@@ -59,6 +59,9 @@ def test_help_inventory_and_schemas() -> None:
         "delivery.claim-outbox",
         "delivery.ack-outbox",
         "hook.stop",
+        "skill.validate",
+        "skill.audit",
+        "skill.matrix",
     }
     assert required <= set(inventory["commands"])
     assert {f"request.{name}" for name in cli.REQUEST_STATE_COMMANDS} <= set(
@@ -69,6 +72,13 @@ def test_help_inventory_and_schemas() -> None:
         "outbox_dispatch",
         "watcher_registration",
     ]
+    assert {
+        "league-skill-contracts.schema.json",
+        "league-skill-runtime-profile.schema.json",
+        "league-skill-validation.schema.json",
+        "league-skill-audit.schema.json",
+        "league-skill-matrix.schema.json",
+    } <= set(inventory["schemas"])
     for name in inventory["schemas"]:
         schema = json.loads((ROOT / "schema" / name).read_text(encoding="utf-8"))
         assert schema["$schema"] == "https://json-schema.org/draft/2020-12/schema"

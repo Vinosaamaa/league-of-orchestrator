@@ -47,6 +47,10 @@ The repository keeps the proven runtime and new storage boundary separate:
   adapters. `cleanup.py` and `routing.py` own proof-first teardown policy and
   assignment-neutral model/effort selection; `sqlite_runtime_ops.py` persists
   their bindings, decisions, resources, operations, and receipts.
+- `src/league/skill_contracts.py` owns strict custom-skill provenance,
+  capability-profile resolution, bounded content hashing, and sanitized
+  duplicate/install parity. It consumes the existing adapter matrix but does
+  not load skills, inspect bodies semantically, or mutate a custom root.
 - `src/league/cli.py` and `bin/league` expose stable domain commands and
   versioned JSON envelopes without a general query or SQL command.
 - `schema/league-*.schema.json` defines command, import-report, and export
@@ -122,6 +126,9 @@ The repository-local SQLite path is separately testable:
    request claim, assignment, or outbox state machine.
 12. Configuration, hooks, guides, launchers, immutable failure/teardown/archive
    evidence, installer backups, and other-product state remain files.
+13. Skill roots remain external file-owned inputs. The repository stores only
+    public labels, identity/provenance/version/capability declarations, content
+    hashes, and sanitized parity receipts; it stores no root path or skill body.
 
 `src/agent_watcher.py` does not import `league`. The filesystem baseline is the
 only live writer until issue #23 switches every consumer at one authorized
@@ -147,6 +154,13 @@ Codex hook, Herdr/tmux branch, and Herdr launch assumptions remain until issue
 #23 verifies and authorizes a cutover. Provider model names remain configuration
 data. Repository-local portability is implemented without claiming installed
 portability.
+
+The skill capability matrix selects one pair from the same registered adapter
+matrix, then evaluates orthogonal harness/tool/platform/browser/forge/
+delegation/multiplexer declarations. It contains no provider or model field.
+Shared research delegates only with `background-visible-agents`; otherwise it
+runs inline. Specialist capability gaps refuse rather than becoming false
+portability claims.
 
 ## Dependencies and side effects
 

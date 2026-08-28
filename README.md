@@ -44,6 +44,9 @@ Nothing here installs files, changes hooks, or connects to live Roster state.
   recoverable proof-first teardown with immutable per-action receipts.
 - Assignment-neutral semantic model/effort routing that preserves explicit
   choices and permits one evidence-triggered safe-boundary escalation.
+- A sanitized custom-skill provenance inventory, bounded install-parity audit,
+  and provider/model-neutral runtime capability matrix with explicit shared
+  inline fallback and specialist refusal.
 
 The proven watcher remains one deep module. The new storage slice is a small
 modular monolith: one composite `Storage` interface with cohesive administrative,
@@ -61,6 +64,7 @@ make test
 make test-storage
 make test-request-lifecycle
 make test-runtime-lifecycle
+make test-skill-contracts
 make test-acceptance
 make test-affected
 make test-all
@@ -69,9 +73,11 @@ make test-all
 `make test` runs the inherited baseline once, `make test-storage` runs the
 storage slice once, `make test-request-lifecycle` runs the grouped lifecycle
 suite, `make test-runtime-lifecycle` runs issues #7/#11/#14, and
+`make test-skill-contracts` runs issue #10's synthetic provenance, privacy,
+duplicate-parity, CLI, and runtime-fallback contract, while
 `make test-acceptance` runs the isolated issue-#23 foundation.
 `make test-affected` composes storage, acceptance, request lifecycle, and
-runtime lifecycle without overlap; `make test-all` adds the inherited baseline once. Every
+runtime/skill lifecycle without overlap; `make test-all` adds the inherited baseline once. Every
 target uses temporary fixtures only. It does not install files, contact GitHub,
 mutate global agent state, or operate live Herdr/tmux sessions.
 
@@ -101,6 +107,9 @@ The grouped request-lifecycle command and transaction map is documented in
 until issue #23 separately proves installation and cutover.
 The adapter, resource, cleanup, and routing contracts are documented in
 [runtime lifecycle](docs/runtime-lifecycle.md) and remain equally repository-local.
+The custom-root provenance and capability boundary is documented in
+[skill capabilities](docs/skill-capabilities.md). Its validation, audit, and
+matrix commands require explicit config/root/profile inputs and create no state.
 
 ## Repository-local SQLite implementation; cutover still gated
 
@@ -152,6 +161,7 @@ fake adapters.
 - [Exact source provenance](docs/PROVENANCE.md)
 - [Repository-local request lifecycle](docs/REQUEST_LIFECYCLE.md)
 - [Repository-local runtime lifecycle](docs/runtime-lifecycle.md)
+- [Skill provenance and runtime capability contract](docs/skill-capabilities.md)
 - [Baseline versus planned issues](docs/ROADMAP.md)
 
 ## Non-goals for this implementation PR

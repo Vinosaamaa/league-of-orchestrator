@@ -27,10 +27,13 @@ RUNTIME_LIFECYCLE_TESTS := \
 	tests/test_cleanup_lifecycle.py \
 	tests/test_model_routing.py
 
+SKILL_CONTRACT_TESTS := \
+	tests/test_skill_contracts.py
+
 ACCEPTANCE_TESTS := \
 	tests/test_acceptance_harness.py
 
-.PHONY: test test-baseline test-storage test-acceptance test-request-lifecycle test-runtime-lifecycle test-affected test-all
+.PHONY: test test-baseline test-storage test-acceptance test-request-lifecycle test-runtime-lifecycle test-skill-contracts test-affected test-all
 test:
 	@$(MAKE) --no-print-directory test-baseline
 
@@ -54,11 +57,16 @@ test-runtime-lifecycle:
 		PYTHONDONTWRITEBYTECODE=1 $(PYTHON) $$test; \
 	done
 
+test-skill-contracts:
+	@set -eu; for test in $(SKILL_CONTRACT_TESTS); do \
+		PYTHONDONTWRITEBYTECODE=1 $(PYTHON) $$test; \
+	done
+
 test-acceptance:
 	@set -eu; for test in $(ACCEPTANCE_TESTS); do \
 		PYTHONDONTWRITEBYTECODE=1 $(PYTHON) $$test; \
 	done
 
-test-affected: test-storage test-acceptance test-request-lifecycle test-runtime-lifecycle
+test-affected: test-storage test-acceptance test-request-lifecycle test-runtime-lifecycle test-skill-contracts
 
 test-all: test-baseline test-affected

@@ -69,6 +69,18 @@ def test_transactional_upgrade_backup_and_rollback(root: Path) -> None:
         assert upgraded["to_version"] == 3
         assert upgraded["backup"]["database_schema_version"] == 1
         assert store.integrity()["ok"]
+        indexes = {
+            row[0]
+            for row in store.connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='index'"
+            )
+        }
+        assert {
+            "ix_tasks_coordinator_state",
+            "ix_assignments_state",
+            "ix_requests_unresolved",
+            "ix_outbox_recipient_state",
+        } <= indexes
 
 
 def test_schema_refusals_without_test_sql(root: Path) -> None:

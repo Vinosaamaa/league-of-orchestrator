@@ -285,50 +285,26 @@ def set_allow_stop_once(store: Any, scope_id: str, actor_agent_id: str) -> dict[
 
 
 def _obligation_counts(store: Any, actor_agent_id: str) -> dict[str, int]:
-    return {
-        "active_champions": int(
-            store.connection.execute(
-                """
-                SELECT COUNT(*) FROM tasks
-                 WHERE coordinator_agent_id=? AND state IN ('pending','accepted','in_progress','blocked','ready_to_land')
-                """,
-                (actor_agent_id,),
-            ).fetchone()[0]
-        ),
-        "pending_assignments": int(
-            store.connection.execute(
-                """
-                SELECT COUNT(*) FROM task_assignments
-                 WHERE coordinator_agent_id=? AND state IN ('pending','launching','cleanup_pending')
-                """,
-                (actor_agent_id,),
-            ).fetchone()[0]
-        ),
-        "unresolved_requests": int(
-            store.connection.execute(
-                "SELECT COUNT(*) FROM requests WHERE owner_agent_id=? AND state NOT IN ('answered','cancelled')",
-                (actor_agent_id,),
-            ).fetchone()[0]
-        ),
-        "pending_deliveries": int(
-            store.connection.execute(
-                """
-                SELECT COUNT(*) FROM delivery_outbox
-                 WHERE recipient_agent_id=? AND state IN ('pending','in_flight','awaiting_receipt')
-                """,
-                (actor_agent_id,),
-            ).fetchone()[0]
-        ),
-        "cleanup_obligations": int(
-            store.connection.execute(
-                """
-                SELECT COUNT(*) FROM cleanup_obligations c JOIN tasks t ON t.task_id=c.task_id
-                 WHERE t.coordinator_agent_id=? AND c.cleanup_state<>'completed'
-                """,
-                (actor_agent_id,),
-            ).fetchone()[0]
-        ),
-    }
+    row = store.connection.execute(
+        """
+        SELECT
+          (SELECT COUNT(*) FROM tasks
+            WHERE coordinator_agent_id=?
+              AND state IN ('pending','accepted','in_progress','blocked','ready_to_land')) active_champions,
+          (SELECT COUNT(*) FROM task_assignments
+            WHERE coordinator_agent_id=?
+              AND state IN ('pending','launching','cleanup_pending')) pending_assignments,
+          (SELECT COUNT(*) FROM requests
+            WHERE owner_agent_id=? AND state NOT IN ('answered','cancelled')) unresolved_requests,
+          (SELECT COUNT(*) FROM delivery_outbox
+            WHERE recipient_agent_id=?
+              AND state IN ('pending','in_flight','awaiting_receipt')) pending_deliveries,
+          (SELECT COUNT(*) FROM cleanup_obligations c JOIN tasks t ON t.task_id=c.task_id
+            WHERE t.coordinator_agent_id=? AND c.cleanup_state<>'completed') cleanup_obligations
+        """,
+        (actor_agent_id,) * 5,
+    ).fetchone()
+    return {name: int(row[name]) for name in row.keys()}
 
 
 def stop_decision(

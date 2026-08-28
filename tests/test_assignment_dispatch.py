@@ -100,15 +100,15 @@ def test_empty_repository_refuses_direct_before_first_write(root: Path) -> None:
     store.close()
 
 
-def test_exact_receipt_and_failure_states(root: Path) -> None:
-    _, store, clock = create_context(root, "exact-receipt")
+def champion_context(root: Path, name: str, work_kind: str = "repository-write"):
+    _, store, clock = create_context(root, name)
     capture_p100(store, clock)
     store.claim_request("R3", GAREN_RUNTIME, "claim-r3", clock.after(120), clock.now())
     store.dispatch_request(
         "R3",
         "claim-r3",
         "dispatch-r3",
-        "repository-write",
+        work_kind,
         "champion",
         False,
         None,
@@ -116,6 +116,11 @@ def test_exact_receipt_and_failure_states(root: Path) -> None:
         None,
         clock.now(),
     )
+    return store, clock
+
+
+def test_exact_receipt_activation_and_atomic_rollback(root: Path) -> None:
+    store, clock = champion_context(root, "exact-receipt")
     ids = FakeIds()
     adapter = FakeLaunchAdapter()
     active = AssignmentService(store, adapter, clock, ids).assign(spec("claim-r3"))
@@ -169,24 +174,9 @@ def test_exact_receipt_and_failure_states(root: Path) -> None:
     ).fetchone()[0] == 0
     store.close()
 
-    _, mismatch_store, mismatch_clock = create_context(root, "mismatch-receipt")
-    capture_p100(mismatch_store, mismatch_clock)
-    mismatch_store.claim_request(
-        "R3", GAREN_RUNTIME, "claim-r3", mismatch_clock.after(120), mismatch_clock.now()
-    )
-    mismatch_store.dispatch_request(
-        "R3",
-        "claim-r3",
-        "dispatch-r3",
-        "repository-write",
-        "champion",
-        False,
-        None,
-        None,
-        None,
-        mismatch_clock.now(),
-    )
 
+def test_receipt_mismatch_remains_launching(root: Path) -> None:
+    store, clock = champion_context(root, "mismatch-receipt")
     class MismatchAdapter(FakeLaunchAdapter):
         def launch(self, assignment_spec):
             receipt = super().launch(assignment_spec)
@@ -194,58 +184,46 @@ def test_exact_receipt_and_failure_states(root: Path) -> None:
             return receipt
 
     try:
-        AssignmentService(mismatch_store, MismatchAdapter(), mismatch_clock, FakeIds()).assign(
+        AssignmentService(store, MismatchAdapter(), clock, FakeIds()).assign(
             spec("claim-r3", suffix="mismatch")
         )
     except StorageRefusal as exc:
         assert exc.code == "receipt_mismatch"
     else:
         raise AssertionError("mismatched Champion receipt was accepted")
-    assert mismatch_store.connection.execute(
+    assert store.connection.execute(
         "SELECT state FROM task_assignments WHERE task_assignment_id='assignment:mismatch'"
     ).fetchone()[0] == "launching"
-    mismatch_store.close()
+    store.close()
 
-    _, failed_store, failed_clock = create_context(root, "cleanup-pending")
-    capture_p100(failed_store, failed_clock)
-    failed_store.claim_request(
-        "R3", GAREN_RUNTIME, "claim-r3", failed_clock.after(120), failed_clock.now()
-    )
-    failed_store.dispatch_request(
-        "R3",
-        "claim-r3",
-        "dispatch-r3",
-        "long-running",
-        "champion",
-        False,
-        None,
-        None,
-        None,
-        failed_clock.now(),
-    )
+
+def test_partial_launch_preserves_cleanup_pending(root: Path) -> None:
+    store, clock = champion_context(root, "cleanup-pending", "long-running")
     failure = FakeLaunchAdapter(
         failure=LaunchAdapterError(
             "synthetic_partial_launch", cleanup_required=True, cleanup_proven=False
         )
     )
-    pending = AssignmentService(failed_store, failure, failed_clock, FakeIds()).assign(
+    pending = AssignmentService(store, failure, clock, FakeIds()).assign(
         spec("claim-r3", suffix="cleanup")
     )
     assert pending["state"] == "cleanup_pending"
-    assert failed_store.connection.execute(
+    assert store.connection.execute(
         "SELECT cleanup_state FROM cleanup_obligations WHERE task_id='task:cleanup'"
     ).fetchone()[0] == "pending"
-    assert failed_store.connection.execute(
+    assert store.connection.execute(
         "SELECT COUNT(*) FROM callsign_leases WHERE callsign='Lux'"
     ).fetchone()[0] == 1
-    failed_store.close()
+    store.close()
 
 
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="league-assignment-dispatch-") as temporary:
         root = Path(temporary)
         test_empty_repository_refuses_direct_before_first_write(root)
-        test_exact_receipt_and_failure_states(root)
+        test_exact_receipt_activation_and_atomic_rollback(root)
+        test_receipt_mismatch_remains_launching(root)
+        test_partial_launch_preserves_cleanup_pending(root)
     print("PASS: explicit dispatch before writes, preserved routing, verified assignment receipt, and cleanup-pending recovery")
 
 

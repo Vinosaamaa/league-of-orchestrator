@@ -7,8 +7,9 @@ import hmac
 import json
 import sqlite3
 from datetime import datetime
-from typing import Any, Iterable, Optional
+from typing import Any, Optional
 
+from .storage_request import AnswerRequestCommand, RequestResultCommand
 from .storage_types import StorageRefusal
 
 
@@ -820,26 +821,22 @@ def set_request_state(
     return {"request_id": request_id, "state": state, "version": next_version, "event_id": event_id}
 
 
-def record_request_result(
-    store: Any,
-    request_id: str,
-    claim_token: str,
-    expected_version: int,
-    result_id: str,
-    idempotency_key: str,
-    outcome: str,
-    summary: str,
-    task_ids: Iterable[str],
-    at: str,
-    *,
-    return_to_requester: bool,
-    event_id: Optional[str] = None,
-    outbox_id: Optional[str] = None,
-) -> dict[str, Any]:
+def record_request_result(store: Any, command: RequestResultCommand) -> dict[str, Any]:
+    request_id = command.request_id
+    claim_token = command.claim_token
+    expected_version = command.expected_version
+    result_id = command.result_id
+    idempotency_key = command.idempotency_key
+    outcome = command.outcome
+    summary = command.summary
+    at = command.at
+    return_to_requester = command.return_to_requester
+    event_id = command.event_id
+    outbox_id = command.outbox_id
     _time(at, "result time")
     if not all((result_id, idempotency_key, outcome, summary)):
         raise StorageRefusal("invalid_result", "request result fields are required")
-    sources = tuple(dict.fromkeys(task_ids))
+    sources = tuple(dict.fromkeys(command.task_ids))
     try:
         with store._transaction():
             request = _request_row(store, request_id)
@@ -968,21 +965,19 @@ def record_request_result(
     }
 
 
-def answer_request(
-    store: Any,
-    request_id: str,
-    claim_token: str,
-    expected_version: int,
-    response_ref_id: str,
-    adapter_kind: str,
-    session_locator: str,
-    response_locator: str,
-    durability: str,
-    content_hash: str,
-    resolution_summary: str,
-    event_id: str,
-    at: str,
-) -> dict[str, Any]:
+def answer_request(store: Any, command: AnswerRequestCommand) -> dict[str, Any]:
+    request_id = command.request_id
+    claim_token = command.claim_token
+    expected_version = command.expected_version
+    response_ref_id = command.response_ref_id
+    adapter_kind = command.adapter_kind
+    session_locator = command.session_locator
+    response_locator = command.response_locator
+    durability = command.durability
+    content_hash = command.content_hash
+    resolution_summary = command.resolution_summary
+    event_id = command.event_id
+    at = command.at
     _time(at, "answer time")
     if durability not in {"durable", "ephemeral"} or not all(
         (response_ref_id, adapter_kind, session_locator, response_locator, content_hash, resolution_summary)

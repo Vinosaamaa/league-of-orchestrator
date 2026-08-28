@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import os
+import shutil
 from pathlib import Path
 from typing import Any
 
-from league.sqlite_store import SQLiteStorage
+from league.sqlite_store import DATABASE_NAME, SQLiteStorage
 
 from lifecycle_fakes import FakeClock
-from storage_fixture import REPOSITORY, SHOTCALLER_ID
+from storage_fixture import REPOSITORY, SHOTCALLER_ID, TASK_ID
 from storage_test_support import seeded_state
 
 
@@ -21,36 +23,53 @@ AHRI_ID = "66666666-6666-4666-8666-666666666666"
 SONA_ID = "77777777-7777-4777-8777-777777777777"
 
 
+class SyntheticLifecycleSeeder:
+    """Test-only setup adapter that keeps schema writes out of scenario code."""
+
+    def __init__(self, store: SQLiteStorage, clock: FakeClock) -> None:
+        self.store = store
+        self.clock = clock
+
+    def seed(self) -> None:
+        with self.store._transaction():
+            self.store.connection.executemany(
+                """
+                INSERT INTO callsigns(callsign,pool_role,enabled,pool_position,last_released_at)
+                VALUES(?,?,1,?,NULL)
+                """,
+                (("Jarvan", "shotcaller", 1), ("Ahri", "champion", 99), ("Sona", "champion", 100)),
+            )
+        self.store.reserve_callsign(
+            "Jarvan",
+            JARVAN_ID,
+            TASK_ID,
+            "shotcaller",
+            "working",
+            "Synthetic Shotcaller ready",
+            self.clock.now(),
+        )
+
+
+def _prepared_database(parent: Path) -> Path:
+    state = parent / ".request-lifecycle-baseline" / "state"
+    database = state / DATABASE_NAME
+    if not database.exists():
+        _, state, _ = seeded_state(parent, ".request-lifecycle-baseline")
+        with SQLiteStorage(state) as store:
+            if store.policy.journal_mode == "WAL":
+                store.connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    return database
+
+
 def create_context(parent: Path, name: str = "request-lifecycle") -> tuple[Path, SQLiteStorage, FakeClock]:
-    _, state, _ = seeded_state(parent, name)
+    root = parent / name
+    state = root / "state"
+    state.mkdir(parents=True)
+    shutil.copy2(_prepared_database(parent), state / DATABASE_NAME)
+    os.chmod(state / DATABASE_NAME, 0o600)
     store = SQLiteStorage(state)
     clock = FakeClock()
-    with store._transaction():
-        store.connection.execute(
-            "INSERT INTO callsigns(callsign,pool_role,enabled,pool_position,last_released_at) VALUES('Jarvan','shotcaller',1,1,NULL)"
-        )
-        store.connection.execute(
-            """
-            INSERT INTO agent_instances
-              (agent_id,callsign,role,shotcaller_agent_id,task_id,kind,address,thread_id,
-               backend,routing_name,display_agent,repository,issue,branch,worktree,status,
-               version,updated_at,update_text,blocker,next_action,metadata_json,retired_at)
-            VALUES(?, 'Jarvan','shotcaller',NULL,NULL,'codex-thread','synthetic:jarvan','thread:jarvan',
-                   'herdr','jarvan','codex',NULL,NULL,NULL,NULL,'working',1,?,
-                   'Synthetic Shotcaller ready',NULL,'Accept routed work','{}',NULL)
-            """,
-            (JARVAN_ID, clock.now()),
-        )
-        store.connection.execute(
-            "INSERT INTO callsign_leases(callsign,agent_id,launch_attempt_id,reserved_at) VALUES('Jarvan',?,NULL,?)",
-            (JARVAN_ID, clock.now()),
-        )
-        store.connection.execute(
-            "INSERT OR IGNORE INTO callsigns(callsign,pool_role,enabled,pool_position,last_released_at) VALUES('Ahri','champion',1,99,NULL)"
-        )
-        store.connection.execute(
-            "INSERT OR IGNORE INTO callsigns(callsign,pool_role,enabled,pool_position,last_released_at) VALUES('Sona','champion',1,100,NULL)"
-        )
+    SyntheticLifecycleSeeder(store, clock).seed()
     for runtime_id, actor_id, endpoint, generation in (
         (GAREN_RUNTIME, SHOTCALLER_ID, "synthetic:garen:one", "generation:garen:one"),
         (GAREN_RUNTIME_TWO, SHOTCALLER_ID, "synthetic:garen:two", "generation:garen:two"),

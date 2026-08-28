@@ -64,9 +64,7 @@ def test_help_inventory_and_schemas() -> None:
         assert schema.get("additionalProperties") is False or schema["type"] == "array"
 
 
-def test_request_and_stop_commands(root: Path) -> None:
-    state, store, clock = create_context(root, "cli")
-    store.close()
+def capture_cli_request(state: Path, clock) -> None:
     intake = success(
         invoke_cli(
             state,
@@ -119,6 +117,9 @@ def test_request_and_stop_commands(root: Path) -> None:
         "request.triage",
     )
     assert triage["request_count"] == 1
+
+
+def dispatch_cli_request(state: Path, clock) -> None:
     success(
         invoke_cli(
             state,
@@ -158,6 +159,18 @@ def test_request_and_stop_commands(root: Path) -> None:
         "request.dispatch",
     )
     assert dispatch["execution_mode"] == "champion"
+
+
+def dispatched_cli_state(root: Path, name: str):
+    state, store, clock = create_context(root, name)
+    store.close()
+    capture_cli_request(state, clock)
+    dispatch_cli_request(state, clock)
+    return state, clock
+
+
+def test_request_commands(root: Path) -> None:
+    state, _ = dispatched_cli_state(root, "cli-request")
     unresolved = success(
         invoke_cli(
             state,
@@ -171,6 +184,10 @@ def test_request_and_stop_commands(root: Path) -> None:
         "request.unresolved",
     )
     assert not unresolved["safe_to_finish"]
+
+
+def test_stop_command(root: Path) -> None:
+    state, clock = dispatched_cli_state(root, "cli-stop")
     stop = success(
         invoke_cli(
             state,
@@ -193,7 +210,9 @@ def test_request_and_stop_commands(root: Path) -> None:
 def main() -> None:
     test_help_inventory_and_schemas()
     with tempfile.TemporaryDirectory(prefix="league-request-cli-") as temporary:
-        test_request_and_stop_commands(Path(temporary))
+        root = Path(temporary)
+        test_request_commands(root)
+        test_stop_command(root)
     print("PASS: machine-readable help/schemas and request/Stop CLI facade")
 
 

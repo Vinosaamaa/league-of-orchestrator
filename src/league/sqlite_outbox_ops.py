@@ -9,6 +9,16 @@ from .sqlite_request_ops import _time
 from .storage_types import StorageRefusal
 
 
+def _reconcile_delivered(store: Any, outbox_id: str, received_at: str) -> None:
+    store.connection.execute(
+        "UPDATE delivery_outbox SET state='delivered',delivered_at=? WHERE outbox_id=?",
+        (received_at, outbox_id),
+    )
+    store.connection.execute(
+        "DELETE FROM outbox_dispatch_leases WHERE outbox_id=?", (outbox_id,)
+    )
+
+
 def claim_outbox(
     store: Any,
     outbox_id: str,
@@ -42,13 +52,7 @@ def claim_outbox(
             ).fetchone()
             if receipt is not None:
                 if outbox["state"] != "delivered":
-                    store.connection.execute(
-                        "UPDATE delivery_outbox SET state='delivered',delivered_at=? WHERE outbox_id=?",
-                        (receipt["received_at"], outbox_id),
-                    )
-                    store.connection.execute(
-                        "DELETE FROM outbox_dispatch_leases WHERE outbox_id=?", (outbox_id,)
-                    )
+                    _reconcile_delivered(store, outbox_id, receipt["received_at"])
                 return {
                     "outbox_id": outbox_id,
                     "event_id": event_id,
@@ -143,13 +147,7 @@ def acknowledge_outbox(
             if existing is not None:
                 if existing["effect_kind"] != effect_kind or existing["effect_id"] != effect_id:
                     raise StorageRefusal("receipt_conflict", "duplicate delivery has a different recipient effect")
-                store.connection.execute(
-                    "UPDATE delivery_outbox SET state='delivered',delivered_at=? WHERE outbox_id=?",
-                    (existing["received_at"], outbox_id),
-                )
-                store.connection.execute(
-                    "DELETE FROM outbox_dispatch_leases WHERE outbox_id=?", (outbox_id,)
-                )
+                _reconcile_delivered(store, outbox_id, existing["received_at"])
                 return {
                     "outbox_id": outbox_id,
                     "event_id": event_id,

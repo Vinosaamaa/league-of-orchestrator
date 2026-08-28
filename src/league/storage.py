@@ -7,7 +7,7 @@ from .storage_assignment import AssignmentStorage
 from .storage_delivery import DeliveryStorage
 from .storage_lifecycle import LifecycleStorage
 from .storage_outbox import OutboxStorage
-from .storage_request import RequestStorage
+from .storage_request import AnswerRequestCommand, RequestResultCommand, RequestStorage
 from .storage_transfer import TransferStorage
 from .storage_watcher import WatcherStorage
 from .storage_types import (
@@ -42,6 +42,8 @@ __all__ = [
     "FaultInjector",
     "ImportArtifact",
     "ImportPlan",
+    "AnswerRequestCommand",
+    "RequestResultCommand",
     "Storage",
     "StorageRefusal",
 ]

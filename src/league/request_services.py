@@ -238,10 +238,19 @@ class DeliveryService:
             self.clock.now(),
         )
 
-    def drain(self, *, limit: int = 20, per_recipient: int = 2) -> list[dict[str, Any]]:
+    def _dispatch_backlog(
+        self,
+        *,
+        limit: int,
+        per_recipient: int,
+        exclude_outbox_id: Optional[str] = None,
+    ) -> list[dict[str, Any]]:
         outcomes: list[dict[str, Any]] = []
         for item in self.store.pending_backlog(
-            self.clock.now(), limit=limit, per_recipient=per_recipient
+            self.clock.now(),
+            limit=limit,
+            per_recipient=per_recipient,
+            exclude_outbox_id=exclude_outbox_id,
         ):
             try:
                 outcomes.append(
@@ -261,6 +270,9 @@ class DeliveryService:
                 )
         return outcomes
 
+    def drain(self, *, limit: int = 20, per_recipient: int = 2) -> list[dict[str, Any]]:
+        return self._dispatch_backlog(limit=limit, per_recipient=per_recipient)
+
     def dispatch_source_then_drain(
         self,
         outbox_id: str,
@@ -270,28 +282,11 @@ class DeliveryService:
         backlog_limit: int = 20,
     ) -> dict[str, Any]:
         source = self.dispatch_source(outbox_id, event_id, recipient_agent_id)
-        backlog = []
-        for item in self.store.pending_backlog(
-            self.clock.now(),
+        backlog = self._dispatch_backlog(
             limit=backlog_limit,
             per_recipient=2,
             exclude_outbox_id=outbox_id,
-        ):
-            try:
-                backlog.append(
-                    self.dispatch_source(
-                        item["outbox_id"], item["event_id"], item["recipient_agent_id"]
-                    )
-                )
-            except (DeliveryUnavailable, StorageRefusal) as exc:
-                backlog.append(
-                    {
-                        "outbox_id": item["outbox_id"],
-                        "event_id": item["event_id"],
-                        "state": "pending",
-                        "error": getattr(exc, "code", str(exc)),
-                    }
-                )
+        )
         return {"source": source, "backlog": backlog}
 
 

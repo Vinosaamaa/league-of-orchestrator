@@ -18,7 +18,11 @@ from league.request_services import (  # noqa: E402
     DeliveryService,
 )
 from league.sqlite_store import SQLiteStorage  # noqa: E402
-from league.storage import StorageRefusal  # noqa: E402
+from league.storage import (  # noqa: E402
+    AnswerRequestCommand,
+    RequestResultCommand,
+    StorageRefusal,
+)
 from lifecycle_fakes import FakeDeliveryAdapter, FakeIds, FakeLaunchAdapter  # noqa: E402
 from request_lifecycle_fixture import (  # noqa: E402
     AHRI_ID,
@@ -138,36 +142,40 @@ def test_p100(root: Path) -> None:
     )
     assert dispatch_r1["execution_mode"] == "direct"
     answer_r1 = store.answer_request(
-        "R1",
-        "claim-r1",
-        2,
-        "response-r1",
-        "codex",
-        "session:p100",
-        "response:r1",
-        "durable",
-        "hash-r1",
-        "Bounded answer delivered",
-        "event-r1-answer",
-        clock.now(),
+        AnswerRequestCommand(
+            "R1",
+            "claim-r1",
+            2,
+            "response-r1",
+            "codex",
+            "session:p100",
+            "response:r1",
+            "durable",
+            "hash-r1",
+            "Bounded answer delivered",
+            "event-r1-answer",
+            clock.now(),
+        )
     )
     assert answer_r1["state"] == "answered"
     assert store.connection.execute(
         "SELECT runtime_instance_id FROM response_references WHERE response_ref_id='response-r1'"
     ).fetchone()[0] == GAREN_RUNTIME
     assert store.answer_request(
-        "R1",
-        "claim-r1",
-        2,
-        "ignored-response-r1-retry",
-        "codex",
-        "session:p100",
-        "ignored:retry",
-        "durable",
-        "hash-r1",
-        "Bounded answer delivered",
-        "ignored-event-r1-retry",
-        clock.now(),
+        AnswerRequestCommand(
+            "R1",
+            "claim-r1",
+            2,
+            "ignored-response-r1-retry",
+            "codex",
+            "session:p100",
+            "ignored:retry",
+            "durable",
+            "hash-r1",
+            "Bounded answer delivered",
+            "ignored-event-r1-retry",
+            clock.now(),
+        )
     )["idempotent"]
 
     store.claim_request("R2", GAREN_RUNTIME, "claim-r2-garen", clock.after(120), clock.now())
@@ -239,18 +247,20 @@ def test_p100(root: Path) -> None:
     ).fetchone()[0] == "in_progress"
     try:
         store.record_request_result(
-            "R2",
-            "claim-r2-jarvan",
-            4,
-            "RES-ROLLBACK",
-            "result-r2-rollback",
-            "success",
-            "This result must roll back with its colliding outbox",
-            ["T201", "T202"],
-            clock.now(),
-            return_to_requester=True,
-            event_id="event-r2-return-rollback",
-            outbox_id=routed["outbox_id"],
+            RequestResultCommand(
+                "R2",
+                "claim-r2-jarvan",
+                4,
+                "RES-ROLLBACK",
+                "result-r2-rollback",
+                "success",
+                "This result must roll back with its colliding outbox",
+                ("T201", "T202"),
+                clock.now(),
+                True,
+                "event-r2-return-rollback",
+                routed["outbox_id"],
+            )
         )
     except StorageRefusal:
         pass
@@ -267,34 +277,38 @@ def test_p100(root: Path) -> None:
         "SELECT COUNT(*) FROM events WHERE event_id='event-r2-return-rollback'"
     ).fetchone()[0] == 0
     returned = store.record_request_result(
-        "R2",
-        "claim-r2-jarvan",
-        4,
-        "RES9",
-        "result-r2",
-        "success",
-        "Combined dependency and failure findings",
-        ["T201", "T202"],
-        clock.now(),
-        return_to_requester=True,
-        event_id="event-r2-return",
-        outbox_id="outbox-r2-return",
+        RequestResultCommand(
+            "R2",
+            "claim-r2-jarvan",
+            4,
+            "RES9",
+            "result-r2",
+            "success",
+            "Combined dependency and failure findings",
+            ("T201", "T202"),
+            clock.now(),
+            True,
+            "event-r2-return",
+            "outbox-r2-return",
+        )
     )
     assert returned["owner_agent_id"] == SHOTCALLER_ID
     assert returned["state"] == "awaiting_requester"
     assert store.record_request_result(
-        "R2",
-        "claim-r2-jarvan",
-        4,
-        "ignored-result-retry",
-        "result-r2",
-        "success",
-        "Combined dependency and failure findings",
-        ["T201", "T202"],
-        clock.now(),
-        return_to_requester=True,
-        event_id="ignored-event-r2-return-retry",
-        outbox_id="ignored-outbox-r2-return-retry",
+        RequestResultCommand(
+            "R2",
+            "claim-r2-jarvan",
+            4,
+            "ignored-result-retry",
+            "result-r2",
+            "success",
+            "Combined dependency and failure findings",
+            ("T201", "T202"),
+            clock.now(),
+            True,
+            "ignored-event-r2-return-retry",
+            "ignored-outbox-r2-return-retry",
+        )
     ) == {
         "request_id": "R2",
         "result_id": "RES9",
@@ -311,18 +325,20 @@ def test_p100(root: Path) -> None:
     )
     assert claimed_back["state"] == "awaiting_requester"
     answer_r2 = store.answer_request(
-        "R2",
-        "claim-r2-returned",
-        5,
-        "response-r2",
-        "codex",
-        "session:p100",
-        "response:r2",
-        "durable",
-        "hash-r2",
-        "User-facing routed synthesis delivered",
-        "event-r2-answer",
-        clock.now(),
+        AnswerRequestCommand(
+            "R2",
+            "claim-r2-returned",
+            5,
+            "response-r2",
+            "codex",
+            "session:p100",
+            "response:r2",
+            "durable",
+            "hash-r2",
+            "User-facing routed synthesis delivered",
+            "event-r2-answer",
+            clock.now(),
+        )
     )
     assert answer_r2["state"] == "answered"
 
@@ -354,31 +370,37 @@ def test_p100(root: Path) -> None:
     local_transition = complete_task(store, clock, ids, local, SHOTCALLER_ID)
     deliver(store, clock, ids, local_transition, SHOTCALLER_ID)
     local_result = store.record_request_result(
-        "R3",
-        "claim-r3",
-        2,
-        "RES-R3",
-        "result-r3",
-        "success",
-        "Local Champion result synthesized",
-        ["T301"],
-        clock.now(),
-        return_to_requester=False,
+        RequestResultCommand(
+            "R3",
+            "claim-r3",
+            2,
+            "RES-R3",
+            "result-r3",
+            "success",
+            "Local Champion result synthesized",
+            ("T301",),
+            clock.now(),
+            False,
+            None,
+            None,
+        )
     )
     assert local_result["state"] == "in_progress"
     store.answer_request(
-        "R3",
-        "claim-r3",
-        3,
-        "response-r3",
-        "codex",
-        "session:p100",
-        "response:r3",
-        "durable",
-        "hash-r3",
-        "Local Champion result delivered",
-        "event-r3-answer",
-        clock.now(),
+        AnswerRequestCommand(
+            "R3",
+            "claim-r3",
+            3,
+            "response-r3",
+            "codex",
+            "session:p100",
+            "response:r3",
+            "durable",
+            "hash-r3",
+            "Local Champion result delivered",
+            "event-r3-answer",
+            clock.now(),
+        )
     )
 
     unresolved = store.unresolved_requests(SHOTCALLER_ID, before_action="reply")

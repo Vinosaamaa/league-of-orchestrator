@@ -13,6 +13,7 @@ from typing import Any, BinaryIO, Callable, Optional
 from .importer import build_import_plan
 from .sqlite_store import DEFAULT_BUSY_TIMEOUT_MS, MAX_EXPORT_RECORDS, SQLiteStorage
 from .storage import Storage, StorageRefusal
+from .storage_request import AnswerRequestCommand, RequestResultCommand
 
 
 COMMAND_SCHEMA = "league.command.v1"
@@ -652,35 +653,39 @@ def _request_state(store: Storage, args: argparse.Namespace) -> CommandResult:
 
 def _request_result(store: Storage, args: argparse.Namespace) -> CommandResult:
     return store.record_request_result(
-        args.request_id,
-        args.claim_token,
-        args.expected_version,
-        args.result_id,
-        args.idempotency_key,
-        args.outcome,
-        args.summary,
-        args.task_id,
-        args.at,
-        return_to_requester=args.return_to_requester,
-        event_id=args.event_id,
-        outbox_id=args.outbox_id,
+        RequestResultCommand(
+            request_id=args.request_id,
+            claim_token=args.claim_token,
+            expected_version=args.expected_version,
+            result_id=args.result_id,
+            idempotency_key=args.idempotency_key,
+            outcome=args.outcome,
+            summary=args.summary,
+            task_ids=tuple(args.task_id),
+            at=args.at,
+            return_to_requester=args.return_to_requester,
+            event_id=args.event_id,
+            outbox_id=args.outbox_id,
+        )
     ), None
 
 
 def _request_answer(store: Storage, args: argparse.Namespace) -> CommandResult:
     return store.answer_request(
-        args.request_id,
-        args.claim_token,
-        args.expected_version,
-        args.response_ref_id,
-        args.adapter_kind,
-        args.session_locator,
-        args.response_locator,
-        args.durability,
-        args.content_hash,
-        args.resolution_summary,
-        args.event_id,
-        args.at,
+        AnswerRequestCommand(
+            request_id=args.request_id,
+            claim_token=args.claim_token,
+            expected_version=args.expected_version,
+            response_ref_id=args.response_ref_id,
+            adapter_kind=args.adapter_kind,
+            session_locator=args.session_locator,
+            response_locator=args.response_locator,
+            durability=args.durability,
+            content_hash=args.content_hash,
+            resolution_summary=args.resolution_summary,
+            event_id=args.event_id,
+            at=args.at,
+        )
     ), None
 
 

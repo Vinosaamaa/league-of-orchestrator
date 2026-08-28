@@ -57,6 +57,7 @@ from .sqlite_watcher_ops import register_watcher as register_watcher_operation
 from .sqlite_watcher_ops import set_allow_stop_once as set_allow_stop_once_operation
 from .sqlite_watcher_ops import stop_decision as stop_decision_operation
 from .storage import ConnectionPolicy, FaultInjector, ImportPlan, StorageRefusal
+from .storage_request import AnswerRequestCommand, RequestResultCommand
 from .storage_types import LIFECYCLE_STATES
 
 
@@ -656,7 +657,9 @@ MIGRATIONS = (
             "CREATE INDEX ix_prompts_untriaged ON prompts(intake_actor_id,triage_state,created_at)",
             "CREATE INDEX ix_requests_unresolved ON requests(owner_agent_id,state,next_attention_at,updated_at)",
             "CREATE INDEX ix_outbox_pending ON delivery_outbox(state,available_at,outbox_id)",
+            "CREATE INDEX ix_outbox_recipient_state ON delivery_outbox(recipient_agent_id,state,available_at)",
             "CREATE INDEX ix_assignments_state ON task_assignments(coordinator_agent_id,state,updated_at)",
+            "CREATE INDEX ix_tasks_coordinator_state ON tasks(coordinator_agent_id,state,task_id)",
             "CREATE INDEX ix_obligations_due ON obligations(owner_agent_id,state,next_attention_at,created_at)",
         ),
     ),
@@ -1484,68 +1487,11 @@ class SQLiteStorage(SQLiteTransactionCore):
             next_attention_at=next_attention_at,
         )
 
-    def record_request_result(
-        self,
-        request_id: str,
-        claim_token: str,
-        expected_version: int,
-        result_id: str,
-        idempotency_key: str,
-        outcome: str,
-        summary: str,
-        task_ids: Iterable[str],
-        at: str,
-        *,
-        return_to_requester: bool,
-        event_id: Optional[str] = None,
-        outbox_id: Optional[str] = None,
-    ) -> dict[str, Any]:
-        return record_request_result_operation(
-            self,
-            request_id,
-            claim_token,
-            expected_version,
-            result_id,
-            idempotency_key,
-            outcome,
-            summary,
-            task_ids,
-            at,
-            return_to_requester=return_to_requester,
-            event_id=event_id,
-            outbox_id=outbox_id,
-        )
+    def record_request_result(self, command: RequestResultCommand) -> dict[str, Any]:
+        return record_request_result_operation(self, command)
 
-    def answer_request(
-        self,
-        request_id: str,
-        claim_token: str,
-        expected_version: int,
-        response_ref_id: str,
-        adapter_kind: str,
-        session_locator: str,
-        response_locator: str,
-        durability: str,
-        content_hash: str,
-        resolution_summary: str,
-        event_id: str,
-        at: str,
-    ) -> dict[str, Any]:
-        return answer_request_operation(
-            self,
-            request_id,
-            claim_token,
-            expected_version,
-            response_ref_id,
-            adapter_kind,
-            session_locator,
-            response_locator,
-            durability,
-            content_hash,
-            resolution_summary,
-            event_id,
-            at,
-        )
+    def answer_request(self, command: AnswerRequestCommand) -> dict[str, Any]:
+        return answer_request_operation(self, command)
 
     def unresolved_requests(
         self,

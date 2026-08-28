@@ -193,7 +193,7 @@ def intake_prompt(
             runtime = store.connection.execute(
                 """
                 SELECT r.actor_agent_id,r.status,r.verified,
-                       i.state AS intake_state,s.shotcaller_agent_id
+                       i.state AS intake_state,s.shotcaller_agent_id,s.state AS squad_state
                   FROM runtime_instances r
                   JOIN agent_instances a ON a.agent_id=r.actor_agent_id
                   LEFT JOIN shotcaller_intake i ON i.agent_id=r.actor_agent_id
@@ -215,6 +215,10 @@ def intake_prompt(
             if runtime["intake_state"] is not None and runtime["intake_state"] != "accepting":
                 raise StorageRefusal(
                     "owner_draining", "Shotcaller intake is draining or closed"
+                )
+            if runtime["intake_state"] is not None and runtime["squad_state"] != "active":
+                raise StorageRefusal(
+                    "owner_superseded", "Shotcaller Squad is no longer active"
                 )
             if (
                 runtime["intake_state"] is not None

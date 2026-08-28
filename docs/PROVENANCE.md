@@ -174,7 +174,7 @@ repository worktrees, or cutover generation.
 
 Migration v6 is contiguous after canonical project/Squad v5 and is named
 `guarded-rollover-and-shuffled-callsign-queue`, checksum
-`194d02864c5aa8587e6c0d6b1c4af7f452c8e878822afc0483517f9eaa12ddd2`.
+`879ef4addfe6725e31c31a5aa1db9078d7c066a26610eaa2753f749c6e53ab75`.
 It deliberately replaces the old public exact-name callsign reserve/release
 commands with one persisted queue allocator. Focused queue tests cover the
 behavioral difference: front scanning, capability skips without reordering,

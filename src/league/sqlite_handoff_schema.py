@@ -199,7 +199,8 @@ STATEMENTS = (
     "CREATE UNIQUE INDEX ux_squad_accepting_shotcaller ON shotcaller_intake(squad_id) WHERE state='accepting'",
     """
     INSERT INTO shotcaller_intake(agent_id,squad_id,state,fence,version,updated_at)
-    SELECT s.shotcaller_agent_id,s.squad_id,'accepting',s.owner_fence,1,s.updated_at FROM squads s
+    SELECT s.shotcaller_agent_id,s.squad_id,'accepting',s.owner_fence,1,s.updated_at
+      FROM squads s WHERE s.state='active'
     """,
     """
     CREATE TABLE squad_champions (

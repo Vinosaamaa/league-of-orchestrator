@@ -570,6 +570,30 @@ def test_acknowledgement_requires_the_accepted_runtime(root: Path) -> None:
             raise AssertionError("rollover acknowledged a runtime other than callsign acceptance")
 
 
+def test_retired_squad_refuses_stale_accepting_intake(root: Path) -> None:
+    state, _ = migrated_state(root, "retired-squad")
+    with SQLiteStorage(state) as store:
+        seed_rollover(store, champion_count=0)
+        store.connection.execute(
+            "UPDATE squads SET state='retired' WHERE squad_id=?", (SQUAD_ID,)
+        )
+        try:
+            store.intake_prompt(
+                "prompt:retired-squad",
+                OLD_ID,
+                "runtime:old-shotcaller",
+                "synthetic",
+                "synthetic:old-shotcaller",
+                "source:retired-squad",
+                "Synthetic intake that a retired Squad must refuse.",
+                AT2,
+            )
+        except StorageRefusal as exc:
+            assert exc.code == "owner_superseded"
+        else:
+            raise AssertionError("retired Squad accepted new intake")
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="league-shotcaller-rollover-") as temporary:
         root = Path(temporary)
@@ -578,6 +602,7 @@ def main() -> None:
         test_pre_switch_abort_releases_cleaned_active_successor(root)
         test_public_safety_and_snapshot_staleness(root)
         test_acknowledgement_requires_the_accepted_runtime(root)
+        test_retired_squad_refuses_stale_accepting_intake(root)
     print(
         "PASS: bounded Shotcaller handoff, exact acknowledgement, atomic owner switch, crash retry, and drain"
     )

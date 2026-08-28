@@ -192,7 +192,8 @@ def initialize_imported_callsign_state(store: Any, at: str) -> None:
     store.connection.execute(
         """
         INSERT OR IGNORE INTO shotcaller_intake(agent_id,squad_id,state,fence,version,updated_at)
-        SELECT shotcaller_agent_id,squad_id,'accepting',owner_fence,1,updated_at FROM squads
+        SELECT shotcaller_agent_id,squad_id,'accepting',owner_fence,1,updated_at
+          FROM squads WHERE state='active'
         """
     )
     store.connection.execute(

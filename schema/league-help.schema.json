@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Vinosaamaa/league-of-orchestrator/schema/league-help.schema.json",
+  "title": "League machine-readable command inventory",
+  "type": "object",
+  "required": ["schema", "command_schema", "commands", "schemas", "execution_modes", "request_states", "assignment_states", "lease_kinds"],
+  "properties": {
+    "schema": {"const": "league.help.v1"},
+    "command_schema": {"const": "league.command.v1"},
+    "commands": {"type": "array", "items": {"type": "string", "pattern": "^[a-z][a-z-]*\\.[a-z][a-z-]*$"}, "uniqueItems": true},
+    "schemas": {"type": "array", "items": {"type": "string", "pattern": "^league-[a-z-]+\\.schema\\.json$"}, "uniqueItems": true},
+    "execution_modes": {"const": ["direct", "hidden", "champion"]},
+    "request_states": {"type": "array", "minItems": 10, "uniqueItems": true, "items": {"type": "string"}},
+    "assignment_states": {"const": ["pending", "launching", "active", "blocked", "cleanup_pending"]},
+    "lease_kinds": {"const": ["request_claim", "outbox_dispatch", "watcher_registration"]}
+  },
+  "additionalProperties": false
+}

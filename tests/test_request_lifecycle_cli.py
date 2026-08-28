@@ -1,0 +1,201 @@
+#!/usr/bin/env python3
+"""Machine-readable lifecycle help, schema, and command facade coverage."""
+
+from __future__ import annotations
+
+import io
+import json
+import tempfile
+from pathlib import Path
+import sys
+
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path[:0] = [str(ROOT / "src"), str(ROOT / "tests")]
+
+from league import cli  # noqa: E402
+from request_lifecycle_fixture import GAREN_RUNTIME, create_context  # noqa: E402
+from storage_fixture import SHOTCALLER_ID  # noqa: E402
+from storage_test_support import invoke_cli  # noqa: E402
+
+
+def success(payload, command):
+    assert payload["schema"] == "league.command.v1"
+    assert payload["ok"] is True and payload["command"] == command
+    return payload["result"]
+
+
+def test_help_inventory_and_schemas() -> None:
+    output = io.BytesIO()
+    assert cli.main(["help", "inventory"], output=output) == 0
+    inventory = success(json.loads(output.getvalue()), "help.inventory")
+    required = {
+        "request.intake",
+        "request.triage",
+        "request.claim",
+        "request.release",
+        "request.dispatch",
+        "request.route",
+        "request.accept",
+        "request.block",
+        "request.defer",
+        "request.cancel",
+        "request.result",
+        "request.answer",
+        "request.unresolved",
+        "assign.prepare",
+        "assign.launching",
+        "assign.activate",
+        "assign.block",
+        "task.transition",
+        "delivery.claim-outbox",
+        "delivery.ack-outbox",
+        "hook.stop",
+    }
+    assert required <= set(inventory["commands"])
+    assert inventory["lease_kinds"] == [
+        "request_claim",
+        "outbox_dispatch",
+        "watcher_registration",
+    ]
+    for name in inventory["schemas"]:
+        schema = json.loads((ROOT / "schema" / name).read_text(encoding="utf-8"))
+        assert schema["$schema"] == "https://json-schema.org/draft/2020-12/schema"
+        assert schema.get("additionalProperties") is False or schema["type"] == "array"
+
+
+def test_request_and_stop_commands(root: Path) -> None:
+    state, store, clock = create_context(root, "cli")
+    store.close()
+    intake = success(
+        invoke_cli(
+            state,
+            "request",
+            "intake",
+            "--prompt-id",
+            "prompt-cli",
+            "--intake-actor-id",
+            SHOTCALLER_ID,
+            "--runtime-instance-id",
+            GAREN_RUNTIME,
+            "--adapter-kind",
+            "codex",
+            "--session-ref",
+            "session:cli",
+            "--source-event-key",
+            "source:cli",
+            "--body",
+            "Implement one synthetic CLI request",
+            "--at",
+            clock.now(),
+        ),
+        "request.intake",
+    )
+    assert intake["prompt_id"] == "prompt-cli"
+    items = json.dumps(
+        [
+            {
+                "prompt_item_id": "item-cli",
+                "ordinal": 1,
+                "summary": "Implement synthetic CLI request",
+                "disposition": "new_request",
+                "request_id": "request-cli",
+            }
+        ],
+        separators=(",", ":"),
+    )
+    triage = success(
+        invoke_cli(
+            state,
+            "request",
+            "triage",
+            "--prompt-id",
+            "prompt-cli",
+            "--items-json",
+            items,
+            "--at",
+            clock.now(),
+        ),
+        "request.triage",
+    )
+    assert triage["request_count"] == 1
+    success(
+        invoke_cli(
+            state,
+            "request",
+            "claim",
+            "--request-id",
+            "request-cli",
+            "--runtime-instance-id",
+            GAREN_RUNTIME,
+            "--claim-token",
+            "claim-cli",
+            "--leased-until",
+            clock.after(120),
+            "--at",
+            clock.now(),
+        ),
+        "request.claim",
+    )
+    dispatch = success(
+        invoke_cli(
+            state,
+            "request",
+            "dispatch",
+            "--request-id",
+            "request-cli",
+            "--claim-token",
+            "claim-cli",
+            "--dispatch-id",
+            "dispatch-cli",
+            "--work-kind",
+            "repository-write",
+            "--requested-mode",
+            "champion",
+            "--at",
+            clock.now(),
+        ),
+        "request.dispatch",
+    )
+    assert dispatch["execution_mode"] == "champion"
+    unresolved = success(
+        invoke_cli(
+            state,
+            "request",
+            "unresolved",
+            "--owner-agent-id",
+            SHOTCALLER_ID,
+            "--before-action",
+            "handoff",
+        ),
+        "request.unresolved",
+    )
+    assert not unresolved["safe_to_finish"]
+    stop = success(
+        invoke_cli(
+            state,
+            "hook",
+            "stop",
+            "--scope-id",
+            "Garen-cli",
+            "--actor-agent-id",
+            SHOTCALLER_ID,
+            "--terminal-generation",
+            "terminal:cli",
+            "--at",
+            clock.now(),
+        ),
+        "hook.stop",
+    )
+    assert stop["status"] == "blocked_once" and stop["decision"] == "block"
+
+
+def main() -> None:
+    test_help_inventory_and_schemas()
+    with tempfile.TemporaryDirectory(prefix="league-request-cli-") as temporary:
+        test_request_and_stop_commands(Path(temporary))
+    print("PASS: machine-readable help/schemas and request/Stop CLI facade")
+
+
+if __name__ == "__main__":
+    main()

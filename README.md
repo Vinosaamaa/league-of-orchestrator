@@ -27,12 +27,19 @@ Nothing here installs files, changes hooks, or connects to live Roster state.
 - Synthetic examples, authoring schemas, and focused local regression tests.
 - One standard-library SQLite implementation behind a `Storage` protocol and
   stable `league` command facade.
-- Two checksummed schema migrations, a loaded-runtime WAL gate, verified
+- Three checksummed schema migrations, a loaded-runtime WAL gate, verified
   backups, integrity checks, expected-version writes, and bounded contention.
 - A strict manifest importer covering every canonical issue-#18 artifact
   family, with dry-run digest confirmation before apply.
 - Deterministic bounded inspection and restricted rollback exports with
   machine-readable schemas.
+- Prompt-once intake, complete bounded triage, request claims and states,
+  explicit direct/hidden/Champion dispatch, and unresolved reconciliation.
+- Recoverable visible-Champion assignment with exact acceptance receipts,
+  source-bound transition outbox delivery, unique recipient effects, and fair
+  backlog draining.
+- One role-aware bounded Shotcaller Stop decision with ordinary-message
+  priority and separate request, dispatch, and watcher leases.
 
 The proven watcher remains one deep module. The new storage slice is a small
 modular monolith: one composite `Storage` interface with cohesive administrative,
@@ -48,12 +55,14 @@ Requirements: Python 3, Git, and a POSIX shell.
 ```sh
 make test
 make test-storage
+make test-request-lifecycle
 make test-all
 ```
 
 `make test` runs the inherited baseline once, `make test-storage` runs the
-storage slice once, and `make test-all` composes both without overlapping test
-lists. Every target uses temporary fixtures only. It does not install files,
+storage slice once, `make test-request-lifecycle` runs the grouped lifecycle
+suite, and `make test-all` composes them without overlapping test lists. Every
+target uses temporary fixtures only. It does not install files,
 contact GitHub, mutate global agent state, or operate live Herdr/tmux sessions.
 
 The repository does not yet own live installation. The currently installed
@@ -66,14 +75,20 @@ Inspect the stable command inventory without creating state:
 
 ```sh
 ./bin/league --help
+./bin/league help inventory
 ./bin/league --state-root /absolute/isolated/state-root storage --help
 ```
 
-Every operation requires an explicit existing absolute state root. The database
+Every state operation requires an explicit existing absolute state root;
+machine-readable help is read-only and needs no root. The database
 filename, SQL, pragmas, and transaction details remain internal. The output
 contracts are [command](schema/league-command-output.schema.json),
 [import report](schema/league-import-report.schema.json), and
 [export](schema/league-export.schema.json) JSON Schemas.
+
+The grouped request-lifecycle command and transaction map is documented in
+[request lifecycle](docs/REQUEST_LIFECYCLE.md). Its implementation is inert
+until issue #23 separately proves installation and cutover.
 
 ## Repository-local SQLite implementation; cutover still gated
 
@@ -115,6 +130,7 @@ those gates pass, the filesystem watcher remains the only live authority.
 - [SQLite prototype and benchmark](docs/research/sqlite-storage-prototype-benchmark.md)
 - [Reversible migration and install boundary](docs/MIGRATION.md)
 - [Exact source provenance](docs/PROVENANCE.md)
+- [Repository-local request lifecycle](docs/REQUEST_LIFECYCLE.md)
 - [Baseline versus planned issues](docs/ROADMAP.md)
 
 ## Non-goals for this implementation PR

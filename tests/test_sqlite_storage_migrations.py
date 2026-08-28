@@ -11,7 +11,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / "src"), str(ROOT / "tests")]
 
-from league.sqlite_store import MIGRATIONS, SQLiteStorage, journal_policy  # noqa: E402
+from league.sqlite_store import (  # noqa: E402
+    CURRENT_SCHEMA_VERSION,
+    MIGRATIONS,
+    SQLiteStorage,
+    journal_policy,
+)
 from league.storage import StorageRefusal  # noqa: E402
 from storage_test_support import migrated_state  # noqa: E402
 
@@ -61,7 +66,7 @@ def test_transactional_upgrade_backup_and_rollback(root: Path) -> None:
         assert unchanged["from_version"] == unchanged["to_version"] == 1
         upgraded = store.migrate(backup_name="backups/pre-v2-retry.sqlite3")
         assert upgraded["from_version"] == 1
-        assert upgraded["to_version"] == 2
+        assert upgraded["to_version"] == 3
         assert upgraded["backup"]["database_schema_version"] == 1
         assert store.integrity()["ok"]
 
@@ -70,7 +75,7 @@ def test_schema_refusals_without_test_sql(root: Path) -> None:
     future, _ = migrated_state(root, "future")
     database = future / "league.sqlite3"
     payload = bytearray(database.read_bytes())
-    payload[60:64] = (3).to_bytes(4, "big")
+    payload[60:64] = (CURRENT_SCHEMA_VERSION + 1).to_bytes(4, "big")
     database.write_bytes(payload)
     refused(lambda: SQLiteStorage(future), "schema_newer")
 

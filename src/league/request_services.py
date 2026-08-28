@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Callable, Optional, Protocol
 
 from .storage import (
@@ -33,11 +33,12 @@ class AssignmentSpec:
     task_summary: str
     coordinator_agent_id: str
     champion_agent_id: str
-    callsign: str
     repository: str
     issue: int
     branch: str
     worktree: str
+    required_capabilities: tuple[str, ...] = ()
+    callsign: Optional[str] = None
 
 
 class LaunchAdapterError(RuntimeError):
@@ -83,12 +84,12 @@ class AssignmentService:
                 task_summary=spec.task_summary,
                 coordinator_agent_id=spec.coordinator_agent_id,
                 champion_agent_id=spec.champion_agent_id,
-                callsign=spec.callsign,
                 repository=spec.repository,
                 issue=spec.issue,
                 branch=spec.branch,
                 worktree=spec.worktree,
                 at=self.clock.now(),
+                required_capabilities=spec.required_capabilities,
             )
         )
         if prepared["state"] == "active":
@@ -104,7 +105,7 @@ class AssignmentService:
                 "assignment_conflict", "assignment cannot launch from its current recoverable state"
             )
         try:
-            receipt = self.adapter.launch(spec)
+            receipt = self.adapter.launch(replace(spec, callsign=prepared["callsign"]))
         except LaunchAdapterError as exc:
             return self.store.block_assignment(
                 spec.assignment_id,

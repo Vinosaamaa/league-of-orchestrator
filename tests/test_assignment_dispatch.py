@@ -229,7 +229,10 @@ def test_unwrapped_adapter_failure_cannot_strand_launching(root: Path) -> None:
 def test_assignment_retry_compares_complete_launch_identity(root: Path) -> None:
     store, clock = champion_context(root, "assignment-retry-identity")
     base = spec("claim-r3", suffix="identity")
-    command = PrepareAssignmentCommand(**vars(base), at=clock.now())
+    command = PrepareAssignmentCommand(
+        **{key: value for key, value in vars(base).items() if key != "callsign"},
+        at=clock.now(),
+    )
     created = store.prepare_assignment(command)
     assert created["state"] == "pending" and not created["idempotent"]
     assert store.prepare_assignment(command)["idempotent"]

@@ -31,10 +31,14 @@ RUNTIME_LIFECYCLE_TESTS := \
 SKILL_CONTRACT_TESTS := \
 	tests/test_skill_contracts.py
 
+HANDOFF_CALLSIGN_TESTS := \
+	tests/test_callsign_queue.py \
+	tests/test_shotcaller_rollover.py
+
 ACCEPTANCE_TESTS := \
 	tests/test_acceptance_harness.py
 
-.PHONY: test test-baseline test-storage test-project-roster test-acceptance test-request-lifecycle test-runtime-lifecycle test-skill-contracts test-affected test-all
+.PHONY: test test-baseline test-storage test-project-roster test-acceptance test-request-lifecycle test-runtime-lifecycle test-skill-contracts test-handoff-callsigns test-affected test-all
 test:
 	@$(MAKE) --no-print-directory test-baseline
 
@@ -66,11 +70,16 @@ test-skill-contracts:
 		PYTHONDONTWRITEBYTECODE=1 $(PYTHON) $$test; \
 	done
 
+test-handoff-callsigns:
+	@set -eu; for test in $(HANDOFF_CALLSIGN_TESTS); do \
+		PYTHONDONTWRITEBYTECODE=1 $(PYTHON) $$test; \
+	done
+
 test-acceptance:
 	@set -eu; for test in $(ACCEPTANCE_TESTS); do \
 		PYTHONDONTWRITEBYTECODE=1 $(PYTHON) $$test; \
 	done
 
-test-affected: test-storage test-acceptance test-request-lifecycle test-runtime-lifecycle test-skill-contracts
+test-affected: test-storage test-acceptance test-request-lifecycle test-runtime-lifecycle test-skill-contracts test-handoff-callsigns
 
 test-all: test-baseline test-affected

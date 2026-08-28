@@ -164,16 +164,16 @@ def test_malformed_duplicate_unknown_and_foreign_key_refusals(root: Path) -> Non
         plan = build_import_plan(state_source, fixture["manifest"], target_counts=store.import_target_counts())
         store.apply_import(plan, plan["report_digest"])
         refused(
-            lambda: store.reserve_callsign(
-                "Lux",
-                "33333333-3333-4333-8333-333333333333",
-                "missing-task",
+            lambda: store.allocate_callsign(
+                "callsign-assignment:conflict",
+                "11111111-1111-4111-8111-111111111111",
                 "champion",
-                "working",
-                "Synthetic reservation.",
+                "task",
+                "missing-task",
+                [],
                 AT2,
             ),
-            "conflict",
+            "agent_conflict",
         )
         assert store.agent_status("33333333-3333-4333-8333-333333333333") is None
         assert store.integrity()["ok"]

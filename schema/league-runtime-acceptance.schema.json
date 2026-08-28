@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Vinosaamaa/league-of-orchestrator/schema/league-runtime-acceptance.schema.json",
+  "title": "League callsign runtime acceptance receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "verified", "assignment_id", "agent_id", "callsign", "runtime_instance_id", "harness_kind", "backend_kind", "session_identity", "endpoint_identity", "endpoint_generation", "routing_name", "display_agent", "capabilities"],
+  "properties": {
+    "schema": {"const": "league.runtime-acceptance.v1"},
+    "verified": {"const": true},
+    "assignment_id": {"type": "string", "minLength": 1},
+    "agent_id": {"type": "string", "minLength": 1},
+    "callsign": {"type": "string", "minLength": 1},
+    "runtime_instance_id": {"type": "string", "minLength": 1},
+    "harness_kind": {"type": "string", "minLength": 1},
+    "backend_kind": {"type": "string", "minLength": 1},
+    "session_identity": {"type": "string", "minLength": 1},
+    "endpoint_identity": {"type": "string", "minLength": 1},
+    "endpoint_generation": {"type": "string", "minLength": 1},
+    "routing_name": {"type": "string", "minLength": 1},
+    "display_agent": {"type": "string", "minLength": 1},
+    "capabilities": {
+      "type": "array",
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^[a-z][a-z0-9._-]{0,63}$"}
+    }
+  }
+}

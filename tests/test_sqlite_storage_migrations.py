@@ -66,8 +66,8 @@ def test_transactional_upgrade_backup_and_rollback(root: Path) -> None:
         assert unchanged["from_version"] == unchanged["to_version"] == 1
         upgraded = store.migrate(backup_name="backups/pre-v2-retry.sqlite3")
         assert upgraded["from_version"] == 1
-        assert upgraded["to_version"] == 5
-        assert upgraded["applied"] == [2, 3, 4, 5]
+        assert upgraded["to_version"] == 6
+        assert upgraded["applied"] == [2, 3, 4, 5, 6]
         assert upgraded["backup"]["database_schema_version"] == 1
         assert store.integrity()["ok"]
         indexes = {
@@ -88,10 +88,57 @@ def test_transactional_upgrade_backup_and_rollback(root: Path) -> None:
             "ix_project_alias_lookup",
             "ix_project_suggestion_squad",
             "ix_roster_tasks_project_state",
+            "ix_events_occurred",
+            "ix_callsign_queue_scan",
+            "ux_squad_accepting_shotcaller",
+            "ux_owner_changed_per_rollover",
         } <= indexes
-        assert [migration.version for migration in MIGRATIONS] == [1, 2, 3, 4, 5]
-        assert MIGRATIONS[-1].name == "advisory-project-catalog-and-roster-indexes"
-        assert MIGRATIONS[-1].checksum == "5477db9879d6a4a9a29bb8188b398bd6db9a7a786e40e86ab819a0a938790faf"
+        assert [migration.version for migration in MIGRATIONS] == [1, 2, 3, 4, 5, 6]
+        assert MIGRATIONS[-2].name == "advisory-project-catalog-and-roster-indexes"
+        assert MIGRATIONS[-2].checksum == "5477db9879d6a4a9a29bb8188b398bd6db9a7a786e40e86ab819a0a938790faf"
+        assert MIGRATIONS[-1].name == "guarded-rollover-and-shuffled-callsign-queue"
+        assert MIGRATIONS[-1].checksum == "4cf50b541cf38661eded46ad2b853747125c31b32b30b09bf16d8170ab2652e9"
+        assert store.connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+
+
+def test_v5_to_v6_rebuild_rolls_back_and_initializes_shuffled_order(root: Path) -> None:
+    state, _ = migrated_state(root, "v5-to-v6", target_version=5)
+    with SQLiteStorage.for_migration(state) as store:
+        store.connection.executemany(
+            """
+            INSERT INTO callsigns(callsign,pool_role,enabled,pool_position,last_released_at)
+            VALUES(?,'champion',1,?,NULL)
+            """,
+            (("Alpha", 1), ("Beta", 2), ("Gamma", 3)),
+        )
+
+        def crash(point: str) -> None:
+            if point == "after_migration_6":
+                raise InjectedCrash(point)
+
+        try:
+            store.migrate(backup_name="backups/pre-v6.sqlite3", fault=crash)
+        except InjectedCrash:
+            pass
+        else:
+            raise AssertionError("v6 migration crash was not injected")
+        assert store.connection.execute("PRAGMA user_version").fetchone()[0] == 5
+        assert store.connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='callsign_queue'"
+        ).fetchone()[0] == 0
+        store.migrate(backup_name="backups/pre-v6-retry.sqlite3")
+        order = [
+            row[0]
+            for row in store.connection.execute(
+                """
+                SELECT callsign FROM callsign_queue
+                 WHERE pool_role='champion' ORDER BY queue_position
+                """
+            )
+        ]
+        assert order != sorted(order)
+        assert store.integrity()["ok"]
 
 
 def test_schema_refusals_without_test_sql(root: Path) -> None:
@@ -138,7 +185,7 @@ def test_v3_upgrade_preserves_cleanup_and_indexes_legacy_project(root: Path) -> 
             """
         )
         receipt = store.migrate(backup_name="backups/pre-v4.sqlite3")
-        assert receipt["from_version"] == 3 and receipt["applied"] == [4, 5]
+        assert receipt["from_version"] == 3 and receipt["applied"] == [4, 5, 6]
         row = store.connection.execute(
             "SELECT * FROM cleanup_obligations WHERE task_id='task:v3-cleanup'"
         ).fetchone()
@@ -188,6 +235,7 @@ def main() -> None:
         root = Path(temporary)
         test_loaded_runtime_gate(root)
         test_transactional_upgrade_backup_and_rollback(root)
+        test_v5_to_v6_rebuild_rolls_back_and_initializes_shuffled_order(root)
         test_schema_refusals_without_test_sql(root)
         test_v3_upgrade_preserves_cleanup_and_indexes_legacy_project(root)
         test_backup_collision_and_corruption(root)

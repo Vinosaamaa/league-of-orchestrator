@@ -55,13 +55,23 @@ def test_launcher_help_and_schemas() -> None:
     )
     assert "SQL is not exposed" in " ".join(launcher.stdout.split())
     assert (
-        "{storage,agent,callsign,delivery,project,roster,task,runtime,skill,routing,resource,cleanup,request,assign,hook,help,acceptance}"
+        "{storage,agent,callsign,rollover,delivery,project,roster,task,runtime,skill,routing,resource,cleanup,request,assign,hook,help,acceptance}"
         in launcher.stdout
     )
     parser = cli._parser()
     groups = next(action for action in parser._actions if getattr(action, "choices", None))
     storage_help = groups.choices["storage"].format_help()
     assert all(name in storage_help for name in ("migrate", "integrity", "backup", "export", "import"))
+    callsign_help = groups.choices["callsign"].format_help()
+    assert all(
+        name in callsign_help
+        for name in ("reconcile", "allocate", "activate", "rollback", "release", "status")
+    )
+    rollover_help = groups.choices["rollover"].format_help()
+    assert all(
+        name in rollover_help
+        for name in ("prepare", "bindings", "acknowledge", "commit", "abort", "drain", "status")
+    )
     for name in (
         "league-command-output.schema.json",
         "league-import-report.schema.json",
@@ -78,6 +88,12 @@ def test_launcher_help_and_schemas() -> None:
         "league-skill-matrix.schema.json",
         "league-project-catalog.schema.json",
         "league-roster-snapshot.schema.json",
+        "league-callsign-catalog.schema.json",
+        "league-runtime-acceptance.schema.json",
+        "league-shotcaller-handoff-plan.schema.json",
+        "league-rollover-pages.schema.json",
+        "league-rollover-abort-receipt.schema.json",
+        "league-rollover-drain-receipt.schema.json",
     ):
         schema = json.loads((ROOT / "schema" / name).read_text(encoding="utf-8"))
         assert schema["$schema"] == "https://json-schema.org/draft/2020-12/schema"
@@ -264,19 +280,17 @@ def test_agent_and_delivery_commands(root: Path) -> None:
 def reservation_args() -> tuple[str, ...]:
     return (
         "callsign",
-        "reserve",
-        "--callsign",
-        "Lux",
+        "allocate",
+        "--assignment-id",
+        "callsign-assignment:cli",
         "--agent-id",
         NEW_AGENT_ID,
-        "--task-id",
-        TASK_ID,
         "--role",
         "champion",
-        "--status",
-        "working",
-        "--update",
-        "Synthetic reservation.",
+        "--scope-kind",
+        "task",
+        "--scope-id",
+        "task:cli-allocation",
         "--at",
         AT3,
     )
@@ -308,33 +322,43 @@ def test_callsign_project_and_task_commands(root: Path) -> None:
         "task.transfer-owner",
     )
     assert owner["owner"] == {"kind": "squad", "id": "squad:Garen"}
-    first = success(invoke_cli(state, *reservation_args()), "callsign.reserve")
+    status = success(
+        invoke_cli(state, "callsign", "status", "--role", "champion"),
+        "callsign.status",
+    )
+    before = next(item["position"] for item in status["entries"] if item["callsign"] == "Lux")
+    first = success(invoke_cli(state, *reservation_args()), "callsign.allocate")
     assert first["version"] == 1 and not first["idempotent"]
-    assert success(invoke_cli(state, *reservation_args()), "callsign.reserve")["idempotent"]
-    mismatched = list(reservation_args())
-    mismatched[mismatched.index("Synthetic reservation.")] = "Different retry payload."
+    assert first["callsign"] == "Lux"
+    assert success(invoke_cli(state, *reservation_args()), "callsign.allocate")["idempotent"]
+    mismatched = [*reservation_args(), "--requires", "backend.herdr"]
     refusal(
         invoke_cli(state, *mismatched, expected=2),
-        "callsign.reserve",
-        "reservation_mismatch",
+        "callsign.allocate",
+        "assignment_conflict",
     )
-    released = success(
+    rolled_back = success(
         invoke_cli(
             state,
             "callsign",
-            "release",
-            "--callsign",
-            "Lux",
-            "--agent-id",
-            NEW_AGENT_ID,
+            "rollback",
+            "--assignment-id",
+            first["assignment_id"],
             "--expected-version",
             "1",
+            "--failure-receipt-digest",
+            "synthetic-failure-receipt",
             "--at",
             AT4,
         ),
-        "callsign.release",
+        "callsign.rollback",
     )
-    assert released["version"] == 2
+    assert rolled_back["version"] == 2
+    restored = success(
+        invoke_cli(state, "callsign", "status", "--role", "champion"),
+        "callsign.status",
+    )
+    assert next(item["position"] for item in restored["entries"] if item["callsign"] == "Lux") == before
 
 
 def test_admin_export_and_operational_envelope(root: Path) -> None:

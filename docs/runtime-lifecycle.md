@@ -9,8 +9,10 @@ claim a real harness/backend canary. Issue
 [#23](https://github.com/Vinosaamaa/league-of-orchestrator/issues/23) owns that
 final gate.
 
-The canonical request-lifecycle migrations remain versions 1, 2, and 3.
-This slice is contiguous migration v4,
+The canonical request-lifecycle migrations remain versions 1, 2, and 3;
+runtime lifecycle is contiguous migration v4, project/Roster catalog is v5,
+and guarded rollover plus callsign allocation is v6. The runtime migration is
+named
 `adapter-runtime-cleanup-and-routing`, checksum
 `01892d93311ce0b5486077b00e6d3adea60fd3c91006663358317260ad21cd2d`.
 It evolves v3's existing one-per-task `cleanup_obligations` row with optional

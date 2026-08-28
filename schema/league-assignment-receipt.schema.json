@@ -3,7 +3,7 @@
   "$id": "https://github.com/Vinosaamaa/league-of-orchestrator/schema/league-assignment-receipt.schema.json",
   "title": "League verified Champion assignment receipt",
   "type": "object",
-  "required": ["verified", "assignment_id", "task_id", "champion_agent_id", "callsign", "runtime_instance_id", "thread_id", "endpoint", "runtime_generation", "harness_kind", "backend_kind", "routing_name", "display_agent", "repository", "issue", "branch", "worktree"],
+  "required": ["verified", "assignment_id", "task_id", "champion_agent_id", "callsign", "runtime_instance_id", "thread_id", "endpoint", "runtime_generation", "harness_kind", "backend_kind", "routing_name", "display_agent", "repository", "issue", "branch", "worktree", "capabilities"],
   "properties": {
     "verified": {"const": true},
     "assignment_id": {"type": "string", "minLength": 1},
@@ -21,7 +21,13 @@
     "repository": {"type": "string", "minLength": 1},
     "issue": {"type": "integer", "minimum": 1},
     "branch": {"type": "string", "minLength": 1},
-    "worktree": {"type": "string", "minLength": 1}
+    "worktree": {"type": "string", "minLength": 1},
+    "capabilities": {
+      "type": "array",
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^[a-z][a-z0-9._-]{0,63}$"}
+    }
   },
   "additionalProperties": false
 }

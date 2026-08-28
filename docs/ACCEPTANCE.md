@@ -71,12 +71,14 @@ make test-acceptance
 make test-request-lifecycle
 make test-runtime-lifecycle
 make test-skill-contracts
+make test-handoff-callsigns
 make test-affected
 ```
 
-The staged migration assertion follows `CURRENT_SCHEMA_VERSION`; after PR #31,
-canonical request migrations are `[1,2,3]` and runtime lifecycle appends
-checksummed v4 without changing the acceptance operation or sentinel contract.
+The staged migration assertion follows `CURRENT_SCHEMA_VERSION`; canonical
+request migrations are `[1,2,3]`, runtime lifecycle appends v4, the advisory
+project/Roster catalog appends v5, and guarded rollover/callsign allocation
+appends v6 without changing the acceptance operation or sentinel contract.
 
 The skill-contract suite uses only synthetic temporary custom roots and fake
 capability profiles. The current machine inventory was audited separately in a

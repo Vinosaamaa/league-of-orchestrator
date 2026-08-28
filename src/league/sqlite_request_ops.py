@@ -209,6 +209,25 @@ def intake_prompt(
                     "runtime_unverified",
                     "prompt intake runtime is not the actor's verified live endpoint",
                 )
+            shotcaller = store.connection.execute(
+                """
+                SELECT i.state,s.shotcaller_agent_id
+                  FROM shotcaller_intake i JOIN squads s ON s.squad_id=i.squad_id
+                 WHERE i.agent_id=?
+                """,
+                (intake_actor_id,),
+            ).fetchone()
+            if shotcaller is not None and shotcaller["state"] != "accepting":
+                raise StorageRefusal(
+                    "owner_draining", "Shotcaller intake is draining or closed"
+                )
+            if (
+                shotcaller is not None
+                and shotcaller["shotcaller_agent_id"] != intake_actor_id
+            ):
+                raise StorageRefusal(
+                    "owner_superseded", "Shotcaller is no longer the stable Squad owner"
+                )
             store.connection.execute(
                 """
                 INSERT INTO prompts

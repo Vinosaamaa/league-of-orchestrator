@@ -162,3 +162,23 @@ It adds project fields, aliases, ordered suggested Squads, and bounded Roster
 lookup indexes without rewriting migrations 1 through 4. Exact repository and
 root data is local-only; outbound catalog/Roster reads and inspection exports
 redact it. All tests use isolated synthetic state roots and fake identities.
+
+## Guarded rollover and callsign queue provenance
+
+The issue-#8/#13 storage operations, command families, plan schema, synthetic
+tests, and `docs/HANDOFF_CALLSIGNS.md` are original League implementation. They
+implement the accepted continuation and callsign policies only inside an
+explicit repository-local SQLite root. They do not read or mutate the global
+Roster, installed watcher, live callsign files, real terminal/runtime state,
+repository worktrees, or cutover generation.
+
+Migration v6 is contiguous after canonical project/Squad v5 and is named
+`guarded-rollover-and-shuffled-callsign-queue`, checksum
+`4cf50b541cf38661eded46ad2b853747125c31b32b30b09bf16d8170ab2652e9`.
+It deliberately replaces the old public exact-name callsign reserve/release
+commands with one persisted queue allocator. Focused queue tests cover the
+behavioral difference: front scanning, capability skips without reordering,
+exact rollback, tail release, sole-compatible reuse, immutable history, and
+concurrent/crash retry. Focused rollover tests cover the bounded snapshot,
+exact acknowledgement, owner CAS, single event/outbox, intake fencing,
+pre-switch abort, post-switch drain, and unchanged Champion bindings.

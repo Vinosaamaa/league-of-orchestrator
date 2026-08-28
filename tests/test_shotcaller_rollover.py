@@ -507,6 +507,57 @@ def test_public_safety_and_snapshot_staleness(root: Path) -> None:
             raise AssertionError("expired binding snapshot was read")
 
 
+def test_acknowledgement_requires_the_accepted_runtime(root: Path) -> None:
+    state, _ = migrated_state(root, "exact-runtime")
+    with SQLiteStorage(state) as store:
+        context = seed_rollover(store, champion_count=0)
+        prepared = prepare(store, context["successor"])
+        store.activate_callsign(
+            context["successor"]["assignment_id"],
+            1,
+            runtime_receipt(
+                context["successor"], "new-shotcaller", ["rollover.accept"]
+            ),
+            AT3,
+        )
+        pages = read_all_pages(store, prepared["operation_id"])
+        store.connection.execute(
+            """
+            INSERT INTO runtime_instances
+              (runtime_instance_id,actor_agent_id,harness_kind,backend_kind,session_ref,
+               endpoint,runtime_generation,status,verified,last_seen_at,capabilities_json)
+            VALUES('runtime:replacement',?,'synthetic','herdr','synthetic:replacement',
+                   'synthetic-endpoint:replacement','generation:replacement',
+                   'active',1,?,'["rollover.accept"]')
+            """,
+            (NEW_ID, AT4),
+        )
+        store.connection.execute(
+            """
+            UPDATE agent_instances SET thread_id='synthetic:replacement',
+                   address='synthetic-endpoint:replacement' WHERE agent_id=?
+            """,
+            (NEW_ID,),
+        )
+        snapshot = prepared["snapshot"]
+        try:
+            store.acknowledge_rollover(
+                prepared["operation_id"],
+                NEW_ID,
+                "runtime:replacement",
+                prepared["handoff_digest"],
+                snapshot["version"],
+                snapshot["count"],
+                snapshot["digest"],
+                pages,
+                AT4,
+            )
+        except StorageRefusal as exc:
+            assert exc.code == "successor_identity_mismatch"
+        else:
+            raise AssertionError("rollover acknowledged a runtime other than callsign acceptance")
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="league-shotcaller-rollover-") as temporary:
         root = Path(temporary)
@@ -514,6 +565,7 @@ def main() -> None:
         test_pre_switch_abort_restores_reservation(root)
         test_pre_switch_abort_releases_cleaned_active_successor(root)
         test_public_safety_and_snapshot_staleness(root)
+        test_acknowledgement_requires_the_accepted_runtime(root)
     print(
         "PASS: bounded Shotcaller handoff, exact acknowledgement, atomic owner switch, crash retry, and drain"
     )

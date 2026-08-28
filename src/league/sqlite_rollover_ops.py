@@ -662,9 +662,14 @@ def acknowledge_rollover(
                 "SELECT * FROM callsign_assignments WHERE callsign_assignment_id=?",
                 (operation["callsign_assignment_id"],),
             ).fetchone()
-            if assignment["state"] != "active" or not assignment["acceptance_digest"]:
+            if (
+                assignment["state"] != "active"
+                or not assignment["acceptance_digest"]
+                or assignment["runtime_instance_id"] != runtime_instance_id
+            ):
                 raise StorageRefusal(
-                    "successor_identity_mismatch", "successor callsign/runtime acceptance is incomplete"
+                    "successor_identity_mismatch",
+                    "successor callsign acceptance does not match the exact runtime",
                 )
             squad = store.connection.execute(
                 "SELECT * FROM squads WHERE squad_id=?", (operation["squad_id"],)

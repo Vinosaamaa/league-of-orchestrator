@@ -127,6 +127,7 @@ STATEMENTS = (
       callsign TEXT NOT NULL REFERENCES callsigns(callsign),
       subject_id TEXT NOT NULL,
       agent_id TEXT REFERENCES agent_instances(agent_id),
+      runtime_instance_id TEXT REFERENCES runtime_instances(runtime_instance_id),
       role TEXT NOT NULL CHECK (role IN ('shotcaller','champion','hidden-worker')),
       scope_kind TEXT NOT NULL CHECK (scope_kind IN ('squad','task','worker')),
       scope_id TEXT NOT NULL,
@@ -146,10 +147,11 @@ STATEMENTS = (
     """,
     """
     INSERT INTO callsign_assignments
-      (callsign_assignment_id,callsign,subject_id,agent_id,role,scope_kind,scope_id,state,
+      (callsign_assignment_id,callsign,subject_id,agent_id,runtime_instance_id,
+       role,scope_kind,scope_id,state,
        reservation_position,queue_version,requirements_json,acceptance_digest,
        release_receipt_digest,failure_receipt_digest,version,reserved_at,activated_at,released_at)
-    SELECT old.callsign_assignment_id,old.callsign,'agent:'||old.agent_id,old.agent_id,
+    SELECT old.callsign_assignment_id,old.callsign,'agent:'||old.agent_id,old.agent_id,NULL,
            ai.role,'task',old.task_id,
            CASE old.state WHEN 'blocked' THEN 'blocked' ELSE old.state END,
            q.queue_position,1,'[]',NULL,NULL,NULL,1,
@@ -160,14 +162,15 @@ STATEMENTS = (
     """,
     """
     INSERT INTO callsign_assignments
-      (callsign_assignment_id,callsign,subject_id,agent_id,role,scope_kind,scope_id,state,
+      (callsign_assignment_id,callsign,subject_id,agent_id,runtime_instance_id,
+       role,scope_kind,scope_id,state,
        reservation_position,queue_version,requirements_json,acceptance_digest,
        release_receipt_digest,failure_receipt_digest,version,reserved_at,activated_at,released_at)
     SELECT CASE WHEN q.state='reserved' THEN q.reservation_assignment_id
                 ELSE 'migrated-live:'||l.callsign END,l.callsign,
            CASE WHEN l.agent_id IS NULL THEN 'attempt:'||COALESCE(l.launch_attempt_id,l.callsign)
                 ELSE 'agent:'||l.agent_id END,
-           l.agent_id,c.pool_role,
+           l.agent_id,NULL,c.pool_role,
            CASE c.pool_role WHEN 'shotcaller' THEN 'squad'
                             WHEN 'champion' THEN 'task' ELSE 'worker' END,
            COALESCE(ai.task_id,(SELECT s.squad_id FROM squads s WHERE s.shotcaller_agent_id=l.agent_id),

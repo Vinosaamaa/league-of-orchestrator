@@ -96,7 +96,7 @@ The repository-local schema is now contiguous `[1,2,3,4,5,6]`. Versions 1 and
 the runtime lifecycle, and canonical v5 is
 `advisory-project-catalog-and-roster-indexes`. Version 6 is
 `guarded-rollover-and-shuffled-callsign-queue`, checksum
-`4cf50b541cf38661eded46ad2b853747125c31b32b30b09bf16d8170ab2652e9`.
+`e2a2a2ec80840923f351b96f40c16e45c4c3d156567fb585254c5be9c73efa0d`.
 It evolves the existing events and callsign-assignment tables, derives queue
 and Squad-intake state during migration/import, and verifies foreign keys
 before restoring enforcement. It creates no parallel request, outbox, runtime,

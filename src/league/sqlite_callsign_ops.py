@@ -168,11 +168,12 @@ def initialize_imported_callsign_state(store: Any, at: str) -> None:
             store.connection.execute(
                 """
                 INSERT INTO callsign_assignments
-                  (callsign_assignment_id,callsign,subject_id,agent_id,role,scope_kind,
+                  (callsign_assignment_id,callsign,subject_id,agent_id,runtime_instance_id,
+                   role,scope_kind,
                    scope_id,state,reservation_position,queue_version,requirements_json,
                    acceptance_digest,release_receipt_digest,failure_receipt_digest,version,
                    reserved_at,activated_at,released_at)
-                VALUES(?,?,?,?,?,?,?,?,?,1,'[]',NULL,NULL,NULL,1,?,?,NULL)
+                VALUES(?,?,?,?,NULL,?,?,?,?,?,1,'[]',NULL,NULL,NULL,1,?,?,NULL)
                 """,
                 (
                     assignment_id,
@@ -220,6 +221,7 @@ def _assignment_value(row: Any, *, idempotent: bool) -> dict[str, Any]:
         "agent_id": row["agent_id"],
         "role": row["role"],
         "scope": {"kind": row["scope_kind"], "id": row["scope_id"]},
+        "runtime_instance_id": row["runtime_instance_id"],
         "state": row["state"],
         "version": int(row["version"]),
         "queue_version": int(row["queue_version"]),
@@ -536,10 +538,11 @@ def _reserve_in_transaction(
     store.connection.execute(
         """
         INSERT INTO callsign_assignments
-          (callsign_assignment_id,callsign,subject_id,agent_id,role,scope_kind,scope_id,state,
+          (callsign_assignment_id,callsign,subject_id,agent_id,runtime_instance_id,
+           role,scope_kind,scope_id,state,
            reservation_position,queue_version,requirements_json,acceptance_digest,
            release_receipt_digest,failure_receipt_digest,version,reserved_at,activated_at,released_at)
-        VALUES(?,?,?, ?,?,?,?,'reserved',?,?,?,NULL,NULL,NULL,1,?,NULL,NULL)
+        VALUES(?,?,?, ?,NULL,?,?,?,'reserved',?,?,?,NULL,NULL,NULL,1,?,NULL,NULL)
         """,
         (
             assignment_id,
@@ -762,10 +765,18 @@ def activate_callsign(
             next_version = expected_version + 1
             store.connection.execute(
                 """
-                UPDATE callsign_assignments SET state='active',acceptance_digest=?,version=?,
-                       queue_version=?,activated_at=? WHERE callsign_assignment_id=?
+                UPDATE callsign_assignments SET state='active',runtime_instance_id=?,
+                       acceptance_digest=?,version=?,queue_version=?,activated_at=?
+                 WHERE callsign_assignment_id=?
                 """,
-                (receipt_digest, next_version, queue_version, at, assignment_id),
+                (
+                    normalized["runtime_instance_id"],
+                    receipt_digest,
+                    next_version,
+                    queue_version,
+                    at,
+                    assignment_id,
+                ),
             )
             store.connection.execute(
                 """

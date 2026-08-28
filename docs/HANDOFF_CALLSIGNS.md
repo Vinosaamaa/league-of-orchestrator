@@ -9,7 +9,7 @@ Issue #23 retains those gates.
 
 The slice is contiguous migration v6,
 `guarded-rollover-and-shuffled-callsign-queue`, checksum
-`4cf50b541cf38661eded46ad2b853747125c31b32b30b09bf16d8170ab2652e9`.
+`e2a2a2ec80840923f351b96f40c16e45c4c3d156567fb585254c5be9c73efa0d`.
 Canonical project/Squad
 migration v5 remains unchanged. Migration v6 evolves the existing callsign
 assignment and event tables rather than creating parallel assignment, event,
@@ -46,8 +46,9 @@ Queue and immutable assignment history are separate. Reservation creates a new
 assignment and incarnation identity. Activation removes its queue position;
 release appends a new position. Rollback preserves the original position.
 Released and rolled-back history retains the original subject, scope, callsign,
-queue versions, receipt digests, and timestamps. Reuse creates another row and
-never rewrites prior task, thread, callsign, event, or archive identity.
+accepted runtime, queue versions, receipt digests, and timestamps. Reuse creates
+another row and never rewrites prior task, thread, callsign, event, or archive
+identity.
 
 All mutations use one `BEGIN IMMEDIATE` transaction and compare-and-set
 versions. Concurrent allocators therefore cannot select the same entry. A

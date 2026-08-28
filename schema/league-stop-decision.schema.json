@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Vinosaamaa/league-of-orchestrator/schema/league-stop-decision.schema.json",
+  "title": "League bounded Shotcaller Stop decision",
+  "type": "object",
+  "required": ["scope_id", "status", "decision", "priority", "wait_generation", "terminal_fresh", "obligations"],
+  "properties": {
+    "scope_id": {"type": "string", "minLength": 1},
+    "status": {"enum": ["not_shotcaller", "armed", "waiting", "blocked_once", "allowed", "unavailable"]},
+    "decision": {"enum": ["block", "allow"]},
+    "priority": {"type": ["string", "null"]},
+    "wait_generation": {"type": ["integer", "null"], "minimum": 0},
+    "terminal_fresh": {"type": "boolean"},
+    "obligations": {
+      "type": "object",
+      "properties": {
+        "active_champions": {"type": "integer", "minimum": 0},
+        "pending_assignments": {"type": "integer", "minimum": 0},
+        "unresolved_requests": {"type": "integer", "minimum": 0},
+        "pending_deliveries": {"type": "integer", "minimum": 0},
+        "cleanup_obligations": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

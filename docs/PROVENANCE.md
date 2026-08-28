@@ -93,3 +93,15 @@ alter `PATH` for unrelated tests. This keeps self-process and resource-lifecycle
 contracts testable in restricted CI and agent sandboxes that deny host process
 inspection. The adapter is test-only; production process inspection and
 behavior are unchanged.
+
+## Grouped request-lifecycle implementation provenance
+
+The issue-#21 request-lifecycle design merged at `ff72125` is the canonical
+invariant source for this grouped #3/#4/#5/#17 slice. The third reviewed SQLite
+migration, request/assignment/outbox/watcher operation modules, injected
+adapter services, CLI families, schemas, and focused tests are original League
+implementation. They extend the merged issue-#19 repository-local facade and
+do not modify `src/agent_watcher.py`, installed files, global hooks, live
+Roster/callsign/watcher state, or canonical authority. Issue #23 retains all
+installation, live import, real-runtime canary, reversible cutover, and rollback
+ownership.

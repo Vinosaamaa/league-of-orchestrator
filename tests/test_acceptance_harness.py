@@ -138,7 +138,7 @@ def assert_staged_install_receipt(result: dict[str, object]) -> None:
     ) == 1
     assert staged["launcher_resolution"] and staged["help_checked"]
     assert staged["schema_migration"] == {
-        "to_version": 2,
+        "to_version": 3,
         "journal_mode": "DELETE",
         "integrity": True,
     }

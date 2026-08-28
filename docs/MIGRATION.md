@@ -86,4 +86,7 @@ beneath an explicit temporary root, validates caller-specified byte/config/fake
 process sentinels, imports the complete synthetic legacy fixture, stages and
 rolls back the exact repository release beneath its own prefix, and fault-tests
 the generation pointer under its own lock. These are pre-cutover mechanics, not
-authority or a claim that any pending lifecycle slice or real adapter passes.
+authority or a claim that any pending acceptance-receipt extension or real
+adapter passes. The grouped request-lifecycle implementation remains inert and
+is verified separately with fake adapters against the same explicit-root
+storage boundary.

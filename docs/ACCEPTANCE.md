@@ -56,8 +56,11 @@ supplied state root. It leaves an owner-only
   writers;
 - exact fake canary registration and identity-bound cleanup.
 
-The request, assignment, watcher, Stop, and teardown assertions remain
-machine-readable `pending` entries until their owning issues merge. Codex,
+The request, assignment, watcher, Stop, and teardown acceptance-receipt
+extensions remain machine-readable `pending` entries. Request, assignment,
+watcher delivery, and Stop now have repository-local implementations and
+focused fake-adapter tests, but this grouped slice deliberately does not rewrite
+the already isolated acceptance receipt or claim a cutover canary. Codex,
 Cursor, Pi, Herdr, and tmux remain `unverified`; consuming a synthetic payload
 or fake endpoint is never reported as real-runtime support.
 

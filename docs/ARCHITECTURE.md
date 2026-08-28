@@ -13,8 +13,8 @@
   scheduler.
 
 Disposable Shotcaller handoff and project aliases remain planned work. The
-storage layer can represent exact projects, tasks, Squads, and owner transfers;
-it does not implement request triage or runtime handoff policy.
+storage layer now implements the canonical prompt/request lifecycle and exact
+owner return; it does not implement autonomous planning or runtime handoff.
 
 ## Current modules
 
@@ -29,14 +29,18 @@ The repository keeps the proven runtime and new storage boundary separate:
 - `schema/`, `examples/`, and `config/` define the public authoring surface.
 - `tests/` exercises the imported behavior with temporary synthetic fixtures.
 - `src/league/storage.py` composes the only domain-facing persistence interface
-  from cohesive administrative, lifecycle, delivery, and transfer protocols;
+  from cohesive administrative, lifecycle, request, assignment, outbox,
+  watcher, delivery, and transfer protocols;
   `storage_types.py` owns the stable refusal and typed import-plan contract.
 - `src/league/sqlite_store.py` is the sole SQLite implementation and facade.
   `sqlite_core.py` owns the shared transaction mechanics; focused
-  `sqlite_*_ops.py` modules own lifecycle, delivery, import, and export SQL,
+  `sqlite_*_ops.py` modules own lifecycle, request, assignment, delivery,
+  watcher, import, and export SQL,
   while the facade owns connection policy, migrations, integrity, and backup.
 - `src/league/importer.py` strictly decodes the explicit issue-#18 manifest and
   produces an in-memory plan; it never opens a database or writes legacy files.
+- `src/league/request_services.py` owns injected visible-launch and delivery
+  adapter boundaries; production adapter selection remains outside the store.
 - `src/league/cli.py` and `bin/league` expose stable domain commands and
   versioned JSON envelopes without a general query or SQL command.
 - `schema/league-*.schema.json` defines command, import-report, and export
@@ -87,7 +91,19 @@ The repository-local SQLite path is separately testable:
    ordered cursors without a second complete in-memory copy. Rollback export is
    deterministic, written mode `0600` beneath the explicit state root, and
    reported by digest without exposing its path.
-5. Configuration, hooks, guides, launchers, immutable failure/teardown/archive
+5. Prompt capture is idempotent by adapter/session/source event. Complete
+   triage creates ordered prompt items and independently finishable requests;
+   request claims, execution mode, request state, and task state stay separate.
+6. Routes, owner results, task transitions, and their exact event/outbox rows
+   commit atomically. Transport is at least once; unique recipient receipts
+   apply the database effect once. Request, dispatch, and watcher leases remain
+   distinct.
+7. Assignment is recoverable across pending, launching, active, blocked, and
+   cleanup-pending states. Active requires one exact verified Champion receipt.
+8. The role-aware Stop decision combines unresolved requests, active tasks,
+   assignments, deliveries, and cleanup, while blocking at most once per fresh
+   wait generation and yielding to ordinary user messages.
+9. Configuration, hooks, guides, launchers, immutable failure/teardown/archive
    evidence, installer backups, and other-product state remain files.
 
 `src/agent_watcher.py` does not import `league`. The filesystem baseline is the
@@ -98,13 +114,15 @@ generation; there is no dual canonical write path.
 explicit-root sentinels, deterministic fake adapters, fixture migration parity,
 staged release/rollback proof, a sandbox-only generation pointer and cutover
 lock, fault-injected operation receipts, and exact fake canary cleanup. It has
-no global path defaults and exposes no canonical cutover operation. The request,
-assignment, watcher, Stop, and teardown extension assertions remain pending
-until their owning issues merge.
+no global path defaults and exposes no canonical cutover operation. The
+request, assignment, watcher, Stop, and teardown acceptance-receipt extensions
+remain pending. The first four are implemented and tested separately in this
+repository-local candidate; they are not wired into a cutover receipt or live
+runtime by this slice.
 
 ## Portability boundary
 
-The baseline is not fully agent- or backend-agnostic. Champion identity requires
+The live baseline is not fully agent- or backend-agnostic. Champion identity requires
 a Codex-shaped UUID, automatic hooks are Codex-specific, Herdr/tmux are
 hard-coded branches, and the atomic launch command is currently Herdr-specific.
 Semantic routing accepts explicit model and effort strings, but the example

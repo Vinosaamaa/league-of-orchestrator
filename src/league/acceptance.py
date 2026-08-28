@@ -298,7 +298,14 @@ def _migration_shadow(home: Path, source_root: Path) -> dict[str, Any]:
         expected_rows = plan["rows"]
         for table, rows in expected_rows.items():
             expected = sorted(rows, key=lambda row: _stable_bytes(row))
-            observed = sorted(exported["tables"][table], key=lambda row: _stable_bytes(row))
+            expected_columns = {column for row in rows for column in row}
+            observed = sorted(
+                (
+                    {column: row[column] for column in expected_columns}
+                    for row in exported["tables"][table]
+                ),
+                key=lambda row: _stable_bytes(row),
+            )
             if expected != observed:
                 raise StorageRefusal("shadow_parity_failed", f"fixture parity failed for {table}")
         parity_payload = {

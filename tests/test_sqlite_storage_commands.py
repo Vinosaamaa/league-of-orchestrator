@@ -53,7 +53,10 @@ def test_launcher_help_and_schemas() -> None:
         [str(LEAGUE), "--help"], text=True, capture_output=True, check=True, timeout=10
     )
     assert "SQL is not exposed" in " ".join(launcher.stdout.split())
-    assert "{storage,agent,callsign,delivery,project,task,acceptance}" in launcher.stdout
+    assert (
+        "{storage,agent,callsign,delivery,project,task,request,assign,hook,help,acceptance}"
+        in launcher.stdout
+    )
     parser = cli._parser()
     groups = next(action for action in parser._actions if getattr(action, "choices", None))
     storage_help = groups.choices["storage"].format_help()
@@ -63,10 +66,14 @@ def test_launcher_help_and_schemas() -> None:
         "league-import-report.schema.json",
         "league-export.schema.json",
         "league-acceptance-receipt.schema.json",
+        "league-help.schema.json",
+        "league-request-triage.schema.json",
+        "league-assignment-receipt.schema.json",
+        "league-stop-decision.schema.json",
     ):
         schema = json.loads((ROOT / "schema" / name).read_text(encoding="utf-8"))
         assert schema["$schema"] == "https://json-schema.org/draft/2020-12/schema"
-        assert schema["additionalProperties"] is False
+        assert schema.get("additionalProperties") is False or schema["type"] == "array"
     report_schema = json.loads(
         (ROOT / "schema/league-import-report.schema.json").read_text(encoding="utf-8")
     )
@@ -90,7 +97,7 @@ def test_storage_migrate_and_import(root: Path) -> None:
     state.mkdir()
     fixture = write_complete_fixture(source)
     migration = success(invoke_cli(state, "storage", "migrate"), "storage.migrate")
-    assert migration["to_version"] == 2 and migration["policy"]["foreign_keys"] is True
+    assert migration["to_version"] == 3 and migration["policy"]["foreign_keys"] is True
     assert os.stat(state / "league.sqlite3").st_mode & 0o777 == 0o600
     dry_run = success(
         invoke_cli(

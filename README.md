@@ -27,12 +27,19 @@ Nothing here installs files, changes hooks, or connects to live Roster state.
 - Synthetic examples, authoring schemas, and focused local regression tests.
 - One standard-library SQLite implementation behind a `Storage` protocol and
   stable `league` command facade.
-- Two checksummed schema migrations, a loaded-runtime WAL gate, verified
+- Three checksummed schema migrations, a loaded-runtime WAL gate, verified
   backups, integrity checks, expected-version writes, and bounded contention.
 - A strict manifest importer covering every canonical issue-#18 artifact
   family, with dry-run digest confirmation before apply.
 - Deterministic bounded inspection and restricted rollback exports with
   machine-readable schemas.
+- Prompt-once intake, complete bounded triage, request claims and states,
+  explicit direct/hidden/Champion dispatch, and unresolved reconciliation.
+- Recoverable visible-Champion assignment with exact acceptance receipts,
+  source-bound transition outbox delivery, unique recipient effects, and fair
+  backlog draining.
+- One role-aware bounded Shotcaller Stop decision with ordinary-message
+  priority and separate request, dispatch, and watcher leases.
 
 The proven watcher remains one deep module. The new storage slice is a small
 modular monolith: one composite `Storage` interface with cohesive administrative,
@@ -48,15 +55,17 @@ Requirements: Python 3, Git, and a POSIX shell.
 ```sh
 make test
 make test-storage
+make test-request-lifecycle
 make test-acceptance
 make test-affected
 make test-all
 ```
 
 `make test` runs the inherited baseline once, `make test-storage` runs the
-storage slice once, `make test-acceptance` runs the isolated issue-#23
-foundation, and `make test-affected` composes storage plus acceptance without
-overlap. `make test-all` composes baseline plus the affected suite. Every
+storage slice once, `make test-request-lifecycle` runs the grouped lifecycle
+suite, and `make test-acceptance` runs the isolated issue-#23 foundation.
+`make test-affected` composes storage, acceptance, and request lifecycle without
+overlap; `make test-all` adds the inherited baseline once. Every
 target uses temporary fixtures only. It does not install files, contact GitHub,
 mutate global agent state, or operate live Herdr/tmux sessions.
 
@@ -70,14 +79,20 @@ Inspect the stable command inventory without creating state:
 
 ```sh
 ./bin/league --help
+./bin/league help inventory
 ./bin/league --state-root /absolute/isolated/state-root storage --help
 ```
 
-Every operation requires an explicit existing absolute state root. The database
+Every state operation requires an explicit existing absolute state root;
+machine-readable help is read-only and needs no root. The database
 filename, SQL, pragmas, and transaction details remain internal. The output
 contracts are [command](schema/league-command-output.schema.json),
 [import report](schema/league-import-report.schema.json), and
 [export](schema/league-export.schema.json) JSON Schemas.
+
+The grouped request-lifecycle command and transaction map is documented in
+[request lifecycle](docs/REQUEST_LIFECYCLE.md). Its implementation is inert
+until issue #23 separately proves installation and cutover.
 
 ## Repository-local SQLite implementation; cutover still gated
 
@@ -111,8 +126,11 @@ shadow, reversible pointer switch, and separately authorized cutover. Until
 those gates pass, the filesystem watcher remains the only live authority.
 The repository-local foundation and its one explicit-root command are
 documented in [isolated acceptance](docs/ACCEPTANCE.md). It records the later
-request, assignment, watcher, Stop, and teardown slices as pending and does not
-claim real Codex, Cursor, Pi, Herdr, or tmux support from fake adapters.
+acceptance-receipt extensions for request, assignment, watcher, Stop, and
+teardown as pending. The first four now have repository-local implementations
+and focused fake-adapter tests, but have not been folded into a cutover receipt;
+the harness does not claim real Codex, Cursor, Pi, Herdr, or tmux support from
+fake adapters.
 
 ## Project map
 
@@ -124,6 +142,7 @@ claim real Codex, Cursor, Pi, Herdr, or tmux support from fake adapters.
 - [Reversible migration and install boundary](docs/MIGRATION.md)
 - [Isolated acceptance and reversible cutover foundation](docs/ACCEPTANCE.md)
 - [Exact source provenance](docs/PROVENANCE.md)
+- [Repository-local request lifecycle](docs/REQUEST_LIFECYCLE.md)
 - [Baseline versus planned issues](docs/ROADMAP.md)
 
 ## Non-goals for this implementation PR

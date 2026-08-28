@@ -125,6 +125,7 @@ def export_bytes(
     purpose: str,
     max_records: int,
     maximum_records: int,
+    maximum_payload_bytes: int,
     current_schema_version: int,
     export_tables: tuple[str, ...],
     export_order: Mapping[str, str],
@@ -147,12 +148,22 @@ def export_bytes(
     total = sum(table_counts.values())
     if total > max_records:
         raise StorageRefusal("export_too_large", "export exceeds the requested record bound")
+    prompt_payload_bytes = int(
+        store.connection.execute(
+            "SELECT COALESCE(SUM(LENGTH(CAST(body AS BLOB))),0) FROM prompt_payloads"
+        ).fetchone()[0]
+    )
+    if prompt_payload_bytes > maximum_payload_bytes:
+        raise StorageRefusal(
+            "export_payload_too_large", "export exceeds the bounded prompt-payload byte budget"
+        )
     header = {
         "schema": "league.export.v1",
         "canonical": False,
         "purpose": purpose,
         "database_schema_version": current_schema_version,
         "record_count": total,
+        "prompt_payload_bytes": prompt_payload_bytes,
         "table_counts": table_counts,
     }
 

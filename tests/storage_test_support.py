@@ -18,7 +18,7 @@ def migrated_state(
     parent: Path,
     name: str,
     *,
-    target_version: int = 2,
+    target_version: int = 3,
     request_wal: bool = True,
 ) -> tuple[Path, dict[str, Any]]:
     state = parent / name

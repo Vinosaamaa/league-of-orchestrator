@@ -13,10 +13,28 @@ from typing import Any, BinaryIO, Callable, Optional
 from . import MAX_ACCEPTANCE_SENTINEL_PATHS, __version__
 from .importer import build_import_plan
 from .sqlite_store import DEFAULT_BUSY_TIMEOUT_MS, MAX_EXPORT_RECORDS, SQLiteStorage
-from .storage import Storage, StorageRefusal
+from .storage import (
+    DispatchRequestCommand,
+    OutboxDispatchIdentity,
+    PrepareAssignmentCommand,
+    RuntimeRegistrationCommand,
+    Storage,
+    StorageRefusal,
+)
+from .storage_request import (
+    MAX_TRIAGE_JSON_BYTES,
+    AnswerRequestCommand,
+    RequestResultCommand,
+)
 
 
 COMMAND_SCHEMA = "league.command.v1"
+REQUEST_STATE_COMMANDS = {
+    "awaiting-user": "awaiting_user",
+    "block": "blocked",
+    "defer": "deferred",
+    "cancel": "cancelled",
+}
 CommandResult = tuple[Any, Optional[bytes]]
 CommandHandler = Callable[[Storage, argparse.Namespace], CommandResult]
 
@@ -136,6 +154,49 @@ def _add_delivery_commands(groups: argparse._SubParsersAction) -> None:
         command.add_argument("--at", required=True)
         if name == "fail":
             command.add_argument("--reason", required=True)
+    claim_outbox = commands.add_parser(
+        "claim-outbox", help="Claim one exact source-event-bound outbox row."
+    )
+    for name in ("outbox-id", "event-id", "recipient-agent-id", "dispatcher-id", "attempt-id"):
+        claim_outbox.add_argument(f"--{name}", required=True)
+    claim_outbox.add_argument("--lease-expires-at", required=True)
+    claim_outbox.add_argument("--at", required=True)
+    ack_outbox = commands.add_parser(
+        "ack-outbox", help="Apply one exact recipient effect and delivery receipt atomically."
+    )
+    for name in (
+        "outbox-id",
+        "event-id",
+        "recipient-agent-id",
+        "dispatcher-id",
+        "attempt-id",
+        "adapter-kind",
+        "effect-kind",
+        "effect-id",
+    ):
+        ack_outbox.add_argument(f"--{name}", required=True)
+    ack_outbox.add_argument("--fence", type=int, required=True)
+    ack_outbox.add_argument("--at", required=True)
+    fail_outbox = commands.add_parser(
+        "fail-outbox", help="Record a bounded failed attempt and return the outbox to pending."
+    )
+    for name in (
+        "outbox-id",
+        "event-id",
+        "recipient-agent-id",
+        "dispatcher-id",
+        "attempt-id",
+        "adapter-kind",
+        "reason",
+    ):
+        fail_outbox.add_argument(f"--{name}", required=True)
+    fail_outbox.add_argument("--fence", type=int, required=True)
+    fail_outbox.add_argument("--retry-at", required=True)
+    fail_outbox.add_argument("--at", required=True)
+    backlog = commands.add_parser("backlog", help="List a fair bounded page of due outbox rows.")
+    backlog.add_argument("--at", required=True)
+    backlog.add_argument("--limit", type=int, default=100)
+    backlog.add_argument("--per-recipient", type=int, default=2)
 
 
 def _add_project_commands(groups: argparse._SubParsersAction) -> None:
@@ -156,6 +217,220 @@ def _add_task_commands(groups: argparse._SubParsersAction) -> None:
     transfer.add_argument("--owner-kind", choices=("agent", "squad"), required=True)
     transfer.add_argument("--owner-id", required=True)
     transfer.add_argument("--at", required=True)
+    transition = commands.add_parser(
+        "transition", help="Record one exact task transition, event, and coordinator outbox row."
+    )
+    for name in (
+        "task-id",
+        "runtime-instance-id",
+        "state",
+        "update",
+        "next-action",
+        "transition-id",
+        "transition-key",
+        "event-id",
+        "outbox-id",
+        "recipient-agent-id",
+        "at",
+    ):
+        transition.add_argument(f"--{name}", required=True)
+    transition.add_argument("--expected-version", type=int, required=True)
+    transition.add_argument("--blocker")
+
+
+def _add_request_commands(groups: argparse._SubParsersAction) -> None:
+    request = groups.add_parser(
+        "request", help="Capture, triage, claim, route, resolve, answer, and reconcile requests."
+    )
+    commands = request.add_subparsers(dest="action", required=True)
+    intake = commands.add_parser("intake", help="Capture one complete prompt exactly once.")
+    for name in (
+        "prompt-id",
+        "intake-actor-id",
+        "runtime-instance-id",
+        "adapter-kind",
+        "session-ref",
+        "source-event-key",
+        "body",
+        "at",
+    ):
+        intake.add_argument(f"--{name}", required=True)
+    triage = commands.add_parser("triage", help="Commit complete ordered prompt-item accounting.")
+    triage.add_argument("--prompt-id", required=True)
+    triage.add_argument("--items-json", required=True, help="JSON array of bounded prompt items.")
+    triage.add_argument("--at", required=True)
+    claim = commands.add_parser("claim", help="Acquire or recover one request mutation claim.")
+    for name in ("request-id", "runtime-instance-id", "claim-token", "leased-until", "at"):
+        claim.add_argument(f"--{name}", required=True)
+    release = commands.add_parser("release", help="Release the exact current request claim.")
+    for name in ("request-id", "runtime-instance-id", "claim-token", "at"):
+        release.add_argument(f"--{name}", required=True)
+    dispatch = commands.add_parser(
+        "dispatch", help="Record direct, hidden, or Champion execution before substantive action."
+    )
+    for name in ("request-id", "claim-token", "dispatch-id", "work-kind", "at"):
+        dispatch.add_argument(f"--{name}", required=True)
+    dispatch.add_argument("--requested-mode", choices=("direct", "hidden", "champion"))
+    dispatch.add_argument("--hidden-supported", action="store_true")
+    dispatch.add_argument("--requested-model")
+    dispatch.add_argument("--requested-effort")
+    dispatch.add_argument("--explicit-route")
+    route = commands.add_parser("route", help="Route ownership with event and outbox atomically.")
+    for name in (
+        "request-id",
+        "claim-token",
+        "recipient-agent-id",
+        "event-id",
+        "outbox-id",
+        "at",
+    ):
+        route.add_argument(f"--{name}", required=True)
+    route.add_argument("--expected-version", type=int, required=True)
+    accept = commands.add_parser(
+        "accept", help="Claim and accept one exactly received routed request."
+    )
+    for name in ("request-id", "runtime-instance-id", "claim-token", "leased-until", "at"):
+        accept.add_argument(f"--{name}", required=True)
+    for state in REQUEST_STATE_COMMANDS:
+        command = commands.add_parser(state, help=f"Record an explicit {state} request transition.")
+        for name in ("request-id", "claim-token", "summary", "event-id", "at"):
+            command.add_argument(f"--{name}", required=True)
+        command.add_argument("--expected-version", type=int, required=True)
+        if state == "defer":
+            command.add_argument("--next-attention-at", required=True)
+    result = commands.add_parser(
+        "result", help="Record an owner result and optionally return ownership atomically."
+    )
+    for name in (
+        "request-id",
+        "claim-token",
+        "result-id",
+        "idempotency-key",
+        "outcome",
+        "summary",
+        "at",
+    ):
+        result.add_argument(f"--{name}", required=True)
+    result.add_argument("--expected-version", type=int, required=True)
+    result.add_argument("--task-id", action="append", default=[])
+    result.add_argument("--return-to-requester", action="store_true")
+    result.add_argument("--event-id")
+    result.add_argument("--outbox-id")
+    answer = commands.add_parser("answer", help="Record response evidence and answer one request.")
+    for name in (
+        "request-id",
+        "claim-token",
+        "response-ref-id",
+        "adapter-kind",
+        "session-locator",
+        "response-locator",
+        "content-hash",
+        "resolution-summary",
+        "event-id",
+        "at",
+    ):
+        answer.add_argument(f"--{name}", required=True)
+    answer.add_argument("--durability", choices=("durable", "ephemeral"), required=True)
+    answer.add_argument("--expected-version", type=int, required=True)
+    unresolved = commands.add_parser(
+        "unresolved", help="Query unresolved work before reply, wait, handoff, or end."
+    )
+    unresolved.add_argument("--owner-agent-id", required=True)
+    unresolved.add_argument("--before-action", choices=("reply", "wait", "handoff", "end"))
+    unresolved.add_argument("--limit", type=int, default=100)
+
+
+def _add_assignment_commands(groups: argparse._SubParsersAction) -> None:
+    assignment = groups.add_parser(
+        "assign", help="Drive recoverable pending, launching, active, blocked, or cleanup-pending assignment state."
+    )
+    commands = assignment.add_subparsers(dest="action", required=True)
+    prepare = commands.add_parser("prepare", help="Reserve one visible Champion assignment before launch.")
+    for name in (
+        "assignment-id",
+        "request-id",
+        "claim-token",
+        "task-id",
+        "task-summary",
+        "coordinator-agent-id",
+        "champion-agent-id",
+        "callsign",
+        "repository",
+        "branch",
+        "worktree",
+        "at",
+    ):
+        prepare.add_argument(f"--{name}", required=True)
+    prepare.add_argument("--issue", type=int, required=True)
+    launching = commands.add_parser("launching", help="Commit launch intent before adapter work.")
+    launching.add_argument("--assignment-id", required=True)
+    launching.add_argument("--expected-version", type=int, required=True)
+    launching.add_argument("--at", required=True)
+    activate = commands.add_parser("activate", help="Activate only from an exact verified Champion receipt.")
+    activate.add_argument("--assignment-id", required=True)
+    activate.add_argument("--expected-version", type=int, required=True)
+    activate.add_argument("--receipt-json", required=True)
+    activate.add_argument("--event-id", required=True)
+    activate.add_argument("--outbox-id", required=True)
+    activate.add_argument("--at", required=True)
+    block = commands.add_parser("block", help="Record a blocked or cleanup-pending failed launch.")
+    block.add_argument("--assignment-id", required=True)
+    block.add_argument("--expected-version", type=int, required=True)
+    block.add_argument("--failure-class", required=True)
+    block.add_argument("--cleanup-required", action="store_true")
+    block.add_argument("--cleanup-proven", action="store_true")
+    block.add_argument("--at", required=True)
+
+
+def _add_hook_commands(groups: argparse._SubParsersAction) -> None:
+    hook = groups.add_parser("hook", help="Record runtime/watcher leases and make one bounded Stop decision.")
+    commands = hook.add_subparsers(dest="action", required=True)
+    runtime = commands.add_parser("register-runtime", help="Register one exact verified runtime generation.")
+    for name in (
+        "runtime-instance-id",
+        "actor-agent-id",
+        "harness-kind",
+        "backend-kind",
+        "session-ref",
+        "endpoint",
+        "runtime-generation",
+        "at",
+    ):
+        runtime.add_argument(f"--{name}", required=True)
+    runtime.add_argument("--status", choices=("active", "idle", "closed", "failed"), required=True)
+    runtime.add_argument("--verified", action="store_true")
+    watcher = commands.add_parser("register-watcher", help="Register one distinct wake lease.")
+    for name in (
+        "scope-id",
+        "watcher-id",
+        "actor-agent-id",
+        "runtime-instance-id",
+        "wake-locator",
+        "leased-until",
+        "at",
+    ):
+        watcher.add_argument(f"--{name}", required=True)
+    watcher.add_argument("--fence", type=int, required=True)
+    watcher.add_argument("--no-block", action="store_true")
+    user = commands.add_parser("user-message", help="Give an ordinary user message priority and rearm waiting.")
+    user.add_argument("--scope-id", required=True)
+    user.add_argument("--actor-agent-id", required=True)
+    user.add_argument("--at", required=True)
+    rearm = commands.add_parser("rearm", help="Bind the next possible block to a fresh event wait generation.")
+    for name in ("scope-id", "actor-agent-id", "event-id", "at"):
+        rearm.add_argument(f"--{name}", required=True)
+    allow = commands.add_parser("allow-stop-once", help="Permit one explicit final Stop decision.")
+    allow.add_argument("--scope-id", required=True)
+    allow.add_argument("--actor-agent-id", required=True)
+    stop = commands.add_parser("stop", help="Combine request, assignment, delivery, and cleanup obligations once.")
+    for name in ("scope-id", "actor-agent-id", "terminal-generation", "at"):
+        stop.add_argument(f"--{name}", required=True)
+
+
+def _add_help_commands(groups: argparse._SubParsersAction) -> None:
+    help_group = groups.add_parser("help", help="Emit machine-readable command and schema inventory.")
+    commands = help_group.add_subparsers(dest="action", required=True)
+    commands.add_parser("inventory", help="Emit the versioned command inventory.")
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -167,7 +442,10 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--state-root",
         type=Path,
-        help="Explicit absolute League state root (the database filename remains internal).",
+        help=(
+            "Explicit absolute League state root; required except for help inventory "
+            "and the separately rooted acceptance command."
+        ),
     )
     parser.add_argument(
         "--busy-timeout-ms",
@@ -188,6 +466,10 @@ def _parser() -> argparse.ArgumentParser:
         _add_delivery_commands,
         _add_project_commands,
         _add_task_commands,
+        _add_request_commands,
+        _add_assignment_commands,
+        _add_hook_commands,
+        _add_help_commands,
         _add_acceptance_commands,
     ):
         builder(groups)
@@ -215,7 +497,7 @@ def _envelope_bytes(
 
 def _open(args: argparse.Namespace) -> SQLiteStorage:
     if args.state_root is None:
-        raise StorageRefusal("state_root_required", "this command requires --state-root")
+        raise StorageRefusal("state_root_required", "operation requires an explicit absolute state root")
     return SQLiteStorage(
         args.state_root,
         busy_timeout_ms=args.busy_timeout_ms,
@@ -321,6 +603,314 @@ def _task_transfer(store: Storage, args: argparse.Namespace) -> CommandResult:
     ), None
 
 
+def _task_transition(store: Storage, args: argparse.Namespace) -> CommandResult:
+    return store.transition_task(
+        args.task_id,
+        args.runtime_instance_id,
+        args.expected_version,
+        args.state,
+        args.update,
+        args.next_action,
+        args.blocker,
+        args.transition_id,
+        args.transition_key,
+        args.event_id,
+        args.outbox_id,
+        args.recipient_agent_id,
+        args.at,
+    ), None
+
+
+def _request_intake(store: Storage, args: argparse.Namespace) -> CommandResult:
+    return store.intake_prompt(
+        args.prompt_id,
+        args.intake_actor_id,
+        args.runtime_instance_id,
+        args.adapter_kind,
+        args.session_ref,
+        args.source_event_key,
+        args.body,
+        args.at,
+    ), None
+
+
+def _decode_json(value: str, label: str) -> Any:
+    try:
+        return json.loads(value)
+    except (json.JSONDecodeError, UnicodeError) as exc:
+        raise StorageRefusal("invalid_json", f"{label} must be valid JSON") from exc
+
+
+def _request_triage(store: Storage, args: argparse.Namespace) -> CommandResult:
+    if len(args.items_json.encode("utf-8")) > MAX_TRIAGE_JSON_BYTES:
+        raise StorageRefusal(
+            "invalid_json", "triage items exceed the bounded encoded size"
+        )
+    items = _decode_json(args.items_json, "triage items")
+    if not isinstance(items, list):
+        raise StorageRefusal("invalid_json", "triage items must be a JSON array")
+    return store.triage_prompt(args.prompt_id, items, args.at), None
+
+
+def _request_claim(store: Storage, args: argparse.Namespace) -> CommandResult:
+    return store.claim_request(
+        args.request_id,
+        args.runtime_instance_id,
+        args.claim_token,
+        args.leased_until,
+        args.at,
+    ), None
+
+
+def _request_release(store: Storage, args: argparse.Namespace) -> CommandResult:
+    return store.release_request_claim(
+        args.request_id, args.runtime_instance_id, args.claim_token, args.at
+    ), None
+
+
+def _request_dispatch(store: Storage, args: argparse.Namespace) -> CommandResult:
+    return store.dispatch_request(
+        DispatchRequestCommand(
+            request_id=args.request_id,
+            claim_token=args.claim_token,
+            dispatch_id=args.dispatch_id,
+            work_kind=args.work_kind,
+            requested_mode=args.requested_mode,
+            hidden_supported=args.hidden_supported,
+            requested_model=args.requested_model,
+            requested_effort=args.requested_effort,
+            explicit_route=args.explicit_route,
+            at=args.at,
+        )
+    ), None
+
+
+def _request_route(store: Storage, args: argparse.Namespace) -> CommandResult:
+    return store.route_request(
+        args.request_id,
+        args.claim_token,
+        args.expected_version,
+        args.recipient_agent_id,
+        args.event_id,
+        args.outbox_id,
+        args.at,
+    ), None
+
+
+def _request_state(store: Storage, args: argparse.Namespace) -> CommandResult:
+    state = REQUEST_STATE_COMMANDS[args.action]
+    return store.set_request_state(
+        args.request_id,
+        args.claim_token,
+        args.expected_version,
+        state,
+        args.summary,
+        args.event_id,
+        args.at,
+        next_attention_at=getattr(args, "next_attention_at", None),
+    ), None
+
+
+def _request_result(store: Storage, args: argparse.Namespace) -> CommandResult:
+    return store.record_request_result(
+        RequestResultCommand(
+            request_id=args.request_id,
+            claim_token=args.claim_token,
+            expected_version=args.expected_version,
+            result_id=args.result_id,
+            idempotency_key=args.idempotency_key,
+            outcome=args.outcome,
+            summary=args.summary,
+            task_ids=tuple(args.task_id),
+            at=args.at,
+            return_to_requester=args.return_to_requester,
+            event_id=args.event_id,
+            outbox_id=args.outbox_id,
+        )
+    ), None
+
+
+def _request_answer(store: Storage, args: argparse.Namespace) -> CommandResult:
+    return store.answer_request(
+        AnswerRequestCommand(
+            request_id=args.request_id,
+            claim_token=args.claim_token,
+            expected_version=args.expected_version,
+            response_ref_id=args.response_ref_id,
+            adapter_kind=args.adapter_kind,
+            session_locator=args.session_locator,
+            response_locator=args.response_locator,
+            durability=args.durability,
+            content_hash=args.content_hash,
+            resolution_summary=args.resolution_summary,
+            event_id=args.event_id,
+            at=args.at,
+        )
+    ), None
+
+
+def _request_unresolved(store: Storage, args: argparse.Namespace) -> CommandResult:
+    return store.unresolved_requests(
+        args.owner_agent_id, limit=args.limit, before_action=args.before_action
+    ), None
+
+
+def _assign_prepare(store: Storage, args: argparse.Namespace) -> CommandResult:
+    return store.prepare_assignment(
+        PrepareAssignmentCommand(
+            assignment_id=args.assignment_id,
+            request_id=args.request_id,
+            claim_token=args.claim_token,
+            task_id=args.task_id,
+            task_summary=args.task_summary,
+            coordinator_agent_id=args.coordinator_agent_id,
+            champion_agent_id=args.champion_agent_id,
+            callsign=args.callsign,
+            repository=args.repository,
+            issue=args.issue,
+            branch=args.branch,
+            worktree=args.worktree,
+            at=args.at,
+        )
+    ), None
+
+
+def _assign_launching(store: Storage, args: argparse.Namespace) -> CommandResult:
+    return store.mark_assignment_launching(
+        args.assignment_id, args.expected_version, args.at
+    ), None
+
+
+def _assign_activate(store: Storage, args: argparse.Namespace) -> CommandResult:
+    receipt = _decode_json(args.receipt_json, "assignment receipt")
+    if not isinstance(receipt, dict):
+        raise StorageRefusal("invalid_json", "assignment receipt must be a JSON object")
+    return store.activate_assignment(
+        args.assignment_id,
+        args.expected_version,
+        receipt,
+        args.event_id,
+        args.outbox_id,
+        args.at,
+    ), None
+
+
+def _assign_block(store: Storage, args: argparse.Namespace) -> CommandResult:
+    return store.block_assignment(
+        args.assignment_id,
+        args.expected_version,
+        args.failure_class,
+        args.cleanup_required,
+        args.cleanup_proven,
+        args.at,
+    ), None
+
+
+def _delivery_claim_outbox(store: Storage, args: argparse.Namespace) -> CommandResult:
+    return store.claim_outbox(
+        OutboxDispatchIdentity(
+            outbox_id=args.outbox_id,
+            event_id=args.event_id,
+            recipient_agent_id=args.recipient_agent_id,
+            dispatcher_id=args.dispatcher_id,
+            attempt_id=args.attempt_id,
+        ),
+        args.lease_expires_at,
+        args.at,
+    ), None
+
+
+def _delivery_ack_outbox(store: Storage, args: argparse.Namespace) -> CommandResult:
+    return store.acknowledge_outbox(
+        OutboxDispatchIdentity(
+            outbox_id=args.outbox_id,
+            event_id=args.event_id,
+            recipient_agent_id=args.recipient_agent_id,
+            dispatcher_id=args.dispatcher_id,
+            attempt_id=args.attempt_id,
+        ),
+        args.fence,
+        args.adapter_kind,
+        args.effect_kind,
+        args.effect_id,
+        args.at,
+    ), None
+
+
+def _delivery_fail_outbox(store: Storage, args: argparse.Namespace) -> CommandResult:
+    return store.fail_outbox(
+        OutboxDispatchIdentity(
+            outbox_id=args.outbox_id,
+            event_id=args.event_id,
+            recipient_agent_id=args.recipient_agent_id,
+            dispatcher_id=args.dispatcher_id,
+            attempt_id=args.attempt_id,
+        ),
+        args.fence,
+        args.adapter_kind,
+        args.reason,
+        args.retry_at,
+        args.at,
+    ), None
+
+
+def _delivery_backlog(store: Storage, args: argparse.Namespace) -> CommandResult:
+    return {
+        "rows": store.pending_backlog(
+            args.at, limit=args.limit, per_recipient=args.per_recipient
+        )
+    }, None
+
+
+def _hook_register_runtime(store: Storage, args: argparse.Namespace) -> CommandResult:
+    return store.register_runtime(
+        RuntimeRegistrationCommand(
+            runtime_instance_id=args.runtime_instance_id,
+            actor_agent_id=args.actor_agent_id,
+            harness_kind=args.harness_kind,
+            backend_kind=args.backend_kind,
+            session_ref=args.session_ref,
+            endpoint=args.endpoint,
+            runtime_generation=args.runtime_generation,
+            status=args.status,
+            verified=args.verified,
+            at=args.at,
+        )
+    ), None
+
+
+def _hook_register_watcher(store: Storage, args: argparse.Namespace) -> CommandResult:
+    return store.register_watcher(
+        args.scope_id,
+        args.watcher_id,
+        args.actor_agent_id,
+        args.runtime_instance_id,
+        args.wake_locator,
+        args.leased_until,
+        args.fence,
+        args.at,
+        block_on_obligations=not args.no_block,
+    ), None
+
+
+def _hook_user_message(store: Storage, args: argparse.Namespace) -> CommandResult:
+    return store.note_user_message(args.scope_id, args.actor_agent_id, args.at), None
+
+
+def _hook_rearm(store: Storage, args: argparse.Namespace) -> CommandResult:
+    return store.rearm_wait(args.scope_id, args.actor_agent_id, args.event_id, args.at), None
+
+
+def _hook_allow_stop_once(store: Storage, args: argparse.Namespace) -> CommandResult:
+    return store.set_allow_stop_once(args.scope_id, args.actor_agent_id), None
+
+
+def _hook_stop(store: Storage, args: argparse.Namespace) -> CommandResult:
+    return store.stop_decision(
+        args.scope_id, args.actor_agent_id, args.terminal_generation, args.at
+    ), None
+
+
 HANDLERS: dict[str, CommandHandler] = {
     "storage.integrity": _storage_integrity,
     "storage.backup": _storage_backup,
@@ -333,13 +923,82 @@ HANDLERS: dict[str, CommandHandler] = {
     "delivery.claim": _delivery_claim,
     "delivery.ack": _delivery_ack,
     "delivery.fail": _delivery_fail,
+    "delivery.claim-outbox": _delivery_claim_outbox,
+    "delivery.ack-outbox": _delivery_ack_outbox,
+    "delivery.fail-outbox": _delivery_fail_outbox,
+    "delivery.backlog": _delivery_backlog,
     "project.resolve": _project_resolve,
     "task.transfer-owner": _task_transfer,
+    "task.transition": _task_transition,
+    "request.intake": _request_intake,
+    "request.triage": _request_triage,
+    "request.claim": _request_claim,
+    "request.accept": _request_claim,
+    "request.release": _request_release,
+    "request.dispatch": _request_dispatch,
+    "request.route": _request_route,
+    "request.awaiting-user": _request_state,
+    "request.block": _request_state,
+    "request.defer": _request_state,
+    "request.cancel": _request_state,
+    "request.result": _request_result,
+    "request.answer": _request_answer,
+    "request.unresolved": _request_unresolved,
+    "assign.prepare": _assign_prepare,
+    "assign.launching": _assign_launching,
+    "assign.activate": _assign_activate,
+    "assign.block": _assign_block,
+    "hook.register-runtime": _hook_register_runtime,
+    "hook.register-watcher": _hook_register_watcher,
+    "hook.user-message": _hook_user_message,
+    "hook.rearm": _hook_rearm,
+    "hook.allow-stop-once": _hook_allow_stop_once,
+    "hook.stop": _hook_stop,
 }
+
+
+SCHEMA_INVENTORY = (
+    "league-command-output.schema.json",
+    "league-import-report.schema.json",
+    "league-export.schema.json",
+    "league-acceptance-receipt.schema.json",
+    "league-help.schema.json",
+    "league-request-triage.schema.json",
+    "league-assignment-receipt.schema.json",
+    "league-stop-decision.schema.json",
+)
+
+
+def _help_inventory() -> dict[str, Any]:
+    return {
+        "schema": "league.help.v1",
+        "command_schema": COMMAND_SCHEMA,
+        "commands": sorted(
+            (*HANDLERS, "storage.migrate", "acceptance.run", "help.inventory")
+        ),
+        "schemas": list(SCHEMA_INVENTORY),
+        "execution_modes": ["direct", "hidden", "champion"],
+        "request_states": [
+            "open",
+            "routed",
+            "accepted",
+            "in_progress",
+            "awaiting_user",
+            "blocked",
+            "awaiting_requester",
+            "deferred",
+            "answered",
+            "cancelled",
+        ],
+        "assignment_states": ["pending", "launching", "active", "blocked", "cleanup_pending"],
+        "lease_kinds": ["request_claim", "outbox_dispatch", "watcher_registration"],
+    }
 
 
 def _run(args: argparse.Namespace) -> CommandResult:
     command = _command_name(args)
+    if command == "help.inventory":
+        return _help_inventory(), None
     if command == "acceptance.run":
         from .acceptance import run_acceptance
 
@@ -357,7 +1016,9 @@ def _run(args: argparse.Namespace) -> CommandResult:
         ), None
     if command == "storage.migrate":
         if args.state_root is None:
-            raise StorageRefusal("state_root_required", "storage migrate requires --state-root")
+            raise StorageRefusal(
+                "state_root_required", "migration requires an explicit absolute state root"
+            )
         with SQLiteStorage.for_migration(
             args.state_root,
             busy_timeout_ms=args.busy_timeout_ms,

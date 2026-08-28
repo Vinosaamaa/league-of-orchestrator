@@ -12,12 +12,13 @@
 - **Lead**: an optional relay destination, never a superior authority or
   scheduler.
 
-Squad ownership, disposable Shotcaller handoff, and a project catalog are
-planned work. They are not represented as completed baseline behavior.
+Disposable Shotcaller handoff and project aliases remain planned work. The
+storage layer can represent exact projects, tasks, Squads, and owner transfers;
+it does not implement request triage or runtime handoff policy.
 
 ## Current modules
 
-The bootstrap deliberately keeps one deep runtime module:
+The repository keeps the proven runtime and new storage boundary separate:
 
 - `src/agent_watcher.py` owns strict record decoding, snapshot/event parity,
   watcher state, durable offsets, event deduplication, transition routing,
@@ -27,8 +28,22 @@ The bootstrap deliberately keeps one deep runtime module:
 - `bin/agent-watcher` is a path-resolving launcher with no domain behavior.
 - `schema/`, `examples/`, and `config/` define the public authoring surface.
 - `tests/` exercises the imported behavior with temporary synthetic fixtures.
+- `src/league/storage.py` composes the only domain-facing persistence interface
+  from cohesive administrative, lifecycle, delivery, and transfer protocols;
+  `storage_types.py` owns the stable refusal and typed import-plan contract.
+- `src/league/sqlite_store.py` is the sole SQLite implementation and facade.
+  `sqlite_core.py` owns the shared transaction mechanics; focused
+  `sqlite_*_ops.py` modules own lifecycle, delivery, import, and export SQL,
+  while the facade owns connection policy, migrations, integrity, and backup.
+- `src/league/importer.py` strictly decodes the explicit issue-#18 manifest and
+  produces an in-memory plan; it never opens a database or writes legacy files.
+- `src/league/cli.py` and `bin/league` expose stable domain commands and
+  versioned JSON envelopes without a general query or SQL command.
+- `schema/league-*.schema.json` defines command, import-report, and export
+  output contracts.
 
-This layout is intentionally not split into shallow wrapper modules. Issue
+This layout is intentionally a small modular monolith, not a set of shallow
+database wrappers. Issue
 [#7](https://github.com/Vinosaamaa/league-of-orchestrator/issues/7) owns the
 future adapter interfaces; extraction should happen against those acceptance
 criteria while the focused suite preserves behavior.
@@ -55,6 +70,30 @@ criteria while the focused suite preserves behavior.
    local-install proof requires exact released source/installed byte parity and
    a smoke receipt.
 
+The repository-local SQLite path is separately testable:
+
+1. `league storage migrate` checks the SQLite library loaded in-process,
+   selects WAL only at 3.51.3+, enables and verifies foreign keys, sets a bounded
+   busy timeout and `synchronous=FULL`, then applies contiguous checksummed
+   migrations in a transaction. An existing schema requires a verified backup.
+2. `league storage import` opens each manifest component beneath a caller-supplied
+   explicit source root through one validated descriptor. Dry-run is the
+   default; apply requires the exact typed-plan digest and an empty target.
+3. Domain writes use short `BEGIN IMMEDIATE` transactions. Agent transition,
+   exact callsign retries, delivery claim expiry/reclaim and acknowledgement,
+   and task/Squad owner transfer enforce stable identity and expected-version
+   preconditions.
+4. Inspection export is bounded and redacted. JSONL rows are emitted from
+   ordered cursors without a second complete in-memory copy. Rollback export is
+   deterministic, written mode `0600` beneath the explicit state root, and
+   reported by digest without exposing its path.
+5. Configuration, hooks, guides, launchers, immutable failure/teardown/archive
+   evidence, installer backups, and other-product state remain files.
+
+`src/agent_watcher.py` does not import `league`. The filesystem baseline is the
+only live writer until issue #23 switches every consumer at one authorized
+generation; there is no dual canonical write path.
+
 ## Portability boundary
 
 The baseline is not fully agent- or backend-agnostic. Champion identity requires
@@ -66,7 +105,8 @@ defaults name current OpenAI models. These are known inputs to issues #7 and
 
 ## Dependencies and side effects
 
-Runtime code uses the Python standard library. Adapter commands are invoked only
+Runtime and storage code use the Python standard library. Adapter commands are invoked only
 by explicit delivery, reconciliation, resource, or teardown operations. The
 local test command substitutes temporary records, repositories, state stores,
-and fake adapter executables; it does not touch live Roster state.
+and fake adapter executables; SQLite tests additionally require explicit
+temporary source and state roots. None touches live Roster state.

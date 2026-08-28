@@ -7,6 +7,7 @@ import importlib.util
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -16,15 +17,19 @@ ROOT = Path(__file__).resolve().parents[1]
 CLI = ROOT / "bin" / "agent-watcher"
 MODULE_PATH = ROOT / "src" / "agent_watcher.py"
 CHAMPION_THREAD_ID = "00000000-0000-4000-8000-000000000017"
+sys.path.insert(0, str(ROOT / "tests"))
+
+from process_adapter import fake_process_environment  # noqa: E402
 
 
 def run(records: Path, state: Path, *args: str, env=None, check=True):
+    environment = fake_process_environment(state / "process-adapter", base=env)
     result = subprocess.run(
         [str(CLI), "--records-root", str(records), "--state-dir", str(state), *args],
         capture_output=True,
         text=True,
         timeout=20,
-        env=env,
+        env=environment,
     )
     if check and result.returncode != 0:
         raise AssertionError(f"{args}: {result.stderr}")
@@ -131,12 +136,13 @@ def fake_adapters(root: Path) -> tuple[dict[str, str], Path]:
         "        handle.write(sys.argv[-1] + '\\n')\n"
     )
     herdr.chmod(0o755)
-    return dict(
+    environment = dict(
         os.environ,
         PATH=f"{binary}:{os.environ['PATH']}",
         PROMPT_LOG=str(log),
         SNAPSHOT_LOG=str(snapshot_log),
-    ), log
+    )
+    return fake_process_environment(root, base=environment), log
 
 
 def test_atomic_transition_and_no_partial_write(root: Path) -> None:

@@ -60,7 +60,27 @@ exact runtime-generation binding.
 
 Those later runtime changes are inventoried in
 `docs/research/json-jsonl-state-dependency-audit.md` but are deliberately not
-folded into this PR's baseline runtime. The only executable addition is the
-isolated synthetic SQLite decision prototype under `prototypes/`, covered by a
-focused test. It is not imported by `src/agent_watcher.py`, installed, or
-connected to live state.
+folded into the baseline watcher.
+
+## Issue-#19 implementation provenance
+
+`src/league/`, `bin/league`, the `league-*.schema.json` contracts, and the
+focused `test_sqlite_storage_*` suite are original League implementation for
+issue #19. The composite protocol, shared SQLite transaction core, focused
+operation modules, and single facade implement the accepted ADR and complete
+dependency audit using only Python's standard-library `sqlite3` binding. The earlier
+`prototypes/sqlite_store.py` remains decision evidence: it informed the proved
+operations and safety gates but is not imported, copied as the production
+module, installed, or connected to live state.
+
+The implementation deliberately leaves `src/agent_watcher.py`,
+`bin/agent-watcher`, global hooks, installed files, live Roster/callsign/watcher
+state, and immutable archives unchanged. Issue #23 owns staged acceptance and
+any later reversible cutover.
+
+Tests that require process inspection explicitly inject the single
+`tests/fakes/ps` adapter through `tests/process_adapter.py`; Make targets do not
+alter `PATH` for unrelated tests. This keeps self-process and resource-lifecycle
+contracts testable in restricted CI and agent sandboxes that deny host process
+inspection. The adapter is test-only; production process inspection and
+behavior are unchanged.

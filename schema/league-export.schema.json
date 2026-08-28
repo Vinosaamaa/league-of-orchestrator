@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Vinosaamaa/league-of-orchestrator/schema/league-export.schema.json",
+  "title": "League deterministic non-canonical export",
+  "type": "object",
+  "required": ["schema", "canonical", "purpose"],
+  "properties": {
+    "schema": {"const": "league.export.v1"},
+    "canonical": {"const": false},
+    "purpose": {"enum": ["inspection", "rollback"]},
+    "database_schema_version": {"type": "integer", "minimum": 1},
+    "record_count": {"type": "integer", "minimum": 0},
+    "table_counts": {
+      "type": "object",
+      "additionalProperties": {"type": "integer", "minimum": 0}
+    },
+    "tables": {
+      "type": "object",
+      "additionalProperties": {"type": "array", "items": {"type": "object"}}
+    },
+    "kind": {"enum": ["metadata", "row"]},
+    "table": {"type": "string", "minLength": 1},
+    "record": {"type": "object"}
+  },
+  "oneOf": [
+    {
+      "required": ["database_schema_version", "record_count", "table_counts", "tables"],
+      "not": {"anyOf": [{"required": ["kind"]}, {"required": ["table"]}, {"required": ["record"]}]}
+    },
+    {
+      "required": ["database_schema_version", "record_count", "table_counts", "kind"],
+      "properties": {"kind": {"const": "metadata"}},
+      "not": {"anyOf": [{"required": ["tables"]}, {"required": ["table"]}, {"required": ["record"]}]}
+    },
+    {
+      "required": ["kind", "table", "record"],
+      "properties": {"kind": {"const": "row"}},
+      "not": {"required": ["tables"]}
+    }
+  ],
+  "additionalProperties": false
+}

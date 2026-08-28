@@ -7,6 +7,7 @@ import importlib.util
 import json
 import os
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -18,14 +19,19 @@ UPDATES_EXAMPLE = ROOT / "examples" / "agent-updates.example.jsonl"
 MODULE_PATH = ROOT / "src" / "agent_watcher.py"
 AT = "2026-08-26T01:30:00-07:00"
 THREAD_ID = "00000000-0000-4000-8000-000000000017"
+sys.path.insert(0, str(ROOT / "tests"))
+
+from process_adapter import fake_process_environment  # noqa: E402
 
 
 def run(records: Path, state: Path, *args: str, check: bool = False):
+    environment = fake_process_environment(state / "process-adapter")
     result = subprocess.run(
         [str(CLI), "--records-root", str(records), "--state-dir", str(state), *args],
         capture_output=True,
         text=True,
         timeout=20,
+        env=environment,
     )
     if check and result.returncode != 0:
         raise AssertionError(result.stderr)

@@ -1,0 +1,103 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Vinosaamaa/league-of-orchestrator/schema/league-import-report.schema.json",
+  "title": "League legacy import dry-run or apply report",
+  "type": "object",
+  "required": [
+    "schema",
+    "dry_run",
+    "applied",
+    "eligible",
+    "source_digest",
+    "report_digest",
+    "artifact_counts",
+    "row_counts",
+    "ordering",
+    "retained_files",
+    "audit_coverage",
+    "unknown_consumers",
+    "target_collisions"
+  ],
+  "properties": {
+    "schema": {"const": "league.import-report.v1"},
+    "dry_run": {"type": "boolean"},
+    "applied": {"type": "boolean"},
+    "eligible": {"type": "boolean"},
+    "source_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "report_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "artifact_counts": {
+      "type": "object",
+      "additionalProperties": {"type": "integer", "minimum": 0}
+    },
+    "row_counts": {
+      "type": "object",
+      "additionalProperties": {"type": "integer", "minimum": 0}
+    },
+    "ordering": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["artifact_id", "kind", "source_order", "record_count"],
+        "properties": {
+          "artifact_id": {"type": "string", "minLength": 1},
+          "kind": {"type": "string", "minLength": 1},
+          "source_order": {"type": "integer", "minimum": 0},
+          "record_count": {"type": "integer", "minimum": 0}
+        },
+        "additionalProperties": false
+      }
+    },
+    "retained_files": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["artifact_id", "class", "digest", "bytes"],
+        "properties": {
+          "artifact_id": {"type": "string", "minLength": 1},
+          "class": {"type": "string", "minLength": 1},
+          "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "bytes": {"type": "integer", "minimum": 0}
+        },
+        "additionalProperties": false
+      }
+    },
+    "audit_coverage": {
+      "type": "object",
+      "required": [
+        "R1", "R2", "R3", "R4", "L1", "L2", "L3", "W1", "W2", "W3",
+        "C1", "C2", "D1", "D2", "D3", "D4", "D5", "P1", "P2", "P3",
+        "P4", "P5", "P6", "T1", "T2", "T3", "T4", "T5", "T6", "H1",
+        "H2", "H3", "A1", "A2", "I1", "I2", "I3", "S1", "S2", "S3"
+      ],
+      "properties": {
+        "R1": {"const": "migrate"}, "R2": {"const": "migrate"},
+        "R3": {"const": "migrate"}, "R4": {"const": "retain-or-absent"},
+        "L1": {"const": "migrate"}, "L2": {"const": "retain"},
+        "L3": {"const": "transient"}, "W1": {"const": "migrate"},
+        "W2": {"const": "migrate"}, "W3": {"const": "transient"},
+        "C1": {"const": "migrate"}, "C2": {"const": "migrate"},
+        "D1": {"const": "migrate"}, "D2": {"const": "migrate"},
+        "D3": {"const": "transient"}, "D4": {"const": "migrate"},
+        "D5": {"const": "transient"}, "P1": {"const": "retain"},
+        "P2": {"const": "retain"}, "P3": {"const": "absent-planned"},
+        "P4": {"const": "absent-planned"}, "P5": {"const": "migrate"},
+        "P6": {"const": "retain"}, "T1": {"const": "retain"},
+        "T2": {"const": "retain"}, "T3": {"const": "retain"},
+        "T4": {"const": "retain"}, "T5": {"const": "retain"},
+        "T6": {"const": "retain"}, "H1": {"const": "retain"},
+        "H2": {"const": "transient"}, "H3": {"const": "transient"},
+        "A1": {"const": "transient"}, "A2": {"const": "transient"},
+        "I1": {"const": "retain"}, "I2": {"const": "retain"},
+        "I3": {"const": "retain"}, "S1": {"const": "retain"},
+        "S2": {"const": "retain"}, "S3": {"const": "out-of-scope"}
+      },
+      "additionalProperties": false
+    },
+    "unknown_consumers": {"type": "array", "items": {"type": "string"}, "maxItems": 0},
+    "target_collisions": {
+      "type": "object",
+      "additionalProperties": {"type": "integer", "minimum": 1}
+    }
+  },
+  "additionalProperties": false
+}

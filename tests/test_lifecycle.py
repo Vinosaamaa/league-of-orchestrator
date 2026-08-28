@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -15,6 +16,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 CLI = ROOT / "bin" / "agent-watcher"
+sys.path.insert(0, str(ROOT / "tests"))
+
+from process_adapter import fake_process_environment  # noqa: E402
 TRANSITION_SEQUENCE = 0
 CHAMPION_THREAD_ID = "00000000-0000-4000-8000-000000000017"
 
@@ -38,6 +42,12 @@ def run(args, *, records: Path, state: Path, check: bool = True, input_text: str
     if check and result.returncode != 0:
         raise AssertionError(f"{args}: {result.returncode}: {result.stderr}")
     return result
+
+
+def adapter_environment(root: Path, fake_bin: Path, **values: str) -> dict[str, str]:
+    base = dict(os.environ, PATH=f"{fake_bin}:{os.environ['PATH']}")
+    base.update(values)
+    return fake_process_environment(root / "process-adapter", base=base)
 
 
 def write_shotcaller(records: Path, callsign: str, session_id: str) -> None:
@@ -119,6 +129,7 @@ def append_update(directory: Path, status: str, update: str) -> None:
 
 
 def wait_process(records: Path, state: Path, shotcaller: str = "Garen"):
+    environment = fake_process_environment(state / "process-adapter")
     return subprocess.Popen(
         [
             str(CLI),
@@ -137,6 +148,7 @@ def wait_process(records: Path, state: Path, shotcaller: str = "Garen"):
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        env=environment,
     )
 
 
@@ -194,7 +206,12 @@ def test_disabled_stays_off(root: Path) -> None:
     write_shotcaller(records, "Garen", "garen-session")
     write_champion(records, "Garen", "Bard")
     run(["--shotcaller", "Garen", "disable"], records=records, state=state)
-    disabled = run(["--shotcaller", "Garen", "wait"], records=records, state=state)
+    disabled = run(
+        ["--shotcaller", "Garen", "wait"],
+        records=records,
+        state=state,
+        env=fake_process_environment(state / "process-adapter"),
+    )
     assert json.loads(disabled.stdout)["event"] == "disabled"
     stop = run(
         ["codex-stop-hook"],
@@ -528,7 +545,7 @@ def test_squash_merge_with_later_main_and_local_install(root: Path) -> None:
         teardown_args(manifest_path, records, execute=True),
         records=records,
         state=state,
-        env=dict(os.environ, PATH=f"{fake_bin}:{os.environ['PATH']}"),
+        env=adapter_environment(root, fake_bin),
     )
     result = json.loads(completed.stdout)
     assert result["executed"] is True
@@ -565,7 +582,7 @@ def test_launch_preflight_and_backend_display(root: Path) -> None:
         "esac\n"
     )
     herdr.chmod(0o755)
-    env = dict(os.environ, PATH=f"{fake_bin}:{os.environ['PATH']}", HERDR_LOG=str(log))
+    env = adapter_environment(root, fake_bin, HERDR_LOG=str(log))
     launched = run(
         [
             "--shotcaller",
@@ -689,7 +706,7 @@ def test_ready_to_land_and_proof_gated_teardown(root: Path) -> None:
         "case \"$*\" in *display-message*) printf '%s\\n' \"${TMUX_LIVE_PANE:-%7}\" ;; esac\n"
     )
     tmux.chmod(0o755)
-    env = dict(os.environ, PATH=f"{fake_bin}:{os.environ['PATH']}", TMUX_TEST_LOG=str(log))
+    env = adapter_environment(root, fake_bin, TMUX_TEST_LOG=str(log))
 
     records, state, record, manifest_path, manifest, repository, worktree, branch = landing_fixture(root / "safe")
     updates_path = record / "updates.jsonl"
@@ -792,7 +809,7 @@ def test_archive_collision_and_secret_exclusion(root: Path) -> None:
         "#!/bin/sh\ncase \"$*\" in *display-message*) printf '%s\\n' '%7' ;; esac\nexit 0\n"
     )
     tmux.chmod(0o755)
-    env = dict(os.environ, PATH=f"{fake_bin}:{os.environ['PATH']}")
+    env = adapter_environment(root, fake_bin)
 
     records, state, record, manifest_path, manifest, _, worktree, _ = landing_fixture(root / "collision")
     collision = records / "Garen/archive/2026-08-25/Bard/example-repository-17"
@@ -879,12 +896,18 @@ def task_resource(
     manifest: dict,
     process: subprocess.Popen,
     registry_path: Path,
+    environment: dict[str, str],
     *,
     registry_owner: str = "Bard",
     process_start: str | None = None,
 ) -> None:
     inspected = json.loads(
-        run(["resource-inspect", "--pid", str(process.pid)], records=records, state=state).stdout
+        run(
+            ["resource-inspect", "--pid", str(process.pid)],
+            records=records,
+            state=state,
+            env=environment,
+        ).stdout
     )
     start = process_start or inspected["process_start"]
     resource = {
@@ -920,12 +943,12 @@ def test_task_owned_resource_cleanup_and_refusals(root: Path) -> None:
         "#!/bin/sh\ncase \"$*\" in *display-message*) printf '%s\\n' '%7' ;; esac\nexit 0\n"
     )
     tmux.chmod(0o755)
-    env = dict(os.environ, PATH=f"{fake_bin}:{os.environ['PATH']}")
+    env = adapter_environment(root, fake_bin)
 
     records, state, _, manifest_path, manifest, _, _, _ = landing_fixture(root / "owned")
     process = subprocess.Popen(["sleep", "60"])
     registry = root / "owned" / "resource-registry.json"
-    task_resource(records, state, manifest, process, registry)
+    task_resource(records, state, manifest, process, registry, env)
     manifest_path.write_text(json.dumps(manifest) + "\n")
     result = run(
         teardown_args(manifest_path, records, execute=True),
@@ -944,7 +967,9 @@ def test_task_owned_resource_cleanup_and_refusals(root: Path) -> None:
     process = subprocess.Popen(["sleep", "60"])
     registry = root / "owner" / "resource-registry.json"
     try:
-        task_resource(records, state, manifest, process, registry, registry_owner="Other")
+        task_resource(
+            records, state, manifest, process, registry, env, registry_owner="Other"
+        )
         manifest_path.write_text(json.dumps(manifest) + "\n")
         refused = run(
             teardown_args(manifest_path, records), records=records, state=state, check=False, env=env
@@ -959,7 +984,9 @@ def test_task_owned_resource_cleanup_and_refusals(root: Path) -> None:
     process = subprocess.Popen(["sleep", "60"])
     registry = root / "reuse" / "resource-registry.json"
     try:
-        task_resource(records, state, manifest, process, registry, process_start="PID-REUSED")
+        task_resource(
+            records, state, manifest, process, registry, env, process_start="PID-REUSED"
+        )
         manifest_path.write_text(json.dumps(manifest) + "\n")
         refused = run(
             teardown_args(manifest_path, records), records=records, state=state, check=False, env=env

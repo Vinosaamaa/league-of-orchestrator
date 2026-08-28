@@ -39,11 +39,30 @@ A later issue may transfer installation ownership only after it:
 Until then, rollback and installation remain the toolkit's responsibility. This
 repository supplies no command that writes global state.
 
-## Live-state migration gate
+## Repository-local import contract
 
-Live Roster migration requires a separately tested schema migration with backup,
-integrity validation, collision refusal, idempotent retry, and rollback. Issue #2
-does not authorize or implement that operation.
+Issue #19 implements a non-live, explicit-root migration surface:
+
+1. `league storage migrate` creates or upgrades only the state root named by
+   the caller. Upgrading an existing schema requires a collision-free verified
+   backup inside that root.
+2. The import manifest explicitly lists every canonical source family:
+   Roster pairs, pending launches, scoped/global watcher state, visible and
+   hidden callsign pools, Lead relay receipts, and resource registries. Empty
+   lists state absence; no home-directory scan or guessed dynamic path exists.
+3. The manifest separately lists retained archive/evidence/config files and
+   unknown consumers. Retained bytes are checked and hashed but never imported;
+   any unknown consumer blocks.
+4. Dry-run strictly validates UTF-8, duplicate keys, JSONL termination,
+   snapshot/event parity, exact identity, source offsets/digests, ordering,
+   leases, delivery ownership, references, and target collisions. It reports
+   exact artifact/row counts and one deterministic digest without local paths.
+5. Apply requires that exact digest, recomputes it from the plan, rechecks an
+   empty target, and inserts all canonical rows in one transaction. A failure or
+   injected crash leaves the target empty. Legacy files are never modified.
+6. `storage integrity`, verified Online Backup API snapshots, redacted
+   inspection export, and mode-`0600` rollback export supply bounded recovery
+   evidence. Exports are explicitly non-canonical.
 
 ADR 0002 accepts one embedded SQLite canonical store using the complete issue
 #18 dependency audit, but it grants no additional authority. Future migration
@@ -53,7 +72,10 @@ single cutover, and rollback boundaries in
 `league` commands, never SQL; JSON/JSONL becomes export/backup only after
 cutover, with no permanent dual canonical write path.
 
-Before any future runtime selects WAL, it must verify that the SQLite library
-actually loaded by that released runtime is 3.51.3 or newer. An older or unknown
-binding uses rollback journal. This repository still performs no live install,
-global hook edit, database placement, or state migration.
+The journal policy in [ADR 0002](adr/0002-sqlite-canonical-store.md#journal-mode-safety-gate)
+is normative; migration receipts report the loaded-runtime decision instead of
+restating a second policy here. Issue #23 must repeat that gate against exact
+staged/released bytes and owns the isolated sandbox, read-only live shadow,
+atomic pointer switch, rollback orchestration, and post-switch smoke. This
+repository still performs no global install, hook edit, live import, watcher
+replacement, or cutover.

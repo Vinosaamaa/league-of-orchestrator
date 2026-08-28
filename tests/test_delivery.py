@@ -7,6 +7,7 @@ import fcntl
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -16,15 +17,19 @@ ROOT = Path(__file__).resolve().parents[1]
 CLI = ROOT / "bin" / "agent-watcher"
 CHAMPION_THREAD_ID = "00000000-0000-4000-8000-000000000017"
 WATCHER_STATE_SCHEMA = 2
+sys.path.insert(0, str(ROOT / "tests"))
+
+from process_adapter import fake_process_environment  # noqa: E402
 
 
 def run(records: Path, state: Path, args: list[str], *, env=None, check=True):
+    environment = fake_process_environment(state / "process-adapter", base=env)
     result = subprocess.run(
         [str(CLI), "--records-root", str(records), "--state-dir", str(state), *args],
         capture_output=True,
         text=True,
         timeout=20,
-        env=env,
+        env=environment,
     )
     if check and result.returncode != 0:
         raise AssertionError(f"{args}: {result.stderr}")
@@ -161,7 +166,7 @@ def fake_adapters(root: Path) -> tuple[dict[str, str], Path]:
     )
     herdr.chmod(0o755)
     env = dict(os.environ, PATH=f"{binary}:{os.environ['PATH']}", DELIVERY_LOG=str(log))
-    return env, log
+    return fake_process_environment(root, base=env), log
 
 
 def tmux_deliver_args() -> list[str]:
@@ -418,6 +423,7 @@ def test_first_install_and_schema_migration_baseline_historical_events(root: Pat
 
 def test_supervise_baselines_old_callsign_and_routes_only_fresh_event(root: Path) -> None:
     records, state = root / "records", root / "state"
+    environment = fake_process_environment(state / "process-adapter")
     bard = write_records(records, address="%7", thread_id="garen-tmux-session")
     aatrox = records / "Garen" / "champions" / "Aatrox"
     aatrox.mkdir()
@@ -459,6 +465,7 @@ def test_supervise_baselines_old_callsign_and_routes_only_fresh_event(root: Path
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        env=environment,
     )
     state_path = state / "shotcallers" / "Garen" / "state.json"
     deadline = time.monotonic() + 5

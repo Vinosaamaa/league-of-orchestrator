@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import fcntl
 import json
-import os
 import select
 import subprocess
 import sys
@@ -16,18 +15,22 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 CLI = ROOT / "bin" / "agent-watcher"
 CHAMPION_THREAD_ID = "00000000-0000-4000-8000-000000000015"
+sys.path.insert(0, str(ROOT / "tests"))
+
+from process_adapter import fake_process_environment  # noqa: E402
 
 
 def fail(message: str) -> None:
     raise AssertionError(message)
 
 
-def run(args, *, root: Path, state: Path, check=True, timeout=20):
+def run(args, *, root: Path, state: Path, environment: dict[str, str], check=True, timeout=20):
     result = subprocess.run(
         [str(CLI), "--records-root", str(root), "--state-dir", str(state), *args],
         text=True,
         capture_output=True,
         timeout=timeout,
+        env=environment,
     )
     if check and result.returncode != 0:
         fail(f"{args}: {result.returncode}: {result.stderr}")
@@ -89,14 +92,14 @@ def append_transition(status_path: Path, updates: Path, at: str, status: str, up
         fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
 
-def wait_process(root: Path, state: Path):
+def wait_process(root: Path, state: Path, environment: dict[str, str]):
     return subprocess.Popen(
         [str(CLI), "--records-root", str(root), "--state-dir", str(state), "wait", "--poll-seconds", "0.03", "--liveness-seconds", "0.05"],
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        env=environment,
     )
-
 
 def wait_until_baselined(state: Path, process: subprocess.Popen):
     deadline = time.monotonic() + 20
@@ -116,25 +119,25 @@ def wait_until_baselined(state: Path, process: subprocess.Popen):
     fail(f"watcher did not persist its baseline: {error}")
 
 
-def test_controls_and_stop_hook(root: Path, state: Path):
+def test_controls_and_stop_hook(root: Path, state: Path, environment: dict[str, str]):
     write_status(root)
     before = (root / "Garen" / "champions" / "Zilean" / "status.json").read_bytes()
-    rejected = run(["allow-stop"], root=root, state=state, check=False)
+    rejected = run(["allow-stop"], root=root, state=state, environment=environment, check=False)
     assert rejected.returncode != 0, "allow-stop without --once was accepted"
-    assert json.loads(run(["status"], root=root, state=state).stdout)["enabled"] is True
-    run(["disable"], root=root, state=state)
-    assert json.loads(run(["status"], root=root, state=state).stdout)["enabled"] is False
-    run(["enable"], root=root, state=state)
-    run(["allow-stop", "--once"], root=root, state=state)
-    assert json.loads(run(["codex-stop-hook"], root=root, state=state).stdout) == {}
-    blocked = json.loads(run(["codex-stop-hook"], root=root, state=state).stdout)
+    assert json.loads(run(["status"], root=root, state=state, environment=environment).stdout)["enabled"] is True
+    run(["disable"], root=root, state=state, environment=environment)
+    assert json.loads(run(["status"], root=root, state=state, environment=environment).stdout)["enabled"] is False
+    run(["enable"], root=root, state=state, environment=environment)
+    run(["allow-stop", "--once"], root=root, state=state, environment=environment)
+    assert json.loads(run(["codex-stop-hook"], root=root, state=state, environment=environment).stdout) == {}
+    blocked = json.loads(run(["codex-stop-hook"], root=root, state=state, environment=environment).stdout)
     assert blocked["decision"] == "block"
     assert (root / "Garen" / "champions" / "Zilean" / "status.json").read_bytes() == before
 
 
-def test_durable_offset_dedup_and_material_wake(root: Path, state: Path):
+def test_durable_offset_dedup_and_material_wake(root: Path, state: Path, environment: dict[str, str]):
     status_path, updates = write_status(root)
-    process = wait_process(root, state)
+    process = wait_process(root, state, environment)
     wait_until_baselined(state, process)
     pid = process.pid
     append_transition(
@@ -161,31 +164,31 @@ def test_durable_offset_dedup_and_material_wake(root: Path, state: Path):
         fail("material blocked transition did not wake the blocking wait")
     event = json.loads(output)
     assert process.pid == pid and event["event"] == "champion-update"
-    duplicate = wait_process(root, state)
+    duplicate = wait_process(root, state, environment)
     time.sleep(0.12)
     assert duplicate.poll() is None, "durable cursor did not suppress the duplicate event"
     duplicate.terminate()
     duplicate.communicate(timeout=2)
 
 
-def test_liveness_is_silent(root: Path, state: Path):
+def test_liveness_is_silent(root: Path, state: Path, environment: dict[str, str]):
     write_status(root)
-    process = wait_process(root, state)
+    process = wait_process(root, state, environment)
     ready, _, _ = select.select([process.stdout], [], [], 0.18)
     assert not ready, "silent liveness check woke the caller"
     process.terminate()
     process.communicate(timeout=2)
 
 
-def test_bounded_failure_fails_open(root: Path, state: Path):
+def test_bounded_failure_fails_open(root: Path, state: Path, environment: dict[str, str]):
     missing = root / "missing"
-    result = run(["wait", "--poll-seconds", "0.02", "--repair-command", "false"], root=missing, state=state, timeout=3)
+    result = run(["wait", "--poll-seconds", "0.02", "--repair-command", "false"], root=missing, state=state, environment=environment, timeout=3)
     event = json.loads(result.stdout)
     assert event["event"] == "watcher-unavailable" and event["fail_open"] is True
     assert "fail-open" in result.stderr
 
 
-def test_teardown_fails_closed(root: Path, state: Path):
+def test_teardown_fails_closed(root: Path, state: Path, environment: dict[str, str]):
     _, updates = write_status(root)
     evidence = root / "unsafe.json"
     evidence.write_text(
@@ -201,13 +204,14 @@ def test_teardown_fails_closed(root: Path, state: Path):
         ["teardown", "--adapter", "tmux", "--evidence", str(evidence), "--archive-dir", str(root / "archive"), "--execute"],
         root=root,
         state=state,
+        environment=environment,
         check=False,
     )
     assert result.returncode != 0 and "teardown refused" in result.stderr
     assert updates.exists(), "unsafe teardown mutated a Champion record"
 
 
-def test_legacy_teardown_proof_is_refused(root: Path, state: Path):
+def test_legacy_teardown_proof_is_refused(root: Path, state: Path, environment: dict[str, str]):
     _, updates = write_status(root)
     identity = {"socket": "isolated", "pane_id": "%1"}
     evidence = root / "safe.json"
@@ -227,6 +231,7 @@ def test_legacy_teardown_proof_is_refused(root: Path, state: Path):
         ["teardown", "--adapter", "tmux", "--evidence", str(evidence), "--archive-dir", str(root / "archive")],
         root=root,
         state=state,
+        environment=environment,
         check=False,
     )
     assert result.returncode != 0 and "manifest schema must be 2" in result.stderr
@@ -235,14 +240,16 @@ def test_legacy_teardown_proof_is_refused(root: Path, state: Path):
 
 def main():
     with tempfile.TemporaryDirectory(prefix="agent-watcher-test.") as directory:
-        root = Path(directory) / "records"
-        state = Path(directory) / "state"
-        test_controls_and_stop_hook(root, state)
-        test_durable_offset_dedup_and_material_wake(root / "offset", state / "offset")
-        test_liveness_is_silent(root / "liveness", state / "liveness")
-        test_bounded_failure_fails_open(root / "failure", state / "failure")
-        test_teardown_fails_closed(root / "teardown", state / "teardown")
-        test_legacy_teardown_proof_is_refused(root / "teardown-plan", state / "teardown-plan")
+        temporary = Path(directory)
+        environment = fake_process_environment(temporary)
+        root = temporary / "records"
+        state = temporary / "state"
+        test_controls_and_stop_hook(root, state, environment)
+        test_durable_offset_dedup_and_material_wake(root / "offset", state / "offset", environment)
+        test_liveness_is_silent(root / "liveness", state / "liveness", environment)
+        test_bounded_failure_fails_open(root / "failure", state / "failure", environment)
+        test_teardown_fails_closed(root / "teardown", state / "teardown", environment)
+        test_legacy_teardown_proof_is_refused(root / "teardown-plan", state / "teardown-plan", environment)
     print("PASS: controls, one-shot Stop permission, durable offsets/deduplication, silent liveness, material wake, bounded failure, and fail-closed teardown")
 
 

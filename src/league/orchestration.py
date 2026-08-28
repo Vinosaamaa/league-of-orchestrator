@@ -7,7 +7,7 @@ receipts remain in their existing lifecycle modules.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Mapping, Optional
 
 from .storage_types import StorageRefusal
 
@@ -46,6 +46,41 @@ class OrchestrationSignals:
     hidden_advisory: bool = False
     project_suggested_shotcaller: Optional[str] = None
 
+    @classmethod
+    def from_value(cls, value: Mapping[str, Any]) -> "OrchestrationSignals":
+        fields = set(cls.__dataclass_fields__)
+        boolean_fields = fields - {
+            "expected_minutes",
+            "expected_task_action_calls",
+            "project_suggested_shotcaller",
+        }
+        invalid = (
+            bool(set(value) - fields)
+            or any(name in value and not isinstance(value[name], bool) for name in boolean_fields)
+            or any(
+                name in value and type(value[name]) is not int
+                for name in ("expected_minutes", "expected_task_action_calls")
+            )
+            or (
+                "project_suggested_shotcaller" in value
+                and value["project_suggested_shotcaller"] is not None
+                and (
+                    not isinstance(value["project_suggested_shotcaller"], str)
+                    or not value["project_suggested_shotcaller"]
+                )
+            )
+        )
+        if invalid:
+            raise StorageRefusal(
+                "orchestration_signals_invalid", "orchestration signals have invalid types"
+            )
+        try:
+            return cls(**value)
+        except TypeError as exc:
+            raise StorageRefusal(
+                "orchestration_signals_invalid", "orchestration signals are incomplete"
+            ) from exc
+
     def as_record(self) -> dict[str, object]:
         return {
             "pre_bounded": self.pre_bounded,
@@ -64,7 +99,7 @@ class OrchestrationSignals:
             "project_suggested_shotcaller": self.project_suggested_shotcaller,
         }
 
-    def direct_tiny(self) -> bool:
+    def _validate_estimates(self) -> None:
         if (
             isinstance(self.expected_minutes, bool)
             or not isinstance(self.expected_minutes, int)
@@ -77,11 +112,13 @@ class OrchestrationSignals:
                 "orchestration_signals_invalid",
                 "time and task-action estimates must be non-negative integers",
             )
+
+    def _bounded_read_only(self) -> bool:
+        self._validate_estimates()
         return all(
             (
                 self.pre_bounded,
                 self.read_only,
-                self.answer_or_routing_only,
                 self.expected_minutes <= 5,
                 self.expected_task_action_calls <= 2,
                 not self.creates_artifact,
@@ -93,6 +130,9 @@ class OrchestrationSignals:
                 not self.project_implementation,
             )
         )
+
+    def direct_tiny(self) -> bool:
+        return self.answer_or_routing_only and self._bounded_read_only()
 
     def hidden_scientist(self) -> bool:
         """Whether a hidden scientist may perform the bounded support subtask.
@@ -103,22 +143,7 @@ class OrchestrationSignals:
         because the bounded work is returned to the owning Shotcaller.
         """
 
-        self.direct_tiny()  # validate numeric estimates once
-        return all(
-            (
-                self.pre_bounded,
-                self.read_only,
-                self.expected_minutes <= 5,
-                self.expected_task_action_calls <= 2,
-                not self.creates_artifact,
-                not self.mutates_state,
-                not self.reproduces_issue,
-                not self.runs_tests,
-                not self.runs_benchmark,
-                not self.uses_browser_or_computer,
-                not self.project_implementation,
-            )
-        )
+        return self._bounded_read_only()
 
 
 @dataclass(frozen=True)

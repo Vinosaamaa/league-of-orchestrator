@@ -946,25 +946,49 @@ def commit_rollover(
                 )
             store.connection.execute(
                 """
-                UPDATE requests SET owner_agent_id=?,owner_squad_id=?,
-                       return_to_agent_id=CASE WHEN return_to_agent_id=? THEN ? ELSE return_to_agent_id END,
-                       version=version+1,updated_at=?
+                UPDATE requests
+                   SET owner_agent_id=CASE
+                         WHEN owner_squad_id=:squad_id THEN :successor
+                         ELSE owner_agent_id
+                       END,
+                       owner_squad_id=CASE
+                         WHEN owner_squad_id=:squad_id THEN :squad_id
+                         ELSE owner_squad_id
+                       END,
+                       return_to_agent_id=CASE
+                         WHEN return_to_agent_id=:predecessor THEN :successor
+                         ELSE return_to_agent_id
+                       END,
+                       pending_owner_agent_id=CASE
+                         WHEN state='routed' AND (
+                           pending_owner_squad_id=:squad_id OR
+                           pending_owner_agent_id=:predecessor
+                         ) THEN :successor
+                         ELSE pending_owner_agent_id
+                       END,
+                       pending_owner_squad_id=CASE
+                         WHEN state='routed' AND (
+                           pending_owner_squad_id=:squad_id OR
+                           pending_owner_agent_id=:predecessor
+                         ) THEN :squad_id
+                         ELSE pending_owner_squad_id
+                       END,
+                       version=version+1,updated_at=:at
                  WHERE state NOT IN ('answered','cancelled')
-                   AND (owner_squad_id=? OR (
-                     owner_squad_id IS NULL AND owner_agent_id=? AND
-                     (SELECT COUNT(*) FROM squads WHERE shotcaller_agent_id=?)=1
-                   ))
+                   AND (
+                     owner_squad_id=:squad_id OR
+                     (state='routed' AND (
+                       pending_owner_squad_id=:squad_id OR
+                       pending_owner_agent_id=:predecessor
+                     ))
+                   )
                 """,
-                (
-                    operation["successor_agent_id"],
-                    operation["squad_id"],
-                    operation["predecessor_agent_id"],
-                    operation["successor_agent_id"],
-                    at,
-                    operation["squad_id"],
-                    operation["predecessor_agent_id"],
-                    operation["predecessor_agent_id"],
-                ),
+                {
+                    "successor": operation["successor_agent_id"],
+                    "predecessor": operation["predecessor_agent_id"],
+                    "squad_id": operation["squad_id"],
+                    "at": at,
+                },
             )
             store.connection.execute(
                 """

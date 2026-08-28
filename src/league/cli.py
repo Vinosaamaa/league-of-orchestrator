@@ -1541,12 +1541,7 @@ def _request_dispatch(store: Storage, args: argparse.Namespace) -> CommandResult
 
 def _request_decide_route(store: Storage, args: argparse.Namespace) -> CommandResult:
     value = _read_json_object(args.signals)
-    try:
-        signals = OrchestrationSignals(**value)
-    except TypeError as exc:
-        raise StorageRefusal(
-            "orchestration_signals_invalid", "orchestration signals do not match the policy"
-        ) from exc
+    signals = OrchestrationSignals.from_value(value)
     return store.orchestration_decision(
         signals,
         project_ids=args.project_id,

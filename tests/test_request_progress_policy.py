@@ -13,7 +13,13 @@ sys.path[:0] = [str(ROOT / "src"), str(ROOT / "tests")]
 
 from league.orchestration import OrchestrationSignals  # noqa: E402
 from league.storage_request import DispatchRequestCommand, RequestProgressCommand  # noqa: E402
-from request_lifecycle_fixture import GAREN_RUNTIME, capture_p100, create_context  # noqa: E402
+from league.storage_watcher import RuntimeRegistrationCommand  # noqa: E402
+from request_lifecycle_fixture import (  # noqa: E402
+    GAREN_RUNTIME,
+    GAREN_RUNTIME_TWO,
+    capture_p100,
+    create_context,
+)
 from storage_fixture import SHOTCALLER_ID  # noqa: E402
 
 
@@ -218,6 +224,48 @@ def test_due_grace_escalates_exactly_once(root: Path) -> None:
         store.close()
 
 
+def test_stale_owner_runtime_escalates_immediately(root: Path) -> None:
+    store, clock, version = _request(root, "progress-stale-owner")
+    try:
+        _progress(store, clock, version, 1, "milestone")
+        clock.advance(60)
+        store.register_runtime(
+            RuntimeRegistrationCommand(
+                runtime_instance_id=GAREN_RUNTIME,
+                actor_agent_id=SHOTCALLER_ID,
+                harness_kind="codex-thread",
+                backend_kind="herdr",
+                session_ref=f"session:{GAREN_RUNTIME}",
+                endpoint="synthetic:garen:one",
+                runtime_generation="generation:garen:one",
+                status="failed",
+                verified=True,
+                at=clock.now(),
+            )
+        )
+        store.register_runtime(
+            RuntimeRegistrationCommand(
+                runtime_instance_id=GAREN_RUNTIME_TWO,
+                actor_agent_id=SHOTCALLER_ID,
+                harness_kind="codex-thread",
+                backend_kind="herdr",
+                session_ref=f"session:{GAREN_RUNTIME_TWO}",
+                endpoint="synthetic:garen:two",
+                runtime_generation="generation:garen:two",
+                status="failed",
+                verified=True,
+                at=clock.now(),
+            )
+        )
+        stalled = store.reconcile_request_progress(SHOTCALLER_ID, clock.now())
+        assert stalled["created"] == 0 and stalled["escalated"] == 1
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM request_progress_events WHERE urgency='overdue'"
+        ).fetchone()[0] == 1
+    finally:
+        store.close()
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="league-request-progress-") as temporary:
         root = Path(temporary)
@@ -225,6 +273,7 @@ def main() -> None:
         test_local_blocker_batches_parent_decision_is_immediate(root)
         test_final_supersedes_and_unchanged_never_heartbeats(root)
         test_due_grace_escalates_exactly_once(root)
+        test_stale_owner_runtime_escalates_immediately(root)
     print("PASS: immediate parent events, 15-minute coalescing, no heartbeats, and one overdue escalation")
 
 

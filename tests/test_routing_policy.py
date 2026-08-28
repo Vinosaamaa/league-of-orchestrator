@@ -82,6 +82,20 @@ def test_hidden_scientist_is_separate_from_direct_tiny() -> None:
         hidden_advisory=True,
     )
     assert unsafe.hidden_scientist() is False
+    try:
+        OrchestrationSignals.from_value(
+            {
+                "pre_bounded": "false",
+                "read_only": True,
+                "answer_or_routing_only": True,
+                "expected_minutes": 2,
+                "expected_task_action_calls": 1,
+            }
+        )
+    except StorageRefusal as exc:
+        assert exc.code == "orchestration_signals_invalid"
+    else:
+        raise AssertionError("truthy text bypassed strict orchestration signal parsing")
 
 
 def test_registered_project_route_requires_squad_and_runtime_capability(root: Path) -> None:
@@ -94,7 +108,7 @@ def test_registered_project_route_requires_squad_and_runtime_capability(root: Pa
             shotcaller_agent_id=JARVAN_ID,
             runtime_instance_id=JARVAN_RUNTIME,
             project_ids=(),
-            capabilities=("request.route",),
+            capabilities=("request.route", "request.review"),
             expires_at=clock.after(600),
             event_id="event:registration:routing",
             outbox_id="outbox:registration:routing",
@@ -163,6 +177,28 @@ def test_registered_project_route_requires_squad_and_runtime_capability(root: Pa
             assert exc.code == "invalid_runtime"
         else:
             raise AssertionError("duplicate runtime capability was accepted")
+        second_runtime = observe_runtime(
+            store,
+            clock,
+            runtime_instance_id="runtime:jarvan:review",
+            actor_agent_id=JARVAN_ID,
+            endpoint="synthetic:jarvan:review",
+            runtime_generation="generation:jarvan:review",
+            status="active",
+            capabilities=("request.review",),
+        )
+        assert not second_runtime["idempotent"]
+        try:
+            store.orchestration_decision(
+                signals,
+                project_ids=("project:routing",),
+                explicit_squad_id="squad:Routing",
+                required_capabilities=("request.route", "request.review"),
+            )
+        except StorageRefusal as exc:
+            assert exc.code == "owner_capability_mismatch"
+        else:
+            raise AssertionError("separate runtimes were combined into one capability proof")
         decision = store.orchestration_decision(
             signals,
             project_ids=("project:routing",),

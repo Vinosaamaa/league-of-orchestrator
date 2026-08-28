@@ -415,7 +415,6 @@ def reconcile_request_progress(store: Any, owner_agent_id: str, at: str) -> dict
                     )
                 if not lease_stalled and now <= grace:
                     continue
-                request = _request_row(store, str(row["request_id"]))
                 value = {
                     "settled_count": int(row["settled_count"]),
                     "total_count": int(row["total_count"]),
@@ -431,7 +430,7 @@ def reconcile_request_progress(store: Any, owner_agent_id: str, at: str) -> dict
                 _insert_progress(
                     store,
                     progress_id=f"{row['progress_id']}:overdue",
-                    request=request,
+                    request=row,
                     recipient=str(row["recipient_agent_id"]),
                     request_generation=int(row["request_generation"]),
                     progress_generation=int(row["progress_generation"]),

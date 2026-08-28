@@ -1034,6 +1034,19 @@ def route_request(
                 or int(recipient["intake_fence"]) != int(recipient["owner_fence"])
             ):
                 raise StorageRefusal("owner_unavailable", "target Squad has no accepting current Shotcaller")
+            required = set(required_capabilities)
+            declared = {
+                str(row["capability"])
+                for row in store.connection.execute(
+                    "SELECT capability FROM squad_capabilities WHERE squad_id=?",
+                    (recipient_squad_id,),
+                )
+            }
+            if not required <= declared:
+                raise StorageRefusal(
+                    "owner_capability_mismatch",
+                    "target Squad has not declared every required capability",
+                )
             runtimes = store.connection.execute(
                 """
                 SELECT capabilities_json FROM runtime_instances
@@ -1041,9 +1054,10 @@ def route_request(
                  ORDER BY last_seen_at DESC
                 """,
                 (recipient_agent_id,),
-            ).fetchall()
-            required = set(required_capabilities)
-            if not any(required <= set(json.loads(row["capabilities_json"])) for row in runtimes):
+            )
+            if not any(
+                required <= set(json.loads(row["capabilities_json"])) for row in runtimes
+            ):
                 raise StorageRefusal(
                     "owner_capability_mismatch",
                     "target Squad's current live owner lacks required capabilities",
@@ -1295,6 +1309,16 @@ def record_request_result(store: Any, command: RequestResultCommand) -> dict[str
                 store.connection.execute(
                     "UPDATE request_claims SET released_at=? WHERE request_id=?", (at, request_id)
                 )
+                progress_value = {
+                    "settled_count": len(sources),
+                    "total_count": len(sources),
+                    "current_phase": "Request result ready",
+                    "blocker_count": int(outcome == "failed"),
+                    "blocker_severity": "high" if outcome == "failed" else "none",
+                    "user_action_required": False,
+                    "deadline_change": None,
+                    "next_action": "Review the returned final result",
+                }
                 _insert_request_event(
                     store,
                     event_id=str(event_id),
@@ -1310,14 +1334,7 @@ def record_request_result(store: Any, command: RequestResultCommand) -> dict[str
                             "request_failed" if outcome == "failed" else "request_resolved"
                         ),
                         "progress_generation": next_version,
-                        "settled_count": len(sources),
-                        "total_count": len(sources),
-                        "current_phase": "Request result ready",
-                        "blocker_count": int(outcome == "failed"),
-                        "blocker_severity": "high" if outcome == "failed" else "none",
-                        "user_action_required": False,
-                        "deadline_change": None,
-                        "next_action": "Review the returned final result",
+                        **progress_value,
                         "result_id": result_id,
                     },
                 )
@@ -1329,16 +1346,6 @@ def record_request_result(store: Any, command: RequestResultCommand) -> dict[str
                     """,
                     (outbox_id, event_id, target_owner, at),
                 )
-                progress_value = {
-                    "settled_count": len(sources),
-                    "total_count": len(sources),
-                    "current_phase": "Request result ready",
-                    "blocker_count": int(outcome == "failed"),
-                    "blocker_severity": "high" if outcome == "failed" else "none",
-                    "user_action_required": False,
-                    "deadline_change": None,
-                    "next_action": "Review the returned final result",
-                }
                 store.connection.execute(
                     """
                     INSERT INTO request_progress_events

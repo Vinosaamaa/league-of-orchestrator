@@ -247,6 +247,14 @@ def test_scope_expansion_promotes_to_new_visible_champion(root: Path) -> None:
             """
         ).fetchone()
         assert tuple(links) == ("hidden-worker", "assignment-visible")
+        roster = store.roster_snapshot(
+            as_of=clock.now(),
+            recent_since=clock.after(-60),
+            stale_before=clock.after(-60),
+            visibility="local",
+        )
+        encoded = str(roster)
+        assert "task-visible" in encoded and "task-hidden" not in encoded
     finally:
         store.close()
 

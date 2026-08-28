@@ -242,3 +242,11 @@ The review follow-up groups dispatch policy inputs in the immutable
 runtime observation may now replace its declared capability list explicitly;
 omitting capabilities preserves the prior list, and focused routing tests cover
 the supported update and duplicate refusal.
+The completed review also shares one bounded read-only safety predicate between
+direct and hidden decisions, strictly rejects non-boolean JSON signals, requires
+one live runtime to satisfy the complete Squad capability set, and carries a
+pending routed owner across Shotcaller rollover. Focused routing, progress,
+hidden-promotion, and rollover tests cover those boundaries. Existing migration
+index recreation, progress-generation uniqueness, committed offer expiry, hidden
+Roster exclusion, and immediate stale-owner escalation were retained after their
+focused tests disproved the reported regressions.

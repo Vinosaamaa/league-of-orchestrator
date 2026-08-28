@@ -208,8 +208,10 @@ def validate_routing_config(value: Mapping[str, Any]) -> dict[str, Any]:
         ):
             raise StorageRefusal("routing_config_invalid", "routing evaluation values are invalid")
     overrides = value.get("operator_overrides", [])
-    if not isinstance(overrides, list):
-        raise StorageRefusal("routing_config_invalid", "operator overrides must be a list")
+    if not isinstance(overrides, list) or len(overrides) > 32:
+        raise StorageRefusal(
+            "routing_config_invalid", "operator overrides must be a bounded list"
+        )
     override_ids: set[str] = set()
     for override in overrides:
         if (

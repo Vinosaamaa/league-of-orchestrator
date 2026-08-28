@@ -47,3 +47,20 @@ artifacts derived from the runtime validator rather than copies of live Roster
 records. They document the optional paired `routing_name` and `display_agent`
 fields; runtime validation additionally requires the routing name to equal the
 lowercase callsign.
+
+## Storage-decision evidence refresh
+
+Issue #18 refreshed the read-only owner-source and installed-contract audit on
+2026-08-28. The current toolkit source revision inspected was
+`51cfad445843c3f2cab7884f3ddff0a3d8a67d77`; its installed runtime bytes matched
+at inspection time. Since the bootstrap revision above, the owner source added
+recoverable launch/resume state, including pending-launch JSON, immutable failed
+launch receipts, launch locking, task-bound pending callsign reservations, and
+exact runtime-generation binding.
+
+Those later runtime changes are inventoried in
+`docs/research/json-jsonl-state-dependency-audit.md` but are deliberately not
+folded into this PR's baseline runtime. The only executable addition is the
+isolated synthetic SQLite decision prototype under `prototypes/`, covered by a
+focused test. It is not imported by `src/agent_watcher.py`, installed, or
+connected to live state.

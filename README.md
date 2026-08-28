@@ -45,14 +45,19 @@ until a later migration proves source/installed parity and rollback from this
 repository. See [migration](docs/MIGRATION.md) and
 [provenance](docs/PROVENANCE.md).
 
-## Planned SQLite prerequisite
+## Accepted SQLite decision; migration still planned
 
-SQLite storage is planned work under
-[#6](https://github.com/Vinosaamaa/league-of-orchestrator/issues/6), after the
-complete JSON/JSONL dependency audit in
-[#18](https://github.com/Vinosaamaa/league-of-orchestrator/issues/18). It is not
-implemented in this bootstrap: no database is created, no migration runs, and
-WAL mode is not enabled.
+Issue [#6](https://github.com/Vinosaamaa/league-of-orchestrator/issues/6)
+accepts one embedded SQLite canonical store, using the complete dependency audit
+from [#18](https://github.com/Vinosaamaa/league-of-orchestrator/issues/18).
+Agents will use stable `league` commands and never SQL; there is no server, ORM,
+or permanent dual canonical store. The decision, sanitized audit, and bounded
+prototype remain non-live: no installed database is created, no migration runs,
+and no hook or live Roster state changes.
+
+See [ADR 0002](docs/adr/0002-sqlite-canonical-store.md), the
+[dependency audit](docs/research/json-jsonl-state-dependency-audit.md), and the
+[prototype benchmark](docs/research/sqlite-storage-prototype-benchmark.md).
 
 Before any future application runtime enables WAL, the SQLite library loaded by
 that runtime must be version **3.51.3 or newer**. SQLite's
@@ -93,6 +98,9 @@ eventual application environment before issue #6 permits WAL configuration.
 
 - [Architecture and authority boundaries](docs/ARCHITECTURE.md)
 - [Filesystem Roster baseline decision](docs/adr/0001-filesystem-roster-baseline.md)
+- [Accepted SQLite canonical-store decision](docs/adr/0002-sqlite-canonical-store.md)
+- [JSON/JSONL dependency audit](docs/research/json-jsonl-state-dependency-audit.md)
+- [SQLite prototype and benchmark](docs/research/sqlite-storage-prototype-benchmark.md)
 - [Reversible migration and install boundary](docs/MIGRATION.md)
 - [Exact source provenance](docs/PROVENANCE.md)
 - [Baseline versus planned issues](docs/ROADMAP.md)

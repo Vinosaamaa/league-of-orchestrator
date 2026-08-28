@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Optional, Protocol
 
+from .orchestration import OrchestrationSignals
+
 
 MAX_TRIAGE_JSON_BYTES = 65_536
 MAX_TASK_RESULT_SOURCES = 128
@@ -22,21 +24,9 @@ class DispatchRequestCommand:
     requested_effort: Optional[str]
     explicit_route: Optional[str]
     at: str
-    pre_bounded: bool = False
-    read_only: bool = False
-    answer_or_routing_only: bool = False
-    expected_minutes: int = 0
-    expected_task_action_calls: int = 0
-    creates_artifact: bool = False
-    mutates_state: bool = False
-    reproduces_issue: bool = False
-    runs_tests: bool = False
-    runs_benchmark: bool = False
-    uses_browser_or_computer: bool = False
-    project_implementation: bool = False
+    orchestration: OrchestrationSignals = OrchestrationSignals(False, False, False, 0, 0)
     continuation_role: Optional[str] = None
     continuation_target: Optional[str] = None
-    project_suggested_shotcaller: Optional[str] = None
     hidden_subtask: Optional[str] = None
     hidden_scope_budget: Optional[str] = None
 

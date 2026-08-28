@@ -8,6 +8,7 @@ import shutil
 from pathlib import Path
 from typing import Any
 
+from league.orchestration import OrchestrationSignals
 from league.sqlite_store import DATABASE_NAME, SQLiteStorage
 from league.storage import DispatchRequestCommand, RuntimeRegistrationCommand
 
@@ -222,11 +223,13 @@ def dispatch_request(
             requested_effort=requested_effort,
             explicit_route=explicit_route,
             at=clock.now(),
-            pre_bounded=direct_tiny or hidden_scientist,
-            read_only=direct_tiny or hidden_scientist,
-            answer_or_routing_only=direct_tiny,
-            expected_minutes=2 if direct_tiny or hidden_scientist else 0,
-            expected_task_action_calls=1 if direct_tiny or hidden_scientist else 0,
+            orchestration=OrchestrationSignals(
+                pre_bounded=direct_tiny or hidden_scientist,
+                read_only=direct_tiny or hidden_scientist,
+                answer_or_routing_only=direct_tiny,
+                expected_minutes=2 if direct_tiny or hidden_scientist else 0,
+                expected_task_action_calls=1 if direct_tiny or hidden_scientist else 0,
+            ),
             hidden_subtask=hidden_subtask,
             hidden_scope_budget=hidden_scope_budget,
         )
@@ -241,11 +244,16 @@ def activate_jarvan_squad(
 ) -> str:
     """Activate one exact synthetic Squad for acknowledgement-gated route tests."""
 
-    with store._transaction():
-        store.connection.execute(
-            "UPDATE runtime_instances SET capabilities_json='[\"request.route\"]' WHERE runtime_instance_id=?",
-            (JARVAN_RUNTIME,),
-        )
+    observe_runtime(
+        store,
+        clock,
+        runtime_instance_id=JARVAN_RUNTIME,
+        actor_agent_id=JARVAN_ID,
+        endpoint="synthetic:jarvan",
+        runtime_generation="generation:jarvan",
+        status="active",
+        capabilities=("request.route",),
+    )
     store.register_squad(
         registration_id=f"registration:{squad_id}",
         squad_id=squad_id,
@@ -281,6 +289,7 @@ def observe_runtime(
     runtime_generation: str,
     status: str,
     verified: bool = True,
+    capabilities: tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
     return store.register_runtime(
         RuntimeRegistrationCommand(
@@ -294,5 +303,6 @@ def observe_runtime(
             status=status,
             verified=verified,
             at=clock.now(),
+            capabilities=capabilities,
         )
     )

@@ -11,6 +11,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / "src"), str(ROOT / "tests")]
 
+from league.orchestration import OrchestrationSignals  # noqa: E402
 from league.storage import StorageRefusal  # noqa: E402
 from league.storage_assignment import (  # noqa: E402
     FinishHiddenAssignmentCommand,
@@ -43,10 +44,7 @@ def _activate_hidden(root: Path, name: str):
             requested_effort="high",
             explicit_route=None,
             at=clock.now(),
-            pre_bounded=True,
-            read_only=True,
-            expected_minutes=3,
-            expected_task_action_calls=2,
+            orchestration=OrchestrationSignals(True, True, False, 3, 2),
             hidden_subtask="Compare two bounded outputs",
             hidden_scope_budget="Two inputs and one comparison only",
         )
@@ -328,11 +326,9 @@ def test_unsafe_hidden_dispatch_requires_champion(root: Path) -> None:
                     requested_effort="high",
                     explicit_route=None,
                     at=clock.now(),
-                    pre_bounded=True,
-                    read_only=True,
-                    expected_minutes=3,
-                    expected_task_action_calls=2,
-                    runs_tests=True,
+                    orchestration=OrchestrationSignals(
+                        True, True, False, 3, 2, runs_tests=True
+                    ),
                     hidden_subtask="Run one test",
                     hidden_scope_budget="One test only",
                 )

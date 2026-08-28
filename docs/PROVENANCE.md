@@ -237,3 +237,8 @@ override/downgrade/escalation, and immediate/coalesced/overdue progress.
 The v8 target-version binding changes the deterministic acceptance fixture's
 dry-run report digest only; its source and imported-row parity digests remain
 unchanged.
+The review follow-up groups dispatch policy inputs in the immutable
+`OrchestrationSignals` value object without changing their stored record. A
+runtime observation may now replace its declared capability list explicitly;
+omitting capabilities preserves the prior list, and focused routing tests cover
+the supported update and duplicate refusal.

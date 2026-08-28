@@ -806,7 +806,8 @@ def _validate_hidden_scientist(
     ).fetchone()
     if owner is None or owner["role"] != "shotcaller" or owner["retired_at"] is not None:
         raise StorageRefusal("hidden_owner_invalid", "hidden scientist owner must be a live Shotcaller")
-    if not 1 <= command.expected_minutes <= 5 or not 1 <= command.expected_task_action_calls <= 2:
+    signals = command.orchestration
+    if not 1 <= signals.expected_minutes <= 5 or not 1 <= signals.expected_task_action_calls <= 2:
         raise StorageRefusal(
             "hidden_scientist_budget_invalid",
             "hidden scientist requires explicit bounded time and scope budgets",
@@ -829,22 +830,8 @@ def dispatch_request(
     explicit_route = command.explicit_route
     at = command.at
     _time(at, "dispatch time")
-    signal_value = {
-        "pre_bounded": command.pre_bounded,
-        "read_only": command.read_only,
-        "answer_or_routing_only": command.answer_or_routing_only,
-        "expected_minutes": command.expected_minutes,
-        "expected_task_action_calls": command.expected_task_action_calls,
-        "creates_artifact": command.creates_artifact,
-        "mutates_state": command.mutates_state,
-        "reproduces_issue": command.reproduces_issue,
-        "runs_tests": command.runs_tests,
-        "runs_benchmark": command.runs_benchmark,
-        "uses_browser_or_computer": command.uses_browser_or_computer,
-        "project_implementation": command.project_implementation,
-        "hidden_advisory": requested_mode == "hidden",
-        "project_suggested_shotcaller": command.project_suggested_shotcaller,
-    }
+    signal_value = command.orchestration.as_record()
+    signal_value["hidden_advisory"] = requested_mode == "hidden"
     hidden_value = {
         "hidden_subtask": command.hidden_subtask,
         "hidden_scope_budget": command.hidden_scope_budget,

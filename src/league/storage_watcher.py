@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Optional, Protocol
 
 
 @dataclass(frozen=True)
@@ -18,6 +18,7 @@ class RuntimeRegistrationCommand:
     status: str
     verified: bool
     at: str
+    capabilities: Optional[tuple[str, ...]] = None
 
 
 class WatcherStorage(Protocol):

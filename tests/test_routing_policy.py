@@ -22,6 +22,7 @@ from request_lifecycle_fixture import (  # noqa: E402
     JARVAN_ID,
     JARVAN_RUNTIME,
     create_context,
+    observe_runtime,
 )
 from storage_fixture import SHOTCALLER_ID  # noqa: E402
 
@@ -136,11 +137,32 @@ def test_registered_project_route_requires_squad_and_runtime_capability(root: Pa
             assert exc.code == "owner_capability_mismatch"
         else:
             raise AssertionError("Squad declaration substituted for live runtime capability")
-        with store._transaction():
-            store.connection.execute(
-                "UPDATE runtime_instances SET capabilities_json='[\"request.route\"]' WHERE runtime_instance_id=?",
-                (JARVAN_RUNTIME,),
+        observed = observe_runtime(
+            store,
+            clock,
+            runtime_instance_id=JARVAN_RUNTIME,
+            actor_agent_id=JARVAN_ID,
+            endpoint="synthetic:jarvan",
+            runtime_generation="generation:jarvan",
+            status="active",
+            capabilities=("request.route",),
+        )
+        assert observed["idempotent"] and observed["capabilities"] == ["request.route"]
+        try:
+            observe_runtime(
+                store,
+                clock,
+                runtime_instance_id=JARVAN_RUNTIME,
+                actor_agent_id=JARVAN_ID,
+                endpoint="synthetic:jarvan",
+                runtime_generation="generation:jarvan",
+                status="active",
+                capabilities=("request.route", "request.route"),
             )
+        except StorageRefusal as exc:
+            assert exc.code == "invalid_runtime"
+        else:
+            raise AssertionError("duplicate runtime capability was accepted")
         decision = store.orchestration_decision(
             signals,
             project_ids=("project:routing",),

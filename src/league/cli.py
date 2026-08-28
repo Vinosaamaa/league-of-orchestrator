@@ -846,6 +846,11 @@ def _add_hook_commands(groups: argparse._SubParsersAction) -> None:
         runtime.add_argument(f"--{name}", required=True)
     runtime.add_argument("--status", choices=("active", "idle", "closed", "failed"), required=True)
     runtime.add_argument("--verified", action="store_true")
+    runtime.add_argument(
+        "--capability",
+        action="append",
+        help="Replace declared runtime capabilities on this observation.",
+    )
     watcher = commands.add_parser("register-watcher", help="Register one distinct wake lease.")
     for name in (
         "scope-id",
@@ -1511,21 +1516,23 @@ def _request_dispatch(store: Storage, args: argparse.Namespace) -> CommandResult
             requested_effort=args.requested_effort,
             explicit_route=args.explicit_route,
             at=args.at,
-            pre_bounded=args.pre_bounded,
-            read_only=args.read_only,
-            answer_or_routing_only=args.answer_or_routing_only,
-            expected_minutes=args.expected_minutes,
-            expected_task_action_calls=args.expected_task_action_calls,
-            creates_artifact=args.creates_artifact,
-            mutates_state=args.mutates_state,
-            reproduces_issue=args.reproduces_issue,
-            runs_tests=args.runs_tests,
-            runs_benchmark=args.runs_benchmark,
-            uses_browser_or_computer=args.uses_browser_or_computer,
-            project_implementation=args.project_implementation,
+            orchestration=OrchestrationSignals(
+                pre_bounded=args.pre_bounded,
+                read_only=args.read_only,
+                answer_or_routing_only=args.answer_or_routing_only,
+                expected_minutes=args.expected_minutes,
+                expected_task_action_calls=args.expected_task_action_calls,
+                creates_artifact=args.creates_artifact,
+                mutates_state=args.mutates_state,
+                reproduces_issue=args.reproduces_issue,
+                runs_tests=args.runs_tests,
+                runs_benchmark=args.runs_benchmark,
+                uses_browser_or_computer=args.uses_browser_or_computer,
+                project_implementation=args.project_implementation,
+                project_suggested_shotcaller=args.project_suggested_shotcaller,
+            ),
             continuation_role=args.continuation_role,
             continuation_target=args.continuation_target,
-            project_suggested_shotcaller=args.project_suggested_shotcaller,
             hidden_subtask=args.hidden_subtask,
             hidden_scope_budget=args.hidden_scope_budget,
         )
@@ -1837,6 +1844,7 @@ def _hook_register_runtime(store: Storage, args: argparse.Namespace) -> CommandR
             status=args.status,
             verified=args.verified,
             at=args.at,
+            capabilities=None if args.capability is None else tuple(args.capability),
         )
     ), None
 

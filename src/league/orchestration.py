@@ -46,6 +46,24 @@ class OrchestrationSignals:
     hidden_advisory: bool = False
     project_suggested_shotcaller: Optional[str] = None
 
+    def as_record(self) -> dict[str, object]:
+        return {
+            "pre_bounded": self.pre_bounded,
+            "read_only": self.read_only,
+            "answer_or_routing_only": self.answer_or_routing_only,
+            "expected_minutes": self.expected_minutes,
+            "expected_task_action_calls": self.expected_task_action_calls,
+            "creates_artifact": self.creates_artifact,
+            "mutates_state": self.mutates_state,
+            "reproduces_issue": self.reproduces_issue,
+            "runs_tests": self.runs_tests,
+            "runs_benchmark": self.runs_benchmark,
+            "uses_browser_or_computer": self.uses_browser_or_computer,
+            "project_implementation": self.project_implementation,
+            "hidden_advisory": self.hidden_advisory,
+            "project_suggested_shotcaller": self.project_suggested_shotcaller,
+        }
+
     def direct_tiny(self) -> bool:
         if (
             isinstance(self.expected_minutes, bool)

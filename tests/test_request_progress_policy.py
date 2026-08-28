@@ -11,6 +11,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / "src"), str(ROOT / "tests")]
 
+from league.orchestration import OrchestrationSignals  # noqa: E402
 from league.storage_request import DispatchRequestCommand, RequestProgressCommand  # noqa: E402
 from request_lifecycle_fixture import GAREN_RUNTIME, capture_p100, create_context  # noqa: E402
 from storage_fixture import SHOTCALLER_ID  # noqa: E402
@@ -32,11 +33,7 @@ def _request(root: Path, name: str):
             requested_effort=None,
             explicit_route=None,
             at=clock.now(),
-            pre_bounded=True,
-            read_only=True,
-            answer_or_routing_only=True,
-            expected_minutes=2,
-            expected_task_action_calls=1,
+            orchestration=OrchestrationSignals(True, True, True, 2, 1),
         )
     )
     return store, clock, dispatch["request_version"]

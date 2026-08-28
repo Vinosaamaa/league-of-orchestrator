@@ -23,6 +23,9 @@ gap, never a silently rewritten report.
 The opaque report identity binds both the specification and content hashes.
 Repeating unchanged input is idempotent; a historical source repair produces a
 new immutable report identity even when a coarse table watermark is unchanged.
+Watermark capture, indexed source reads, completion gates, hashing, and the
+immutable specification write share one SQLite snapshot; a contended snapshot
+upgrade refuses instead of persisting a mixed-time report.
 
 ## Public commands
 

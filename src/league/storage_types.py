@@ -55,6 +55,7 @@ class ImportPlan(TypedDict):
     """Validated, digest-bound plan accepted by the storage implementation."""
 
     report: dict[str, Any]
+    target_schema_version: int
     report_digest: str
     source_digest: str
     applied_at: str

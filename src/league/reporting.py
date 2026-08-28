@@ -15,6 +15,7 @@ from .storage_types import StorageRefusal
 REPORT_FORMATS = frozenset({"json", "markdown", "html"})
 MAX_RENDERED_REPORT_BYTES = 1_000_000
 _TEMPLATE = Path(__file__).with_name("report_template.html")
+_TEMPLATE_MARKER = re.compile(r"\{\{([A-Z_]+)\}\}")
 
 
 def _json_bytes(report: dict[str, Any]) -> bytes:
@@ -184,11 +185,10 @@ def _html(report: dict[str, Any]) -> bytes:
         "PAGE": f"{report['pagination']['returned']} of {report['pagination']['total']}",
         "NEXT": "available" if report["pagination"]["next_cursor"] else "complete",
     }
-    for marker, value in values.items():
-        template = template.replace("{{" + marker + "}}", value)
-    if re.search(r"\{\{[A-Z_]+\}\}", template):
+    if set(_TEMPLATE_MARKER.findall(template)) != set(values):
         raise StorageRefusal("report_template_invalid", "report HTML template has unresolved markers")
-    return template.encode("utf-8")
+    rendered = _TEMPLATE_MARKER.sub(lambda match: values[match.group(1)], template)
+    return rendered.encode("utf-8")
 
 
 def render_report(report: dict[str, Any], format_name: str) -> bytes:

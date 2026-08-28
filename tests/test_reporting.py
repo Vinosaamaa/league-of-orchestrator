@@ -708,6 +708,12 @@ def test_report_contract(root: Path) -> None:
         assert json.loads(json_payload)["report"]["content_hash"] == complete["report"]["content_hash"]
         assert complete["report"]["content_hash"] in markdown and complete["report"]["content_hash"] in html
         assert "EVERYTHING FINISHED" in html and "http://" not in html and "<script" not in html
+        marker_report = json.loads(json.dumps(complete))
+        marker_report["chronological"][0]["summary"] = (
+            "literal {{OWNERS}} and {{FOO_BAR}} evidence"
+        )
+        marker_html = render_report(marker_report, "html").decode()
+        assert "literal {{OWNERS}} and {{FOO_BAR}} evidence" in marker_html
 
         for scope_kind, scope_id in (
             ("owner", "Orianna"), ("squad", "squad:garen"), ("project", "project:league"), ("all", None)
@@ -723,6 +729,7 @@ def test_report_contract(root: Path) -> None:
 
         def counted_sources(*args, **kwargs):
             nonlocal source_calls
+            assert store.connection.in_transaction
             source_calls += 1
             return original_sources(*args, **kwargs)
 

@@ -107,6 +107,10 @@ reporting indexes, immutable activity evidence, and report specifications. It
 does not duplicate source evidence or create parallel request, outbox, runtime,
 assignment, rollover, or callsign authority.
 
+Dry-run import plans bind `target_schema_version` into their digest. A plan
+created for an earlier schema is refused as `import_plan_incompatible` before
+row replay and must be regenerated from its retained source artifacts.
+
 An existing explicit-root database still requires the ordinary verified
 pre-upgrade backup. Issue #23 retains installed-state, live migration, rollback
 rehearsal, guidance installation, and cutover ownership. The source-managed

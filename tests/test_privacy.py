@@ -5,23 +5,30 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from urllib.parse import quote
 
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from league.privacy import ClassifiedValue, PrivacyRefusal, validate_final_rendered_payload  # noqa: E402
-from league.remote_adapters import REMOTE_ADAPTER_KINDS, RenderedPayload, remote_adapter  # noqa: E402
-from league.storage import StorageRefusal  # noqa: E402
+from league.remote_adapters import (  # noqa: E402
+    REMOTE_ADAPTER_KINDS,
+    RemoteOutcomeUnknown,
+    RenderedPayload,
+    remote_adapter,
+)
 
 
 class FakeTransport:
     def __init__(self, receipt_id: str = "synthetic-remote-receipt") -> None:
         self.calls: list[bytes] = []
+        self.idempotency_keys: list[str] = []
         self.receipt_id = receipt_id
 
-    def send(self, payload: bytes) -> dict[str, str]:
+    def send(self, payload: bytes, *, idempotency_key: str) -> dict[str, str]:
         self.calls.append(payload)
+        self.idempotency_keys.append(idempotency_key)
         return {"receipt_id": self.receipt_id}
 
 
@@ -58,6 +65,14 @@ def test_rejection_matrix() -> None:
     for payload, category in cases:
         refusal(payload, category)
         refusal(payload, category, "private")
+    nested = "/Users/example/Projects/repository"
+    for _ in range(4):
+        nested = quote(nested, safe="")
+    refusal(nested, "absolute_path")
+    excessive = "/Users/example/Projects/repository"
+    for _ in range(17):
+        excessive = quote(excessive, safe="")
+    refusal(excessive, "encoding_depth")
 
 
 def test_allowlist_and_structured_classification() -> None:
@@ -129,6 +144,7 @@ def test_live_state_issue_body_incident_regression() -> None:
     receipt = adapter.send(RenderedPayload(sanitized))
     assert transport.calls == [sanitized]
     assert receipt["redacted"] is True and "receipt_id" not in receipt
+    assert receipt["idempotency_key"] == transport.idempotency_keys[0]
 
 
 def test_every_remote_adapter_uses_same_guard() -> None:
@@ -147,11 +163,13 @@ def test_every_remote_adapter_uses_same_guard() -> None:
     adapter = remote_adapter("future_remote", "private", oversized)
     try:
         adapter.send(RenderedPayload(b"safe bounded body"))
-    except StorageRefusal as exc:
-        assert exc.code == "remote_receipt_invalid"
+    except RemoteOutcomeUnknown as exc:
+        assert exc.code == "remote_outcome_unknown"
         assert oversized.calls == [b"safe bounded body"]
+        assert oversized.idempotency_keys == [exc.idempotency_key]
+        assert len(exc.idempotency_key) == 64
     else:
-        raise AssertionError("oversized remote receipt identity was hashed")
+        raise AssertionError("oversized remote receipt identity was treated as delivered")
 
 
 def main() -> None:

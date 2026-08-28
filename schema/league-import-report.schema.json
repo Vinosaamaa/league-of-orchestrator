@@ -5,6 +5,7 @@
   "type": "object",
   "required": [
     "schema",
+    "target_schema_version",
     "dry_run",
     "applied",
     "eligible",
@@ -20,6 +21,7 @@
   ],
   "properties": {
     "schema": {"const": "league.import-report.v1"},
+    "target_schema_version": {"type": "integer", "minimum": 1},
     "dry_run": {"type": "boolean"},
     "applied": {"type": "boolean"},
     "eligible": {"type": "boolean"},

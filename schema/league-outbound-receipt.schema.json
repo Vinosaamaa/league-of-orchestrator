@@ -3,13 +3,14 @@
   "$id": "https://github.com/Vinosaamaa/league-of-orchestrator/schema/league-outbound-receipt.schema.json",
   "title": "League bounded redacted outbound receipt",
   "type": "object",
-  "required": ["schema", "adapter", "destination_visibility", "payload_sha256", "bytes", "transport_receipt_sha256", "redacted"],
+  "required": ["schema", "adapter", "destination_visibility", "payload_sha256", "bytes", "idempotency_key", "transport_receipt_sha256", "redacted"],
   "properties": {
     "schema": {"const": "league.outbound-receipt.v1"},
     "adapter": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$"},
     "destination_visibility": {"enum": ["public", "private"]},
     "payload_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "bytes": {"type": "integer", "minimum": 0, "maximum": 1000000},
+    "idempotency_key": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "transport_receipt_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "redacted": {"const": true}
   },

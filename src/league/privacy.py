@@ -21,6 +21,7 @@ from .storage_types import StorageRefusal
 
 
 MAX_OUTBOUND_BYTES = 1_000_000
+MAX_ESCAPE_DECODING_ROUNDS = 16
 DESTINATION_VISIBILITIES = frozenset({"public", "private"})
 PAYLOAD_MODES = frozenset({"outbound", "local_diagnostic"})
 
@@ -150,10 +151,10 @@ def validate_structured_fields(value: Any, *, field: str = "payload") -> None:
             validate_structured_fields(item, field=f"{field}[{index}]")
 
 
-def _decode_escaped_forms(text: str) -> str:
+def _decode_escaped_forms(text: str, *, field: str) -> str:
     current = text
     replacements = {"2f": "/", "5c": "\\", "3a": ":", "7e": "~"}
-    for _ in range(3):
+    for _ in range(MAX_ESCAPE_DECODING_ROUNDS):
         decoded = html.unescape(unquote(current))
         decoded = decoded.replace("\\/", "/")
         decoded = _ESCAPED_CODEPOINT.sub(
@@ -163,9 +164,9 @@ def _decode_escaped_forms(text: str) -> str:
             lambda match: replacements[match.group(1).casefold()], decoded
         )
         if decoded == current:
-            break
+            return current
         current = decoded
-    return current
+    _refuse("encoding_depth", field)
 
 
 def _json_text_values(text: str) -> Iterable[str]:
@@ -254,11 +255,13 @@ def _validate_text_fragment(
 
 
 def _validate_text(text: str, *, approved_urls: frozenset[str], field: str) -> None:
-    normalized = _decode_escaped_forms(text)
+    normalized = _decode_escaped_forms(text, field=field)
     _validate_text_fragment(normalized, approved_urls=approved_urls, field=field)
     for item in _json_text_values(normalized):
         _validate_text_fragment(
-            _decode_escaped_forms(item), approved_urls=approved_urls, field=field
+            _decode_escaped_forms(item, field=field),
+            approved_urls=approved_urls,
+            field=field,
         )
 
 

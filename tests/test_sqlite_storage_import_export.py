@@ -55,6 +55,8 @@ def test_complete_dry_run_apply_and_round_trip(root: Path) -> None:
         )
         report = plan["report"]
         assert report["schema"] == "league.import-report.v1"
+        assert report["target_schema_version"] == 7
+        assert plan["target_schema_version"] == 7
         assert report["dry_run"] and not report["applied"] and report["eligible"]
         assert report["unknown_consumers"] == []
         assert report["target_collisions"] == {}
@@ -203,6 +205,13 @@ def test_import_crash_atomicity_and_plan_tamper(root: Path) -> None:
         tampered = copy.deepcopy(plan)
         tampered["rows"]["agent_instances"][0]["task_id"] = "missing-task"
         refused(lambda: store.apply_import(tampered, plan["report_digest"]), "import_plan_invalid")
+        stale = copy.deepcopy(plan)
+        stale.pop("target_schema_version")
+        stale["report"].pop("target_schema_version")
+        refused(
+            lambda: store.apply_import(stale, plan["report_digest"]),
+            "import_plan_incompatible",
+        )
         assert all(count == 0 for count in store.import_target_counts().values())
 
 

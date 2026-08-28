@@ -38,6 +38,8 @@ def _source(value: Path) -> bytes:
     path = Path(value)
     if not path.is_absolute() or not path.is_file() or path.is_symlink():
         raise StorageRefusal("invalid_guidance_source", "shared guidance source is invalid")
+    if path.stat().st_size > MAX_GUIDANCE_BYTES:
+        raise StorageRefusal("invalid_guidance_source", "shared guidance source is not bounded text")
     payload = path.read_bytes()
     if not payload or len(payload) > MAX_GUIDANCE_BYTES or b"\x00" in payload:
         raise StorageRefusal("invalid_guidance_source", "shared guidance source is not bounded text")
@@ -71,6 +73,9 @@ def stage_guidance(source: Path, harness: str, destination_root: Path) -> dict[s
                 "guidance_target_unsafe", "existing guidance exceeds the backup byte bound"
             )
         before = target.read_bytes()
+    temporary = root / f".{TARGET_NAME}.league-stage"
+    if temporary.exists() or temporary.is_symlink():
+        raise StorageRefusal("guidance_stage_collision", "guidance staging file already exists")
     backup = None
     if before is not None:
         backup = root / f".{TARGET_NAME}.league-backup-{_hash(before)[:12]}"
@@ -81,9 +86,6 @@ def stage_guidance(source: Path, harness: str, destination_root: Path) -> dict[s
             handle.write(before)
             handle.flush()
             os.fsync(handle.fileno())
-    temporary = root / f".{TARGET_NAME}.league-stage"
-    if temporary.exists() or temporary.is_symlink():
-        raise StorageRefusal("guidance_stage_collision", "guidance staging file already exists")
     try:
         descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(descriptor, "wb") as handle:

@@ -42,7 +42,9 @@ transport calls, then proves a placeholder-only body succeeds.
 Successful transport returns a bounded redacted receipt with the adapter kind,
 destination visibility, exact payload hash and byte count, and a hash of the
 transport receipt identity. It never returns the body, local evidence, or raw
-remote receipt identity.
+remote receipt identity. Each call also carries a deterministic idempotency
+key; a transport error or invalid receipt is an explicit unknown outcome whose
+retry must reuse that key.
 
 ## Publication metadata and staged guidance
 

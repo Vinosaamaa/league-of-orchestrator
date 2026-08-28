@@ -26,17 +26,33 @@ def apply_import(
     plan: ImportPlan,
     expected_digest: str,
     *,
+    current_schema_version: int,
     columns_by_table: Mapping[str, tuple[str, ...]],
     table_order: tuple[str, ...],
     post_import: Optional[Callable[[Any, str], None]] = None,
     fault: Optional[FaultInjector] = None,
 ) -> dict[str, Any]:
+    report = plan.get("report", {})
+    target_schema_version = plan.get("target_schema_version")
+    if (
+        not isinstance(report, dict)
+        or target_schema_version != current_schema_version
+        or report.get("target_schema_version") != current_schema_version
+    ):
+        raise StorageRefusal(
+            "import_plan_incompatible",
+            "import plan target schema is incompatible; regenerate the dry-run plan",
+        )
     observed_digest = str(plan.get("report_digest", ""))
-    report_for_digest = dict(plan.get("report", {}))
+    report_for_digest = dict(report)
     report_for_digest.pop("report_digest", None)
     recomputed_digest = hashlib.sha256(
         json.dumps(
-            {"report": report_for_digest, "rows": plan.get("rows")},
+            {
+                "target_schema_version": target_schema_version,
+                "report": report_for_digest,
+                "rows": plan.get("rows"),
+            },
             sort_keys=True,
             separators=(",", ":"),
         ).encode("utf-8")

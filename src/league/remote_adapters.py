@@ -27,7 +27,20 @@ MAX_REMOTE_RECEIPT_ID = 512
 
 
 class RemoteTransport(Protocol):
-    def send(self, payload: bytes) -> Mapping[str, Any]: ...
+    def send(self, payload: bytes, *, idempotency_key: str) -> Mapping[str, Any]: ...
+
+
+class RemoteOutcomeUnknown(StorageRefusal):
+    """A remote call may have landed and must only be retried idempotently."""
+
+    def __init__(self, adapter_kind: str, idempotency_key: str, payload_sha256: str) -> None:
+        self.adapter_kind = adapter_kind
+        self.idempotency_key = idempotency_key
+        self.payload_sha256 = payload_sha256
+        super().__init__(
+            "remote_outcome_unknown",
+            "remote outcome is unknown; any retry must reuse the supplied idempotency key",
+        )
 
 
 @dataclass(frozen=True)
@@ -63,7 +76,28 @@ class GuardedRemoteAdapter:
             structured_fields=payload.structured_fields,
             approved_urls=payload.approved_urls,
         )
-        transport_receipt = self.transport.send(payload.body)
+        idempotency_key = hashlib.sha256(
+            (
+                "league.remote.v1\0"
+                + self.adapter_kind
+                + "\0"
+                + self.destination_visibility
+                + "\0"
+                + validation.payload_sha256
+            ).encode("ascii")
+        ).hexdigest()
+        try:
+            transport_receipt = self.transport.send(
+                payload.body, idempotency_key=idempotency_key
+            )
+        except Exception as exc:
+            raise RemoteOutcomeUnknown(
+                self.adapter_kind, idempotency_key, validation.payload_sha256
+            ) from exc
+        if not isinstance(transport_receipt, Mapping):
+            raise RemoteOutcomeUnknown(
+                self.adapter_kind, idempotency_key, validation.payload_sha256
+            )
         receipt_id = transport_receipt.get("receipt_id")
         if (
             not isinstance(receipt_id, str)
@@ -71,8 +105,8 @@ class GuardedRemoteAdapter:
             or len(receipt_id) > MAX_REMOTE_RECEIPT_ID
             or "\x00" in receipt_id
         ):
-            raise StorageRefusal(
-                "remote_receipt_invalid", "remote transport returned no bounded receipt identity"
+            raise RemoteOutcomeUnknown(
+                self.adapter_kind, idempotency_key, validation.payload_sha256
             )
         return {
             "schema": "league.outbound-receipt.v1",
@@ -80,6 +114,7 @@ class GuardedRemoteAdapter:
             "destination_visibility": self.destination_visibility,
             "payload_sha256": validation.payload_sha256,
             "bytes": validation.byte_count,
+            "idempotency_key": idempotency_key,
             "transport_receipt_sha256": hashlib.sha256(
                 receipt_id.encode("utf-8")
             ).hexdigest(),
@@ -101,6 +136,7 @@ __all__ = [
     "GuardedRemoteAdapter",
     "MAX_REMOTE_RECEIPT_ID",
     "REMOTE_ADAPTER_KINDS",
+    "RemoteOutcomeUnknown",
     "RenderedPayload",
     "RemoteTransport",
     "remote_adapter",

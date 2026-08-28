@@ -207,3 +207,8 @@ migration v7. Migration v7 is named
 `bounded-reporting-and-outbound-privacy`, checksum
 `bebe90eb841eac2a0b42d3f89e321cb4f3f8b23b02d92febf5a4ea2a50727cde`;
 canonical v6 remains byte-for-byte unchanged.
+
+The v7 import-plan contract now binds its target schema version and returns a
+dedicated compatibility refusal for retained pre-v7 plans; this changes only
+the deterministic dry-run report digest, not imported canonical rows or the v7
+migration checksum.

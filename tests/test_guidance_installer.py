@@ -54,6 +54,29 @@ def main() -> None:
         else:
             raise AssertionError("oversized existing guidance was read for backup")
         assert oversized_target.stat().st_size == MAX_GUIDANCE_BYTES + 1
+        collision = root / "collision"
+        collision.mkdir()
+        collision_target = collision / "AGENTS.md"
+        collision_target.write_text("prior synthetic guidance\n", encoding="utf-8")
+        staging_file = collision / ".AGENTS.md.league-stage"
+        staging_file.write_text("unrelated interrupted stage\n", encoding="utf-8")
+        try:
+            stage_guidance(source.resolve(), "codex", collision.resolve())
+        except StorageRefusal as exc:
+            assert exc.code == "guidance_stage_collision"
+        else:
+            raise AssertionError("staging collision mutated the destination")
+        assert collision_target.read_text(encoding="utf-8") == "prior synthetic guidance\n"
+        assert list(collision.glob(".AGENTS.md.league-backup-*")) == []
+        assert staging_file.read_text(encoding="utf-8") == "unrelated interrupted stage\n"
+        oversized_source = root / "oversized-source.md"
+        oversized_source.write_bytes(b"x" * (MAX_GUIDANCE_BYTES + 1))
+        try:
+            stage_guidance(oversized_source.resolve(), "codex", (root / "codex").resolve())
+        except StorageRefusal as exc:
+            assert exc.code == "invalid_guidance_source"
+        else:
+            raise AssertionError("oversized guidance source was read for staging")
     assert source.read_bytes() == original
     print("PASS: explicit-root Codex/Cursor/Pi staging, parity, backup, and no global mutation")
 

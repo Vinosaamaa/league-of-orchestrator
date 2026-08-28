@@ -95,6 +95,6 @@ test-reporting-privacy:
 test-public-safety:
 	@PYTHONDONTWRITEBYTECODE=1 $(PYTHON) scripts/public_safety.py --base origin/main --head HEAD
 
-test-affected: test-storage test-acceptance test-request-lifecycle test-runtime-lifecycle test-skill-contracts test-handoff-callsigns test-reporting-privacy
+test-affected: test-storage test-acceptance test-request-lifecycle test-runtime-lifecycle test-skill-contracts test-handoff-callsigns test-reporting-privacy test-public-safety
 
 test-all: test-baseline test-affected

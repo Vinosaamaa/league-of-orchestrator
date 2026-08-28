@@ -2478,6 +2478,7 @@ class SQLiteStorage(SQLiteTransactionCore):
             self,
             plan,
             expected_digest,
+            current_schema_version=CURRENT_SCHEMA_VERSION,
             columns_by_table=_IMPORT_COLUMNS,
             table_order=_IMPORT_ORDER,
             post_import=initialize_imported_callsign_state,

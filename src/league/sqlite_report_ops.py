@@ -1550,26 +1550,32 @@ def _persist_report_spec(store: Any, desired: tuple[Any, ...]) -> None:
         "scope_kind", "scope_id", "event_watermark", "source_watermark", "created_at",
         "spec_hash", "content_hash", "fact_count",
     )
+    def write() -> None:
+        existing = store.connection.execute(
+            "SELECT * FROM report_specs WHERE report_id=?", (report_identity,)
+        ).fetchone()
+        if existing is None:
+            store.connection.execute(
+                """
+                INSERT INTO report_specs
+                  (report_id,report_schema,from_at,to_at,timezone,from_inclusive,
+                   scope_kind,scope_id,event_watermark,source_watermark,created_at,
+                   spec_hash,content_hash,fact_count)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                desired,
+            )
+        elif tuple(existing[column] for column in columns) != desired:
+            raise StorageRefusal(
+                "report_spec_conflict", "immutable report identity already differs"
+            )
+
     try:
-        with store._transaction():
-            existing = store.connection.execute(
-                "SELECT * FROM report_specs WHERE report_id=?", (report_identity,)
-            ).fetchone()
-            if existing is None:
-                store.connection.execute(
-                    """
-                    INSERT INTO report_specs
-                      (report_id,report_schema,from_at,to_at,timezone,from_inclusive,
-                       scope_kind,scope_id,event_watermark,source_watermark,created_at,
-                       spec_hash,content_hash,fact_count)
-                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                    """,
-                    desired,
-                )
-            elif tuple(existing[column] for column in columns) != desired:
-                raise StorageRefusal(
-                    "report_spec_conflict", "immutable report identity already differs"
-                )
+        if store.connection.in_transaction:
+            write()
+        else:
+            with store._transaction():
+                write()
     except StorageRefusal:
         raise
     except sqlite3.DatabaseError as exc:
@@ -1578,7 +1584,7 @@ def _persist_report_spec(store: Any, desired: tuple[Any, ...]) -> None:
         ) from exc
 
 
-def generate_report(
+def _generate_report_snapshot(
     store: Any,
     *,
     from_at: str,
@@ -1762,6 +1768,46 @@ def generate_report(
             ),
         )
     return report
+
+
+def generate_report(
+    store: Any,
+    *,
+    from_at: str,
+    to_at: str,
+    timezone_name: str,
+    from_inclusive: bool,
+    scope_kind: str,
+    scope_id: Optional[str],
+    limit: int,
+    cursor: Optional[str],
+    local_diagnostic: bool,
+    report_id: Optional[str] = None,
+    event_watermark: Optional[int] = None,
+    source_watermark: Optional[str] = None,
+    persist: bool = True,
+    expected_content_hash: Optional[str] = None,
+) -> dict[str, Any]:
+    """Generate and optionally persist one report from one SQLite snapshot."""
+
+    with store._read_transaction():
+        return _generate_report_snapshot(
+            store,
+            from_at=from_at,
+            to_at=to_at,
+            timezone_name=timezone_name,
+            from_inclusive=from_inclusive,
+            scope_kind=scope_kind,
+            scope_id=scope_id,
+            limit=limit,
+            cursor=cursor,
+            local_diagnostic=local_diagnostic,
+            report_id=report_id,
+            event_watermark=event_watermark,
+            source_watermark=source_watermark,
+            persist=persist,
+            expected_content_hash=expected_content_hash,
+        )
 
 
 def report_spec(store: Any, report_id: str) -> Optional[dict[str, Any]]:

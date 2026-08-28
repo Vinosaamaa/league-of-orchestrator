@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Vinosaamaa/league-of-orchestrator/schema/agent-routing.schema.json",
+  "title": "League semantic model routing",
+  "type": "object",
+  "required": ["schema", "tiers"],
+  "properties": {
+    "schema": {"const": 1},
+    "tiers": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "type": "object",
+        "required": ["model", "effort"],
+        "properties": {
+          "model": {"type": "string", "minLength": 1},
+          "effort": {"type": "string", "minLength": 1}
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

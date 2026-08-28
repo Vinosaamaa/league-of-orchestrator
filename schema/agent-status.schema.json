@@ -1,0 +1,119 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Vinosaamaa/league-of-orchestrator/schema/agent-status.schema.json",
+  "title": "League Roster status snapshot",
+  "type": "object",
+  "required": [
+    "callsign",
+    "role",
+    "shotcaller",
+    "kind",
+    "address",
+    "thread_id",
+    "task",
+    "status",
+    "updated_at",
+    "update",
+    "blocker",
+    "next"
+  ],
+  "properties": {
+    "callsign": {"type": "string", "minLength": 1},
+    "routing_name": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]{0,31}$"
+    },
+    "role": {"enum": ["shotcaller", "champion", "worker"]},
+    "shotcaller": {"type": ["string", "null"]},
+    "kind": {"type": "string", "minLength": 1},
+    "display_agent": {"type": "string", "minLength": 1},
+    "address": {"type": "string", "minLength": 1},
+    "thread_id": {"type": "string", "minLength": 1},
+    "backend": {"enum": ["herdr", "tmux"]},
+    "task_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "repository": {"type": ["string", "null"]},
+    "issue": {"type": ["integer", "null"], "minimum": 1},
+    "branch": {"type": ["string", "null"]},
+    "worktree": {"type": ["string", "null"]},
+    "task": {"type": "string", "minLength": 1},
+    "status": {
+      "enum": [
+        "active",
+        "started",
+        "working",
+        "progress",
+        "blocked",
+        "completed",
+        "complete",
+        "cancelled",
+        "canceled",
+        "failed",
+        "ready_to_land"
+      ]
+    },
+    "updated_at": {"type": "string", "format": "date-time"},
+    "update": {"type": "string", "minLength": 1},
+    "blocker": {"type": ["string", "null"]},
+    "next": {"type": "string", "minLength": 1}
+  },
+  "dependentRequired": {
+    "routing_name": ["display_agent"],
+    "display_agent": ["routing_name"]
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"role": {"const": "shotcaller"}}},
+      "then": {"properties": {"shotcaller": {"type": "null"}}},
+      "else": {"properties": {"shotcaller": {"type": "string", "minLength": 1}}}
+    },
+    {
+      "if": {"properties": {"role": {"const": "champion"}}},
+      "then": {
+        "required": [
+          "backend",
+          "task_id",
+          "repository",
+          "issue",
+          "branch",
+          "worktree"
+        ],
+        "properties": {
+          "thread_id": {
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          }
+        },
+        "allOf": [
+          {
+            "if": {"properties": {"backend": {"const": "herdr"}}},
+            "then": {"properties": {"address": {"pattern": "^w[0-9A-Za-z]+:p[0-9A-Za-z]+$"}}},
+            "else": {"properties": {"address": {"pattern": "^%[0-9]+$"}}}
+          },
+          {
+            "oneOf": [
+              {
+                "properties": {
+                  "repository": {"type": "null"},
+                  "issue": {"type": "null"},
+                  "branch": {"type": "null"},
+                  "worktree": {"type": "null"}
+                }
+              },
+              {
+                "properties": {
+                  "repository": {"type": "string", "minLength": 1},
+                  "issue": {"type": "integer", "minimum": 1},
+                  "branch": {"type": "string", "minLength": 1},
+                  "worktree": {"type": "string", "pattern": "^/"}
+                }
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "additionalProperties": true
+}

@@ -1,0 +1,22 @@
+{
+  "callsign": "Bard",
+  "routing_name": "bard",
+  "role": "champion",
+  "shotcaller": "Garen",
+  "kind": "codex-thread",
+  "display_agent": "codex",
+  "address": "w1:p2",
+  "thread_id": "00000000-0000-4000-8000-000000000002",
+  "backend": "herdr",
+  "task_id": "example-repository-42",
+  "repository": "https://example.invalid/example/repository",
+  "issue": 42,
+  "branch": "agent/bard/42-example",
+  "worktree": "/example/worktrees/repository-42-example",
+  "task": "Example lifecycle task",
+  "status": "working",
+  "updated_at": "2026-01-01T12:00:00Z",
+  "update": "Started the synthetic example task.",
+  "blocker": null,
+  "next": "Continue the synthetic example task."
+}

@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / "src"), str(ROOT / "tests")]
 
 from league.cleanup import CleanupAdapterRegistry, CleanupExecutor, CleanupPlanner  # noqa: E402
+from league.cli import MAX_JSON_INPUT_BYTES  # noqa: E402
 from league.sqlite_store import SQLiteStorage  # noqa: E402
 from league.storage import StorageRefusal  # noqa: E402
 from runtime_doubles import StateCleanupAdapter  # noqa: E402
@@ -94,7 +95,21 @@ def manifest(
     }
 
 
-def test_supported_policies_and_refusals(root: Path) -> None:
+def assert_plan_refused(
+    planner: CleanupPlanner,
+    value: dict,
+    operation_id: str,
+    code: str,
+) -> None:
+    try:
+        planner.plan(value, operation_id=operation_id, at=AT3)
+    except StorageRefusal as exc:
+        assert exc.code == code, (operation_id, exc.code)
+    else:
+        raise AssertionError(f"cleanup refusal was not enforced: {operation_id}")
+
+
+def test_supported_policies_reach_cleanup_completed(root: Path) -> None:
     cases = (
         ("analysis", "completed"),
         ("local_git", "completed"),
@@ -137,6 +152,8 @@ def test_supported_policies_and_refusals(root: Path) -> None:
             ).fetchone()[0]
             assert json.loads(archive_after)["archived"] is True
 
+
+def test_cleanup_and_resource_commands_are_bounded(root: Path) -> None:
     _, cli_state, _ = seeded_state(root, "policy-cli")
     cli_manifest = root / "policy-cli.json"
     cli_manifest.write_text(json.dumps(manifest("analysis", with_resources=False)) + "\n")
@@ -169,6 +186,24 @@ def test_supported_policies_and_refusals(root: Path) -> None:
     )
     assert registered["ok"] is True and registered["result"]["resource_id"] == "registered-shared"
 
+    oversized = root / "oversized-manifest.json"
+    oversized.write_bytes(b"{" + (b" " * MAX_JSON_INPUT_BYTES))
+    refused = invoke_cli(
+        cli_state,
+        "cleanup",
+        "plan",
+        "--manifest",
+        str(oversized),
+        "--operation-id",
+        "operation:oversized",
+        "--at",
+        AT3,
+        expected=2,
+    )
+    assert refused["error"]["code"] == "input_too_large"
+
+
+def test_cleanup_manifest_and_resource_refusals(root: Path) -> None:
     _, state, _ = seeded_state(root, "refusals")
     with SQLiteStorage(state) as store:
         planner = CleanupPlanner(store)
@@ -183,12 +218,7 @@ def test_supported_policies_and_refusals(root: Path) -> None:
         ):
             value = manifest(with_resources=False)
             mutate(value)
-            try:
-                planner.plan(value, operation_id=f"operation:{name}", at=AT3)
-            except StorageRefusal as exc:
-                assert exc.code == code, (name, exc.code)
-            else:
-                raise AssertionError(f"cleanup refusal was not enforced: {name}")
+            assert_plan_refused(planner, value, f"operation:{name}", code)
 
         for item, code in (
             (resource("shared-stop", "shared_lease", "release_lease"), "shared_resource_refused"),
@@ -196,12 +226,7 @@ def test_supported_policies_and_refusals(root: Path) -> None:
         ):
             value = manifest(with_resources=False)
             value["resources"] = [item]
-            try:
-                planner.plan(value, operation_id=f"operation:{item['resource_id']}", at=AT3)
-            except StorageRefusal as exc:
-                assert exc.code == code
-            else:
-                raise AssertionError("shared/persistent resource was accepted for task cleanup")
+            assert_plan_refused(planner, value, f"operation:{item['resource_id']}", code)
 
         for item, code in (
             (resource("shared-invalid", "shared_lease", "terminate"), "shared_resource_refused"),
@@ -214,32 +239,29 @@ def test_supported_policies_and_refusals(root: Path) -> None:
             else:
                 raise AssertionError("invalid shared/persistent cleanup action was registered")
 
+
+def test_registered_resources_cannot_be_hidden(root: Path) -> None:
+    _, state, _ = seeded_state(root, "registered-shared")
+    with SQLiteStorage(state) as store:
+        planner = CleanupPlanner(store)
         planner.register_resource(resource("registered-shared", "shared_lease", "release_lease"), AT3)
-        try:
-            planner.plan(
-                manifest(with_resources=False),
-                operation_id="operation:hidden-shared",
-                at=AT3,
-            )
-        except StorageRefusal as exc:
-            assert exc.code == "shared_resource_refused"
-        else:
-            raise AssertionError("omitted canonical shared lease did not block cleanup")
+        assert_plan_refused(
+            planner,
+            manifest(with_resources=False),
+            "operation:hidden-shared",
+            "shared_resource_refused",
+        )
 
     _, omitted_state, _ = seeded_state(root, "omitted-task-resource")
     with SQLiteStorage(omitted_state) as store:
         planner = CleanupPlanner(store)
         planner.register_resource(resource("registered-task", "task_owned", "terminate"), AT3)
-        try:
-            planner.plan(
-                manifest(with_resources=False),
-                operation_id="operation:omitted-task-resource",
-                at=AT3,
-            )
-        except StorageRefusal as exc:
-            assert exc.code == "resource_proof_missing"
-        else:
-            raise AssertionError("omitted canonical task resource did not block cleanup")
+        assert_plan_refused(
+            planner,
+            manifest(with_resources=False),
+            "operation:omitted-task-resource",
+            "resource_proof_missing",
+        )
 
 
 def planned_execution(root: Path, suffix: str) -> tuple[SQLiteStorage, CleanupExecutor, dict, dict, list[str]]:
@@ -262,6 +284,8 @@ def test_crash_after_every_external_action_and_duplicate(root: Path) -> None:
     action_kinds = [action["action_kind"] for action in operation["actions"]]
     probe.close()
     for index, action_kind in enumerate(action_kinds):
+        # Each rollback boundary gets a fresh database so no prior crash case
+        # can mask a duplicate effect or receipt-recovery defect.
         store, executor, operation, _, effects = planned_execution(root, f"crash-{index}")
 
         def crash(point: str, target: str = action_kind) -> None:
@@ -378,7 +402,10 @@ def test_public_candidate_has_no_private_paths() -> None:
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="league-cleanup-lifecycle-") as temporary:
         root = Path(temporary)
-        test_supported_policies_and_refusals(root)
+        test_supported_policies_reach_cleanup_completed(root)
+        test_cleanup_and_resource_commands_are_bounded(root)
+        test_cleanup_manifest_and_resource_refusals(root)
+        test_registered_resources_cannot_be_hidden(root)
         test_crash_after_every_external_action_and_duplicate(root)
         test_already_closed_or_missing_exact_resources_and_stale_identity(root)
     test_public_candidate_has_no_private_paths()

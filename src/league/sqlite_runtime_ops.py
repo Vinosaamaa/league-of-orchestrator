@@ -37,6 +37,7 @@ def register_runtime_binding(
     backend_kind: str,
     session_identity: str,
     endpoint_identity: str,
+    endpoint_generation: str,
     capabilities: Mapping[str, Any],
     at: str,
 ) -> dict[str, Any]:
@@ -47,6 +48,7 @@ def register_runtime_binding(
         backend_kind,
         session_identity,
         endpoint_identity,
+        endpoint_generation,
         _json(capabilities),
         at,
     )
@@ -59,7 +61,7 @@ def register_runtime_binding(
                 expected = values[:-1]
                 observed = tuple(existing[key] for key in (
                     "binding_id", "task_id", "harness_kind", "backend_kind",
-                    "session_identity", "endpoint_identity", "capabilities_json"
+                    "session_identity", "endpoint_identity", "endpoint_generation", "capabilities_json"
                 ))
                 if observed != expected:
                     raise StorageRefusal("binding_conflict", "runtime binding identity conflicts")
@@ -68,8 +70,8 @@ def register_runtime_binding(
                 """
                 INSERT INTO runtime_bindings
                   (binding_id,task_id,harness_kind,backend_kind,session_identity,endpoint_identity,
-                   capabilities_json,state,version,created_at,updated_at,last_receipt_json)
-                VALUES(?,?,?,?,?,?,?,'active',1,?,?, '{}')
+                   endpoint_generation,capabilities_json,state,version,created_at,updated_at,last_receipt_json)
+                VALUES(?,?,?,?,?,?,?,?,'active',1,?,?, '{}')
                 """,
                 (*values, at),
             )
@@ -267,13 +269,16 @@ def plan_cleanup(store: Any, plan: Mapping[str, Any]) -> dict[str, Any]:
                 """,
                 (plan["operation_id"], obligation_id, cleanup_revision, plan["plan_digest"], plan["at"], plan["at"]),
             )
+            registered_resources = {
+                row["resource_id"]: row["task_id"]
+                for row in store.connection.execute(
+                    "SELECT resource_id,task_id FROM task_resources WHERE task_id=? AND state='active'",
+                    (plan["task_id"],),
+                )
+            }
             for action in plan["actions"]:
                 if action["resource_id"] is not None:
-                    resource = store.connection.execute(
-                        "SELECT task_id FROM task_resources WHERE resource_id=? AND state='active'",
-                        (action["resource_id"],),
-                    ).fetchone()
-                    if resource is None or resource["task_id"] != plan["task_id"]:
+                    if registered_resources.get(action["resource_id"]) != plan["task_id"]:
                         raise StorageRefusal("resource_identity_mismatch", "cleanup resource is not registered to the task")
                 store.connection.execute(
                     """

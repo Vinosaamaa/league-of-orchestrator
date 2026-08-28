@@ -11,8 +11,10 @@ final gate.
 
 ## Adapter boundary
 
-Core session and endpoint identities are `namespace:opaque-value` strings.
-Core validates the namespace envelope and exact equality only. A harness
+Core session and endpoint identities are `namespace:opaque-value` strings;
+the backend also supplies an opaque endpoint generation that is persisted and
+revalidated before every input or inspection. Core validates the namespace
+envelope and exact equality only. A harness
 adapter owns create, identify, title, prompt, status, hook, interrupt, resume,
 and exit semantics. A backend adapter owns allocation, input transport,
 inspection, and close. Missing declarations return `unsupported_capability`;

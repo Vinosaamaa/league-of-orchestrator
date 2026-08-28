@@ -19,6 +19,7 @@ from .storage import Storage, StorageRefusal
 
 
 COMMAND_SCHEMA = "league.command.v1"
+MAX_JSON_INPUT_BYTES = 1_000_000
 CommandResult = tuple[Any, Optional[bytes]]
 CommandHandler = Callable[[Storage, argparse.Namespace], CommandResult]
 
@@ -361,7 +362,16 @@ def _task_transfer(store: Storage, args: argparse.Namespace) -> CommandResult:
 
 def _read_json_object(path: Path) -> dict[str, Any]:
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        with path.open("rb") as stream:
+            payload = stream.read(MAX_JSON_INPUT_BYTES + 1)
+        if len(payload) > MAX_JSON_INPUT_BYTES:
+            raise StorageRefusal(
+                "input_too_large",
+                f"JSON input exceeds the {MAX_JSON_INPUT_BYTES}-byte limit",
+            )
+        value = json.loads(payload.decode("utf-8"))
+    except StorageRefusal:
+        raise
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise StorageRefusal("input_invalid", "JSON input could not be read") from exc
     if not isinstance(value, dict):

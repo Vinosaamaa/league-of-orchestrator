@@ -14,6 +14,7 @@ class RuntimeLifecycleStorage(Protocol):
         backend_kind: str,
         session_identity: str,
         endpoint_identity: str,
+        endpoint_generation: str,
         capabilities: Mapping[str, Any],
         at: str,
     ) -> dict[str, Any]: ...

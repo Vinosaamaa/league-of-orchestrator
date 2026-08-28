@@ -132,21 +132,21 @@ class ModelRouter:
         if explicit_model is not None or explicit_effort is not None:
             reason = "Explicit user choices were preserved exactly; only unspecified fields use the selected semantic tier."
         choice = RoutingChoice(
-            decision_id,
-            subject_kind,
-            subject_id,
-            role,
-            tier,
-            model,
-            effort,
-            reason,
-            explicit_model is not None,
-            explicit_effort is not None,
-            "selected",
-            0,
-            None,
-            None,
-            chosen_at,
+            decision_id=decision_id,
+            subject_kind=subject_kind,
+            subject_id=subject_id,
+            role=role,
+            tier=tier,
+            model=model,
+            effort=effort,
+            reason=reason,
+            explicit_model=explicit_model is not None,
+            explicit_effort=explicit_effort is not None,
+            state="selected",
+            escalation_count=0,
+            prior_decision_id=None,
+            failure_class=None,
+            chosen_at=chosen_at,
         )
         return self.storage.record_routing_decision(choice.as_record())
 
@@ -178,21 +178,22 @@ class ModelRouter:
             effort = str(prior["effort"]) if prior["explicit_effort"] else str(selected["effort"])
             reason = f"Concrete {failure_class.replace('_', ' ')} triggered the one safe-boundary stronger retry."
         choice = RoutingChoice(
-            decision_id,
-            str(prior["subject_kind"]),
-            str(prior["subject_id"]),
-            str(prior["role"]),
-            tier,
-            model,
-            effort,
-            reason,
-            bool(prior["explicit_model"]),
-            bool(prior["explicit_effort"]),
-            state,
-            int(prior["escalation_count"]) + (1 if state == "escalated" else 0),
-            prior_decision_id,
-            failure_class,
-            chosen_at,
+            decision_id=decision_id,
+            subject_kind=str(prior["subject_kind"]),
+            subject_id=str(prior["subject_id"]),
+            role=str(prior["role"]),
+            tier=tier,
+            model=model,
+            effort=effort,
+            reason=reason,
+            explicit_model=bool(prior["explicit_model"]),
+            explicit_effort=bool(prior["explicit_effort"]),
+            state=state,
+            escalation_count=int(prior["escalation_count"])
+            + (1 if state == "escalated" else 0),
+            prior_decision_id=prior_decision_id,
+            failure_class=failure_class,
+            chosen_at=chosen_at,
         )
         return self.storage.record_routing_decision(choice.as_record())
 

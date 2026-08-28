@@ -391,6 +391,9 @@ class CleanupExecutor:
                 )
             prepared.append((action, adapter))
         for action, adapter in prepared:
+            # Preflight proves the whole plan is initially safe; this second
+            # observation is intentional because earlier effects may change
+            # external reality before a later action runs.
             before = dict(adapter.inspect(action))
             if adapter.intended(action, before):
                 outcome = "already_applied"

@@ -59,8 +59,8 @@ def test_named_compatibility_matrix_and_opaque_identity() -> None:
         raise AssertionError("unnamespaced core identity was accepted")
 
 
-def test_non_codex_shared_lifecycle(root: Path) -> None:
-    _, state, _ = seeded_state(root, "runtime")
+def test_runtime_matrix_cli_and_unsupported_create(root: Path) -> None:
+    _, state, _ = seeded_state(root, "matrix")
     matrix_command = invoke_cli(state, "runtime", "matrix")
     assert matrix_command["ok"] is True and matrix_command["result"]["pairs"]
     with SQLiteStorage(state) as store:
@@ -82,6 +82,18 @@ def test_non_codex_shared_lifecycle(root: Path) -> None:
             assert exc.code == "unsupported_capability"
         else:
             raise AssertionError("unsupported Codex/tmux allocation was attempted")
+
+
+def assert_runtime_export_redaction(store: SQLiteStorage) -> None:
+    exported = store.export_bytes(format_name="json", purpose="inspection", max_records=1000)
+    value = json.loads(exported)
+    binding = value["tables"]["runtime_bindings"][0]
+    assert binding["session_identity"] == "[redacted]"
+    assert binding["endpoint_generation"] == "[redacted]"
+
+
+def test_non_codex_shared_lifecycle(root: Path) -> None:
+    _, state, _ = seeded_state(root, "runtime")
     backend = DeterministicBackend()
     registry = AdapterRegistry()
     pi = next(adapter for adapter in builtin_harness_contracts() if adapter.contract.kind == "pi")
@@ -102,6 +114,17 @@ def test_non_codex_shared_lifecycle(root: Path) -> None:
             )
         )
         assert created["session_identity"] == "pi:session-1"
+        endpoint_state = backend.endpoints[created["endpoint_identity"]]
+        endpoint_state["generation"] = "reused-generation"
+        prompts_before = [operation for operation, _ in backend.operations].count("prompt")
+        try:
+            lifecycle.prompt("binding:pi-fixture", "Must not reach a reused endpoint.")
+        except StorageRefusal as exc:
+            assert exc.code == "identity_mismatch"
+        else:
+            raise AssertionError("reused endpoint generation accepted runtime input")
+        assert [operation for operation, _ in backend.operations].count("prompt") == prompts_before
+        endpoint_state["generation"] = "generation-1"
         lifecycle.prompt("binding:pi-fixture", "Route the synthetic task.")
         transition = store.transition(
             CHAMPION_ID, 2, "progress", "Synthetic routed transition.", AT3
@@ -115,9 +138,7 @@ def test_non_codex_shared_lifecycle(root: Path) -> None:
         closed = lifecycle.guarded_exit("binding:pi-fixture", 1, AT4)
         assert closed == {"binding_id": "binding:pi-fixture", "state": "closed", "version": 2}
         assert lifecycle.status("binding:pi-fixture") == "missing"
-        exported = store.export_bytes(format_name="json", purpose="inspection", max_records=1000)
-        value = json.loads(exported)
-        assert value["tables"]["runtime_bindings"][0]["session_identity"] == "[redacted]"
+        assert_runtime_export_redaction(store)
     operations = [operation for operation, _ in backend.operations]
     assert all(name in operations for name in ("allocate", "create", "title", "prompt", "hook", "interrupt", "resume", "exit", "close"))
 
@@ -222,6 +243,7 @@ def test_named_codex_herdr_and_tmux_contract_behavior(root: Path) -> None:
             "tmux",
             "codex:attached-session",
             endpoint.encoded,
+            "attached-generation",
             {
                 "harness": ["create", "exit", "identify", "interrupt", "prompt", "status", "title"],
                 "backend": ["close", "input", "inspect"],
@@ -242,6 +264,7 @@ def main() -> None:
     test_named_compatibility_matrix_and_opaque_identity()
     with tempfile.TemporaryDirectory(prefix="league-runtime-adapter-") as temporary:
         root = Path(temporary)
+        test_runtime_matrix_cli_and_unsupported_create(root / "matrix")
         test_non_codex_shared_lifecycle(root / "lifecycle")
         test_create_rolls_back_allocated_endpoint_before_persistence(root / "rollback")
         test_unsupported_resume_fails_before_backend_input(root / "unsupported")

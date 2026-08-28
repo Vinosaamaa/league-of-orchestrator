@@ -3,5 +3,12 @@
 from .storage import ConnectionPolicy, Storage, StorageRefusal
 
 __version__ = "0.1.0"
+MAX_ACCEPTANCE_SENTINEL_PATHS = 16
 
-__all__ = ["ConnectionPolicy", "Storage", "StorageRefusal", "__version__"]
+__all__ = [
+    "ConnectionPolicy",
+    "MAX_ACCEPTANCE_SENTINEL_PATHS",
+    "Storage",
+    "StorageRefusal",
+    "__version__",
+]

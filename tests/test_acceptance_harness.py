@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 LEAGUE = ROOT / "bin/league"
 sys.path.insert(0, str(ROOT / "src"))
 
+from league import MAX_ACCEPTANCE_SENTINEL_PATHS  # noqa: E402
 from league.acceptance import (  # noqa: E402
     POINTER_STAGES,
     PROCESS_SENTINEL_SCHEMA,
@@ -64,12 +65,13 @@ def live_sentinels(root: Path, name: str) -> tuple[Path, Path, Path]:
     return byte_path, config, processes
 
 
-def assert_receipt(result: dict[str, object]) -> None:
+def assert_receipt_shape(result: dict[str, object]) -> None:
     assert set(result) == {
         "schema",
         "version",
         "namespace",
         "home",
+        "operation",
         "determinism",
         "sentinels",
         "migration_shadow",
@@ -81,7 +83,12 @@ def assert_receipt(result: dict[str, object]) -> None:
         "runtime_claims",
     }
     assert result["schema"] == "league.acceptance-receipt.v1"
+    assert result["operation"]["state"] == "completed"
+    assert result["operation"]["attempt"] >= 1
     assert set(result["determinism"]) == {"clock", "ids_allocated"}
+
+
+def assert_sentinel_and_migration_receipts(result: dict[str, object]) -> None:
     assert set(result["sentinels"]) == {
         "unchanged",
         "byte_paths",
@@ -94,6 +101,9 @@ def assert_receipt(result: dict[str, object]) -> None:
     assert shadow["dry_run"]["eligible"] is True
     assert shadow["apply"]["applied"] is True
     assert shadow["exact_parity"] is True and shadow["legacy_unchanged"] is True
+
+
+def assert_staged_install_receipt(result: dict[str, object]) -> None:
     staged = result["staged_install"]
     assert set(staged) == {
         "prefix",
@@ -133,27 +143,41 @@ def assert_receipt(result: dict[str, object]) -> None:
         "cursor",
         "pi",
     }
+
+
+def assert_cutover_receipt(result: dict[str, object]) -> None:
     matrix = result["cutover"]
     assert set(matrix) == {
         "pointer_schema",
         "generation_bound",
         "exclusive_lock",
+        "crash_recovery_journal",
         "fault_stages",
         "cases",
         "never_two_writers",
     }
     assert matrix["fault_stages"] == list(POINTER_STAGES)
     assert matrix["exclusive_lock"] and matrix["generation_bound"]
+    assert matrix["crash_recovery_journal"]
     assert matrix["never_two_writers"]
     assert all(
         case["coherent"] and case["max_active_writers"] <= 1
         for case in matrix["cases"]
     )
     assert any(case["terminal_state"] == "blocked" for case in matrix["cases"])
+    assert matrix["cases"][0]["journal_state"] == "completed"
+    assert matrix["cases"][0]["startup_reconciled"] is False
+    assert all(
+        case["journal_state"] == "reconciled" and case["startup_reconciled"]
+        for case in matrix["cases"][1:]
+    )
     for case in matrix["cases"]:
         states = [item["state"] for item in case["history"]]
         assert states[:2] == ["planned", "executing"]
         assert states[-1] in {"completed", "blocked"}
+
+
+def assert_canary_and_pending_receipts(result: dict[str, object]) -> None:
     assert result["canary"]["registered_exactly"]
     assert set(result["canary"]) == {
         "registered_exactly",
@@ -192,53 +216,46 @@ def assert_receipt(result: dict[str, object]) -> None:
     assert all(not adapter["real"] for adapter in result["adapters"].values())
 
 
-def test_full_foundation(root: Path) -> None:
+def assert_receipt(result: dict[str, object]) -> None:
+    assert_receipt_shape(result)
+    assert_sentinel_and_migration_receipts(result)
+    assert_staged_install_receipt(result)
+    assert_cutover_receipt(result)
+    assert_canary_and_pending_receipts(result)
+
+
+def test_foundation_through_command_without_home(root: Path) -> None:
     root.mkdir()
-    temporary_root = root / "temporary-root"
+    temporary_root = root / "command-root"
     temporary_root.mkdir()
-    byte_path, config, processes = live_sentinels(root, "caller-live")
+    byte_path, config, processes = live_sentinels(root, "command-live")
     before = (
         (byte_path / "watcher.bin").read_bytes(),
         config.read_bytes(),
         processes.read_bytes(),
     )
-    result = run_acceptance(
-        temporary_root,
-        "foundation",
-        sentinel_paths=(byte_path,),
-        config_sentinel=config,
-        process_sentinel=processes,
-        source_root=ROOT,
-    )
-    assert_receipt(result)
-    home = Path(result["home"])
-    assert home.parent == temporary_root and home.name == "league-foundation"
-    assert home.stat().st_mode & 0o777 == 0o700
-    assert json.loads((home / "acceptance-receipt.json").read_text()) == result
-    after = (
-        (byte_path / "watcher.bin").read_bytes(),
-        config.read_bytes(),
-        processes.read_bytes(),
-    )
-    assert after == before
     refused(
         lambda: run_acceptance(
             temporary_root,
-            "foundation",
+            "command",
             sentinel_paths=(byte_path,),
             config_sentinel=config,
             process_sentinel=processes,
-            source_root=ROOT,
+            source_root=root / "missing-source",
         ),
-        "namespace_collision",
+        "fixture_missing",
     )
-
-
-def test_command_without_home(root: Path) -> None:
-    root.mkdir()
-    temporary_root = root / "command-root"
-    temporary_root.mkdir()
-    byte_path, config, processes = live_sentinels(root, "command-live")
+    home = temporary_root / "league-command"
+    blocked = json.loads((home / "acceptance-operation.json").read_text())
+    assert blocked["state"] == "blocked" and blocked["attempt"] == 1
+    assert blocked["history"][-1] == {
+        "state": "blocked",
+        "at": "2026-01-01T00:00:00Z",
+        "attempt": 1,
+        "error_code": "fixture_missing",
+        "resumable": True,
+    }
+    assert not (home / "acceptance-receipt.json").exists()
     environment = {
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
         "PYTHONDONTWRITEBYTECODE": "1",
@@ -271,7 +288,39 @@ def test_command_without_home(root: Path) -> None:
     envelope = json.loads(command.stdout)
     assert envelope["schema"] == "league.command.v1"
     assert envelope["ok"] is True and envelope["command"] == "acceptance.run"
-    assert_receipt(envelope["result"])
+    result = envelope["result"]
+    assert_receipt(result)
+    assert result["operation"]["attempt"] == 2
+    assert [item["state"] for item in result["operation"]["history"]] == [
+        "planned",
+        "executing",
+        "blocked",
+        "executing",
+        "completed",
+    ]
+    home = Path(result["home"])
+    assert home.parent == temporary_root and home.name == "league-command"
+    assert home.stat().st_mode & 0o777 == 0o700
+    assert json.loads((home / "acceptance-receipt.json").read_text()) == result
+    assert (home / "attempts/attempt-0001").is_dir()
+    assert (home / "attempts/attempt-0002").is_dir()
+    after = (
+        (byte_path / "watcher.bin").read_bytes(),
+        config.read_bytes(),
+        processes.read_bytes(),
+    )
+    assert after == before
+    collision = subprocess.run(
+        command.args,
+        cwd=root,
+        env=environment,
+        text=True,
+        capture_output=True,
+        timeout=10,
+        check=False,
+    )
+    assert collision.returncode == 2
+    assert json.loads(collision.stdout)["error"]["code"] == "namespace_collision"
     ambiguous = subprocess.run(
         [
             str(LEAGUE),
@@ -331,6 +380,48 @@ def test_fail_closed_inputs(root: Path) -> None:
         "invalid_temporary_root",
     )
     refused(
+        lambda: run_acceptance(
+            root.resolve(),
+            "too-many",
+            sentinel_paths=(byte_path,) * (MAX_ACCEPTANCE_SENTINEL_PATHS + 1),
+            config_sentinel=config,
+            process_sentinel=processes,
+            source_root=ROOT,
+        ),
+        "too_many_sentinels",
+    )
+    bounded_command = subprocess.run(
+        [
+            str(LEAGUE),
+            "acceptance",
+            "run",
+            "--temporary-root",
+            str(root.resolve()),
+            "--namespace",
+            "bounded",
+            *(
+                ["--sentinel-path", str(byte_path)]
+                * (MAX_ACCEPTANCE_SENTINEL_PATHS + 1)
+            ),
+            "--config-sentinel",
+            str(config),
+            "--process-sentinel",
+            str(processes),
+        ],
+        cwd=root,
+        env={
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "LC_ALL": "C",
+        },
+        text=True,
+        capture_output=True,
+        timeout=10,
+        check=False,
+    )
+    assert bounded_command.returncode == 2
+    assert "at most 16 sentinel paths are allowed" in bounded_command.stderr
+    refused(
         lambda: validate_hook_fixture("codex", {"schema": "wrong", "harness": "codex"}),
         "invalid_hook_fixture",
     )
@@ -344,6 +435,10 @@ def test_schema_and_command_inventory() -> None:
     )
     assert schema["$schema"] == "https://json-schema.org/draft/2020-12/schema"
     assert schema["additionalProperties"] is False
+    assert schema["properties"]["migration_shadow"]["properties"]["migration"] == {
+        "$ref": "#/$defs/migrationReceipt"
+    }
+    assert len(schema["$defs"]["operationHistory"]["oneOf"]) == 4
     assert all(
         schema["properties"][name]["additionalProperties"] is False
         for name in (
@@ -369,8 +464,7 @@ def test_schema_and_command_inventory() -> None:
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="league-acceptance-test-") as temporary:
         root = Path(temporary)
-        test_full_foundation(root / "full")
-        test_command_without_home(root / "command")
+        test_foundation_through_command_without_home(root / "command")
         test_fail_closed_inputs(root / "failure")
         test_schema_and_command_inventory()
     print(

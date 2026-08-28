@@ -13,14 +13,13 @@ import importlib.util
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
-from . import __version__
+from . import MAX_ACCEPTANCE_SENTINEL_PATHS, __version__
 from .importer import build_import_plan
 from .sqlite_store import CURRENT_SCHEMA_VERSION, SQLiteStorage
 from .storage import StorageRefusal
@@ -357,68 +356,50 @@ def _run_checked(arguments: list[str], *, cwd: Path, env: dict[str, str]) -> str
     return result.stdout
 
 
-def _staged_install(home: Path, source_root: Path) -> dict[str, Any]:
-    if (source_root / "VERSION").read_text(encoding="utf-8").strip() != __version__:
-        raise StorageRefusal("staged_version_failed", "source version declarations disagree")
-    prefix = home / "stage-prefix"
-    release_bundle = home / "release-bundle" / __version__
-    releases = prefix / "releases"
-    release = releases / __version__
-    legacy = releases / "0.0.0-legacy"
-    for directory in (
-        release_bundle,
-        prefix,
-        releases,
-        release,
-        legacy,
-        prefix / "bin",
-    ):
-        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-    (legacy / "bin").mkdir(mode=0o700)
-    legacy_launcher = legacy / "bin/league"
-    _atomic_write(
-        legacy_launcher,
-        b"#!/usr/bin/env python3\nprint('league 0.0.0-legacy')\n",
-        mode=0o755,
-    )
+def _stage_release_bytes(
+    source_root: Path,
+    release_bundle: Path,
+    release: Path,
+    forbidden_paths: tuple[bytes, ...],
+) -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
     source_hashes: dict[str, str] = {}
     release_hashes: dict[str, str] = {}
     staged_hashes: dict[str, str] = {}
     for source in _release_files(source_root):
         relative = source.relative_to(source_root)
+        name = relative.as_posix()
+        mode = 0o755 if relative == Path("bin/league") else 0o644
+        payload = source.read_bytes()
+        if any(value in payload for value in forbidden_paths):
+            raise StorageRefusal(
+                "staged_path_leak", "release source bytes contain a local path leak"
+            )
+        digest = _sha256(payload)
+        source_hashes[name] = digest
         bundle_file = release_bundle / relative
-        bundle_file.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        shutil.copy2(source, bundle_file)
-        os.chmod(bundle_file, 0o755 if relative == Path("bin/league") else 0o644)
         destination = release / relative
-        destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        shutil.copy2(bundle_file, destination)
-        os.chmod(destination, 0o755 if relative == Path("bin/league") else 0o644)
-        source_hashes[relative.as_posix()] = _sha256(source.read_bytes())
-        release_hashes[relative.as_posix()] = _sha256(bundle_file.read_bytes())
-        staged_hashes[relative.as_posix()] = _sha256(destination.read_bytes())
+        _atomic_write(bundle_file, payload, mode=mode)
+        _atomic_write(destination, payload, mode=mode)
+        release_hashes[name] = _sha256(bundle_file.read_bytes())
+        staged_hashes[name] = _sha256(destination.read_bytes())
     if not source_hashes == release_hashes == staged_hashes:
         raise StorageRefusal(
             "staged_parity_failed", "source, release bundle, and staged bytes differ"
         )
-    forbidden = (str(source_root).encode(), str(prefix).encode())
-    for tree in (release_bundle, release):
-        for path in tree.rglob("*"):
-            if path.is_file() and any(value in path.read_bytes() for value in forbidden):
-                raise StorageRefusal(
-                    "staged_path_leak", "release or staged bytes contain a local path leak"
-                )
-    current = prefix / "current"
-    current.symlink_to("releases/0.0.0-legacy")
-    stable = prefix / "bin/league"
-    stable.symlink_to("../current/bin/league")
-    previous_target = os.readlink(current)
-    _switch_symlink(current, f"releases/{__version__}")
-    environment = {
+    return source_hashes, release_hashes, staged_hashes
+
+
+def _staged_environment() -> dict[str, str]:
+    return {
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
         "PYTHONDONTWRITEBYTECODE": "1",
         "LC_ALL": "C",
     }
+
+
+def _check_staged_launcher(
+    stable: Path, home: Path, environment: dict[str, str]
+) -> dict[str, Any]:
     version_output = _run_checked(
         [str(stable), "--version"], cwd=home, env=environment
     ).strip()
@@ -466,12 +447,21 @@ def _staged_install(home: Path, source_root: Path) -> dict[str, Any]:
         raise StorageRefusal(
             "staged_schema_failed", "staged schema migration or integrity check failed"
         )
+    return {
+        "to_version": migration_result["to_version"],
+        "journal_mode": migration_result["policy"]["journal_mode"],
+        "integrity": integrity_result["ok"],
+    }
+
+
+def _check_staged_schemas_and_hooks(
+    release: Path, home: Path, environment: dict[str, str]
+) -> tuple[int, list[dict[str, Any]]]:
     schema_files = sorted((release / "schema").glob("*.json"))
     for schema_file in schema_files:
         value = json.loads(schema_file.read_text(encoding="utf-8"))
         if value.get("$schema") != "https://json-schema.org/draft/2020-12/schema":
             raise StorageRefusal("staged_schema_failed", "staged schema is malformed")
-    hook_checks = []
     hook_script = (
         "import json,sys;"
         "sys.path.insert(0,sys.argv[1]);"
@@ -481,38 +471,114 @@ def _staged_install(home: Path, source_root: Path) -> dict[str, Any]:
         "'session_ref':'synthetic-'+h+'-session'};"
         "print(json.dumps(validate_hook_fixture(h,p),sort_keys=True,separators=(',',':')))"
     )
-    for harness in ("codex", "cursor", "pi"):
-        hook_checks.append(
-            json.loads(
-                _run_checked(
-                    [sys.executable, "-c", hook_script, str(release / "src"), harness],
-                    cwd=home,
-                    env=environment,
-                )
+    hook_checks = [
+        json.loads(
+            _run_checked(
+                [sys.executable, "-c", hook_script, str(release / "src"), harness],
+                cwd=home,
+                env=environment,
             )
         )
+        for harness in ("codex", "cursor", "pi")
+    ]
+    return len(schema_files), hook_checks
+
+
+def _check_staged_permissions(
+    release_bundle: Path,
+    prefix: Path,
+    releases: Path,
+    release: Path,
+    legacy: Path,
+    manifest: dict[str, str],
+) -> None:
     expected_modes = {
         relative: (0o755 if relative == "bin/league" else 0o644)
-        for relative in staged_hashes
+        for relative in manifest
     }
-    observed_modes = {
-        relative: (release / relative).stat().st_mode & 0o777 for relative in staged_hashes
+    staged_modes = {
+        relative: (release / relative).stat().st_mode & 0o777 for relative in manifest
     }
     release_modes = {
         relative: (release_bundle / relative).stat().st_mode & 0o777
-        for relative in release_hashes
+        for relative in manifest
     }
-    if observed_modes != expected_modes or release_modes != expected_modes or any(
+    if staged_modes != expected_modes or release_modes != expected_modes or any(
         path.stat().st_mode & 0o022
         for path in (release_bundle, prefix, releases, release, legacy)
     ):
         raise StorageRefusal(
             "staged_permissions_failed", "staged release permissions are not owner-controlled"
         )
+
+
+def _rollback_staged_pointer(
+    current: Path,
+    stable: Path,
+    previous_target: str,
+    home: Path,
+    environment: dict[str, str],
+) -> dict[str, Any]:
     _switch_symlink(current, previous_target)
-    rollback_version = _run_checked([str(stable), "--version"], cwd=home, env=environment).strip()
+    rollback_version = _run_checked(
+        [str(stable), "--version"], cwd=home, env=environment
+    ).strip()
     if rollback_version != "league 0.0.0-legacy":
-        raise StorageRefusal("staged_rollback_failed", "staged stable pointer did not roll back")
+        raise StorageRefusal(
+            "staged_rollback_failed", "staged stable pointer did not roll back"
+        )
+    return {
+        "completed": True,
+        "restored_target": previous_target,
+        "observed_version": rollback_version.removeprefix("league "),
+    }
+
+
+def _staged_install(home: Path, source_root: Path) -> dict[str, Any]:
+    if (source_root / "VERSION").read_text(encoding="utf-8").strip() != __version__:
+        raise StorageRefusal("staged_version_failed", "source version declarations disagree")
+    prefix = home / "stage-prefix"
+    release_bundle = home / "release-bundle" / __version__
+    releases = prefix / "releases"
+    release = releases / __version__
+    legacy = releases / "0.0.0-legacy"
+    for directory in (
+        release_bundle,
+        prefix,
+        releases,
+        release,
+        legacy,
+        prefix / "bin",
+    ):
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    (legacy / "bin").mkdir(mode=0o700)
+    legacy_launcher = legacy / "bin/league"
+    _atomic_write(
+        legacy_launcher,
+        b"#!/usr/bin/env python3\nprint('league 0.0.0-legacy')\n",
+        mode=0o755,
+    )
+    forbidden = (str(source_root).encode(), str(prefix).encode())
+    source_hashes, release_hashes, staged_hashes = _stage_release_bytes(
+        source_root, release_bundle, release, forbidden
+    )
+    current = prefix / "current"
+    current.symlink_to("releases/0.0.0-legacy")
+    stable = prefix / "bin/league"
+    stable.symlink_to("../current/bin/league")
+    previous_target = os.readlink(current)
+    _switch_symlink(current, f"releases/{__version__}")
+    environment = _staged_environment()
+    schema_migration = _check_staged_launcher(stable, home, environment)
+    schema_count, hook_checks = _check_staged_schemas_and_hooks(
+        release, home, environment
+    )
+    _check_staged_permissions(
+        release_bundle, prefix, releases, release, legacy, staged_hashes
+    )
+    rollback = _rollback_staged_pointer(
+        current, stable, previous_target, home, environment
+    )
     source_manifest_digest = _sha256(_stable_bytes(source_hashes))
     release_manifest_digest = _sha256(_stable_bytes(release_hashes))
     staged_manifest_digest = _sha256(_stable_bytes(staged_hashes))
@@ -526,20 +592,12 @@ def _staged_install(home: Path, source_root: Path) -> dict[str, Any]:
         "file_count": len(source_hashes),
         "launcher_resolution": True,
         "help_checked": True,
-        "schemas_checked": len(schema_files),
-        "schema_migration": {
-            "to_version": migration_result["to_version"],
-            "journal_mode": migration_result["policy"]["journal_mode"],
-            "integrity": integrity_result["ok"],
-        },
+        "schemas_checked": schema_count,
+        "schema_migration": schema_migration,
         "hook_fixtures": hook_checks,
         "permissions_checked": True,
         "path_leaks": False,
-        "rollback": {
-            "completed": True,
-            "restored_target": previous_target,
-            "observed_version": rollback_version.removeprefix("league "),
-        },
+        "rollback": rollback,
     }
 
 
@@ -555,6 +613,117 @@ def _operation_write(
     _write_json(path, receipt)
 
 
+class _InjectedCutoverCrash(RuntimeError):
+    pass
+
+
+def _set_sandbox_writers(
+    path: Path,
+    values: list[dict[str, str]],
+    history: list[list[str]],
+) -> None:
+    if len(values) > 1:
+        raise StorageRefusal("dual_writer", "two canonical writers are forbidden")
+    _write_json(path, {"active": values})
+    history.append([item["generation"] for item in values])
+
+
+def _coherent_sandbox_writer(pointer_path: Path, writers_path: Path) -> dict[str, Any]:
+    pointer = json.loads(pointer_path.read_text(encoding="utf-8"))
+    writers = json.loads(writers_path.read_text(encoding="utf-8"))["active"]
+    if len(writers) != 1 or writers[0]["generation"] != pointer["generation"]:
+        raise StorageRefusal("generation_mismatch", "writer and pointer generations disagree")
+    return pointer
+
+
+def _write_cutover_journal(
+    path: Path,
+    old: dict[str, str],
+    new: dict[str, str],
+    stage: str,
+    state: str,
+    *,
+    selected_generation: Optional[str] = None,
+) -> None:
+    value: dict[str, Any] = {
+        "schema": "league.cutover-journal.v1",
+        "state": state,
+        "stage": stage,
+        "old": old,
+        "new": new,
+    }
+    if selected_generation is not None:
+        value["selected_generation"] = selected_generation
+    _write_json(path, value)
+
+
+def _inject_cutover_crash(fault_stage: Optional[str], stage: str) -> None:
+    if fault_stage == stage:
+        raise _InjectedCutoverCrash(stage)
+
+
+def _reconcile_cutover_startup(
+    root: Path,
+    context: DeterministicContext,
+    old: dict[str, str],
+    new: dict[str, str],
+    writer_history: list[list[str]],
+    operation: dict[str, Any],
+    *,
+    resume: bool,
+) -> dict[str, Any]:
+    lock_path = root / "cutover.lock"
+    pointer_path = root / "writer-pointer.json"
+    writers_path = root / "writers.json"
+    journal_path = root / "cutover-journal.json"
+    operation_path = root / "operation.json"
+    with lock_path.open("a+b") as lock_handle:
+        fcntl.flock(lock_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        journal = json.loads(journal_path.read_text(encoding="utf-8"))
+        if (
+            journal.get("schema") != "league.cutover-journal.v1"
+            or journal.get("state") != "executing"
+            or journal.get("old") != old
+            or journal.get("new") != new
+            or journal.get("stage") != operation["fault_stage"]
+        ):
+            raise StorageRefusal(
+                "cutover_recovery_failed", "cutover recovery journal is inconsistent"
+            )
+        selected = json.loads(pointer_path.read_text(encoding="utf-8"))
+        if selected not in (old, new):
+            raise StorageRefusal(
+                "cutover_recovery_failed", "cutover pointer is not a journal generation"
+            )
+        _set_sandbox_writers(writers_path, [selected], writer_history)
+        _coherent_sandbox_writer(pointer_path, writers_path)
+        _write_cutover_journal(
+            journal_path,
+            old,
+            new,
+            journal["stage"],
+            "reconciled",
+            selected_generation=selected["generation"],
+        )
+        _operation_write(
+            operation_path,
+            operation,
+            "blocked",
+            context,
+            stage=operation["fault_stage"],
+            resumable=True,
+        )
+        if resume:
+            _operation_write(
+                operation_path, operation, "executing", context, stage="resume"
+            )
+            outcome = "new" if selected["generation"] == new["generation"] else "old"
+            _operation_write(
+                operation_path, operation, "completed", context, outcome=outcome
+            )
+        return selected
+
+
 def _cutover_case(
     root: Path,
     context: DeterministicContext,
@@ -567,6 +736,7 @@ def _cutover_case(
     pointer_path = root / "writer-pointer.json"
     writers_path = root / "writers.json"
     operation_path = root / "operation.json"
+    journal_path = root / "cutover-journal.json"
     old = {
         "schema": "league.writer-pointer.v1",
         "generation": "generation-old",
@@ -580,22 +750,8 @@ def _cutover_case(
         "version": __version__,
     }
     _write_json(pointer_path, old)
-    history: list[list[str]] = []
-
-    def set_writers(values: list[dict[str, str]]) -> None:
-        if len(values) > 1:
-            raise StorageRefusal("dual_writer", "two canonical writers are forbidden")
-        _write_json(writers_path, {"active": values})
-        history.append([item["generation"] for item in values])
-
-    def coherent() -> dict[str, Any]:
-        pointer = json.loads(pointer_path.read_text(encoding="utf-8"))
-        writers = json.loads(writers_path.read_text(encoding="utf-8"))["active"]
-        if len(writers) != 1 or writers[0]["generation"] != pointer["generation"]:
-            raise StorageRefusal("generation_mismatch", "writer and pointer generations disagree")
-        return pointer
-
-    set_writers([old])
+    writer_history: list[list[str]] = []
+    _set_sandbox_writers(writers_path, [old], writer_history)
     receipt = {
         "schema": "league.cutover-operation.v1",
         "operation_id": context.identifier("cutover-operation"),
@@ -603,69 +759,95 @@ def _cutover_case(
         "history": [],
     }
     _operation_write(operation_path, receipt, "planned", context)
-    with lock_path.open("a+b") as lock_handle:
-        fcntl.flock(lock_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        second = lock_path.open("a+b")
-        try:
+    try:
+        with lock_path.open("a+b") as lock_handle:
+            fcntl.flock(lock_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            second = lock_path.open("a+b")
             try:
-                fcntl.flock(second, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                lock_exclusive = True
-            else:
-                lock_exclusive = False
-                fcntl.flock(second, fcntl.LOCK_UN)
-        finally:
-            second.close()
-        if not lock_exclusive:
-            raise StorageRefusal("cutover_lock_failed", "exclusive cutover lock was not exclusive")
-        _operation_write(operation_path, receipt, "executing", context, stage="lock_acquired")
-        try:
-            if fault_stage == "lock_acquired":
-                raise RuntimeError(fault_stage)
-            _write_json(root / "pointer-backup.json", old)
-            if fault_stage == "backup_recorded":
-                raise RuntimeError(fault_stage)
-            set_writers([])
-            if fault_stage == "old_writer_quiesced":
-                raise RuntimeError(fault_stage)
-            _write_json(root / "pointer.next.json", new)
-            if fault_stage == "pointer_prepared":
-                raise RuntimeError(fault_stage)
-            os.replace(root / "pointer.next.json", pointer_path)
-            if fault_stage == "pointer_switched":
-                raise RuntimeError(fault_stage)
-            set_writers([new])
-            if fault_stage == "new_writer_activated":
-                raise RuntimeError(fault_stage)
-            coherent()
-            if fault_stage == "generation_verified":
-                raise RuntimeError(fault_stage)
-            _operation_write(operation_path, receipt, "completed", context, outcome="new")
-        except RuntimeError:
-            selected = json.loads(pointer_path.read_text(encoding="utf-8"))
-            set_writers([new if selected["generation"] == new["generation"] else old])
-            coherent()
+                try:
+                    fcntl.flock(second, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    lock_exclusive = True
+                else:
+                    lock_exclusive = False
+                    fcntl.flock(second, fcntl.LOCK_UN)
+            finally:
+                second.close()
+            if not lock_exclusive:
+                raise StorageRefusal(
+                    "cutover_lock_failed", "exclusive cutover lock was not exclusive"
+                )
             _operation_write(
-                operation_path,
-                receipt,
-                "blocked",
-                context,
-                stage=fault_stage,
-                resumable=True,
+                operation_path, receipt, "executing", context, stage="lock_acquired"
             )
-            if resume:
-                _operation_write(operation_path, receipt, "executing", context, stage="resume")
-                outcome = "new" if selected["generation"] == new["generation"] else "old"
-                _operation_write(operation_path, receipt, "completed", context, outcome=outcome)
-    final = coherent()
+            _write_cutover_journal(
+                journal_path, old, new, "lock_acquired", "executing"
+            )
+            _inject_cutover_crash(fault_stage, "lock_acquired")
+            _write_json(root / "pointer-backup.json", old)
+            _write_cutover_journal(
+                journal_path, old, new, "backup_recorded", "executing"
+            )
+            _inject_cutover_crash(fault_stage, "backup_recorded")
+            _set_sandbox_writers(writers_path, [], writer_history)
+            _write_cutover_journal(
+                journal_path, old, new, "old_writer_quiesced", "executing"
+            )
+            _inject_cutover_crash(fault_stage, "old_writer_quiesced")
+            _write_json(root / "pointer.next.json", new)
+            _write_cutover_journal(
+                journal_path, old, new, "pointer_prepared", "executing"
+            )
+            _inject_cutover_crash(fault_stage, "pointer_prepared")
+            os.replace(root / "pointer.next.json", pointer_path)
+            _write_cutover_journal(
+                journal_path, old, new, "pointer_switched", "executing"
+            )
+            _inject_cutover_crash(fault_stage, "pointer_switched")
+            _set_sandbox_writers(writers_path, [new], writer_history)
+            _write_cutover_journal(
+                journal_path, old, new, "new_writer_activated", "executing"
+            )
+            _inject_cutover_crash(fault_stage, "new_writer_activated")
+            _coherent_sandbox_writer(pointer_path, writers_path)
+            _write_cutover_journal(
+                journal_path, old, new, "generation_verified", "executing"
+            )
+            _inject_cutover_crash(fault_stage, "generation_verified")
+            _operation_write(operation_path, receipt, "completed", context, outcome="new")
+            _write_cutover_journal(
+                journal_path,
+                old,
+                new,
+                "generation_verified",
+                "completed",
+                selected_generation=new["generation"],
+            )
+    except _InjectedCutoverCrash:
+        final = _reconcile_cutover_startup(
+            root,
+            context,
+            old,
+            new,
+            writer_history,
+            receipt,
+            resume=resume,
+        )
+        startup_reconciled = True
+    else:
+        final = _coherent_sandbox_writer(pointer_path, writers_path)
+        startup_reconciled = False
+    journal = json.loads(journal_path.read_text(encoding="utf-8"))
     return {
         "fault_stage": fault_stage,
         "terminal_state": receipt["state"],
         "final_generation": final["generation"],
         "history": receipt["history"],
-        "max_active_writers": max(len(item) for item in history),
+        "max_active_writers": max(len(item) for item in writer_history),
         "lock_exclusive": True,
         "coherent": True,
+        "journal_state": journal["state"],
+        "startup_reconciled": startup_reconciled,
     }
 
 
@@ -686,6 +868,7 @@ def _cutover_matrix(home: Path, context: DeterministicContext) -> dict[str, Any]
         "pointer_schema": "league.writer-pointer.v1",
         "generation_bound": True,
         "exclusive_lock": True,
+        "crash_recovery_journal": True,
         "fault_stages": list(POINTER_STAGES),
         "cases": cases,
         "never_two_writers": True,
@@ -744,6 +927,69 @@ def _canary(
     }
 
 
+def _acceptance_operation_write(
+    path: Path,
+    operation: dict[str, Any],
+    state: str,
+    context: DeterministicContext,
+    attempt: int,
+    **extra: Any,
+) -> None:
+    operation["state"] = state
+    operation["attempt"] = attempt
+    operation["history"].append(
+        {"state": state, "at": context.at, "attempt": attempt, **extra}
+    )
+    _write_json(path, operation)
+
+
+def _load_blocked_acceptance_operation(
+    path: Path, namespace: str, sentinel_sha256: str
+) -> dict[str, Any]:
+    if not path.is_file() or path.is_symlink():
+        raise StorageRefusal(
+            "namespace_collision", "acceptance namespace already exists"
+        )
+    try:
+        operation = json.loads(
+            path.read_text(encoding="utf-8"), object_pairs_hook=_reject_duplicate_pairs
+        )
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise StorageRefusal(
+            "resume_refused", "acceptance operation receipt is malformed"
+        ) from exc
+    if (
+        isinstance(operation, dict)
+        and operation.get("schema") == "league.acceptance-operation.v1"
+        and operation.get("namespace") == namespace
+        and operation.get("state") != "blocked"
+    ):
+        raise StorageRefusal(
+            "namespace_collision", "acceptance namespace already exists"
+        )
+    history = operation.get("history") if isinstance(operation, dict) else None
+    last = history[-1] if isinstance(history, list) and history else None
+    if (
+        not isinstance(operation, dict)
+        or set(operation)
+        != {"schema", "namespace", "state", "attempt", "sentinel_sha256", "history"}
+        or operation.get("schema") != "league.acceptance-operation.v1"
+        or operation.get("namespace") != namespace
+        or operation.get("state") != "blocked"
+        or operation.get("sentinel_sha256") != sentinel_sha256
+        or not isinstance(operation.get("attempt"), int)
+        or isinstance(operation.get("attempt"), bool)
+        or operation["attempt"] < 1
+        or not isinstance(last, dict)
+        or last.get("state") != "blocked"
+        or last.get("resumable") is not True
+    ):
+        raise StorageRefusal(
+            "resume_refused", "acceptance operation cannot resume safely"
+        )
+    return operation
+
+
 def run_acceptance(
     temporary_root: Path,
     namespace: str,
@@ -767,73 +1013,132 @@ def run_acceptance(
         raise StorageRefusal("invalid_namespace", "acceptance namespace is invalid")
     if not sentinel_paths:
         raise StorageRefusal("sentinel_required", "at least one byte sentinel is required")
+    if len(sentinel_paths) > MAX_ACCEPTANCE_SENTINEL_PATHS:
+        raise StorageRefusal(
+            "too_many_sentinels",
+            f"at most {MAX_ACCEPTANCE_SENTINEL_PATHS} byte sentinels are allowed",
+        )
     source = (source_root or Path(__file__).resolve().parents[2]).resolve()
     sentinels = SentinelSet(
         tuple(Path(path) for path in sentinel_paths),
         Path(config_sentinel),
         Path(process_sentinel),
     )
+    sentinel_sha256 = _sha256(_stable_bytes(sentinels.before))
     home = root / f"league-{namespace}"
     try:
         home.mkdir(mode=0o700)
     except FileExistsError as exc:
-        raise StorageRefusal("namespace_collision", "acceptance namespace already exists") from exc
-    context = DeterministicContext()
-    adapters = _fake_adapters(context)
-    adapters["harness"].call("create", namespace=namespace)
-    adapters["terminal_backend"].call("create-namespace", namespace=namespace)
-    adapters["git"].call("inspect-fixture", repository="synthetic://repository")
-    adapters["github"].call("inspect-fixture", repository="synthetic://repository")
-    adapters["notification"].call("record-only", delivery="disabled")
-    adapters["deployment"].call("record-only", deployment="disabled")
-    for harness in ("codex", "cursor", "pi"):
-        adapters["hook"].call(
-            "consume-fixture",
-            **validate_hook_fixture(
-                harness,
-                {
-                    "schema": HOOK_FIXTURE_SCHEMA,
-                    "harness": harness,
-                    "event": "stop",
-                    "session_ref": f"synthetic-{harness}-session",
-                },
-            ),
+        if not home.is_dir() or home.is_symlink():
+            raise StorageRefusal(
+                "namespace_collision", "acceptance namespace already exists"
+            ) from exc
+        operation = _load_blocked_acceptance_operation(
+            home / "acceptance-operation.json", namespace, sentinel_sha256
         )
-    migration = _migration_shadow(home, source)
-    staged = _staged_install(home, source)
-    cutover = _cutover_matrix(home / "cutover", context)
-    canary = _canary(home, context, adapters)
-    sentinel_receipt = sentinels.verify()
-    adapter_receipt = {
-        name: {"kind": f"fake-{adapter.name}", "calls": len(adapter.calls), "real": False}
-        for name, adapter in adapters.items()
-    }
-    result = {
-        "schema": RECEIPT_SCHEMA,
-        "version": __version__,
-        "namespace": namespace,
-        "home": str(home),
-        "determinism": {"clock": context.at, "ids_allocated": context.sequence},
-        "sentinels": sentinel_receipt,
-        "migration_shadow": migration,
-        "staged_install": staged,
-        "cutover": cutover,
-        "canary": canary,
-        "adapters": adapter_receipt,
-        "pending_assertions": [
-            {
-                "slice": name,
-                "issue": issue,
-                "status": "pending",
-                "passed": False,
-                "reason": "owning lifecycle slice is not merged",
+        attempt = operation["attempt"] + 1
+    else:
+        attempt = 1
+        operation = {
+            "schema": "league.acceptance-operation.v1",
+            "namespace": namespace,
+            "state": "planned",
+            "attempt": attempt,
+            "sentinel_sha256": sentinel_sha256,
+            "history": [],
+        }
+    context = DeterministicContext()
+    operation_path = home / "acceptance-operation.json"
+    if not operation["history"]:
+        _acceptance_operation_write(
+            operation_path, operation, "planned", context, attempt
+        )
+    _acceptance_operation_write(
+        operation_path, operation, "executing", context, attempt
+    )
+    work = home / "attempts" / f"attempt-{attempt:04d}"
+    try:
+        try:
+            work.mkdir(parents=True, mode=0o700)
+        except FileExistsError as exc:
+            raise StorageRefusal(
+                "resume_refused", "acceptance attempt directory already exists"
+            ) from exc
+        adapters = _fake_adapters(context)
+        adapters["harness"].call("create", namespace=namespace)
+        adapters["terminal_backend"].call("create-namespace", namespace=namespace)
+        adapters["git"].call("inspect-fixture", repository="synthetic://repository")
+        adapters["github"].call("inspect-fixture", repository="synthetic://repository")
+        adapters["notification"].call("record-only", delivery="disabled")
+        adapters["deployment"].call("record-only", deployment="disabled")
+        for harness in ("codex", "cursor", "pi"):
+            adapters["hook"].call(
+                "consume-fixture",
+                **validate_hook_fixture(
+                    harness,
+                    {
+                        "schema": HOOK_FIXTURE_SCHEMA,
+                        "harness": harness,
+                        "event": "stop",
+                        "session_ref": f"synthetic-{harness}-session",
+                    },
+                ),
+            )
+        migration = _migration_shadow(work, source)
+        staged = _staged_install(work, source)
+        cutover = _cutover_matrix(work / "cutover", context)
+        canary = _canary(work, context, adapters)
+        sentinel_receipt = sentinels.verify()
+        adapter_receipt = {
+            name: {
+                "kind": f"fake-{adapter.name}",
+                "calls": len(adapter.calls),
+                "real": False,
             }
-            for name, issue in PENDING_SLICES
-        ],
-        "runtime_claims": [
-            {"runtime": name, "status": "unverified", "mock_proof": False}
-            for name in UNVERIFIED_RUNTIMES
-        ],
-    }
-    _write_json(home / "acceptance-receipt.json", result)
-    return result
+            for name, adapter in adapters.items()
+        }
+        _acceptance_operation_write(
+            operation_path, operation, "completed", context, attempt
+        )
+        result = {
+            "schema": RECEIPT_SCHEMA,
+            "version": __version__,
+            "namespace": namespace,
+            "home": str(home),
+            "operation": operation,
+            "determinism": {"clock": context.at, "ids_allocated": context.sequence},
+            "sentinels": sentinel_receipt,
+            "migration_shadow": migration,
+            "staged_install": staged,
+            "cutover": cutover,
+            "canary": canary,
+            "adapters": adapter_receipt,
+            "pending_assertions": [
+                {
+                    "slice": name,
+                    "issue": issue,
+                    "status": "pending",
+                    "passed": False,
+                    "reason": "owning lifecycle slice is not merged",
+                }
+                for name, issue in PENDING_SLICES
+            ],
+            "runtime_claims": [
+                {"runtime": name, "status": "unverified", "mock_proof": False}
+                for name in UNVERIFIED_RUNTIMES
+            ],
+        }
+        _write_json(home / "acceptance-receipt.json", result)
+        return result
+    except BaseException as exc:
+        error_code = exc.code if isinstance(exc, StorageRefusal) else "acceptance_failed"
+        _acceptance_operation_write(
+            operation_path,
+            operation,
+            "blocked",
+            context,
+            attempt,
+            error_code=error_code,
+            resumable=True,
+        )
+        raise

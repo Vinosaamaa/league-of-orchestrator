@@ -82,18 +82,10 @@ any later reversible cutover.
 
 `src/league/acceptance.py`, `schema/league-acceptance-receipt.schema.json`,
 `docs/ACCEPTANCE.md`, and `tests/test_acceptance_harness.py` are original League
-implementation. The harness composes the issue-#19 storage/import surface with
-deterministic synthetic adapters and the source-managed legacy fixture. Its
-staging manifest copies exact repository bytes only beneath an explicit
-task-owned prefix and verifies a stable-pointer rollback there. No installer,
-global hook mutation, live import, watcher replacement, external delivery, or
-real harness/backend operation is included.
-
-The global `--state-root` parser option is optional only so `acceptance run`
-can use its separately named temporary root. Every storage and domain command
-still refuses without an explicit state root, and acceptance refuses a supplied
-state root to prevent ambiguous ownership. Focused command tests cover both
-refusals.
+implementation for issue #23. `VERSION` and the CLI extension are also original
+League work. The canonical behavior, safety boundaries, and verification
+contract live in [`docs/ACCEPTANCE.md`](ACCEPTANCE.md); this file records source
+origin and ownership only.
 
 Tests that require process inspection explicitly inject the single
 `tests/fakes/ps` adapter through `tests/process_adapter.py`; Make targets do not

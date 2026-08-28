@@ -25,10 +25,18 @@ The process sentinel is synthetic and has this exact outer shape:
 ```
 
 The command refuses missing, relative, symbolic-link, or malformed sentinels
-and refuses an existing namespace. It leaves an owner-only
+and refuses an existing namespace. It accepts at most 16 byte sentinels so a
+caller cannot create an unbounded preflight workload. The global
+`--state-root` option remains mandatory for storage and domain commands, while
+`acceptance run` uses only its separately named temporary root and refuses a
+supplied state root. It leaves an owner-only
 `acceptance-receipt.json` in the new home. The receipt conforms to
 `schema/league-acceptance-receipt.schema.json` and records:
 
+- a durable planned/executing/completed operation history; a failed attempt is
+  recorded as resumable `blocked`, and the same command resumes it in a new
+  isolated attempt only when the namespace and sentinel fingerprint still
+  match;
 - deterministic IDs and a fixed fake clock;
 - fake harness, terminal, Git/GitHub, process/resource, notification,
   deployment, and hook adapters;
@@ -40,8 +48,10 @@ and refuses an existing namespace. It leaves an owner-only
   fixtures, permissions, path-leak refusal, and tested pointer rollback beneath
   a task-owned prefix;
 - one sandbox-only generation-bound writer pointer and exclusive cutover lock;
-- every pointer-switch fault stage, resumable operation histories, coherent
-  old/new recovery, and the invariant that no scenario activates two writers;
+- every pointer-switch fault stage, a durable recovery journal reconciled after
+  a simulated process restart under the exclusive lock, resumable operation
+  histories, coherent old/new recovery, and the invariant that no scenario
+  activates two writers;
 - exact fake canary registration and identity-bound cleanup.
 
 The request, assignment, watcher, Stop, and teardown assertions remain

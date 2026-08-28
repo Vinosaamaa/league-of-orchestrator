@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 from typing import Any, BinaryIO, Callable, Optional
 
-from . import __version__
+from . import MAX_ACCEPTANCE_SENTINEL_PATHS, __version__
 from .importer import build_import_plan
 from .sqlite_store import DEFAULT_BUSY_TIMEOUT_MS, MAX_EXPORT_RECORDS, SQLiteStorage
 from .storage import Storage, StorageRefusal
@@ -21,6 +21,24 @@ CommandResult = tuple[Any, Optional[bytes]]
 CommandHandler = Callable[[Storage, argparse.Namespace], CommandResult]
 
 
+class _BoundedSentinelPath(argparse.Action):
+    def __call__(
+        self,
+        parser: argparse.ArgumentParser,
+        namespace: argparse.Namespace,
+        value: Path,
+        option_string: Optional[str] = None,
+    ) -> None:
+        paths = list(getattr(namespace, self.dest, None) or [])
+        if len(paths) >= MAX_ACCEPTANCE_SENTINEL_PATHS:
+            raise argparse.ArgumentError(
+                self,
+                f"at most {MAX_ACCEPTANCE_SENTINEL_PATHS} sentinel paths are allowed",
+            )
+        paths.append(value)
+        setattr(namespace, self.dest, paths)
+
+
 def _add_acceptance_commands(groups: argparse._SubParsersAction) -> None:
     acceptance = groups.add_parser(
         "acceptance", help="Run isolated acceptance beneath an explicit temporary root."
@@ -29,7 +47,12 @@ def _add_acceptance_commands(groups: argparse._SubParsersAction) -> None:
     run = commands.add_parser("run", help="Create and verify one namespaced disposable League home.")
     run.add_argument("--temporary-root", type=Path, required=True)
     run.add_argument("--namespace", required=True)
-    run.add_argument("--sentinel-path", type=Path, action="append", required=True)
+    run.add_argument(
+        "--sentinel-path",
+        type=Path,
+        action=_BoundedSentinelPath,
+        required=True,
+    )
     run.add_argument("--config-sentinel", type=Path, required=True)
     run.add_argument("--process-sentinel", type=Path, required=True)
 

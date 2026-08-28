@@ -182,3 +182,28 @@ exact rollback, tail release, sole-compatible reuse, immutable history, and
 concurrent/crash retry. Focused rollover tests cover the bounded snapshot,
 exact acknowledgement, owner CAS, single event/outbox, intake fencing,
 pre-switch abort, post-switch drain, and unchanged Champion bindings.
+
+## Reporting and privacy implementation provenance
+
+The issue-#22/#25 reporting, privacy, guarded remote adapter, report renderer,
+HTML template, report skill, source-managed shared instruction, explicit-root
+guidance adapter, schemas, documentation, public-safety gate, and focused tests
+are original League implementation. No harness transcript, live Roster,
+multiplexer, browser profile, global instruction, installed file, remote
+transport, deployment, or personal/application record was read or modified to
+author them. Visual language is adapted from this repository's source-managed
+Project Ledger artifact; no asset or runtime dependency is copied from it.
+
+The candidate preserves exact local roots, repositories, and evidence only in
+the canonical local store. Outbound projections contain bounded summaries,
+approved public URLs, opaque League IDs, hashes, and explicit placeholders.
+The report skill uses only public `league report` commands and the cross-harness
+guide remains an uninstalled source input owned for later staging by issue #23.
+
+This branch was rebased onto canonical main
+`f015a5c34efca039accc911f8995a340eb067fc7`, whose merge tree is
+`8e18b33caca431b12a462da31610abdf5af318a1`, before assigning contiguous
+migration v7. Migration v7 is named
+`bounded-reporting-and-outbound-privacy`, checksum
+`bebe90eb841eac2a0b42d3f89e321cb4f3f8b23b02d92febf5a4ea2a50727cde`;
+canonical v6 remains byte-for-byte unchanged.

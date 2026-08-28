@@ -340,6 +340,10 @@ class ImportPlanner:
             "root_key": None,
             "code": None,
             "code_key": None,
+            "repository_visibility": "unknown",
+            "export_policy": "deny",
+            "root_classification": "local_only",
+            "repository_classification": "local_only",
         }
         self.projects[project_id] = row
         self.project_by_repository[repository_key] = project_id

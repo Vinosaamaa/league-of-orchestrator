@@ -34,12 +34,12 @@ The repository keeps the proven runtime and new storage boundary separate:
 - `tests/` exercises the imported behavior with temporary synthetic fixtures.
 - `src/league/storage.py` composes the only domain-facing persistence interface
   from cohesive administrative, lifecycle, request, assignment, outbox,
-  watcher, delivery, transfer, project, and Roster protocols;
+  watcher, delivery, transfer, project, Roster, evidence, and reporting protocols;
   `storage_types.py` owns the stable refusal and typed import-plan contract.
 - `src/league/sqlite_store.py` is the sole SQLite implementation and facade.
   `sqlite_core.py` owns the shared transaction mechanics; focused
   `sqlite_*_ops.py` modules own lifecycle, request, assignment, delivery,
-  watcher, catalog, Roster, import, and export SQL,
+  watcher, catalog, Roster, reporting, import, and export SQL,
   while the facade owns connection policy, migrations, integrity, and backup.
 - `src/league/importer.py` strictly decodes the explicit issue-#18 manifest and
   produces an in-memory plan; it never opens a database or writes legacy files.
@@ -54,6 +54,14 @@ The repository keeps the proven runtime and new storage boundary separate:
   capability-profile resolution, bounded content hashing, and sanitized
   duplicate/install parity. It consumes the existing adapter matrix but does
   not load skills, inspect bodies semantically, or mutate a custom root.
+- `src/league/privacy.py` owns the single exact-byte outbound validator;
+  `remote_adapters.py` makes it mandatory immediately before every current or
+  future League remote transport. `guidance.py` has an explicit-root staging
+  API only and cannot discover or update installed guidance.
+- `src/league/sqlite_report_ops.py` streams indexed canonical facts into one
+  bounded stable JSON report. `reporting.py` derives Markdown and portable HTML
+  from that object without another data source. The repository reporting skill
+  invokes only the public command facade.
 - `src/league/cli.py` and `bin/league` expose stable domain commands and
   versioned JSON envelopes without a general query or SQL command.
 - `schema/league-*.schema.json` defines command, import-report, and export
@@ -140,6 +148,12 @@ The repository-local SQLite path is separately testable:
 15. `league.roster-snapshot.v1` groups current work from one bounded read
     transaction. It is non-canonical, has explicit limits/truncation, and links
     every item to exact canonical keys without persisting a report cache.
+16. `league.report.v1` streams timestamp-indexed canonical facts and refuses
+    both fact and completion scans above their explicit bounds. Markdown and
+    portable HTML are pure renderers over that versioned JSON object.
+17. Exact project roots and full evidence remain classified `local_only`.
+    Every remote adapter validates the final rendered bytes with the same
+    fail-closed policy immediately before invoking its injected transport.
 
 `src/agent_watcher.py` does not import `league`. The filesystem baseline is the
 only live writer until issue #23 switches every consumer at one authorized

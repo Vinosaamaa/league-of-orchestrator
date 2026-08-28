@@ -38,7 +38,14 @@ HANDOFF_CALLSIGN_TESTS := \
 ACCEPTANCE_TESTS := \
 	tests/test_acceptance_harness.py
 
-.PHONY: test test-baseline test-storage test-project-roster test-acceptance test-request-lifecycle test-runtime-lifecycle test-skill-contracts test-handoff-callsigns test-affected test-all
+REPORTING_PRIVACY_TESTS := \
+	tests/test_privacy.py \
+	tests/test_guidance_installer.py \
+	tests/test_public_safety.py \
+	tests/test_reporting.py \
+	tests/test_reporting_performance.py
+
+.PHONY: test test-baseline test-storage test-project-roster test-acceptance test-request-lifecycle test-runtime-lifecycle test-skill-contracts test-handoff-callsigns test-reporting-privacy test-public-safety test-affected test-all
 test:
 	@$(MAKE) --no-print-directory test-baseline
 
@@ -80,6 +87,14 @@ test-acceptance:
 		PYTHONDONTWRITEBYTECODE=1 $(PYTHON) $$test; \
 	done
 
-test-affected: test-storage test-acceptance test-request-lifecycle test-runtime-lifecycle test-skill-contracts test-handoff-callsigns
+test-reporting-privacy:
+	@set -eu; for test in $(REPORTING_PRIVACY_TESTS); do \
+		PYTHONDONTWRITEBYTECODE=1 $(PYTHON) $$test; \
+	done
+
+test-public-safety:
+	@PYTHONDONTWRITEBYTECODE=1 $(PYTHON) scripts/public_safety.py --base origin/main --head HEAD
+
+test-affected: test-storage test-acceptance test-request-lifecycle test-runtime-lifecycle test-skill-contracts test-handoff-callsigns test-reporting-privacy
 
 test-all: test-baseline test-affected

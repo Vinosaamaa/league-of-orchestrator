@@ -1,0 +1,177 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Vinosaamaa/league-of-orchestrator/schema/league-report.schema.json",
+  "title": "League deterministic bounded evidence report",
+  "type": "object",
+  "required": ["schema", "mode", "report", "completion", "totals", "pagination", "chronological", "owner_grouped", "recurring_repairs", "approved_public_urls"],
+  "properties": {
+    "schema": {"const": "league.report.v1"},
+    "mode": {"enum": ["outbound_safe", "local_diagnostic"]},
+    "report": {"$ref": "#/$defs/report_identity"},
+    "completion": {"$ref": "#/$defs/completion"},
+    "totals": {"$ref": "#/$defs/totals"},
+    "pagination": {"$ref": "#/$defs/pagination"},
+    "chronological": {"type": "array", "maxItems": 1000, "items": {"$ref": "#/$defs/fact"}},
+    "owner_grouped": {"type": "array", "maxItems": 1000, "items": {"$ref": "#/$defs/owner_group"}},
+    "recurring_repairs": {"$ref": "#/$defs/repairs"},
+    "approved_public_urls": {"type": "array", "maxItems": 1000, "uniqueItems": true, "items": {"type": "string", "format": "uri"}}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "report_identity": {
+      "type": "object",
+      "required": ["report_id", "created_at", "spec_hash", "content_hash", "event_watermark", "source_watermark", "from", "to", "timezone", "from_inclusive", "scope", "reproduction"],
+      "properties": {
+        "report_id": {"type": "string", "minLength": 1, "maxLength": 192},
+        "created_at": {"type": "string", "format": "date-time"},
+        "spec_hash": {"$ref": "#/$defs/sha256"},
+        "content_hash": {"$ref": "#/$defs/sha256"},
+        "event_watermark": {"type": "integer", "minimum": 0},
+        "source_watermark": {"$ref": "#/$defs/sha256"},
+        "from": {"type": "string", "format": "date-time"},
+        "to": {"type": "string", "format": "date-time"},
+        "timezone": {"type": "string", "minLength": 1, "maxLength": 128},
+        "from_inclusive": {"type": "boolean"},
+        "scope": {"$ref": "#/$defs/report_scope"},
+        "reproduction": {
+          "type": "object",
+          "required": ["requested", "matches_stored_hash", "expected_content_hash", "observed_content_hash"],
+          "properties": {
+            "requested": {"type": "boolean"},
+            "matches_stored_hash": {"type": "boolean"},
+            "expected_content_hash": {"anyOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]},
+            "observed_content_hash": {"$ref": "#/$defs/sha256"}
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "report_scope": {
+      "type": "object",
+      "required": ["kind", "id"],
+      "properties": {"kind": {"enum": ["owner", "squad", "project", "all"]}, "id": {"type": ["string", "null"], "maxLength": 192}},
+      "additionalProperties": false
+    },
+    "completion": {
+      "type": "object",
+      "required": ["everything_finished", "status", "gates", "gap_total", "gaps", "gaps_truncated"],
+      "properties": {
+        "everything_finished": {"type": "boolean"},
+        "status": {"enum": ["unfinished", "unknown", "finished"]},
+        "gates": {"type": "array", "maxItems": 16, "items": {"$ref": "#/$defs/gate"}},
+        "gap_total": {"type": "integer", "minimum": 0},
+        "gaps": {"type": "array", "maxItems": 200, "items": {"$ref": "#/$defs/gap"}},
+        "gaps_truncated": {"type": "boolean"}
+      },
+      "additionalProperties": false
+    },
+    "gate": {
+      "type": "object",
+      "required": ["kind", "count", "status"],
+      "properties": {"kind": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$"}, "count": {"type": "integer", "minimum": 0}, "status": {"enum": ["settled", "pending", "unknown"]}},
+      "additionalProperties": false
+    },
+    "gap": {
+      "type": "object",
+      "required": ["kind", "subject", "status"],
+      "properties": {"kind": {"type": "string", "maxLength": 64}, "subject": {"type": "string", "maxLength": 192}, "status": {"type": "string", "maxLength": 32}},
+      "additionalProperties": false
+    },
+    "totals": {
+      "type": "object",
+      "required": ["facts", "by_category", "by_state"],
+      "properties": {
+        "facts": {"type": "integer", "minimum": 0, "maximum": 100000},
+        "by_category": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}},
+        "by_state": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}}
+      },
+      "additionalProperties": false
+    },
+    "pagination": {
+      "type": "object",
+      "required": ["limit", "returned", "total", "cursor", "next_cursor", "truncated"],
+      "properties": {
+        "limit": {"type": "integer", "minimum": 1, "maximum": 1000},
+        "returned": {"type": "integer", "minimum": 0, "maximum": 1000},
+        "total": {"type": "integer", "minimum": 0, "maximum": 100000},
+        "cursor": {"type": ["string", "null"], "maxLength": 1024},
+        "next_cursor": {"type": ["string", "null"], "maxLength": 1024},
+        "truncated": {"type": "boolean"}
+      },
+      "additionalProperties": false
+    },
+    "owner": {
+      "anyOf": [
+        {"type": "null"},
+        {"type": "object", "required": ["actor_id", "callsign", "role"], "properties": {"actor_id": {"type": "string", "maxLength": 192}, "callsign": {"type": ["string", "null"], "maxLength": 64}, "role": {"type": ["string", "null"], "maxLength": 64}}, "additionalProperties": false}
+      ]
+    },
+    "fact": {
+      "type": "object",
+      "required": ["fact_id", "occurred_at", "category", "action", "owner", "subject", "state", "verification", "summary", "details", "evidence", "gaps", "scope", "repair"],
+      "properties": {
+        "fact_id": {"type": "string", "maxLength": 192},
+        "occurred_at": {"type": "string", "format": "date-time"},
+        "category": {"type": "string", "maxLength": 64},
+        "action": {"type": "string", "maxLength": 64},
+        "owner": {"$ref": "#/$defs/owner"},
+        "subject": {"type": "object", "required": ["kind", "id"], "properties": {"kind": {"type": "string", "maxLength": 64}, "id": {"type": "string", "maxLength": 192}}, "additionalProperties": false},
+        "state": {"type": ["string", "null"], "maxLength": 64},
+        "verification": {"enum": ["verified", "unverified", "unknown"]},
+        "summary": {"type": "string", "maxLength": 512},
+        "details": {"type": "object"},
+        "evidence": {"type": "array", "maxItems": 16, "items": {"$ref": "#/$defs/evidence_link"}},
+        "gaps": {"type": "array", "maxItems": 32, "items": {"type": "string", "maxLength": 64}},
+        "scope": {"$ref": "#/$defs/fact_scope"},
+        "repair": {"anyOf": [{"type": "null"}, {"$ref": "#/$defs/repair_ref"}]}
+      },
+      "additionalProperties": false
+    },
+    "evidence_link": {
+      "type": "object",
+      "required": ["kind"],
+      "properties": {"kind": {"enum": ["canonical", "public_url"]}, "ref": {"type": "string", "maxLength": 512}, "url": {"type": "string", "format": "uri", "maxLength": 2048}},
+      "additionalProperties": false
+    },
+    "fact_scope": {
+      "type": "object",
+      "required": ["project_id", "request_id", "task_id", "squad_id"],
+      "properties": {"project_id": {"type": ["string", "null"], "maxLength": 192}, "request_id": {"type": ["string", "null"], "maxLength": 192}, "task_id": {"type": ["string", "null"], "maxLength": 192}, "squad_id": {"type": ["string", "null"], "maxLength": 192}},
+      "additionalProperties": false
+    },
+    "repair_ref": {
+      "type": "object",
+      "required": ["stable_id", "phase"],
+      "properties": {"stable_id": {"type": "string", "maxLength": 192}, "phase": {"type": ["string", "null"], "enum": ["failure", "attempt", "fix", "final", null]}},
+      "additionalProperties": false
+    },
+    "owner_group": {
+      "type": "object",
+      "required": ["owner", "facts", "count"],
+      "properties": {"owner": {"$ref": "#/$defs/owner"}, "facts": {"type": "array", "maxItems": 1000, "items": {"$ref": "#/$defs/fact"}}, "count": {"type": "integer", "minimum": 1, "maximum": 1000}},
+      "additionalProperties": false
+    },
+    "repairs": {
+      "type": "object",
+      "required": ["groups", "truncated", "total_groups"],
+      "properties": {"groups": {"type": "array", "maxItems": 1000, "items": {"$ref": "#/$defs/repair_group"}}, "truncated": {"type": "boolean"}, "total_groups": {"type": "integer", "minimum": 0, "maximum": 1000}},
+      "additionalProperties": false
+    },
+    "repair_group": {
+      "type": "object",
+      "required": ["stable_id", "repetitions", "phases", "final_state", "owning_issue_url", "root_cause_tag", "underlying_evidence"],
+      "properties": {
+        "stable_id": {"type": "string", "maxLength": 192},
+        "repetitions": {"type": "integer", "minimum": 1},
+        "phases": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 1}},
+        "final_state": {"type": ["string", "null"], "maxLength": 64},
+        "owning_issue_url": {"type": ["string", "null"], "maxLength": 2048},
+        "root_cause_tag": {"type": ["string", "null"], "maxLength": 192},
+        "underlying_evidence": {"type": "array", "maxItems": 100000, "items": {"type": "string", "maxLength": 192}}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

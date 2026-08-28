@@ -5,7 +5,7 @@
   "type": "object",
   "required": ["schema", "canonical", "visibility", "projects", "truncated", "limit"],
   "properties": {
-    "schema": {"const": "league.project-catalog.v1"},
+    "schema": {"const": "league.project-catalog.v2"},
     "canonical": {"const": false},
     "visibility": {"enum": ["local", "outbound"]},
     "projects": {
@@ -21,15 +21,29 @@
       "type": "object",
       "required": [
         "project_id", "summary", "aliases", "code", "root", "repository",
+        "repository_visibility", "export_policy", "classifications",
         "state", "version", "updated_at"
       ],
       "properties": {
         "project_id": {"type": "string", "pattern": "^project:[a-z0-9][a-z0-9._-]{0,95}$"},
-        "summary": {"type": "string", "maxLength": 240},
+        "summary": {"type": ["string", "null"], "maxLength": 240},
         "aliases": {"type": "array", "maxItems": 16, "items": {"type": "string", "maxLength": 64}},
         "code": {"type": ["string", "null"], "maxLength": 24},
         "root": {"type": ["string", "null"], "maxLength": 2048},
         "repository": {"type": ["string", "null"], "maxLength": 2048},
+        "repository_visibility": {"enum": ["public", "private", "unknown"]},
+        "export_policy": {"enum": ["deny", "metadata_only", "public_repository"]},
+        "classifications": {
+          "type": "object",
+          "required": ["root", "repository", "summary", "code"],
+          "properties": {
+            "root": {"const": "local_only"},
+            "repository": {"enum": ["local_only", "outbound_safe"]},
+            "summary": {"enum": ["local_only", "outbound_safe"]},
+            "code": {"enum": ["local_only", "outbound_safe"]}
+          },
+          "additionalProperties": false
+        },
         "state": {"enum": ["active", "retired"]},
         "version": {"type": "integer", "minimum": 1},
         "updated_at": {"type": "string", "format": "date-time"}

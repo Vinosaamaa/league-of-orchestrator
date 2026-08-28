@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Vinosaamaa/league-of-orchestrator/schema/league-activity-evidence.schema.json",
+  "title": "League bounded activity evidence input",
+  "type": "object",
+  "required": [
+    "evidence_id", "evidence_kind", "action", "owner_agent_id", "squad_id",
+    "project_id", "request_id", "task_id", "state", "verification", "summary",
+    "public_url", "object_hash", "local_evidence_ref", "local_evidence", "local_evidence_hash",
+    "stable_repair_id", "repair_phase", "root_cause_tag", "owning_issue_url",
+    "required_for_completion", "occurred_at"
+  ],
+  "properties": {
+    "evidence_id": {"type": "string", "minLength": 1, "maxLength": 192},
+    "evidence_kind": {"enum": ["issue", "commit", "pull_request", "check", "merge", "install", "deployment", "smoke", "rollback", "teardown", "resource", "authority", "handoff", "continuation", "repair"]},
+    "action": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$"},
+    "owner_agent_id": {"type": ["string", "null"], "maxLength": 192},
+    "squad_id": {"type": ["string", "null"], "maxLength": 192},
+    "project_id": {"type": ["string", "null"], "maxLength": 192},
+    "request_id": {"type": ["string", "null"], "maxLength": 192},
+    "task_id": {"type": ["string", "null"], "maxLength": 192},
+    "state": {"enum": ["pending", "succeeded", "failed", "cancelled", "blocked"]},
+    "verification": {"enum": ["verified", "unverified", "unknown"]},
+    "summary": {"type": "string", "minLength": 1, "maxLength": 512},
+    "public_url": {"type": ["string", "null"], "format": "uri", "maxLength": 2048},
+    "object_hash": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+    "local_evidence_ref": {"type": ["string", "null"], "maxLength": 192},
+    "local_evidence": {},
+    "local_evidence_hash": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+    "stable_repair_id": {"type": ["string", "null"], "maxLength": 192},
+    "repair_phase": {"type": ["string", "null"], "enum": ["failure", "attempt", "fix", "final", null]},
+    "root_cause_tag": {"type": ["string", "null"], "maxLength": 192},
+    "owning_issue_url": {"type": ["string", "null"], "format": "uri", "maxLength": 2048},
+    "required_for_completion": {"type": "boolean"},
+    "occurred_at": {"type": "string", "format": "date-time"}
+  },
+  "additionalProperties": false
+}

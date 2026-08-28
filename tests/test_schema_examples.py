@@ -106,6 +106,10 @@ def main() -> None:
         "league-skill-validation.schema.json",
         "league-skill-audit.schema.json",
         "league-skill-matrix.schema.json",
+        "league-activity-evidence.schema.json",
+        "league-report.schema.json",
+        "league-outbound-receipt.schema.json",
+        "league-project-catalog.schema.json",
     ):
         schema = load_json(ROOT / "schema" / name)
         assert schema["$schema"] == "https://json-schema.org/draft/2020-12/schema"

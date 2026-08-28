@@ -24,8 +24,9 @@ related partial behavior:
 - [#18: Audit every JSON/JSONL state dependency before SQLite migration](https://github.com/Vinosaamaa/league-of-orchestrator/issues/18) — completed by the sanitized producer-consumer matrix and cutover inventory
 - [#19: Implement SQLite storage and atomic canonical cutover](https://github.com/Vinosaamaa/league-of-orchestrator/issues/19) — repository-local store, audited dry-run import, command facade, and focused tests are merged; live cutover remains separate
 - [#21: Document the SQLite orchestration design and decision trail](https://github.com/Vinosaamaa/league-of-orchestrator/issues/21) — completed; its accepted resolutions are canonical for lifecycle work
-- [#22: Add evidence-backed League activity and end-of-day reports](https://github.com/Vinosaamaa/league-of-orchestrator/issues/22)
+- [#22: Add evidence-backed League activity and end-of-day reports](https://github.com/Vinosaamaa/league-of-orchestrator/issues/22) — this repository-local candidate adds stable JSON, Markdown/HTML derivation, exact scopes/ranges, immutable show/since specs, completion gates, bounded pagination, and the public-command-only League report skill
 - [#23: Build an isolated League acceptance sandbox and reversible cutover harness](https://github.com/Vinosaamaa/league-of-orchestrator/issues/23) — the repository-local disposable sandbox, fixture shadow, staged rollback, fake canary, and generation-switch fault foundation are merged; lifecycle receipt integration, real-runtime canaries, authorized global switch, and live smoke remain open
+- [#25: Add League-specific outbound privacy enforcement and local-only project metadata](https://github.com/Vinosaamaa/league-of-orchestrator/issues/25) — this repository-local candidate adds structured classifications, one exact-byte remote boundary, incident and no-reply regressions, and staged cross-harness guidance without installation
 
 The merged #3/#4/#5/#17 slice and PR #30's #7/#11/#14 slice extend only the
 repository-local store, command facade, and injected-adapter services. They do

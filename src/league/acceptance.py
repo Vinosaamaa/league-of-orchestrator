@@ -335,6 +335,9 @@ def _release_files(source_root: Path) -> list[Path]:
         source_root / "VERSION",
         source_root / "bin/league",
         source_root / "tests/storage_fixture.py",
+        source_root / "src/league/report_template.html",
+        source_root / "skills/league-report/SKILL.md",
+        source_root / "global-agent-instructions/shared-AGENTS.md",
     ]
     files.extend(sorted((source_root / "src/league").glob("*.py")))
     files.extend(sorted((source_root / "schema").glob("*.json")))

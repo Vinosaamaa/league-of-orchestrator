@@ -66,8 +66,8 @@ def test_transactional_upgrade_backup_and_rollback(root: Path) -> None:
         assert unchanged["from_version"] == unchanged["to_version"] == 1
         upgraded = store.migrate(backup_name="backups/pre-v2-retry.sqlite3")
         assert upgraded["from_version"] == 1
-        assert upgraded["to_version"] == 6
-        assert upgraded["applied"] == [2, 3, 4, 5, 6]
+        assert upgraded["to_version"] == CURRENT_SCHEMA_VERSION
+        assert upgraded["applied"] == list(range(2, CURRENT_SCHEMA_VERSION + 1))
         assert upgraded["backup"]["database_schema_version"] == 1
         assert store.integrity()["ok"]
         indexes = {
@@ -93,11 +93,15 @@ def test_transactional_upgrade_backup_and_rollback(root: Path) -> None:
             "ux_squad_accepting_shotcaller",
             "ux_owner_changed_per_rollover",
         } <= indexes
-        assert [migration.version for migration in MIGRATIONS] == [1, 2, 3, 4, 5, 6]
-        assert MIGRATIONS[-2].name == "advisory-project-catalog-and-roster-indexes"
-        assert MIGRATIONS[-2].checksum == "5477db9879d6a4a9a29bb8188b398bd6db9a7a786e40e86ab819a0a938790faf"
-        assert MIGRATIONS[-1].name == "guarded-rollover-and-shuffled-callsign-queue"
-        assert MIGRATIONS[-1].checksum == "879ef4addfe6725e31c31a5aa1db9078d7c066a26610eaa2753f749c6e53ab75"
+        assert [migration.version for migration in MIGRATIONS] == list(
+            range(1, CURRENT_SCHEMA_VERSION + 1)
+        )
+        assert MIGRATIONS[-3].name == "advisory-project-catalog-and-roster-indexes"
+        assert MIGRATIONS[-3].checksum == "5477db9879d6a4a9a29bb8188b398bd6db9a7a786e40e86ab819a0a938790faf"
+        assert MIGRATIONS[-2].name == "guarded-rollover-and-shuffled-callsign-queue"
+        assert MIGRATIONS[-2].checksum == "879ef4addfe6725e31c31a5aa1db9078d7c066a26610eaa2753f749c6e53ab75"
+        assert MIGRATIONS[-1].name == "bounded-reporting-and-outbound-privacy"
+        assert MIGRATIONS[-1].checksum == "bebe90eb841eac2a0b42d3f89e321cb4f3f8b23b02d92febf5a4ea2a50727cde"
         assert store.connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
 
 
@@ -138,6 +142,46 @@ def test_v5_to_v6_rebuild_rolls_back_and_initializes_shuffled_order(root: Path) 
             )
         ]
         assert order != sorted(order)
+        assert store.integrity()["ok"]
+
+
+def test_v6_to_v7_rolls_back_and_applies_privacy_defaults(root: Path) -> None:
+    state, _ = migrated_state(root, "v6-to-v7", target_version=6)
+    with SQLiteStorage.for_migration(state) as store:
+        store.connection.execute(
+            """
+            INSERT INTO projects(project_id,repository,state,version,updated_at,summary)
+            VALUES('project:v6','https://example.invalid/synthetic/v6.git','active',1,
+                   '2026-01-01T00:00:00Z','Synthetic v6 project')
+            """
+        )
+
+        def crash(point: str) -> None:
+            if point == "after_migration_7":
+                raise InjectedCrash(point)
+
+        try:
+            store.migrate(backup_name="backups/pre-v7.sqlite3", fault=crash)
+        except InjectedCrash:
+            pass
+        else:
+            raise AssertionError("v7 migration crash was not injected")
+        assert store.connection.execute("PRAGMA user_version").fetchone()[0] == 6
+        columns = {
+            row[1] for row in store.connection.execute("PRAGMA table_info(projects)")
+        }
+        assert "export_policy" not in columns
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='report_specs'"
+        ).fetchone()[0] == 0
+        store.migrate(backup_name="backups/pre-v7-retry.sqlite3")
+        project = store.connection.execute(
+            """
+            SELECT repository_visibility,export_policy,root_classification,
+                   repository_classification FROM projects WHERE project_id='project:v6'
+            """
+        ).fetchone()
+        assert tuple(project) == ("unknown", "deny", "local_only", "local_only")
         assert store.integrity()["ok"]
 
 
@@ -185,7 +229,8 @@ def test_v3_upgrade_preserves_cleanup_and_indexes_legacy_project(root: Path) -> 
             """
         )
         receipt = store.migrate(backup_name="backups/pre-v4.sqlite3")
-        assert receipt["from_version"] == 3 and receipt["applied"] == [4, 5, 6]
+        assert receipt["from_version"] == 3
+        assert receipt["applied"] == list(range(4, CURRENT_SCHEMA_VERSION + 1))
         row = store.connection.execute(
             "SELECT * FROM cleanup_obligations WHERE task_id='task:v3-cleanup'"
         ).fetchone()
@@ -236,6 +281,7 @@ def main() -> None:
         test_loaded_runtime_gate(root)
         test_transactional_upgrade_backup_and_rollback(root)
         test_v5_to_v6_rebuild_rolls_back_and_initializes_shuffled_order(root)
+        test_v6_to_v7_rolls_back_and_applies_privacy_defaults(root)
         test_schema_refusals_without_test_sql(root)
         test_v3_upgrade_preserves_cleanup_and_indexes_legacy_project(root)
         test_backup_collision_and_corruption(root)

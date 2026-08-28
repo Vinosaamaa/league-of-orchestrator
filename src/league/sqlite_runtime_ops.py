@@ -245,15 +245,21 @@ def record_routing_decision(store: Any, decision: Mapping[str, Any]) -> dict[str
     columns = (
         "decision_id", "subject_kind", "subject_id", "role", "tier", "model", "effort", "reason",
         "explicit_model", "explicit_effort", "state", "escalation_count", "prior_decision_id",
-        "failure_class", "chosen_at",
+        "failure_class", "chosen_at", "provider", "provider_config_version", "policy_version", "reason_code",
+        "explicit_provider", "operator_override_id", "fallback_from_provider",
+        "required_capabilities_json", "signals_json",
     )
-    values = tuple(decision.get(column) for column in columns)
+    normalized = tuple(
+        int(bool(decision.get(column)))
+        if column in {"explicit_model", "explicit_effort", "explicit_provider"}
+        else decision.get(column)
+        for column in columns
+    )
     try:
         with store._transaction():
             existing = store.connection.execute(
                 "SELECT * FROM model_routing_decisions WHERE decision_id=?", (decision["decision_id"],)
             ).fetchone()
-            normalized = values[:7] + values[7:8] + tuple(int(bool(value)) for value in values[8:10]) + values[10:]
             if existing is not None:
                 if tuple(existing[column] for column in columns) != normalized:
                     raise StorageRefusal("routing_decision_conflict", "routing decision id has different evidence")

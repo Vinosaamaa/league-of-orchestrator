@@ -13,7 +13,11 @@
   scheduler.
 
 Disposable Shotcaller handoff and persistent callsign allocation are now
-implemented repository-locally by contiguous migration v6. The storage layer
+implemented repository-locally by contiguous migration v6. Migration v7 adds
+bounded reporting and outbound privacy; migration v8 adds the routing-policy
+slice: owner routing separate from execution,
+pending Squad registration, role-aware hidden-scientist assignments, versioned
+provider routing, and parent-request progress/outbox state. The storage layer
 also implements the canonical prompt/request lifecycle, exact owner return,
 adapter-neutral runtime binding, recoverable teardown, advisory project
 catalog, and bounded project-grouped Roster. Installation, live migration,
@@ -39,7 +43,8 @@ The repository keeps the proven runtime and new storage boundary separate:
 - `src/league/sqlite_store.py` is the sole SQLite implementation and facade.
   `sqlite_core.py` owns the shared transaction mechanics; focused
   `sqlite_*_ops.py` modules own lifecycle, request, assignment, delivery,
-  watcher, catalog, Roster, reporting, import, and export SQL,
+  watcher, catalog, Squad registration, request progress, Roster, reporting,
+  import, and export SQL,
   while the facade owns connection policy, migrations, integrity, and backup.
 - `src/league/importer.py` strictly decodes the explicit issue-#18 manifest and
   produces an in-memory plan; it never opens a database or writes legacy files.
@@ -121,7 +126,10 @@ The repository-local SQLite path is separately testable:
    apply the database effect once. Request, dispatch, and watcher leases remain
    distinct.
 7. Assignment is recoverable across pending, launching, active, blocked, and
-   cleanup-pending states. Active requires one exact verified Champion receipt.
+   cleanup-pending states. Active requires one exact role-specific verified
+   receipt. Champions require issue/repository/branch/worktree identity; hidden
+   scientists require exact owner/request/subtask/model/effort/reason/budgets,
+   remain outside the visible Roster, and deliver terminal-only.
 8. The role-aware Stop decision combines unresolved requests, active tasks,
    assignments, deliveries, and cleanup, while blocking at most once per fresh
    wait generation and yielding to ordinary user messages.
@@ -133,19 +141,24 @@ The repository-local SQLite path is separately testable:
    endpoint generation, and declared capabilities. Cleanup validates every
    action before its first external effect and then records immutable,
    fence-bound receipts for crash-safe resumption.
-11. Routing records semantic tier, configured model/effort, explicit overrides,
-   reason, and at most one atomically unique escalation child. It exposes no
-   request claim, assignment, or outbox state machine.
-12. Configuration, hooks, guides, launchers, immutable failure/teardown/archive
+11. Orchestration resolves explicit route, continuation, then one unique strong
+   eligible Squad before local direct/Champion execution. Canonical ownership
+   moves only after acknowledgement. Parent progress has immediate and
+   15-minute changed-only aggregate classes plus one five-minute-grace overdue
+   escalation; no heartbeat is synthesized.
+12. Model routing records policy/provider versions, structured semantic
+   signals, explicit and expiring operator overrides, capability fallback,
+   evidence-gated downgrade, and at most one safe-boundary escalation child.
+13. Configuration, hooks, guides, launchers, immutable failure/teardown/archive
    evidence, installer backups, and other-product state remain files.
-13. Skill roots remain external file-owned inputs. The repository stores only
+14. Skill roots remain external file-owned inputs. The repository stores only
     public labels, identity/provenance/version/capability declarations, content
     hashes, and sanitized parity receipts; it stores no root path or skill body.
-14. Project aliases, codes, exact roots/repositories, and ordered suggested
+15. Project aliases, codes, exact roots/repositories, and ordered suggested
     Squads are versioned catalog facts. Suggestion changes never mutate tasks,
     assignments, requests, events, or instructions; explicit routing stays
     separate and authoritative.
-15. `league.roster-snapshot.v1` groups current work from one bounded read
+16. `league.roster-snapshot.v1` groups current work from one bounded read
     transaction. It is non-canonical, has explicit limits/truncation, and links
     every item to exact canonical keys without persisting a report cache.
 16. `league.report.v1` streams timestamp-indexed canonical facts and refuses

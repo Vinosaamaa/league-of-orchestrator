@@ -17,7 +17,7 @@ sys.path[:0] = [str(ROOT / "src"), str(ROOT / "tests")]
 
 import league.importer as importer  # noqa: E402
 from league.importer import AUDIT_COVERAGE, build_import_plan  # noqa: E402
-from league.sqlite_store import SQLiteStorage  # noqa: E402
+from league.sqlite_store import CURRENT_SCHEMA_VERSION, SQLiteStorage  # noqa: E402
 from league.storage import StorageRefusal  # noqa: E402
 from storage_fixture import (  # noqa: E402
     AT2,
@@ -55,8 +55,8 @@ def test_complete_dry_run_apply_and_round_trip(root: Path) -> None:
         )
         report = plan["report"]
         assert report["schema"] == "league.import-report.v1"
-        assert report["target_schema_version"] == 7
-        assert plan["target_schema_version"] == 7
+        assert report["target_schema_version"] == CURRENT_SCHEMA_VERSION
+        assert plan["target_schema_version"] == CURRENT_SCHEMA_VERSION
         assert report["dry_run"] and not report["applied"] and report["eligible"]
         assert report["unknown_consumers"] == []
         assert report["target_collisions"] == {}

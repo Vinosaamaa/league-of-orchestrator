@@ -22,6 +22,47 @@ class DispatchRequestCommand:
     requested_effort: Optional[str]
     explicit_route: Optional[str]
     at: str
+    pre_bounded: bool = False
+    read_only: bool = False
+    answer_or_routing_only: bool = False
+    expected_minutes: int = 0
+    expected_task_action_calls: int = 0
+    creates_artifact: bool = False
+    mutates_state: bool = False
+    reproduces_issue: bool = False
+    runs_tests: bool = False
+    runs_benchmark: bool = False
+    uses_browser_or_computer: bool = False
+    project_implementation: bool = False
+    continuation_role: Optional[str] = None
+    continuation_target: Optional[str] = None
+    project_suggested_shotcaller: Optional[str] = None
+    hidden_subtask: Optional[str] = None
+    hidden_scope_budget: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class RequestProgressCommand:
+    progress_id: str
+    request_id: str
+    claim_token: str
+    expected_version: int
+    progress_generation: int
+    reason_code: str
+    settled_count: int
+    total_count: int
+    current_phase: str
+    blocker_count: int
+    blocker_severity: str
+    user_action_required: bool
+    deadline_change: Optional[str]
+    next_action: str
+    event_id: str
+    outbox_id: str
+    at: str
+    minimum_interval_seconds: int = 900
+    grace_seconds: int = 300
+    promised_checkpoint_at: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -85,6 +126,12 @@ class RequestStorage(Protocol):
 
     def dispatch_request(self, command: DispatchRequestCommand) -> dict[str, Any]: ...
 
+    def emit_request_progress(self, command: RequestProgressCommand) -> dict[str, Any]: ...
+
+    def reconcile_request_progress(
+        self, owner_agent_id: str, at: str
+    ) -> dict[str, Any]: ...
+
     def route_request(
         self,
         request_id: str,
@@ -94,6 +141,12 @@ class RequestStorage(Protocol):
         event_id: str,
         outbox_id: str,
         at: str,
+        *,
+        recipient_squad_id: Optional[str] = None,
+        route_reason_code: str = "explicit_squad",
+        route_policy_version: str = "league.orchestration.v1",
+        route_confidence: str = "explicit",
+        required_capabilities: tuple[str, ...] = (),
     ) -> dict[str, Any]: ...
 
     def set_request_state(

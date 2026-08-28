@@ -65,6 +65,15 @@ def main() -> None:
         assert set(tier) == {"model", "effort"}
         assert all(isinstance(value, str) and value for value in tier.values())
 
+    league_routing = load_json(ROOT / "config" / "league-model-routing.example.json")
+    assert league_routing["schema"] == 3
+    assert league_routing["policy_version"] == "league.model-routing.2026-08-28.1"
+    assert league_routing["default_provider"] in league_routing["providers"]
+    assert league_routing["operator_overrides"][0]["id"] == "sol-xhigh-2026-08-28"
+    assert league_routing["operator_overrides"][0]["expires_at"] == (
+        "2026-08-29T00:00:00-07:00"
+    )
+
     skill_contract = load_json(ROOT / "config" / "custom-skills.json")
     skill_profile = load_json(ROOT / "config" / "skill-runtime.example.json")
     skill_audit = load_json(ROOT / "docs" / "research" / "custom-skill-audit.json")

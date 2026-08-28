@@ -1,0 +1,228 @@
+{
+  "schema": "league.routing-decision-corpus.v1",
+  "orchestration": [
+    {
+      "name": "direct tiny all bounds",
+      "signals": {
+        "pre_bounded": true,
+        "read_only": true,
+        "answer_or_routing_only": true,
+        "expected_minutes": 5,
+        "expected_task_action_calls": 2
+      },
+      "expected": ["local_direct", "direct_tiny", null]
+    },
+    {
+      "name": "artifact requires visible Champion",
+      "signals": {
+        "pre_bounded": true,
+        "read_only": true,
+        "answer_or_routing_only": true,
+        "expected_minutes": 3,
+        "expected_task_action_calls": 1,
+        "creates_artifact": true
+      },
+      "expected": ["local_champion", "worker_required", null]
+    },
+    {
+      "name": "explicit eligible Squad",
+      "signals": {
+        "pre_bounded": false,
+        "read_only": false,
+        "answer_or_routing_only": false,
+        "expected_minutes": 30,
+        "expected_task_action_calls": 4
+      },
+      "explicit_squad_id": "squad:interview",
+      "candidates": [
+        {"squad_id": "squad:interview", "strong_match": false, "accepting": true, "owner_live": true}
+      ],
+      "expected": ["squad_route", "explicit_squad", "squad:interview"]
+    },
+    {
+      "name": "durable continuation after owner rollover",
+      "signals": {
+        "pre_bounded": false,
+        "read_only": false,
+        "answer_or_routing_only": false,
+        "expected_minutes": 30,
+        "expected_task_action_calls": 4
+      },
+      "continuation_squad_id": "squad:interview",
+      "candidates": [
+        {"squad_id": "squad:interview", "strong_match": false, "accepting": true, "owner_live": true}
+      ],
+      "expected": ["squad_route", "continuation_squad", "squad:interview"]
+    },
+    {
+      "name": "sole strong project match",
+      "signals": {
+        "pre_bounded": false,
+        "read_only": false,
+        "answer_or_routing_only": false,
+        "expected_minutes": 30,
+        "expected_task_action_calls": 4
+      },
+      "candidates": [
+        {"squad_id": "squad:interview", "strong_match": true, "accepting": true, "owner_live": true}
+      ],
+      "expected": ["squad_route", "unique_strong_squad", "squad:interview"]
+    },
+    {
+      "name": "advisory only is not authority",
+      "signals": {
+        "pre_bounded": false,
+        "read_only": false,
+        "answer_or_routing_only": false,
+        "expected_minutes": 30,
+        "expected_task_action_calls": 4
+      },
+      "candidates": [
+        {"squad_id": "squad:interview", "strong_match": false, "accepting": true, "owner_live": true}
+      ],
+      "expected": ["local_champion", "worker_required", null]
+    },
+    {
+      "name": "strong tie stays local",
+      "signals": {
+        "pre_bounded": false,
+        "read_only": false,
+        "answer_or_routing_only": false,
+        "expected_minutes": 30,
+        "expected_task_action_calls": 4
+      },
+      "candidates": [
+        {"squad_id": "squad:a", "strong_match": true, "accepting": true, "owner_live": true},
+        {"squad_id": "squad:b", "strong_match": true, "accepting": true, "owner_live": true}
+      ],
+      "expected": ["local_champion", "worker_required", null]
+    },
+    {
+      "name": "stale sole match stays local",
+      "signals": {
+        "pre_bounded": false,
+        "read_only": false,
+        "answer_or_routing_only": false,
+        "expected_minutes": 30,
+        "expected_task_action_calls": 4
+      },
+      "candidates": [
+        {"squad_id": "squad:a", "strong_match": true, "accepting": true, "owner_live": false}
+      ],
+      "expected": ["local_champion", "worker_required", null]
+    },
+    {
+      "name": "cross project never guesses",
+      "signals": {
+        "pre_bounded": false,
+        "read_only": false,
+        "answer_or_routing_only": false,
+        "expected_minutes": 30,
+        "expected_task_action_calls": 4
+      },
+      "cross_project": true,
+      "candidates": [
+        {"squad_id": "squad:a", "strong_match": true, "accepting": true, "owner_live": true}
+      ],
+      "expected": ["local_champion", "worker_required", null]
+    },
+    {
+      "name": "explicit capability mismatch refuses",
+      "signals": {
+        "pre_bounded": false,
+        "read_only": false,
+        "answer_or_routing_only": false,
+        "expected_minutes": 30,
+        "expected_task_action_calls": 4
+      },
+      "explicit_squad_id": "squad:a",
+      "required_capabilities": ["browser"],
+      "candidates": [
+        {"squad_id": "squad:a", "strong_match": false, "accepting": true, "owner_live": true}
+      ],
+      "refusal": "owner_capability_mismatch"
+    }
+  ],
+  "model": [
+    {
+      "name": "reliability baseline without evidence",
+      "evaluated": false,
+      "signals": {"bounded_checkable": true},
+      "at": "2026-08-29T12:00:00-07:00",
+      "expected": {"provider": "alpha", "tier": "WORKER_STRONG", "reason_code": "reliability_baseline"}
+    },
+    {
+      "name": "representative evidence downgrade",
+      "evaluated": true,
+      "signals": {"bounded_checkable": true},
+      "at": "2026-08-29T12:00:00-07:00",
+      "expected": {"provider": "alpha", "tier": "WORKER_FAST", "reason_code": "evidence_downgrade"}
+    },
+    {
+      "name": "risk retains strongest baseline",
+      "evaluated": true,
+      "signals": {"bounded_checkable": true, "high_impact": true},
+      "at": "2026-08-29T12:00:00-07:00",
+      "expected": {"provider": "alpha", "tier": "WORKER_STRONG", "reason_code": "reliability_baseline"}
+    },
+    {
+      "name": "ambiguity retains strongest baseline",
+      "evaluated": true,
+      "signals": {"bounded_checkable": true, "ambiguity": true},
+      "at": "2026-08-29T12:00:00-07:00",
+      "expected": {"provider": "alpha", "tier": "WORKER_STRONG", "reason_code": "reliability_baseline"}
+    },
+    {
+      "name": "weak verification retains strongest baseline",
+      "evaluated": true,
+      "signals": {"bounded_checkable": true, "weak_verification": true},
+      "at": "2026-08-29T12:00:00-07:00",
+      "expected": {"provider": "alpha", "tier": "WORKER_STRONG", "reason_code": "reliability_baseline"}
+    },
+    {
+      "name": "exact explicit tuple wins",
+      "evaluated": true,
+      "signals": {"bounded_checkable": true},
+      "at": "2026-08-28T12:00:00-07:00",
+      "explicit_provider": "beta",
+      "explicit_model": "user/exact",
+      "explicit_effort": "max",
+      "required_capabilities": ["browser"],
+      "expected": {"provider": "beta", "model": "user/exact", "effort": "max", "reason_code": "explicit_override"}
+    },
+    {
+      "name": "active dated operator override",
+      "evaluated": true,
+      "override": true,
+      "signals": {"bounded_checkable": true},
+      "at": "2026-08-28T12:00:00-07:00",
+      "expected": {"provider": "alpha", "model": "alpha/operator-strong", "effort": "xhigh", "reason_code": "operator_override"}
+    },
+    {
+      "name": "expired override falls back then one failure escalates",
+      "evaluated": true,
+      "override": true,
+      "signals": {"bounded_checkable": true},
+      "at": "2026-08-29T12:00:00-07:00",
+      "expected": {"provider": "alpha", "tier": "WORKER_FAST", "reason_code": "evidence_downgrade"},
+      "escalate_failure": "tool_failure",
+      "escalated_expected": {"state": "escalated", "tier": "WORKER_STRONG", "reason_code": "failure_escalation", "escalation_count": 1}
+    },
+    {
+      "name": "provider capability fallback",
+      "evaluated": true,
+      "signals": {"bounded_checkable": true},
+      "at": "2026-08-29T12:00:00-07:00",
+      "required_capabilities": ["browser"],
+      "expected": {"provider": "beta", "reason_code": "provider_capability_fallback"}
+    },
+    {
+      "name": "unsupported capability refuses before selection",
+      "evaluated": true,
+      "signals": {"bounded_checkable": true},
+      "at": "2026-08-29T12:00:00-07:00",
+      "required_capabilities": ["audio"],
+      "refusal": "routing_capability_unavailable"
+    }
+  ]
+}

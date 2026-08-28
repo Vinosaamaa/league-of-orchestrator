@@ -946,16 +946,23 @@ def commit_rollover(
                 )
             store.connection.execute(
                 """
-                UPDATE requests SET owner_agent_id=?,
+                UPDATE requests SET owner_agent_id=?,owner_squad_id=?,
                        return_to_agent_id=CASE WHEN return_to_agent_id=? THEN ? ELSE return_to_agent_id END,
                        version=version+1,updated_at=?
-                 WHERE owner_agent_id=? AND state NOT IN ('answered','cancelled')
+                 WHERE state NOT IN ('answered','cancelled')
+                   AND (owner_squad_id=? OR (
+                     owner_squad_id IS NULL AND owner_agent_id=? AND
+                     (SELECT COUNT(*) FROM squads WHERE shotcaller_agent_id=?)=1
+                   ))
                 """,
                 (
                     operation["successor_agent_id"],
+                    operation["squad_id"],
                     operation["predecessor_agent_id"],
                     operation["successor_agent_id"],
                     at,
+                    operation["squad_id"],
+                    operation["predecessor_agent_id"],
                     operation["predecessor_agent_id"],
                 ),
             )

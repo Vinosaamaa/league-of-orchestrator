@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import re
 import sqlite3
 from datetime import datetime
 from typing import Any, Optional
@@ -16,6 +17,13 @@ from .storage_request import (
     RequestResultCommand,
 )
 from .storage_types import StorageRefusal
+from .orchestration import (
+    LOCAL_CHAMPION,
+    LOCAL_DIRECT,
+    SQUAD_ROUTE,
+    OrchestrationSignals,
+    decide_orchestration_route,
+)
 
 
 REQUEST_STATES = {
@@ -31,7 +39,7 @@ REQUEST_STATES = {
     "cancelled",
 }
 TERMINAL_REQUEST_STATES = {"answered", "cancelled"}
-EXECUTION_MODES = {"direct", "hidden", "champion"}
+EXECUTION_MODES = {"direct", "hidden", "champion", "squad"}
 PROMPT_ITEM_DISPOSITIONS = {
     "new_request",
     "follow_up",
@@ -51,6 +59,57 @@ CHAMPION_WORK_KINDS = {
 DIRECT_WORK_KINDS = {"question", "short-check", "read-only"}
 MAX_PROMPT_BYTES = 262_144
 MAX_PROMPT_ITEMS = 32
+ROUTINE_PROGRESS_REASONS = {
+    "child_started",
+    "child_working",
+    "milestone",
+    "partial_completion",
+    "recoverable_child_blocker",
+    "aggregate_changed",
+}
+IMMEDIATE_PROGRESS_REASONS = {
+    "route_accepted",
+    "route_rejected",
+    "owner_unavailable",
+    "awaiting_user",
+    "awaiting_authority",
+    "parent_critical_blocker",
+    "acceptance_risk",
+    "safety_risk",
+    "scope_change",
+    "target_change",
+    "authority_change",
+    "cost_change",
+    "deadline_change",
+    "owner_change",
+    "reroute",
+    "request_resolved",
+    "request_failed",
+    "request_cancelled",
+    "request_stalled",
+}
+PROGRESS_REASONS = ROUTINE_PROGRESS_REASONS | IMMEDIATE_PROGRESS_REASONS
+PRIVATE_PROGRESS_PATTERN = re.compile(
+    r"(?:^|\s)/(?:Users|home|private|tmp)/|\b(?:runtime|thread|worktree):|"
+    r"\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b",
+    re.IGNORECASE,
+)
+
+
+def _bounded_public_text(value: str, label: str, *, maximum: int = 512) -> str:
+    if (
+        not isinstance(value, str)
+        or not value.strip()
+        or value != value.strip()
+        or "\n" in value
+        or len(value.encode("utf-8")) > maximum
+        or PRIVATE_PROGRESS_PATTERN.search(value)
+    ):
+        raise StorageRefusal(
+            "public_summary_invalid",
+            f"{label} must be bounded public-safe text without local runtime details",
+        )
+    return value
 
 
 def _time(value: str, label: str) -> datetime:
@@ -450,7 +509,12 @@ def claim_request(
                 or not runtime["verified"]
             ):
                 raise StorageRefusal("runtime_unverified", "request claim runtime is not verified and active")
-            if runtime["actor_agent_id"] != request["owner_agent_id"]:
+            claim_owner = (
+                request["pending_owner_agent_id"]
+                if request["state"] == "routed"
+                else request["owner_agent_id"]
+            )
+            if runtime["actor_agent_id"] != claim_owner:
                 raise StorageRefusal("owner_mismatch", "request claim runtime does not belong to the owner")
             existing = store.connection.execute(
                 "SELECT * FROM request_claims WHERE request_id=?", (request_id,)
@@ -492,7 +556,7 @@ def claim_request(
                     store,
                     event_id=event_id,
                     request_id=request_id,
-                    actor_id=request["owner_agent_id"],
+                    actor_id=claim_owner,
                     request_version=int(request["version"]),
                     event_type="request_claim_recovered",
                     state=request["state"],
@@ -520,7 +584,7 @@ def claim_request(
                     store,
                     event_id=f"request:{request_id}:claim:{next_claim_version}",
                     request_id=request_id,
-                    actor_id=request["owner_agent_id"],
+                    actor_id=claim_owner,
                     request_version=int(request["version"]),
                     event_type="request_claimed",
                     state=request["state"],
@@ -531,26 +595,95 @@ def claim_request(
                 route_event = request["last_route_event_id"]
                 receipt = store.connection.execute(
                     "SELECT 1 FROM recipient_receipts WHERE event_id=? AND recipient_agent_id=?",
-                    (route_event, request["owner_agent_id"]),
+                    (route_event, claim_owner),
                 ).fetchone()
                 if receipt is None:
                     raise StorageRefusal("route_unreceived", "routed request cannot be accepted before exact receipt")
                 next_version = int(request["version"]) + 1
                 store.connection.execute(
-                    "UPDATE requests SET state='accepted',version=?,updated_at=? WHERE request_id=?",
+                    """
+                    UPDATE requests SET owner_agent_id=pending_owner_agent_id,
+                      owner_squad_id=pending_owner_squad_id,pending_owner_agent_id=NULL,
+                      pending_owner_squad_id=NULL,state='accepted',version=?,updated_at=?
+                     WHERE request_id=?
+                    """,
                     (next_version, at, request_id),
                 )
                 _insert_request_event(
                     store,
                     event_id=f"request:{request_id}:{next_version}:accepted",
                     request_id=request_id,
-                    actor_id=request["owner_agent_id"],
+                    actor_id=claim_owner,
                     request_version=next_version,
                     event_type="request_accepted",
                     state="accepted",
                     update="routed request accepted",
                     at=at,
                     source_event_id=route_event,
+                )
+                progress_event_id = f"request:{request_id}:{next_version}:route-accepted"
+                progress_outbox_id = f"outbox:{request_id}:{next_version}:route-accepted"
+                progress_value = {
+                    "settled_count": 0,
+                    "total_count": 0,
+                    "current_phase": "Route accepted",
+                    "blocker_count": 0,
+                    "blocker_severity": "none",
+                    "user_action_required": False,
+                    "deadline_change": None,
+                    "next_action": "The accepted owner continues the request",
+                }
+                _insert_request_event(
+                    store,
+                    event_id=progress_event_id,
+                    request_id=request_id,
+                    actor_id=claim_owner,
+                    request_version=next_version,
+                    event_type="request_progress",
+                    state="accepted",
+                    update="Route accepted by the selected Squad owner",
+                    at=at,
+                    detail={
+                        "reason_code": "route_accepted",
+                        "progress_generation": next_version,
+                        **progress_value,
+                    },
+                    source_event_id=route_event,
+                )
+                store.connection.execute(
+                    """
+                    INSERT INTO delivery_outbox
+                      (outbox_id,event_id,recipient_agent_id,state,available_at,attempt_count)
+                    VALUES(?,?,?,'pending',?,0)
+                    """,
+                    (progress_outbox_id, progress_event_id, request["requester_agent_id"], at),
+                )
+                store.connection.execute(
+                    """
+                    INSERT INTO request_progress_events
+                      (progress_id,request_id,request_generation,progress_generation,
+                       owner_agent_id,recipient_agent_id,urgency,reason_code,content_digest,
+                       settled_count,total_count,current_phase,blocker_count,blocker_severity,
+                       user_action_required,deadline_change,next_action,event_id,outbox_id,emitted_at)
+                    VALUES(?,?,?,?,?,?,'immediate','route_accepted',?,?,?,?,?,'none',0,NULL,?,?,?,?)
+                    """,
+                    (
+                        f"progress:{request_id}:{next_version}:route-accepted",
+                        request_id,
+                        next_version,
+                        next_version,
+                        claim_owner,
+                        request["requester_agent_id"],
+                        _digest(_json(progress_value)),
+                        0,
+                        0,
+                        progress_value["current_phase"],
+                        0,
+                        progress_value["next_action"],
+                        progress_event_id,
+                        progress_outbox_id,
+                        at,
+                    ),
                 )
                 accepted = True
                 request_state = "accepted"
@@ -599,26 +732,86 @@ def release_request_claim(
 
 
 def classify_dispatch(
-    *, work_kind: str, requested_mode: Optional[str], hidden_supported: bool
-) -> tuple[str, str]:
+    *,
+    work_kind: str,
+    requested_mode: Optional[str],
+    hidden_supported: bool,
+    signals: OrchestrationSignals,
+    explicit_squad_id: Optional[str],
+    continuation_squad_id: Optional[str],
+) -> tuple[str, str, str]:
     if requested_mode is not None and requested_mode not in EXECUTION_MODES:
         raise StorageRefusal("invalid_dispatch", "requested execution mode is invalid")
-    if work_kind in CHAMPION_WORK_KINDS:
-        if requested_mode in {"direct", "hidden"}:
+    if work_kind not in CHAMPION_WORK_KINDS | DIRECT_WORK_KINDS:
+        raise StorageRefusal("invalid_dispatch", "work kind is not part of the bounded classifier contract")
+    if requested_mode == "hidden" and not hidden_supported:
+        raise StorageRefusal("hidden_unavailable", "hidden advisory support is unavailable")
+    force_local_champion = requested_mode == "champion"
+    force_local_direct = requested_mode == "direct"
+    decision = decide_orchestration_route(
+        signals,
+        explicit_squad_id=explicit_squad_id if requested_mode == "squad" else None,
+        continuation_squad_id=(
+            continuation_squad_id if requested_mode not in {"direct", "champion"} else None
+        ),
+    )
+    if decision.route == SQUAD_ROUTE:
+        raise StorageRefusal(
+            "squad_route_required",
+            "Squad ownership must use the acknowledgement-gated durable request-route operation",
+        )
+    if force_local_champion:
+        decision = decision.__class__(LOCAL_CHAMPION, "explicit_champion", None, True)
+    if force_local_direct and decision.route != LOCAL_DIRECT:
+        raise StorageRefusal(
+            "champion_required",
+            "work outside every direct-tiny bound requires a visible Champion assignment receipt",
+        )
+    if requested_mode == "hidden":
+        if not signals.hidden_scientist():
             raise StorageRefusal(
                 "champion_required",
-                "repository writes, migration, supervised tests, and long work require a visible Champion",
+                "hidden scientists must stop at the bounded read-only boundary and promote to a visible Champion",
             )
-        return "champion", f"{work_kind} requires visible Champion ownership"
-    if work_kind not in DIRECT_WORK_KINDS:
-        raise StorageRefusal("invalid_dispatch", "work kind is not part of the bounded classifier contract")
-    if requested_mode == "champion":
-        return "champion", "explicit Champion routing was preserved"
-    if requested_mode == "hidden":
-        if not hidden_supported or work_kind != "read-only":
-            raise StorageRefusal("hidden_unavailable", "hidden execution is unavailable for this work kind")
-        return "hidden", "bounded read-only analysis uses an available hidden worker"
-    return "direct", "bounded non-writing work is safe for direct execution"
+        return "hidden", "hidden_scientist", "bounded read-only scientist support is recorded"
+    if decision.route == LOCAL_CHAMPION:
+        if requested_mode == "direct":
+            raise StorageRefusal(
+                "champion_required",
+                "work outside every direct-tiny bound requires a visible Champion assignment receipt",
+            )
+        return "champion", decision.reason_code, "visible Champion ownership is required"
+    return "direct", decision.reason_code, "every direct-tiny bound is satisfied"
+
+
+def _validate_hidden_scientist(
+    store: Any, command: DispatchRequestCommand, owner_agent_id: str
+) -> str:
+    values = (
+        command.hidden_subtask,
+        command.hidden_scope_budget,
+        command.requested_model,
+        command.requested_effort,
+    )
+    if not all(isinstance(value, str) and value for value in values):
+        raise StorageRefusal(
+            "hidden_scientist_incomplete",
+            "hidden scientist dispatch requires subtask, scope budget, model, and effort",
+        )
+    subtask = _bounded_public_text(str(command.hidden_subtask), "hidden subtask")
+    _bounded_public_text(str(command.hidden_scope_budget), "hidden scope budget", maximum=256)
+    owner = store.connection.execute(
+        "SELECT role,retired_at FROM agent_instances WHERE agent_id=?",
+        (owner_agent_id,),
+    ).fetchone()
+    if owner is None or owner["role"] != "shotcaller" or owner["retired_at"] is not None:
+        raise StorageRefusal("hidden_owner_invalid", "hidden scientist owner must be a live Shotcaller")
+    if not 1 <= command.expected_minutes <= 5 or not 1 <= command.expected_task_action_calls <= 2:
+        raise StorageRefusal(
+            "hidden_scientist_budget_invalid",
+            "hidden scientist requires explicit bounded time and scope budgets",
+        )
+    return subtask
 
 
 def dispatch_request(
@@ -636,10 +829,33 @@ def dispatch_request(
     explicit_route = command.explicit_route
     at = command.at
     _time(at, "dispatch time")
-    mode, reason = classify_dispatch(
+    signal_value = {
+        "pre_bounded": command.pre_bounded,
+        "read_only": command.read_only,
+        "answer_or_routing_only": command.answer_or_routing_only,
+        "expected_minutes": command.expected_minutes,
+        "expected_task_action_calls": command.expected_task_action_calls,
+        "creates_artifact": command.creates_artifact,
+        "mutates_state": command.mutates_state,
+        "reproduces_issue": command.reproduces_issue,
+        "runs_tests": command.runs_tests,
+        "runs_benchmark": command.runs_benchmark,
+        "uses_browser_or_computer": command.uses_browser_or_computer,
+        "project_implementation": command.project_implementation,
+        "hidden_advisory": requested_mode == "hidden",
+        "project_suggested_shotcaller": command.project_suggested_shotcaller,
+    }
+    hidden_value = {
+        "hidden_subtask": command.hidden_subtask,
+        "hidden_scope_budget": command.hidden_scope_budget,
+    }
+    mode, reason_code, reason = classify_dispatch(
         work_kind=work_kind,
         requested_mode=requested_mode,
         hidden_supported=hidden_supported,
+        signals=OrchestrationSignals(**signal_value),
+        explicit_squad_id=explicit_route,
+        continuation_squad_id=command.continuation_target,
     )
     try:
         with store._transaction():
@@ -659,6 +875,10 @@ def dispatch_request(
                         "work_kind": work_kind,
                         "requested_mode": requested_mode,
                         "hidden_supported": hidden_supported,
+                        "signals": signal_value,
+                        "continuation_role": command.continuation_role,
+                        "continuation_target": command.continuation_target,
+                        "hidden_scientist": hidden_value,
                     }))
                     and existing["requested_model"] == requested_model
                     and existing["requested_effort"] == requested_effort
@@ -675,18 +895,32 @@ def dispatch_request(
                 }
             if request["state"] not in {"open", "accepted", "blocked", "deferred"}:
                 raise StorageRefusal("dispatch_conflict", "request state does not permit classification")
+            hidden_subtask: Optional[str] = None
+            if mode == "hidden":
+                hidden_subtask = _validate_hidden_scientist(
+                    store, command, str(request["owner_agent_id"])
+                )
+            elif any(hidden_value.values()):
+                raise StorageRefusal(
+                    "hidden_scientist_unexpected",
+                    "hidden scientist identity is valid only for hidden execution",
+                )
             next_version = int(request["version"]) + 1
             input_value = {
                 "work_kind": work_kind,
                 "requested_mode": requested_mode,
                 "hidden_supported": hidden_supported,
+                "signals": signal_value,
+                "continuation_role": command.continuation_role,
+                "continuation_target": command.continuation_target,
+                "hidden_scientist": hidden_value,
             }
             store.connection.execute(
                 """
                 INSERT INTO request_dispatches
-                  (dispatch_id,request_id,request_version,work_kind,execution_mode,reason,
+                  (dispatch_id,request_id,request_version,work_kind,execution_mode,reason,reason_code,
                    requested_mode,requested_model,requested_effort,explicit_route,input_json,decided_at)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     dispatch_id,
@@ -695,6 +929,7 @@ def dispatch_request(
                     work_kind,
                     mode,
                     reason,
+                    reason_code,
                     requested_mode,
                     requested_model,
                     requested_effort,
@@ -710,9 +945,10 @@ def dispatch_request(
                 """,
                 (mode, next_version, at, request_id, int(request["version"])),
             )
+            dispatch_event_id = f"request:{request_id}:{next_version}:dispatched"
             _insert_request_event(
                 store,
-                event_id=f"request:{request_id}:{next_version}:dispatched",
+                event_id=dispatch_event_id,
                 request_id=request_id,
                 actor_id=request["owner_agent_id"],
                 request_version=next_version,
@@ -722,6 +958,7 @@ def dispatch_request(
                 at=at,
                 detail={
                     "execution_mode": mode,
+                    "reason_code": reason_code,
                     "requested_model": requested_model,
                     "requested_effort": requested_effort,
                     "explicit_route": explicit_route,
@@ -735,6 +972,7 @@ def dispatch_request(
         "request_id": request_id,
         "execution_mode": mode,
         "reason": reason,
+        "reason_code": reason_code,
         "request_version": next_version,
         "idempotent": False,
     }
@@ -749,8 +987,23 @@ def route_request(
     event_id: str,
     outbox_id: str,
     at: str,
+    *,
+    recipient_squad_id: Optional[str] = None,
+    route_reason_code: str = "explicit_squad",
+    route_policy_version: str = "league.orchestration.v1",
+    route_confidence: str = "explicit",
+    required_capabilities: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     _time(at, "route time")
+    if (
+        not recipient_squad_id
+        or route_reason_code not in {"explicit_squad", "continuation_squad", "unique_strong_squad"}
+        or not route_policy_version
+        or route_confidence not in {"explicit", "continuation", "strong"}
+        or len(set(required_capabilities)) != len(required_capabilities)
+        or any(not item for item in required_capabilities)
+    ):
+        raise StorageRefusal("invalid_route", "Squad route policy evidence is incomplete")
     try:
         with store._transaction():
             request = _request_row(store, request_id)
@@ -763,6 +1016,9 @@ def route_request(
                     return {
                         "request_id": request_id,
                         "owner_agent_id": request["owner_agent_id"],
+                        "owner_squad_id": request["owner_squad_id"],
+                        "pending_owner_agent_id": request["pending_owner_agent_id"],
+                        "pending_owner_squad_id": request["pending_owner_squad_id"],
                         "state": request["state"],
                         "version": int(request["version"]),
                         "event_id": event_id,
@@ -772,11 +1028,39 @@ def route_request(
                 raise StorageRefusal("version_conflict", "request route expected-version failed")
             _active_claim(store, request_id, token=claim_token, at=at)
             recipient = store.connection.execute(
-                "SELECT 1 FROM agent_instances WHERE agent_id=? AND role='shotcaller' AND retired_at IS NULL",
-                (recipient_agent_id,),
+                """
+                SELECT s.owner_fence,i.state intake_state,i.fence intake_fence,
+                       a.role,a.retired_at
+                  FROM squads s
+                  JOIN agent_instances a ON a.agent_id=s.shotcaller_agent_id
+                  JOIN shotcaller_intake i
+                    ON i.squad_id=s.squad_id AND i.agent_id=s.shotcaller_agent_id
+                 WHERE s.squad_id=? AND s.state='active' AND s.shotcaller_agent_id=?
+                """,
+                (recipient_squad_id, recipient_agent_id),
             ).fetchone()
-            if recipient is None:
-                raise StorageRefusal("owner_unknown", "route recipient is not an active Shotcaller")
+            if (
+                recipient is None
+                or recipient["role"] != "shotcaller"
+                or recipient["retired_at"] is not None
+                or recipient["intake_state"] != "accepting"
+                or int(recipient["intake_fence"]) != int(recipient["owner_fence"])
+            ):
+                raise StorageRefusal("owner_unavailable", "target Squad has no accepting current Shotcaller")
+            runtimes = store.connection.execute(
+                """
+                SELECT capabilities_json FROM runtime_instances
+                 WHERE actor_agent_id=? AND status IN ('active','idle') AND verified=1
+                 ORDER BY last_seen_at DESC
+                """,
+                (recipient_agent_id,),
+            ).fetchall()
+            required = set(required_capabilities)
+            if not any(required <= set(json.loads(row["capabilities_json"])) for row in runtimes):
+                raise StorageRefusal(
+                    "owner_capability_mismatch",
+                    "target Squad's current live owner lacks required capabilities",
+                )
             next_version = expected_version + 1
             return_to = request["return_to_agent_id"] or request["owner_agent_id"]
             _insert_request_event(
@@ -787,17 +1071,36 @@ def route_request(
                 request_version=next_version,
                 event_type="request_routed",
                 state="routed",
-                update="request routed to another Shotcaller",
+                update="request offered to the selected Squad owner",
                 at=at,
-                detail={"recipient_agent_id": recipient_agent_id, "return_to_agent_id": return_to},
+                detail={
+                    "recipient_squad_id": recipient_squad_id,
+                    "route_reason_code": route_reason_code,
+                    "route_policy_version": route_policy_version,
+                    "route_confidence": route_confidence,
+                    "required_capabilities": list(required_capabilities),
+                },
             )
             store.connection.execute(
                 """
-                UPDATE requests SET owner_agent_id=?,return_to_agent_id=?,state='routed',
-                  last_route_event_id=?,version=?,updated_at=?
+                UPDATE requests SET pending_owner_agent_id=?,pending_owner_squad_id=?,
+                  return_to_agent_id=?,route_reason_code=?,route_policy_version=?,route_confidence=?,
+                  state='routed',last_route_event_id=?,version=?,updated_at=?
                  WHERE request_id=? AND version=?
                 """,
-                (recipient_agent_id, return_to, event_id, next_version, at, request_id, expected_version),
+                (
+                    recipient_agent_id,
+                    recipient_squad_id,
+                    return_to,
+                    route_reason_code,
+                    route_policy_version,
+                    route_confidence,
+                    event_id,
+                    next_version,
+                    at,
+                    request_id,
+                    expected_version,
+                ),
             )
             store.connection.execute(
                 "UPDATE request_claims SET released_at=? WHERE request_id=?", (at, request_id)
@@ -825,7 +1128,10 @@ def route_request(
         raise store._translate_database_error(exc, "request route conflicted with canonical state") from exc
     return {
         "request_id": request_id,
-        "owner_agent_id": recipient_agent_id,
+        "owner_agent_id": request["owner_agent_id"],
+        "owner_squad_id": request["owner_squad_id"],
+        "pending_owner_agent_id": recipient_agent_id,
+        "pending_owner_squad_id": recipient_squad_id,
         "state": "routed",
         "version": next_version,
         "event_id": event_id,
@@ -909,6 +1215,8 @@ def record_request_result(store: Any, command: RequestResultCommand) -> dict[str
     _time(at, "result time")
     if not all((result_id, idempotency_key, outcome, summary)):
         raise StorageRefusal("invalid_result", "request result fields are required")
+    if return_to_requester:
+        _bounded_public_text(summary, "returned result", maximum=1024)
     if len(command.task_ids) > MAX_TASK_RESULT_SOURCES:
         raise StorageRefusal(
             "invalid_result",
@@ -985,9 +1293,7 @@ def record_request_result(store: Any, command: RequestResultCommand) -> dict[str
             target_owner = request["owner_agent_id"]
             next_state = request["state"]
             if return_to_requester:
-                target_owner = request["return_to_agent_id"] or request["requester_agent_id"]
-                if target_owner == request["owner_agent_id"]:
-                    raise StorageRefusal("return_owner_conflict", "request is already owned by its requester")
+                target_owner = request["requester_agent_id"]
                 if not event_id or not outbox_id:
                     raise StorageRefusal("return_delivery_required", "owner return requires exact event and outbox IDs")
                 next_state = "awaiting_requester"
@@ -1008,11 +1314,25 @@ def record_request_result(store: Any, command: RequestResultCommand) -> dict[str
                     request_id=request_id,
                     actor_id=request["owner_agent_id"],
                     request_version=next_version,
-                    event_type="owner_result_recorded",
+                    event_type="request_progress",
                     state="awaiting_requester",
                     update=summary,
                     at=at,
-                    detail={"result_id": result_id, "return_to_agent_id": target_owner},
+                    detail={
+                        "reason_code": (
+                            "request_failed" if outcome == "failed" else "request_resolved"
+                        ),
+                        "progress_generation": next_version,
+                        "settled_count": len(sources),
+                        "total_count": len(sources),
+                        "current_phase": "Request result ready",
+                        "blocker_count": int(outcome == "failed"),
+                        "blocker_severity": "high" if outcome == "failed" else "none",
+                        "user_action_required": False,
+                        "deadline_change": None,
+                        "next_action": "Review the returned final result",
+                        "result_id": result_id,
+                    },
                 )
                 store.connection.execute(
                     """
@@ -1021,6 +1341,53 @@ def record_request_result(store: Any, command: RequestResultCommand) -> dict[str
                     VALUES(?,?,?,'pending',?,0)
                     """,
                     (outbox_id, event_id, target_owner, at),
+                )
+                progress_value = {
+                    "settled_count": len(sources),
+                    "total_count": len(sources),
+                    "current_phase": "Request result ready",
+                    "blocker_count": int(outcome == "failed"),
+                    "blocker_severity": "high" if outcome == "failed" else "none",
+                    "user_action_required": False,
+                    "deadline_change": None,
+                    "next_action": "Review the returned final result",
+                }
+                store.connection.execute(
+                    """
+                    INSERT INTO request_progress_events
+                      (progress_id,request_id,request_generation,progress_generation,
+                       owner_agent_id,recipient_agent_id,urgency,reason_code,content_digest,
+                       settled_count,total_count,current_phase,blocker_count,blocker_severity,
+                       user_action_required,deadline_change,next_action,event_id,outbox_id,emitted_at)
+                    VALUES(?,?,?,?,?,?,'immediate',?,?,?,?,?,?,?,?,NULL,?,?,?,?)
+                    """,
+                    (
+                        f"progress:{request_id}:{next_version}:result",
+                        request_id,
+                        next_version,
+                        next_version,
+                        request["owner_agent_id"],
+                        target_owner,
+                        "request_failed" if outcome == "failed" else "request_resolved",
+                        _digest(_json(progress_value)),
+                        len(sources),
+                        len(sources),
+                        progress_value["current_phase"],
+                        progress_value["blocker_count"],
+                        progress_value["blocker_severity"],
+                        0,
+                        progress_value["next_action"],
+                        event_id,
+                        outbox_id,
+                        at,
+                    ),
+                )
+                store.connection.execute(
+                    """
+                    UPDATE request_progress_buffers SET state='superseded',updated_at=?
+                     WHERE request_id=? AND state IN ('pending','due')
+                    """,
+                    (at, request_id),
                 )
                 store.connection.execute(
                     """

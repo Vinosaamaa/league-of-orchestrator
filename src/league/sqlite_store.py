@@ -19,8 +19,10 @@ from . import sqlite_runtime_ops
 from .sqlite_core import SQLiteTransactionCore
 from .sqlite_assignment_ops import activate_assignment as activate_assignment_operation
 from .sqlite_assignment_ops import block_assignment as block_assignment_operation
+from .sqlite_assignment_ops import finish_hidden_assignment as finish_hidden_assignment_operation
 from .sqlite_assignment_ops import mark_assignment_launching as mark_assignment_launching_operation
 from .sqlite_assignment_ops import prepare_assignment as prepare_assignment_operation
+from .sqlite_assignment_ops import reconcile_assignment_runtime as reconcile_assignment_runtime_operation
 from .sqlite_assignment_ops import transition_task as transition_task_operation
 from .sqlite_callsign_ops import activate_callsign as activate_callsign_operation
 from .sqlite_callsign_ops import allocate_callsign as allocate_callsign_operation
@@ -38,6 +40,7 @@ from .sqlite_lifecycle_ops import transition as transition_operation
 from .sqlite_project_ops import canonical_repository
 from .sqlite_project_ops import list_projects as list_projects_operation
 from .sqlite_project_ops import project_advice as project_advice_operation
+from .sqlite_project_ops import orchestration_decision as orchestration_decision_operation
 from .sqlite_project_ops import put_project as put_project_operation
 from .sqlite_project_ops import resolve_project as resolve_project_operation
 from .sqlite_project_ops import set_project_suggestions as set_project_suggestions_operation
@@ -57,6 +60,8 @@ from .sqlite_request_ops import route_request as route_request_operation
 from .sqlite_request_ops import set_request_state as set_request_state_operation
 from .sqlite_request_ops import triage_prompt as triage_prompt_operation
 from .sqlite_request_ops import unresolved_requests as unresolved_requests_operation
+from .sqlite_progress_ops import emit_request_progress as emit_request_progress_operation
+from .sqlite_progress_ops import reconcile_request_progress as reconcile_request_progress_operation
 from .sqlite_rollover_ops import abort_rollover as abort_rollover_operation
 from .sqlite_rollover_ops import acknowledge_rollover as acknowledge_rollover_operation
 from .sqlite_rollover_ops import commit_rollover as commit_rollover_operation
@@ -68,6 +73,9 @@ from .sqlite_roster_ops import roster_snapshot as roster_snapshot_operation
 from .sqlite_report_ops import generate_report as generate_report_operation
 from .sqlite_report_ops import record_activity_evidence as record_activity_evidence_operation
 from .sqlite_report_ops import report_spec as report_spec_operation
+from .sqlite_squad_ops import accept_squad as accept_squad_operation
+from .sqlite_squad_ops import register_squad as register_squad_operation
+from .sqlite_squad_ops import squad_status as squad_status_operation
 from .sqlite_transfer_ops import (
     apply_import as apply_import_operation,
     canonical_counts,
@@ -80,21 +88,24 @@ from .sqlite_watcher_ops import register_watcher as register_watcher_operation
 from .sqlite_watcher_ops import set_allow_stop_once as set_allow_stop_once_operation
 from .sqlite_watcher_ops import stop_decision as stop_decision_operation
 from .storage import ConnectionPolicy, FaultInjector, ImportPlan, StorageRefusal
-from .storage_assignment import PrepareAssignmentCommand
+from .storage_assignment import FinishHiddenAssignmentCommand, PrepareAssignmentCommand
 from .storage_outbox import OutboxDispatchIdentity
 from .storage_request import (
     AnswerRequestCommand,
     DispatchRequestCommand,
+    RequestProgressCommand,
     RequestResultCommand,
 )
 from .storage_watcher import RuntimeRegistrationCommand
 from .storage_types import LIFECYCLE_STATES
 from .sqlite_handoff_schema import MIGRATION_NAME as HANDOFF_MIGRATION_NAME
 from .sqlite_handoff_schema import STATEMENTS as HANDOFF_MIGRATION_STATEMENTS
+from .sqlite_routing_policy_schema import MIGRATION_NAME as ROUTING_POLICY_MIGRATION_NAME
+from .sqlite_routing_policy_schema import STATEMENTS as ROUTING_POLICY_MIGRATION_STATEMENTS
 
 
 WAL_MINIMUM = (3, 51, 3)
-CURRENT_SCHEMA_VERSION = 7
+CURRENT_SCHEMA_VERSION = 8
 DATABASE_NAME = "league.sqlite3"
 DEFAULT_BUSY_TIMEOUT_MS = 500
 MAX_BUSY_TIMEOUT_MS = 10_000
@@ -1011,6 +1022,12 @@ MIGRATIONS = (
             "CREATE INDEX ix_report_specs_created ON report_specs(created_at,report_id)",
         ),
     ),
+    Migration(
+        8,
+        ROUTING_POLICY_MIGRATION_NAME,
+        ROUTING_POLICY_MIGRATION_STATEMENTS,
+        rebuilds_foreign_keys=True,
+    ),
 )
 
 
@@ -1176,6 +1193,8 @@ _EXPORT_TABLES = (
     "squads",
     "shotcaller_intake",
     "squad_champions",
+    "squad_capabilities",
+    "squad_registration_offers",
     "project_squad_suggestions",
     "callsign_leases",
     "launch_attempts",
@@ -1218,6 +1237,8 @@ _EXPORT_TABLES = (
     "runtime_bindings",
     "model_routing_decisions",
     "model_routing_outcomes",
+    "request_progress_events",
+    "request_progress_buffers",
     "task_resources",
     "cleanup_operations",
     "cleanup_actions",
@@ -1240,6 +1261,8 @@ _EXPORT_ORDER = {
     "squads": "squad_id",
     "shotcaller_intake": "squad_id,agent_id",
     "squad_champions": "squad_id,champion_agent_id",
+    "squad_capabilities": "squad_id,capability",
+    "squad_registration_offers": "registered_at,registration_id",
     "project_squad_suggestions": "project_id,position,squad_id",
     "callsign_leases": "callsign",
     "launch_attempts": "attempt_id",
@@ -1282,6 +1305,8 @@ _EXPORT_ORDER = {
     "runtime_bindings": "binding_id",
     "model_routing_decisions": "chosen_at,decision_id",
     "model_routing_outcomes": "recorded_at,outcome_id",
+    "request_progress_events": "emitted_at,progress_id",
+    "request_progress_buffers": "due_at,request_id,recipient_agent_id",
     "task_resources": "task_id,resource_id",
     "cleanup_operations": "cleanup_obligation_id,cleanup_revision",
     "cleanup_actions": "operation_id,ordinal",
@@ -1331,7 +1356,15 @@ _INSPECTION_REDACTIONS = {
     },
     "request_results": {"summary", "payload_hash", "idempotency_key"},
     "response_references": {"session_locator", "response_locator", "content_hash"},
-    "task_assignments": {"acceptance_receipt_json", "failure_class"},
+    "task_assignments": {
+        "acceptance_receipt_json",
+        "failure_class",
+        "bounded_subtask",
+        "model",
+        "result_summary",
+        "cleanup_receipt",
+        "unpublished_state_receipt",
+    },
     "rollover_operations": {"plan_json"},
     "task_transitions": {"update_text", "next_action", "blocker"},
     "delivery_attempts": {"outcome"},
@@ -1345,6 +1378,8 @@ _INSPECTION_REDACTIONS = {
         "last_receipt_json",
     },
     "model_routing_decisions": {"model", "reason"},
+    "request_progress_events": {"current_phase", "deadline_change", "next_action"},
+    "request_progress_buffers": {"current_phase", "deadline_change", "next_action"},
     "task_resources": {"expected_identity_json", "applicability_reason"},
     "cleanup_actions": {"expected_identity_json", "intended_state_json"},
     "cleanup_action_receipts": {"before_json", "after_json", "adapter_receipt_json"},
@@ -2072,6 +2107,24 @@ class SQLiteStorage(SQLiteTransactionCore):
             visibility=visibility,
         )
 
+    def orchestration_decision(
+        self,
+        signals: Any,
+        *,
+        project_ids: Sequence[str] = (),
+        explicit_squad_id: Optional[str] = None,
+        continuation_squad_id: Optional[str] = None,
+        required_capabilities: Sequence[str] = (),
+    ) -> dict[str, object]:
+        return orchestration_decision_operation(
+            self,
+            signals,
+            project_ids=project_ids,
+            explicit_squad_id=explicit_squad_id,
+            continuation_squad_id=continuation_squad_id,
+            required_capabilities=required_capabilities,
+        )
+
     def roster_snapshot(
         self,
         *,
@@ -2194,6 +2247,12 @@ class SQLiteStorage(SQLiteTransactionCore):
     def dispatch_request(self, command: DispatchRequestCommand) -> dict[str, Any]:
         return dispatch_request_operation(self, command)
 
+    def emit_request_progress(self, command: RequestProgressCommand) -> dict[str, Any]:
+        return emit_request_progress_operation(self, command)
+
+    def reconcile_request_progress(self, owner_agent_id: str, at: str) -> dict[str, Any]:
+        return reconcile_request_progress_operation(self, owner_agent_id, at)
+
     def route_request(
         self,
         request_id: str,
@@ -2203,6 +2262,12 @@ class SQLiteStorage(SQLiteTransactionCore):
         event_id: str,
         outbox_id: str,
         at: str,
+        *,
+        recipient_squad_id: Optional[str] = None,
+        route_reason_code: str = "explicit_squad",
+        route_policy_version: str = "league.orchestration.v1",
+        route_confidence: str = "explicit",
+        required_capabilities: tuple[str, ...] = (),
     ) -> dict[str, Any]:
         return route_request_operation(
             self,
@@ -2213,7 +2278,21 @@ class SQLiteStorage(SQLiteTransactionCore):
             event_id,
             outbox_id,
             at,
+            recipient_squad_id=recipient_squad_id,
+            route_reason_code=route_reason_code,
+            route_policy_version=route_policy_version,
+            route_confidence=route_confidence,
+            required_capabilities=required_capabilities,
         )
+
+    def register_squad(self, **command: Any) -> dict[str, Any]:
+        return register_squad_operation(self, **command)
+
+    def accept_squad(self, **command: Any) -> dict[str, Any]:
+        return accept_squad_operation(self, **command)
+
+    def squad_status(self, **query: Any) -> dict[str, Any]:
+        return squad_status_operation(self, **query)
 
     def set_request_state(
         self,
@@ -2297,6 +2376,16 @@ class SQLiteStorage(SQLiteTransactionCore):
             cleanup_proven,
             at,
         )
+
+    def finish_hidden_assignment(
+        self, command: FinishHiddenAssignmentCommand
+    ) -> dict[str, Any]:
+        return finish_hidden_assignment_operation(self, command)
+
+    def reconcile_assignment_runtime(
+        self, assignment_id: str, at: str
+    ) -> dict[str, Any]:
+        return reconcile_assignment_runtime_operation(self, assignment_id, at)
 
     def transition_task(
         self,

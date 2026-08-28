@@ -55,7 +55,7 @@ def test_launcher_help_and_schemas() -> None:
     )
     assert "SQL is not exposed" in " ".join(launcher.stdout.split())
     assert (
-        "{storage,agent,callsign,rollover,delivery,project,roster,evidence,report,task,runtime,skill,routing,resource,cleanup,request,assign,hook,help,acceptance}"
+        "{storage,agent,callsign,rollover,delivery,project,roster,evidence,report,squad,task,runtime,skill,routing,resource,cleanup,request,assign,hook,help,acceptance}"
         in launcher.stdout
     )
     parser = cli._parser()
@@ -72,6 +72,25 @@ def test_launcher_help_and_schemas() -> None:
         name in rollover_help
         for name in ("prepare", "bindings", "acknowledge", "commit", "abort", "drain", "status")
     )
+    squad_help = groups.choices["squad"].format_help()
+    assert all(name in squad_help for name in ("register", "accept", "status"))
+    request_actions = next(
+        action
+        for action in groups.choices["request"]._actions
+        if getattr(action, "choices", None)
+    )
+    dispatch_help = request_actions.choices["dispatch"].format_help()
+    assert all(
+        phrase in dispatch_help
+        for phrase in (
+            "Shotcaller direct",
+            "recorded hidden scientist",
+            "local visible Champion",
+            "acknowledgement-gated Squad route",
+        )
+    )
+    assignment_help = groups.choices["assign"].format_help()
+    assert all(name in assignment_help for name in ("reconcile-runtime", "finish-hidden"))
     for name in (
         "league-command-output.schema.json",
         "league-import-report.schema.json",

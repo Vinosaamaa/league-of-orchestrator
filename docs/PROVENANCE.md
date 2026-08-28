@@ -212,3 +212,28 @@ The v7 import-plan contract now binds its target schema version and returns a
 dedicated compatibility refusal for retained pre-v7 plans; this changes only
 the deterministic dry-run report digest, not imported canonical rows or the v7
 migration checksum.
+
+## Routing-policy and requester-progress provenance
+
+The issue-#36 orchestration/model policy, Squad registration commands, hidden
+scientist assignment role, parent-request progress projection, decision corpus,
+research report, and synthetic tests are original League implementation. They
+extend the merged #4 assignment/request state machine and #14 model-routing
+records; they add no learned router, planner, scheduler, Lead hierarchy,
+installed writer, live adapter, migration, or cutover.
+The new provider-policy example is `config/league-model-routing.example.json`;
+the imported `config/agent-routing.example.json` remains unchanged for the
+filesystem watcher contract.
+
+Migration v8 is contiguous after the reporting/privacy v7 and is named
+`bounded-routing-policy-and-request-progress`, checksum
+`593e2cf05d0200463800b6be7cbf5918a9b5fc3304f793d2ec3fad30b538e80c`.
+It deliberately separates stable Squad ownership from current Shotcaller
+runtime, owner routing from execution mode, hidden-worker validation from
+Champion validation, and child delivery from requester progress. Focused tests
+cover exact route precedence/tie refusal, registration acceptance atomicity,
+direct bounds, hidden persistence/promotion/stale-runtime fencing, model
+override/downgrade/escalation, and immediate/coalesced/overdue progress.
+The v8 target-version binding changes the deterministic acceptance fixture's
+dry-run report digest only; its source and imported-row parity digests remain
+unchanged.

@@ -34,11 +34,13 @@ from request_lifecycle_fixture import (  # noqa: E402
     create_context,
     dispatch_request,
     SyntheticLifecycleSeeder,
+    activate_jarvan_squad,
 )
 from storage_fixture import CHAMPION_ID, REPOSITORY, SHOTCALLER_ID  # noqa: E402
 
 
 def route_request_r2(store, clock):
+    squad_id = activate_jarvan_squad(store, clock)
     store.claim_request("R2", GAREN_RUNTIME, "route-r2", clock.after(120), clock.now())
     return store.route_request(
         "R2",
@@ -48,6 +50,8 @@ def route_request_r2(store, clock):
         "event:heimerdinger:source",
         "outbox:heimerdinger:source",
         clock.now(),
+        recipient_squad_id=squad_id,
+        required_capabilities=("request.route",),
     )
 
 

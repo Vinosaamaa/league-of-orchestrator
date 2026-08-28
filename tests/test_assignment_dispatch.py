@@ -95,6 +95,10 @@ def test_empty_repository_refuses_direct_before_first_write(root: Path) -> None:
         "read-only",
         "hidden",
         hidden_supported=True,
+        requested_model="synthetic-scientist",
+        requested_effort="low",
+        hidden_subtask="Summarize the bounded synthetic record",
+        hidden_scope_budget="Read one synthetic record and return one summary",
     )
     assert hidden["execution_mode"] == "hidden"
     store.close()

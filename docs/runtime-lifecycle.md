@@ -95,13 +95,16 @@ repeating the external action.
 
 ## Model and effort routing
 
-`ModelRouter` is the stable assignment-neutral API. It accepts a semantic role
-profile and records the chosen tier, concrete model, effort, reason, and which
-fields were explicit. Provider-specific model names remain in configuration.
+`ModelRouter` is the stable assignment-neutral API. It accepts semantic
+task/risk/verification signals and records policy/provider versions, chosen
+tier, provider, model, effort, bounded reason, explicit fields, active operator
+override, and capability fallback. Provider-specific model names remain in
+versioned configuration.
 
 The default bounded/checkable route stays on `WORKER_STRONG` until a configured
 representative evaluation explicitly approves `WORKER_FAST`. Explicit user
-model or effort values are preserved exactly. Only the enumerated concrete
+provider, model, or effort values are preserved exactly, before an expiring
+operator override and ordinary policy. Only the enumerated concrete
 failure classes permit one safe-boundary escalation; a second escalation, or a
 route already at the strongest worker tier, records `blocked`. Outcomes record
 success, corrections, latency, and cost by routing decision and role. Storage

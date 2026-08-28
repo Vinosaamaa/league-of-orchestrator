@@ -13,6 +13,7 @@ from .storage_request import (
     RequestResultCommand,
     RequestStorage,
 )
+from .storage_runtime import RuntimeLifecycleStorage
 from .storage_transfer import TransferStorage
 from .storage_watcher import RuntimeRegistrationCommand, WatcherStorage
 from .storage_types import (
@@ -33,6 +34,7 @@ class Storage(
     AssignmentStorage,
     OutboxStorage,
     WatcherStorage,
+    RuntimeLifecycleStorage,
 ):
     """The only domain-facing persistence interface.
 

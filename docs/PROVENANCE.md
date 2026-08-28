@@ -105,3 +105,25 @@ do not modify `src/agent_watcher.py`, installed files, global hooks, live
 Roster/callsign/watcher state, or canonical authority. Issue #23 retains all
 installation, live import, real-runtime canary, reversible cutover, and rollback
 ownership.
+
+The grouped implementation was squash-merged from PR #31 as
+`fa2c5f862c5bd223057a6b9b34f5b11607a747be`. Its schema migrations 1, 2, and 3
+remain byte-for-byte canonical in this descendant; the runtime slice does not
+renumber or rewrite their names, statements, or checksums.
+
+## Runtime-lifecycle implementation provenance
+
+The issue-#7/#11/#14 adapter, runtime, cleanup, resource, routing, storage, CLI,
+documentation, and focused-test modules are original League implementation.
+They extend the canonical request-lifecycle store with contiguous migration v4,
+`adapter-runtime-cleanup-and-routing`, checksum
+`01892d93311ce0b5486077b00e6d3adea60fd3c91006663358317260ad21cd2d`.
+Migration v4 evolves v3's existing one-per-task cleanup obligation and adds
+opaque runtime bindings, typed resources, cleanup operations/actions/receipts,
+and durable routing evidence; it does not duplicate request claims,
+assignments, delivery outbox, watcher, or Stop state machines.
+
+Codex+Herdr and Codex+tmux are named adapter contracts. Pi and all destructive
+cleanup adapters in the suite are deterministic isolated doubles, not
+real-runtime evidence. Installed drivers, a genuine isolated canary, global
+installation, live migration, cutover, and rollback remain issue-#23 gates.

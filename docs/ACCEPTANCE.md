@@ -58,8 +58,8 @@ supplied state root. It leaves an owner-only
 
 The request, assignment, watcher, Stop, and teardown acceptance-receipt
 extensions remain machine-readable `pending` entries. Request, assignment,
-watcher delivery, and Stop now have repository-local implementations and
-focused fake-adapter tests, but this grouped slice deliberately does not rewrite
+watcher delivery, Stop, and teardown now have repository-local implementations
+and focused deterministic tests, but these slices deliberately do not rewrite
 the already isolated acceptance receipt or claim a cutover canary. Codex,
 Cursor, Pi, Herdr, and tmux remain `unverified`; consuming a synthetic payload
 or fake endpoint is never reported as real-runtime support.
@@ -68,8 +68,14 @@ Focused and combined affected verification are:
 
 ```sh
 make test-acceptance
+make test-request-lifecycle
+make test-runtime-lifecycle
 make test-affected
 ```
+
+The staged migration assertion follows `CURRENT_SCHEMA_VERSION`; after PR #31,
+canonical request migrations are `[1,2,3]` and runtime lifecycle appends
+checksummed v4 without changing the acceptance operation or sentinel contract.
 
 The generation switch in this harness is a model exercised beneath the
 disposable namespace. It is not a global cutover command. Canonical cutover,

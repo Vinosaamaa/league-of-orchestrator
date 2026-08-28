@@ -90,3 +90,12 @@ authority or a claim that any pending acceptance-receipt extension or real
 adapter passes. The grouped request-lifecycle implementation remains inert and
 is verified separately with fake adapters against the same explicit-root
 storage boundary.
+
+The repository-local schema is now contiguous `[1,2,3,4]`. Versions 1 and 2
+remain the issue-#19 store, version 3 is the merged request lifecycle, and
+version 4 is the runtime-lifecycle extension. Version 4 preserves and evolves
+v3's existing task cleanup obligation before attaching typed resources,
+executable cleanup operations, ordered actions, and receipts. It does not grant
+live migration authority; any existing explicit-root database still requires
+the ordinary verified pre-upgrade backup, and issue #23 retains installed-state
+and cutover ownership.

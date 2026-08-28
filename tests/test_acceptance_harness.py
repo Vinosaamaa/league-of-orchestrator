@@ -26,6 +26,7 @@ from league.acceptance import (  # noqa: E402
     run_acceptance,
     validate_hook_fixture,
 )
+from league.sqlite_store import CURRENT_SCHEMA_VERSION  # noqa: E402
 from league.storage import StorageRefusal  # noqa: E402
 
 
@@ -138,7 +139,7 @@ def assert_staged_install_receipt(result: dict[str, object]) -> None:
     ) == 1
     assert staged["launcher_resolution"] and staged["help_checked"]
     assert staged["schema_migration"] == {
-        "to_version": 3,
+        "to_version": CURRENT_SCHEMA_VERSION,
         "journal_mode": "DELETE",
         "integrity": True,
     }

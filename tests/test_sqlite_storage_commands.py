@@ -18,6 +18,7 @@ LEAGUE = ROOT / "bin/league"
 sys.path[:0] = [str(ROOT / "src"), str(ROOT / "tests")]
 
 import league.cli as cli  # noqa: E402
+from league.sqlite_store import CURRENT_SCHEMA_VERSION  # noqa: E402
 from storage_fixture import (  # noqa: E402
     CHAMPION_ID,
     REPOSITORY,
@@ -54,7 +55,7 @@ def test_launcher_help_and_schemas() -> None:
     )
     assert "SQL is not exposed" in " ".join(launcher.stdout.split())
     assert (
-        "{storage,agent,callsign,delivery,project,task,request,assign,hook,help,acceptance}"
+        "{storage,agent,callsign,delivery,project,task,runtime,routing,resource,cleanup,request,assign,hook,help,acceptance}"
         in launcher.stdout
     )
     parser = cli._parser()
@@ -97,7 +98,8 @@ def test_storage_migrate_and_import(root: Path) -> None:
     state.mkdir()
     fixture = write_complete_fixture(source)
     migration = success(invoke_cli(state, "storage", "migrate"), "storage.migrate")
-    assert migration["to_version"] == 3 and migration["policy"]["foreign_keys"] is True
+    assert migration["to_version"] == CURRENT_SCHEMA_VERSION
+    assert migration["policy"]["foreign_keys"] is True
     assert os.stat(state / "league.sqlite3").st_mode & 0o777 == 0o600
     dry_run = success(
         invoke_cli(

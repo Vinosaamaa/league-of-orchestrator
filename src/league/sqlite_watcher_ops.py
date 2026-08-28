@@ -302,7 +302,8 @@ def _obligation_counts(store: Any, actor_agent_id: str) -> dict[str, int]:
             WHERE recipient_agent_id=?
               AND state IN ('pending','in_flight','awaiting_receipt')) pending_deliveries,
           (SELECT COUNT(*) FROM cleanup_obligations c JOIN tasks t ON t.task_id=c.task_id
-            WHERE t.coordinator_agent_id=? AND c.cleanup_state<>'completed') cleanup_obligations
+            WHERE t.coordinator_agent_id=?
+              AND c.cleanup_state NOT IN ('completed','cleanup_completed')) cleanup_obligations
         """,
         (actor_agent_id,) * 5,
     ).fetchone()

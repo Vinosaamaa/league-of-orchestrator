@@ -9,7 +9,7 @@ from typing import Any
 
 from league.cli import main as league_main
 from league.importer import build_import_plan
-from league.sqlite_store import SQLiteStorage
+from league.sqlite_store import CURRENT_SCHEMA_VERSION, SQLiteStorage
 
 from storage_fixture import write_complete_fixture
 
@@ -18,7 +18,7 @@ def migrated_state(
     parent: Path,
     name: str,
     *,
-    target_version: int = 3,
+    target_version: int = CURRENT_SCHEMA_VERSION,
     request_wal: bool = True,
 ) -> tuple[Path, dict[str, Any]]:
     state = parent / name

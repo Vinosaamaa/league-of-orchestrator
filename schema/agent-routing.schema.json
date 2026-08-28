@@ -5,7 +5,7 @@
   "type": "object",
   "required": ["schema", "tiers"],
   "properties": {
-    "schema": {"const": 1},
+    "schema": {"enum": [1, 2]},
     "tiers": {
       "type": "object",
       "minProperties": 1,
@@ -18,6 +18,30 @@
         },
         "additionalProperties": false
       }
+    },
+    "evaluations": {
+      "type": "object",
+      "properties": {
+        "WORKER_FAST": {
+          "type": "object",
+          "required": ["approved", "representative_tasks"],
+          "properties": {
+            "approved": {"type": "boolean"},
+            "representative_tasks": {"type": "integer", "minimum": 0}
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "policy": {
+      "type": "object",
+      "required": ["quality_baseline", "safe_boundary_escalations"],
+      "properties": {
+        "quality_baseline": {"const": "WORKER_STRONG"},
+        "safe_boundary_escalations": {"const": 1}
+      },
+      "additionalProperties": false
     }
   },
   "additionalProperties": false

@@ -58,16 +58,16 @@ def canonical_repository(value: str) -> tuple[str, str]:
     host: Optional[str] = None
     path: Optional[str] = None
     if "://" in exact:
-        parsed = urlsplit(exact)
-        if parsed.scheme not in {"https", "http", "ssh", "git"}:
-            raise StorageRefusal("invalid_project", "repository scheme is unsupported")
-        if parsed.query or parsed.fragment or parsed.password:
-            raise StorageRefusal("invalid_project", "repository identity cannot contain secrets, query, or fragment")
-        host = parsed.hostname
         try:
+            parsed = urlsplit(exact)
+            if parsed.scheme not in {"https", "http", "ssh", "git"}:
+                raise StorageRefusal("invalid_project", "repository scheme is unsupported")
+            if parsed.query or parsed.fragment or parsed.password:
+                raise StorageRefusal("invalid_project", "repository identity cannot contain secrets, query, or fragment")
+            host = parsed.hostname
             port = parsed.port
         except ValueError as exc:
-            raise StorageRefusal("invalid_project", "repository port is invalid") from exc
+            raise StorageRefusal("invalid_project", "repository URL is invalid") from exc
         if host is not None and port is not None:
             host = f"{host}:{port}"
         path = parsed.path
@@ -105,26 +105,52 @@ def _alias_rows(store: Any, project_id: str) -> list[dict[str, Any]]:
     ]
 
 
-def _squad_rows(store: Any, project_id: str) -> list[dict[str, Any]]:
+def _alias_map(store: Any, project_ids: Sequence[str]) -> dict[str, list[str]]:
+    result = {project_id: [] for project_id in project_ids}
+    if not project_ids:
+        return result
+    placeholders = ",".join("?" for _ in project_ids)
     rows = store.connection.execute(
-        """
-        SELECT p.squad_id,p.position,s.state squad_state,a.callsign,a.status shotcaller_status,
-               a.retired_at
+        f"""
+        SELECT project_id,alias FROM project_aliases
+         WHERE project_id IN ({placeholders})
+         ORDER BY project_id,position,alias_key
+        """,
+        tuple(project_ids),
+    ).fetchall()
+    for row in rows:
+        result[str(row["project_id"])].append(str(row["alias"]))
+    return result
+
+
+def _squad_unavailable_reason(row: Any) -> Optional[str]:
+    if row["squad_state"] != "active":
+        return "squad_retired"
+    if row["retired_at"] is not None or row["shotcaller_status"] in TERMINAL_AGENT_STATES:
+        return "shotcaller_unavailable"
+    return None
+
+
+def _squad_map(store: Any, project_ids: Sequence[str]) -> dict[str, list[dict[str, Any]]]:
+    result = {project_id: [] for project_id in project_ids}
+    if not project_ids:
+        return result
+    placeholders = ",".join("?" for _ in project_ids)
+    rows = store.connection.execute(
+        f"""
+        SELECT p.project_id,p.squad_id,p.position,s.state squad_state,a.callsign,
+               a.status shotcaller_status,a.retired_at
           FROM project_squad_suggestions p
           JOIN squads s ON s.squad_id=p.squad_id
           JOIN agent_instances a ON a.agent_id=s.shotcaller_agent_id
-         WHERE p.project_id=? ORDER BY p.position,p.squad_id
+         WHERE p.project_id IN ({placeholders})
+         ORDER BY p.project_id,p.position,p.squad_id
         """,
-        (project_id,),
+        tuple(project_ids),
     ).fetchall()
-    result: list[dict[str, Any]] = []
     for row in rows:
-        reason = None
-        if row["squad_state"] != "active":
-            reason = "squad_retired"
-        elif row["retired_at"] is not None or row["shotcaller_status"] in TERMINAL_AGENT_STATES:
-            reason = "shotcaller_unavailable"
-        result.append(
+        reason = _squad_unavailable_reason(row)
+        result[str(row["project_id"])].append(
             {
                 "squad_id": row["squad_id"],
                 "shotcaller": row["callsign"],
@@ -136,9 +162,23 @@ def _squad_rows(store: Any, project_id: str) -> list[dict[str, Any]]:
     return result
 
 
-def _project_value(store: Any, row: Any, visibility: str) -> dict[str, Any]:
+def _squad_rows(store: Any, project_id: str) -> list[dict[str, Any]]:
+    return _squad_map(store, [project_id])[project_id]
+
+
+def _project_value(
+    store: Any,
+    row: Any,
+    visibility: str,
+    *,
+    aliases: Optional[Sequence[str]] = None,
+) -> dict[str, Any]:
     mode = _visibility(visibility)
-    aliases = [item["alias"] for item in _alias_rows(store, row["project_id"])]
+    alias_values = (
+        list(aliases)
+        if aliases is not None
+        else [item["alias"] for item in _alias_rows(store, row["project_id"])]
+    )
     repository = row["repository"]
     root = row["root_path"]
     if mode == "outbound":
@@ -147,7 +187,7 @@ def _project_value(store: Any, row: Any, visibility: str) -> dict[str, Any]:
     return {
         "project_id": row["project_id"],
         "summary": row["summary"],
-        "aliases": aliases,
+        "aliases": alias_values,
         "code": row["code"],
         "root": root,
         "repository": repository,
@@ -171,14 +211,14 @@ def resolve_project_routing_identity(
     store: Any, repository: str
 ) -> Optional[tuple[str, str]]:
     """Resolve only the project identity needed by assignment reservation."""
-    exact, key = canonical_repository(repository)
+    _, key = canonical_repository(repository)
     rows = store.connection.execute(
         """
         SELECT project_id,state FROM projects
-         WHERE repository_key=? OR (repository_key IS NULL AND repository=?)
+        WHERE repository_key=?
          ORDER BY project_id LIMIT 2
         """,
-        (key, exact),
+        (key,),
     ).fetchall()
     if len(rows) > 1:
         raise StorageRefusal(
@@ -207,9 +247,9 @@ def resolve_project(
         query = "SELECT * FROM projects WHERE project_id=?"
         parameters = (project_id,)
     elif repository is not None:
-        exact, key = canonical_repository(repository)
-        query = "SELECT * FROM projects WHERE repository_key=? OR repository=?"
-        parameters = (key, exact)
+        _, key = canonical_repository(repository)
+        query = "SELECT * FROM projects WHERE repository_key=?"
+        parameters = (key,)
     elif root is not None:
         exact, key = canonical_root(root)
         query = "SELECT * FROM projects WHERE root_key=? OR (root_key IS NULL AND root_path=?)"
@@ -226,23 +266,6 @@ def resolve_project(
         """
         parameters = (key,)
     rows = list(store.connection.execute(query, parameters).fetchall())
-    if repository is not None:
-        known_ids = {str(row["project_id"]) for row in rows}
-        legacy_rows = store.connection.execute(
-            "SELECT * FROM projects WHERE repository_key IS NULL ORDER BY project_id LIMIT ?",
-            (MAX_PROJECTS + 1,),
-        ).fetchall()
-        if len(legacy_rows) > MAX_PROJECTS:
-            raise StorageRefusal("catalog_too_large", "legacy project identity scan exceeds its bound")
-        for row in legacy_rows:
-            if str(row["project_id"]) in known_ids:
-                continue
-            try:
-                _, legacy_key = canonical_repository(str(row["repository"]))
-            except StorageRefusal:
-                continue
-            if legacy_key == key:
-                rows.append(row)
     if len(rows) > 1:
         raise StorageRefusal("ambiguous_project", "project identity matches more than one catalog entry")
     return _project_value(store, rows[0], visibility) if rows else None
@@ -265,6 +288,7 @@ def _normalized_aliases(values: Sequence[str]) -> list[tuple[str, str]]:
 def put_project(
     store: Any,
     project_id: str,
+    *,
     expected_version: int,
     summary: str,
     repository: str,
@@ -291,6 +315,11 @@ def put_project(
             existing_aliases = [
                 (row["alias"], row["alias_key"]) for row in _alias_rows(store, project_id)
             ]
+            if existing is None:
+                if expected_version != 0:
+                    raise StorageRefusal("version_conflict", "new project requires expected version zero")
+            elif int(existing["version"]) != expected_version:
+                raise StorageRefusal("version_conflict", "project expected-version precondition failed")
             desired = {
                 "summary": summary_value,
                 "repository": repository_value,
@@ -316,29 +345,7 @@ def put_project(
                 ).fetchone()
                 if collision is not None:
                     raise StorageRefusal("project_identity_conflict", f"canonical project {label} already belongs to another project")
-            legacy_rows = store.connection.execute(
-                """
-                SELECT project_id,repository FROM projects
-                 WHERE repository_key IS NULL AND project_id<>?
-                 ORDER BY project_id LIMIT ?
-                """,
-                (project_id, MAX_PROJECTS + 1),
-            ).fetchall()
-            if len(legacy_rows) > MAX_PROJECTS:
-                raise StorageRefusal("catalog_too_large", "legacy project identity scan exceeds its bound")
-            for legacy in legacy_rows:
-                try:
-                    _, legacy_key = canonical_repository(str(legacy["repository"]))
-                except StorageRefusal:
-                    continue
-                if legacy_key == repository_key:
-                    raise StorageRefusal(
-                        "project_identity_conflict",
-                        "canonical project repository already belongs to another project",
-                    )
             if existing is None:
-                if expected_version != 0:
-                    raise StorageRefusal("version_conflict", "new project requires expected version zero")
                 version = 1
                 store.connection.execute(
                     """
@@ -351,8 +358,6 @@ def put_project(
                      repository_key, root_key, code_value, code_key),
                 )
             else:
-                if int(existing["version"]) != expected_version:
-                    raise StorageRefusal("version_conflict", "project expected-version precondition failed")
                 version = expected_version + 1
                 store.connection.execute(
                     """
@@ -394,6 +399,8 @@ def set_project_suggestions(
             project = _row_by_id(store, project_id)
             if project is None:
                 raise StorageRefusal("project_unknown", "project does not exist")
+            if int(project["version"]) != expected_version:
+                raise StorageRefusal("version_conflict", "project expected-version precondition failed")
             current = [row["squad_id"] for row in _squad_rows(store, project_id)]
             if current == list(squad_ids):
                 return {
@@ -402,10 +409,16 @@ def set_project_suggestions(
                     "idempotent": True,
                     "suggestions": _squad_rows(store, project_id),
                 }
-            if int(project["version"]) != expected_version:
-                raise StorageRefusal("version_conflict", "project expected-version precondition failed")
-            for squad_id in squad_ids:
-                if store.connection.execute("SELECT 1 FROM squads WHERE squad_id=?", (squad_id,)).fetchone() is None:
+            if squad_ids:
+                placeholders = ",".join("?" for _ in squad_ids)
+                known = {
+                    str(row["squad_id"])
+                    for row in store.connection.execute(
+                        f"SELECT squad_id FROM squads WHERE squad_id IN ({placeholders})",
+                        tuple(squad_ids),
+                    )
+                }
+                if known != set(squad_ids):
                     raise StorageRefusal("squad_unknown", "suggested Squad does not exist")
             store.connection.execute("DELETE FROM project_squad_suggestions WHERE project_id=?", (project_id,))
             for position, squad_id in enumerate(squad_ids):
@@ -441,11 +454,21 @@ def list_projects(store: Any, *, visibility: str = "local", limit: int = 200) ->
     rows = store.connection.execute(
         "SELECT * FROM projects ORDER BY project_id LIMIT ?", (limit + 1,)
     ).fetchall()
+    sample = list(rows[:limit])
+    aliases = _alias_map(store, [str(row["project_id"]) for row in sample])
     return {
         "schema": "league.project-catalog.v1",
         "canonical": False,
         "visibility": visibility,
-        "projects": [_project_value(store, row, visibility) for row in rows[:limit]],
+        "projects": [
+            _project_value(
+                store,
+                row,
+                visibility,
+                aliases=aliases[str(row["project_id"])],
+            )
+            for row in sample
+        ],
         "truncated": len(rows) > limit,
         "limit": limit,
     }
@@ -466,18 +489,13 @@ def project_advice(
     if explicit_squad_id is not None:
         squad = store.connection.execute(
             """
-            SELECT s.state,a.status shotcaller_status,a.retired_at
+            SELECT s.state squad_state,a.status shotcaller_status,a.retired_at
               FROM squads s JOIN agent_instances a ON a.agent_id=s.shotcaller_agent_id
              WHERE s.squad_id=?
             """,
             (explicit_squad_id,),
         ).fetchone()
-        available = bool(
-            squad is not None
-            and squad["state"] == "active"
-            and squad["retired_at"] is None
-            and squad["shotcaller_status"] not in TERMINAL_AGENT_STATES
-        )
+        available = squad is not None and _squad_unavailable_reason(squad) is None
         explicit = {
             "squad_id": explicit_squad_id,
             "known": squad is not None,

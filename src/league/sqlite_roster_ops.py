@@ -6,7 +6,12 @@ from datetime import datetime
 from typing import Any
 from urllib.parse import quote
 
-from .sqlite_project_ops import _project_value, _squad_rows
+from .sqlite_project_ops import (
+    _alias_map,
+    _project_value,
+    _squad_map,
+    _squad_unavailable_reason,
+)
 from .storage_types import StorageRefusal
 
 
@@ -21,7 +26,6 @@ TERMINAL_STATES = {
     "canceled",
 }
 NEEDS_ACTION_STATES = {"blocked", "failed", "rejected", "awaiting_user", "awaiting_requester"}
-RESOLVED_REQUEST_STATES = {"answered", "cancelled"}
 
 
 def _time(value: str, label: str) -> datetime:
@@ -54,17 +58,27 @@ def _private(value: Any, visibility: str) -> Any:
     return value if visibility == "local" else "[redacted]"
 
 
-def _latest_events(store: Any, column: str, identities: list[str], limit: int) -> dict[str, dict[str, Any]]:
+def _latest_events(
+    store: Any, column: str, identities: list[str], as_of: str
+) -> dict[str, dict[str, Any]]:
     if not identities:
         return {}
     placeholders = ",".join("?" for _ in identities)
     rows = store.connection.execute(
         f"""
-        SELECT event_id,{column} entity_id,event_type,status,update_text,occurred_at,event_seq
-          FROM events WHERE {column} IN ({placeholders})
-         ORDER BY event_seq DESC,event_id DESC LIMIT ?
+        SELECT event_id,entity_id,event_type,status,update_text,occurred_at,event_seq
+          FROM (
+            SELECT event_id,{column} entity_id,event_type,status,update_text,occurred_at,
+                   event_seq,ROW_NUMBER() OVER (
+                     PARTITION BY {column} ORDER BY event_seq DESC,event_id DESC
+                   ) ordinal
+              FROM events
+             WHERE {column} IN ({placeholders})
+               AND julianday(occurred_at)<=julianday(?)
+          )
+         WHERE ordinal=1 ORDER BY entity_id
         """,
-        (*identities, limit),
+        (*identities, as_of),
     ).fetchall()
     result: dict[str, dict[str, Any]] = {}
     for row in rows:
@@ -73,7 +87,7 @@ def _latest_events(store: Any, column: str, identities: list[str], limit: int) -
 
 
 def _latest_task_transitions(
-    store: Any, identities: list[str], limit: int
+    store: Any, identities: list[str], as_of: str
 ) -> dict[str, dict[str, Any]]:
     if not identities:
         return {}
@@ -81,15 +95,79 @@ def _latest_task_transitions(
     rows = store.connection.execute(
         f"""
         SELECT task_id,transition_id,event_id,update_text,next_action,blocker,created_at
-          FROM task_transitions WHERE task_id IN ({placeholders})
-         ORDER BY created_at DESC,transition_id DESC LIMIT ?
+          FROM (
+            SELECT task_id,transition_id,event_id,update_text,next_action,blocker,created_at,
+                   ROW_NUMBER() OVER (
+                     PARTITION BY task_id ORDER BY created_at DESC,transition_id DESC
+                   ) ordinal
+              FROM task_transitions
+             WHERE task_id IN ({placeholders})
+               AND julianday(created_at)<=julianday(?)
+          )
+         WHERE ordinal=1 ORDER BY task_id
         """,
-        (*identities, limit),
+        (*identities, as_of),
     ).fetchall()
     result: dict[str, dict[str, Any]] = {}
     for row in rows:
         result.setdefault(str(row["task_id"]), dict(row))
     return result
+
+
+def _classify(
+    primary_state: str,
+    related_states: set[str],
+    updated: datetime,
+    recent_time: datetime,
+    stale_time: datetime,
+    *,
+    unresolved: bool,
+) -> tuple[str | None, bool]:
+    terminal = primary_state in TERMINAL_STATES
+    stale = updated < stale_time and not terminal
+    if {primary_state, *related_states} & NEEDS_ACTION_STATES or stale:
+        return "needs_action", stale
+    if terminal:
+        return ("recently_finished" if updated >= recent_time else None), False
+    return ("unresolved" if unresolved else "underway"), stale
+
+
+def _agent_item(row: Any, event: Any, visibility: str, stale: bool) -> dict[str, Any]:
+    agent_id = str(row["agent_id"])
+    evidence = [_link("agent_instances", "agent_id", agent_id, int(row["version"]))]
+    if event is not None:
+        evidence.append(_link("events", "event_id", str(event["event_id"])))
+    return {
+        "kind": "agent",
+        "agent_id": agent_id,
+        "callsign": row["callsign"],
+        "role": row["role"],
+        "status": row["status"],
+        "updated_at": row["updated_at"],
+        "stale": stale,
+        "update": _private(row["update_text"], visibility),
+        "blocker": _private(row["blocker"], visibility),
+        "next_action": _private(row["next_action"], visibility),
+        "evidence_links": evidence,
+    }
+
+
+def _request_item(row: Any, visibility: str, stale: bool) -> dict[str, Any]:
+    request_id = str(row["request_id"])
+    evidence = [_link("requests", "request_id", request_id, int(row["version"]))]
+    if row["last_route_event_id"] is not None:
+        evidence.append(_link("events", "event_id", str(row["last_route_event_id"])))
+    return {
+        "kind": "request",
+        "request_id": request_id,
+        "summary": _private(row["summary"], visibility),
+        "status": row["state"],
+        "updated_at": row["updated_at"],
+        "stale": stale,
+        "owner_agent_id": row["owner_agent_id"],
+        "return_to_agent_id": row["return_to_agent_id"],
+        "evidence_links": evidence,
+    }
 
 
 def roster_snapshot(
@@ -113,60 +191,106 @@ def roster_snapshot(
 
     with store._read_transaction():
         project_rows = store.connection.execute(
-            "SELECT * FROM projects ORDER BY project_id LIMIT ?", (MAX_ROSTER_ITEMS + 1,)
+            """
+            SELECT * FROM projects
+             WHERE julianday(updated_at)<=julianday(?)
+             ORDER BY project_id LIMIT ?
+            """,
+            (as_of, MAX_ROSTER_ITEMS + 1),
         ).fetchall()
         task_rows = store.connection.execute(
-            "SELECT * FROM tasks ORDER BY updated_at DESC,task_id LIMIT ?", (limit + 1,)
+            """
+            SELECT * FROM tasks
+             WHERE julianday(updated_at)<=julianday(?)
+             ORDER BY updated_at DESC,task_id LIMIT ?
+            """,
+            (as_of, limit + 1),
         ).fetchall()
         agent_rows = store.connection.execute(
             """
             SELECT agent_id,callsign,role,shotcaller_agent_id,task_id,status,version,
                    updated_at,update_text,blocker,next_action,retired_at
-              FROM agent_instances WHERE retired_at IS NULL
+              FROM agent_instances
+             WHERE retired_at IS NULL AND julianday(updated_at)<=julianday(?)
              ORDER BY updated_at DESC,agent_id LIMIT ?
             """,
-            (limit + 1,),
+            (as_of, limit + 1),
         ).fetchall()
         request_rows = store.connection.execute(
             """
             SELECT r.request_id,r.summary,r.state,r.version,r.updated_at,r.owner_agent_id,
                    r.return_to_agent_id,r.last_route_event_id,r.resolution_summary,t.task_id,t.project_id
-              FROM requests r LEFT JOIN tasks t ON t.request_id=r.request_id
+              FROM requests r LEFT JOIN tasks t
+                ON t.request_id=r.request_id
+               AND julianday(t.updated_at)<=julianday(?)
              WHERE r.state NOT IN ('answered','cancelled')
+               AND julianday(r.updated_at)<=julianday(?)
              ORDER BY r.updated_at DESC,r.request_id LIMIT ?
             """,
-            (limit + 1,),
+            (as_of, as_of, limit + 1),
         ).fetchall()
         squad_rows = store.connection.execute(
             """
-            SELECT s.squad_id,s.state,s.version,s.updated_at,a.agent_id shotcaller_agent_id,
+            SELECT s.squad_id,s.state squad_state,s.version,s.updated_at,
+                   a.agent_id shotcaller_agent_id,
                    a.callsign shotcaller,a.status shotcaller_status,a.retired_at
               FROM squads s JOIN agent_instances a ON a.agent_id=s.shotcaller_agent_id
+             WHERE julianday(s.updated_at)<=julianday(?)
+               AND julianday(a.updated_at)<=julianday(?)
              ORDER BY s.squad_id LIMIT ?
             """,
-            (MAX_ROSTER_ITEMS + 1,),
+            (as_of, as_of, MAX_ROSTER_ITEMS + 1),
         ).fetchall()
         task_sample = list(task_rows[:limit])
         agent_sample = list(agent_rows[:limit])
-        task_events = _latest_events(store, "task_id", [str(row["task_id"]) for row in task_sample], limit)
+        task_ids = [str(row["task_id"]) for row in task_sample]
+        task_events = _latest_events(store, "task_id", task_ids, as_of)
         task_transitions = _latest_task_transitions(
-            store, [str(row["task_id"]) for row in task_sample], limit
+            store, task_ids, as_of
         )
-        agent_events = _latest_events(store, "agent_id", [str(row["agent_id"]) for row in agent_sample], limit)
+        agent_events = _latest_events(
+            store, "agent_id", [str(row["agent_id"]) for row in agent_sample], as_of
+        )
+        linked_request_rows: list[Any] = []
+        if task_ids:
+            placeholders = ",".join("?" for _ in task_ids)
+            linked_request_rows = list(
+                store.connection.execute(
+                    f"""
+                    SELECT r.request_id,r.summary,r.state,r.version,r.updated_at,
+                           r.owner_agent_id,r.return_to_agent_id,r.last_route_event_id,
+                           r.resolution_summary,t.task_id,t.project_id
+                      FROM tasks t JOIN requests r ON r.request_id=t.request_id
+                     WHERE t.task_id IN ({placeholders})
+                       AND julianday(r.updated_at)<=julianday(?)
+                     ORDER BY t.task_id,r.request_id
+                    """,
+                    (*task_ids, as_of),
+                ).fetchall()
+            )
         transition_limit = min(limit, 100)
         recent_event_rows = store.connection.execute(
             """
             SELECT event_id,event_type,status,update_text,occurred_at,event_seq
-              FROM events ORDER BY event_seq DESC,event_id DESC LIMIT ?
+              FROM events
+             WHERE julianday(occurred_at)<=julianday(?)
+             ORDER BY event_seq DESC,event_id DESC LIMIT ?
             """,
-            (transition_limit + 1,),
+            (as_of, transition_limit + 1),
         ).fetchall()
 
+        project_sample = list(project_rows[:MAX_ROSTER_ITEMS])
+        project_ids = [str(row["project_id"]) for row in project_sample]
+        aliases = _alias_map(store, project_ids)
+        suggestions = _squad_map(store, project_ids)
         projects: dict[str, dict[str, Any]] = {}
-        for row in project_rows[:MAX_ROSTER_ITEMS]:
-            project = _project_value(store, row, visibility)
-            project["suggested_squads"] = _squad_rows(store, row["project_id"])
-            projects[str(row["project_id"])] = {
+        for row in project_sample:
+            project_id = str(row["project_id"])
+            project = _project_value(
+                store, row, visibility, aliases=aliases[project_id]
+            )
+            project["suggested_squads"] = suggestions[project_id]
+            projects[project_id] = {
                 "project": project,
                 "groups": {
                     "needs_action": [],
@@ -190,7 +314,11 @@ def roster_snapshot(
         for row in agent_sample:
             if row["task_id"] is not None:
                 agents_by_task.setdefault(str(row["task_id"]), []).append(row)
-        request_by_task = {str(row["task_id"]): row for row in request_rows[:limit] if row["task_id"] is not None}
+        request_by_task = {
+            str(row["task_id"]): row
+            for row in linked_request_rows
+            if row["task_id"] is not None
+        }
         represented_agents: set[str] = set()
         represented_requests: set[str] = set()
         items: list[tuple[str | None, str, dict[str, Any]]] = []
@@ -203,21 +331,29 @@ def roster_snapshot(
             if request is not None:
                 represented_requests.add(str(request["request_id"]))
             updated = _time(str(row["updated_at"]), "task update")
-            states = {str(row["state"]), *(str(agent["status"]) for agent in associated)}
+            related_states = {str(agent["status"]) for agent in associated}
             if request is not None:
-                states.add(str(request["state"]))
-            stale = updated < stale_time and not states & TERMINAL_STATES
-            if states & NEEDS_ACTION_STATES or stale:
-                category = "needs_action"
-            elif str(row["state"]) in TERMINAL_STATES:
-                if updated < recent_time:
-                    continue
-                category = "recently_finished"
-            elif row["project_id"] is None:
-                category = "unresolved"
-            else:
-                category = "underway"
+                related_states.add(str(request["state"]))
+            category, stale = _classify(
+                str(row["state"]),
+                related_states,
+                updated,
+                recent_time,
+                stale_time,
+                unresolved=row["project_id"] is None,
+            )
+            if category is None:
+                continue
             evidence = [_link("tasks", "task_id", task_id, int(row["version"]))]
+            if request is not None:
+                evidence.append(
+                    _link(
+                        "requests",
+                        "request_id",
+                        str(request["request_id"]),
+                        int(request["version"]),
+                    )
+                )
             event = task_events.get(task_id)
             if event is not None:
                 evidence.append(_link("events", "event_id", str(event["event_id"])))
@@ -279,38 +415,22 @@ def roster_snapshot(
             if agent_id in represented_agents:
                 continue
             updated = _time(str(row["updated_at"]), "agent update")
-            stale = updated < stale_time and str(row["status"]) not in TERMINAL_STATES
-            if str(row["status"]) in NEEDS_ACTION_STATES or stale:
-                category = "needs_action"
-            elif str(row["status"]) in TERMINAL_STATES:
-                if updated < recent_time:
-                    continue
-                category = "recently_finished"
-            elif row["role"] == "shotcaller":
-                category = "underway"
-            else:
-                category = "unresolved"
-            evidence = [_link("agent_instances", "agent_id", agent_id, int(row["version"]))]
+            category, stale = _classify(
+                str(row["status"]),
+                set(),
+                updated,
+                recent_time,
+                stale_time,
+                unresolved=row["role"] != "shotcaller",
+            )
+            if category is None:
+                continue
             event = agent_events.get(agent_id)
-            if event is not None:
-                evidence.append(_link("events", "event_id", str(event["event_id"])))
             items.append(
                 (
                     None,
                     category,
-                    {
-                        "kind": "agent",
-                        "agent_id": agent_id,
-                        "callsign": row["callsign"],
-                        "role": row["role"],
-                        "status": row["status"],
-                        "updated_at": row["updated_at"],
-                        "stale": stale,
-                        "update": _private(row["update_text"], visibility),
-                        "blocker": _private(row["blocker"], visibility),
-                        "next_action": _private(row["next_action"], visibility),
-                        "evidence_links": evidence,
-                    },
+                    _agent_item(row, event, visibility, stale),
                 )
             )
 
@@ -319,24 +439,12 @@ def roster_snapshot(
             if request_id in represented_requests:
                 continue
             category = "needs_action" if row["state"] in NEEDS_ACTION_STATES else "unresolved"
-            evidence = [_link("requests", "request_id", request_id, int(row["version"]))]
-            if row["last_route_event_id"] is not None:
-                evidence.append(_link("events", "event_id", str(row["last_route_event_id"])))
+            stale = _time(str(row["updated_at"]), "request update") < stale_time
             items.append(
                 (
                     row["project_id"],
                     category,
-                    {
-                        "kind": "request",
-                        "request_id": request_id,
-                        "summary": _private(row["summary"], visibility),
-                        "status": row["state"],
-                        "updated_at": row["updated_at"],
-                        "stale": _time(str(row["updated_at"]), "request update") < stale_time,
-                        "owner_agent_id": row["owner_agent_id"],
-                        "return_to_agent_id": row["return_to_agent_id"],
-                        "evidence_links": evidence,
-                    },
+                    _request_item(row, visibility, stale),
                 )
             )
 
@@ -372,11 +480,11 @@ def roster_snapshot(
             groups.append(unresolved_project)
         squads = []
         for row in squad_rows[:MAX_ROSTER_ITEMS]:
-            available = row["state"] == "active" and row["retired_at"] is None and row["shotcaller_status"] not in TERMINAL_STATES
+            available = _squad_unavailable_reason(row) is None
             squads.append(
                 {
                     "squad_id": row["squad_id"],
-                    "state": row["state"],
+                    "state": row["squad_state"],
                     "available": available,
                     "shotcaller": {
                         "agent_id": row["shotcaller_agent_id"],

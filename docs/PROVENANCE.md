@@ -157,7 +157,7 @@ interactive TUI/controller.
 
 Migration v5 is contiguous and named
 `advisory-project-catalog-and-roster-indexes`, checksum
-`6bf4acd02288e1bc8ce92c83c6876ed1f89979289e76d947b50f30a703a1eb25`.
+`5477db9879d6a4a9a29bb8188b398bd6db9a7a786e40e86ab819a0a938790faf`.
 It adds project fields, aliases, ordered suggested Squads, and bounded Roster
 lookup indexes without rewriting migrations 1 through 4. Exact repository and
 root data is local-only; outbound catalog/Roster reads and inspection exports

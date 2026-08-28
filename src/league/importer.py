@@ -334,7 +334,7 @@ class ImportPlanner:
             "state": "active",
             "version": 1,
             "updated_at": at,
-            "summary": repository_key.rsplit("/", 1)[-1],
+            "summary": "Imported project",
             "root_path": None,
             "repository_key": repository_key,
             "root_key": None,

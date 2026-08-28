@@ -128,8 +128,11 @@ copy is process memory only and disappears on exit; it is not persisted.
 - `r`: request one new bounded snapshot. It performs no other action.
 - `?`: show the key legend; `Esc` closes filter, detail, or help; `q` exits.
 - `Tab`/`Shift-Tab`: move among header filter, Roster, detail, and help
-  landmarks. Every operation available through a letter key is also reachable
-  with arrows, Enter, Tab, or Escape.
+  landmarks. The header exposes focusable Filter, Previous match, Next match,
+  Refresh, Help, and Exit controls activated with `Enter`; these are the exact
+  non-letter alternatives for `/`, `N`, `n`, `r`, `?`, and `q`. Arrow keys,
+  `Enter`, `Tab`, and `Escape` cover row movement, expansion, activation, focus
+  movement, and dismissal without requiring letter keys.
 
 There are deliberately no assign, route, send, merge, deploy, stop, teardown,
 or retry-work keys. A read failure can be retried only by the ordinary refresh
@@ -143,6 +146,10 @@ and stale boundaries, visibility, item limit, and truncation flags. Refresh
 replaces the whole view only after a valid schema-complete response. Selection
 is restored by exact entity ID; if that ID disappears, focus moves to the next
 row in the same project, then the project header.
+
+`as_of` is an inclusive read boundary, not a promise to reconstruct earlier
+versions of mutable rows. Records and evidence with later timestamps are
+omitted; the view never presents future-dated state as part of the snapshot.
 
 `busy`, `store_missing`, `migration_required`, schema mismatch, and integrity
 failure remain distinct error codes. Runtime observation unavailable is a row

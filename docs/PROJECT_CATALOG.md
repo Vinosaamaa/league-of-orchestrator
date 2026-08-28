@@ -31,7 +31,9 @@ state store.
   describe several projects; resolving that alias returns
   `ambiguous_project` instead of choosing one.
 - Automatically imported legacy projects derive their canonical ID from the
-  normalized repository key rather than the original URL spelling.
+  normalized repository key rather than the original URL spelling. Migration
+  v5 indexes existing repository identities once through the same canonical
+  normalizer, so later resolution and writes use the index instead of rescans.
 
 ## Catalog data
 
@@ -84,6 +86,8 @@ Local catalog reads include the exact repository and root. Outbound reads keep
 the project ID, summary, aliases, code, state, and version but replace repository
 and root with `[redacted]`. The default Roster command visibility is outbound;
 local terminal software must request local visibility deliberately.
+Legacy imports use the generic summary `Imported project`; they never derive an
+outbound-visible label from a private repository path.
 
 Migration v5 adds the catalog fields, normalized aliases, suggestions, and
 Roster lookup indexes automatically through `league storage migrate`. Existing
@@ -122,6 +126,10 @@ as recent. Each item includes exact table/key/version references and, when
 available, the latest event and task-transition references. Locators use the
 non-network `league://` namespace; they identify canonical rows but are not
 authority to mutate them.
+
+`as_of` is an inclusive upper bound for every source and evidence query. Rows
+with later timestamps are omitted; because mutable rows do not retain every
+historical version, the snapshot does not claim to reconstruct a past state.
 
 The output schemas are
 [project catalog](../schema/league-project-catalog.schema.json) and

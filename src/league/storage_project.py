@@ -9,6 +9,7 @@ class ProjectStorage(Protocol):
     def put_project(
         self,
         project_id: str,
+        *,
         expected_version: int,
         summary: str,
         repository: str,

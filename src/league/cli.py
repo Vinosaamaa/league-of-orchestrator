@@ -756,14 +756,14 @@ def _project_resolve(store: Storage, args: argparse.Namespace) -> CommandResult:
 def _project_put(store: Storage, args: argparse.Namespace) -> CommandResult:
     return store.put_project(
         args.project_id,
-        args.expected_version,
-        args.summary,
-        args.repository,
-        args.root,
-        args.code,
-        args.alias,
-        args.state,
-        args.at,
+        expected_version=args.expected_version,
+        summary=args.summary,
+        repository=args.repository,
+        root=args.root,
+        code=args.code,
+        aliases=args.alias,
+        state=args.state,
+        at=args.at,
     ), None
 
 

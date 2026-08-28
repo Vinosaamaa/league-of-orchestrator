@@ -91,7 +91,7 @@ def test_transactional_upgrade_backup_and_rollback(root: Path) -> None:
         } <= indexes
         assert [migration.version for migration in MIGRATIONS] == [1, 2, 3, 4, 5]
         assert MIGRATIONS[-1].name == "advisory-project-catalog-and-roster-indexes"
-        assert MIGRATIONS[-1].checksum == "6bf4acd02288e1bc8ce92c83c6876ed1f89979289e76d947b50f30a703a1eb25"
+        assert MIGRATIONS[-1].checksum == "5477db9879d6a4a9a29bb8188b398bd6db9a7a786e40e86ab819a0a938790faf"
 
 
 def test_schema_refusals_without_test_sql(root: Path) -> None:
@@ -113,7 +113,7 @@ def test_schema_refusals_without_test_sql(root: Path) -> None:
     refused(lambda: SQLiteStorage(drift), "migration_drift")
 
 
-def test_v4_preserves_canonical_v3_cleanup_obligation(root: Path) -> None:
+def test_v3_upgrade_preserves_cleanup_and_indexes_legacy_project(root: Path) -> None:
     state, _ = migrated_state(root, "v3-cleanup", target_version=3)
     with SQLiteStorage.for_migration(state) as store:
         store.connection.execute(
@@ -147,6 +147,10 @@ def test_v4_preserves_canonical_v3_cleanup_obligation(root: Path) -> None:
         assert row["owner_id"] is None and row["task_class"] is None
         project = store.resolve_project("git@example.invalid:synthetic/legacy.git")
         assert project is not None and project["project_id"] == "project:legacy"
+        repository_key = store.connection.execute(
+            "SELECT repository_key FROM projects WHERE project_id='project:legacy'"
+        ).fetchone()[0]
+        assert repository_key == "example.invalid/synthetic/legacy"
         assert store.integrity()["ok"]
 
 
@@ -185,7 +189,7 @@ def main() -> None:
         test_loaded_runtime_gate(root)
         test_transactional_upgrade_backup_and_rollback(root)
         test_schema_refusals_without_test_sql(root)
-        test_v4_preserves_canonical_v3_cleanup_obligation(root)
+        test_v3_upgrade_preserves_cleanup_and_indexes_legacy_project(root)
         test_backup_collision_and_corruption(root)
     print("PASS: SQLite runtime gate, migrations, verified backup, rollback, drift, and corruption refusal")
 

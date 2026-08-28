@@ -66,7 +66,10 @@
       font: 700 0.72rem/1 var(--mono);
       text-decoration: none;
     }
-    .page-shell { width: min(1460px, calc(100% - 32px)); margin: 0 auto; }
+    .page-shell, .local-nav-inner {
+      width: min(1460px, calc(100% - 32px));
+      margin: 0 auto;
+    }
 
     .masthead { padding: 46px 0 28px; }
     .masthead-grid {
@@ -130,8 +133,6 @@
       display: flex;
       flex-wrap: wrap;
       gap: 6px;
-      width: min(1460px, calc(100% - 32px));
-      margin: 0 auto;
       padding: 9px 0;
     }
     .local-nav a {
@@ -415,7 +416,7 @@
         <p>The future process reads at startup and on explicit refresh. Focus is restored by exact entity ID after a schema-complete replacement snapshot.</p>
       </div>
       <div class="contract-grid">
-        <article class="contract-card"><h3>Move and inspect</h3><ul><li><span class="mono">j/k</span> or arrows move rows</li><li><span class="mono">h/l</span> collapse or expand</li><li><span class="mono">Enter</span> opens read-only detail</li><li><span class="mono">/</span> filters; <span class="mono">n/N</span> finds</li><li><span class="mono">?</span> help; <span class="mono">q</span> exit</li></ul></article>
+        <article class="contract-card"><h3>Move and inspect</h3><ul><li><span class="mono">j/k</span> or arrows move rows</li><li><span class="mono">h/l</span> collapse or expand</li><li><span class="mono">Enter</span> opens read-only detail</li><li><span class="mono">/</span>, <span class="mono">N/n</span>, <span class="mono">r</span>, <span class="mono">?</span>, and <span class="mono">q</span> map to focusable Filter, Previous, Next, Refresh, Help, and Exit controls activated with <span class="mono">Enter</span></li></ul></article>
         <article class="contract-card"><h3>Refresh and fail honestly</h3><ul><li><span class="mono">r</span> requests exactly one new snapshot</li><li>No automatic polling in the first slice</li><li>Malformed or partial responses never render</li><li>Old in-memory view is marked stale after failure</li><li>Runtime unavailable remains unknown, not failed</li></ul></article>
         <article class="contract-card"><h3>Accessible by construction</h3><ul><li>Status symbol plus full word</li><li><span class="mono">NO_COLOR</span> and ASCII fallbacks</li><li>One top-to-bottom reading order</li><li>Reserved line announces refresh and focus changes</li><li><span class="mono">TERM=dumb</span> emits the plain report</li></ul></article>
         <article class="contract-card"><h3>Truncate deliberately</h3><ul><li>Below 80 columns, hide aliases then repeated Squad then age</li><li>Never hide status, selected callsign, task ID, blocker marker, or bound</li><li>Wrap full values in details</li><li>No horizontal scrolling</li><li>No durable UI cache</li></ul></article>

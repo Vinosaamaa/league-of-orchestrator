@@ -29,6 +29,7 @@ from .sqlite_lifecycle_ops import release_callsign as release_callsign_operation
 from .sqlite_lifecycle_ops import reserve_callsign as reserve_callsign_operation
 from .sqlite_lifecycle_ops import transfer_task_owner as transfer_task_owner_operation
 from .sqlite_lifecycle_ops import transition as transition_operation
+from .sqlite_project_ops import canonical_repository
 from .sqlite_project_ops import list_projects as list_projects_operation
 from .sqlite_project_ops import project_advice as project_advice_operation
 from .sqlite_project_ops import put_project as put_project_operation
@@ -855,6 +856,7 @@ MIGRATIONS = (
             "ALTER TABLE projects ADD COLUMN root_key TEXT",
             "ALTER TABLE projects ADD COLUMN code TEXT",
             "ALTER TABLE projects ADD COLUMN code_key TEXT",
+            "UPDATE projects SET repository_key=league_repository_key(repository) WHERE repository_key IS NULL",
             """
             CREATE TABLE project_aliases (
               project_id TEXT NOT NULL REFERENCES projects(project_id) ON DELETE CASCADE,
@@ -1257,6 +1259,12 @@ class SQLiteStorage(SQLiteTransactionCore):
                 check_same_thread=False,
             )
             self.connection.row_factory = sqlite3.Row
+            self.connection.create_function(
+                "league_repository_key",
+                1,
+                lambda value: canonical_repository(str(value))[1],
+                deterministic=True,
+            )
             if not self._database_existed:
                 os.chmod(self.database, 0o600)
             loaded = tuple(int(item) for item in sqlite3.sqlite_version_info[:3])
@@ -1617,6 +1625,7 @@ class SQLiteStorage(SQLiteTransactionCore):
     def put_project(
         self,
         project_id: str,
+        *,
         expected_version: int,
         summary: str,
         repository: str,
@@ -1629,14 +1638,14 @@ class SQLiteStorage(SQLiteTransactionCore):
         return put_project_operation(
             self,
             project_id,
-            expected_version,
-            summary,
-            repository,
-            root,
-            code,
-            aliases,
-            state,
-            at,
+            expected_version=expected_version,
+            summary=summary,
+            repository=repository,
+            root=root,
+            code=code,
+            aliases=aliases,
+            state=state,
+            at=at,
         )
 
     def set_project_suggestions(

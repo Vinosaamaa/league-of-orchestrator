@@ -27,7 +27,7 @@ Nothing here installs files, changes hooks, or connects to live Roster state.
 - Synthetic examples, authoring schemas, and focused local regression tests.
 - One standard-library SQLite implementation behind a `Storage` protocol and
   stable `league` command facade.
-- Four contiguous checksummed schema migrations, a loaded-runtime WAL gate, verified
+- Five contiguous checksummed schema migrations, a loaded-runtime WAL gate, verified
   backups, integrity checks, expected-version writes, and bounded contention.
 - A strict manifest importer covering every canonical issue-#18 artifact
   family, with dry-run digest confirmation before apply.
@@ -47,6 +47,11 @@ Nothing here installs files, changes hooks, or connects to live Roster state.
 - A sanitized custom-skill provenance inventory, bounded install-parity audit,
   and provider/model-neutral runtime capability matrix with explicit shared
   inline fallback and specialist refusal.
+- A canonical-ID project catalog with exact local/repository identities,
+  aliases/codes, and many-to-many advisory Squad suggestions that never move
+  work or override explicit routing.
+- One bounded read-only project-grouped Roster snapshot with exact evidence
+  references, outbound redaction, and an accepted terminal-first design.
 
 The proven watcher remains one deep module. The new storage slice is a small
 modular monolith: one composite `Storage` interface with cohesive administrative,
@@ -62,6 +67,7 @@ Requirements: Python 3, Git, and a POSIX shell.
 ```sh
 make test
 make test-storage
+make test-project-roster
 make test-request-lifecycle
 make test-runtime-lifecycle
 make test-skill-contracts
@@ -71,7 +77,8 @@ make test-all
 ```
 
 `make test` runs the inherited baseline once, `make test-storage` runs the
-storage slice once, `make test-request-lifecycle` runs the grouped lifecycle
+storage slice once, `make test-project-roster` runs the focused issues #9/#12
+contract, `make test-request-lifecycle` runs the grouped lifecycle
 suite, `make test-runtime-lifecycle` runs issues #7/#11/#14, and
 `make test-skill-contracts` runs issue #10's synthetic provenance, privacy,
 duplicate-parity, CLI, and runtime-fallback contract, while
@@ -100,7 +107,9 @@ machine-readable help is read-only and needs no root. The database
 filename, SQL, pragmas, and transaction details remain internal. The output
 contracts are [command](schema/league-command-output.schema.json),
 [import report](schema/league-import-report.schema.json), and
-[export](schema/league-export.schema.json) JSON Schemas.
+[export](schema/league-export.schema.json) JSON Schemas. The advisory surfaces
+add [project catalog](schema/league-project-catalog.schema.json) and
+[Roster snapshot](schema/league-roster-snapshot.schema.json) contracts.
 
 The grouped request-lifecycle command and transaction map is documented in
 [request lifecycle](docs/REQUEST_LIFECYCLE.md). Its implementation is inert
@@ -110,6 +119,9 @@ The adapter, resource, cleanup, and routing contracts are documented in
 The custom-root provenance and capability boundary is documented in
 [skill capabilities](docs/skill-capabilities.md). Its validation, audit, and
 matrix commands require explicit config/root/profile inputs and create no state.
+The project catalog and bounded Roster are documented in
+[project catalog](docs/PROJECT_CATALOG.md); the chosen design-only terminal
+direction is [Project Ledger](docs/design/terminal-roster-ui.md).
 
 ## Repository-local SQLite implementation; cutover still gated
 
@@ -162,10 +174,12 @@ fake adapters.
 - [Repository-local request lifecycle](docs/REQUEST_LIFECYCLE.md)
 - [Repository-local runtime lifecycle](docs/runtime-lifecycle.md)
 - [Skill provenance and runtime capability contract](docs/skill-capabilities.md)
+- [Advisory project catalog and project-grouped Roster](docs/PROJECT_CATALOG.md)
+- [Terminal-first Project Ledger design](docs/design/terminal-roster-ui.md)
 - [Baseline versus planned issues](docs/ROADMAP.md)
 
 ## Non-goals for this implementation PR
 
-No Roster UI, adapter cutover, global install, hook mutation, live import,
+No interactive Roster UI or controller, adapter cutover, global install, hook mutation, live import,
 watcher replacement, daemon, merge, release, deployment, or teardown is
 introduced here.

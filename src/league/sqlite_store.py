@@ -13,7 +13,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable, Optional, Sequence
 
 from . import sqlite_runtime_ops
 from .sqlite_core import SQLiteTransactionCore
@@ -27,9 +27,13 @@ from .sqlite_delivery_ops import finish_delivery as finish_delivery_operation
 from .sqlite_lifecycle_ops import agent_status as agent_status_operation
 from .sqlite_lifecycle_ops import release_callsign as release_callsign_operation
 from .sqlite_lifecycle_ops import reserve_callsign as reserve_callsign_operation
-from .sqlite_lifecycle_ops import resolve_project as resolve_project_operation
 from .sqlite_lifecycle_ops import transfer_task_owner as transfer_task_owner_operation
 from .sqlite_lifecycle_ops import transition as transition_operation
+from .sqlite_project_ops import list_projects as list_projects_operation
+from .sqlite_project_ops import project_advice as project_advice_operation
+from .sqlite_project_ops import put_project as put_project_operation
+from .sqlite_project_ops import resolve_project as resolve_project_operation
+from .sqlite_project_ops import set_project_suggestions as set_project_suggestions_operation
 from .sqlite_outbox_ops import acknowledge_outbox as acknowledge_outbox_operation
 from .sqlite_outbox_ops import claim_outbox as claim_outbox_operation
 from .sqlite_outbox_ops import delivery_target as delivery_target_operation
@@ -46,6 +50,7 @@ from .sqlite_request_ops import route_request as route_request_operation
 from .sqlite_request_ops import set_request_state as set_request_state_operation
 from .sqlite_request_ops import triage_prompt as triage_prompt_operation
 from .sqlite_request_ops import unresolved_requests as unresolved_requests_operation
+from .sqlite_roster_ops import roster_snapshot as roster_snapshot_operation
 from .sqlite_transfer_ops import (
     apply_import as apply_import_operation,
     canonical_counts,
@@ -70,7 +75,7 @@ from .storage_types import LIFECYCLE_STATES
 
 
 WAL_MINIMUM = (3, 51, 3)
-CURRENT_SCHEMA_VERSION = 4
+CURRENT_SCHEMA_VERSION = 5
 DATABASE_NAME = "league.sqlite3"
 DEFAULT_BUSY_TIMEOUT_MS = 500
 MAX_BUSY_TIMEOUT_MS = 10_000
@@ -840,11 +845,56 @@ MIGRATIONS = (
             "CREATE INDEX ix_cleanup_actions ON cleanup_actions(operation_id,ordinal,state)",
         ),
     ),
+    Migration(
+        5,
+        "advisory-project-catalog-and-roster-indexes",
+        (
+            "ALTER TABLE projects ADD COLUMN summary TEXT NOT NULL DEFAULT 'Imported project'",
+            "ALTER TABLE projects ADD COLUMN root_path TEXT",
+            "ALTER TABLE projects ADD COLUMN repository_key TEXT",
+            "ALTER TABLE projects ADD COLUMN root_key TEXT",
+            "ALTER TABLE projects ADD COLUMN code TEXT",
+            "ALTER TABLE projects ADD COLUMN code_key TEXT",
+            """
+            CREATE TABLE project_aliases (
+              project_id TEXT NOT NULL REFERENCES projects(project_id) ON DELETE CASCADE,
+              alias TEXT NOT NULL,
+              alias_key TEXT NOT NULL,
+              position INTEGER NOT NULL CHECK (position >= 0),
+              PRIMARY KEY (project_id, alias_key),
+              UNIQUE (project_id, position)
+            )
+            """,
+            """
+            CREATE TABLE project_squad_suggestions (
+              project_id TEXT NOT NULL REFERENCES projects(project_id) ON DELETE CASCADE,
+              squad_id TEXT NOT NULL REFERENCES squads(squad_id),
+              position INTEGER NOT NULL CHECK (position >= 0),
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              PRIMARY KEY (project_id, squad_id),
+              UNIQUE (project_id, position)
+            )
+            """,
+            "CREATE INDEX ix_projects_repository_key ON projects(repository_key,project_id)",
+            "CREATE INDEX ix_projects_root_key ON projects(root_key,project_id)",
+            "CREATE INDEX ix_projects_code_key ON projects(code_key,project_id)",
+            "CREATE INDEX ix_project_alias_lookup ON project_aliases(alias_key,project_id)",
+            "CREATE INDEX ix_project_suggestion_squad ON project_squad_suggestions(squad_id,project_id)",
+            "CREATE INDEX ix_roster_tasks_project_state ON tasks(project_id,state,updated_at,task_id)",
+            "CREATE INDEX ix_roster_agents_task_state ON agent_instances(task_id,status,updated_at,agent_id)",
+            "CREATE INDEX ix_roster_requests_state ON requests(state,updated_at,request_id)",
+        ),
+    ),
 )
 
 
 _IMPORT_COLUMNS: dict[str, tuple[str, ...]] = {
-    "projects": ("project_id", "repository", "state", "version", "updated_at"),
+    "projects": (
+        "project_id", "repository", "state", "version", "updated_at", "summary",
+        "root_path", "repository_key", "root_key", "code", "code_key",
+    ),
+    "project_aliases": ("project_id", "alias", "alias_key", "position"),
     "callsigns": ("callsign", "pool_role", "enabled", "pool_position", "last_released_at"),
     "tasks": (
         "task_id",
@@ -882,6 +932,9 @@ _IMPORT_COLUMNS: dict[str, tuple[str, ...]] = {
         "retired_at",
     ),
     "squads": ("squad_id", "shotcaller_agent_id", "state", "version", "updated_at"),
+    "project_squad_suggestions": (
+        "project_id", "squad_id", "position", "created_at", "updated_at",
+    ),
     "launch_attempts": (
         "attempt_id",
         "task_id",
@@ -973,10 +1026,12 @@ _IMPORT_ORDER = tuple(_IMPORT_COLUMNS)
 _EXPORT_TABLES = (
     "schema_migrations",
     "projects",
+    "project_aliases",
     "tasks",
     "callsigns",
     "agent_instances",
     "squads",
+    "project_squad_suggestions",
     "callsign_leases",
     "launch_attempts",
     "events",
@@ -1025,10 +1080,12 @@ _EXPORT_TABLES = (
 _EXPORT_ORDER = {
     "schema_migrations": "version",
     "projects": "project_id",
+    "project_aliases": "project_id,position,alias_key",
     "tasks": "task_id",
     "callsigns": "pool_role,pool_position,callsign",
     "agent_instances": "agent_id",
     "squads": "squad_id",
+    "project_squad_suggestions": "project_id,position,squad_id",
     "callsign_leases": "callsign",
     "launch_attempts": "attempt_id",
     "events": "occurred_at,event_id",
@@ -1075,7 +1132,7 @@ _EXPORT_ORDER = {
 }
 
 _INSPECTION_REDACTIONS = {
-    "projects": {"repository"},
+    "projects": {"repository", "root_path", "repository_key", "root_key", "summary"},
     "tasks": {"summary"},
     "agent_instances": {
         "address",
@@ -1557,8 +1614,98 @@ class SQLiteStorage(SQLiteTransactionCore):
             self, event_id, recipient_agent_id, claim_token, state, at, reason
         )
 
-    def resolve_project(self, repository: str) -> Optional[dict[str, Any]]:
-        return resolve_project_operation(self, repository)
+    def put_project(
+        self,
+        project_id: str,
+        expected_version: int,
+        summary: str,
+        repository: str,
+        root: str,
+        code: Optional[str],
+        aliases: Sequence[str],
+        state: str,
+        at: str,
+    ) -> dict[str, Any]:
+        return put_project_operation(
+            self,
+            project_id,
+            expected_version,
+            summary,
+            repository,
+            root,
+            code,
+            aliases,
+            state,
+            at,
+        )
+
+    def set_project_suggestions(
+        self,
+        project_id: str,
+        expected_version: int,
+        squad_ids: Sequence[str],
+        at: str,
+    ) -> dict[str, Any]:
+        return set_project_suggestions_operation(
+            self, project_id, expected_version, squad_ids, at
+        )
+
+    def resolve_project(
+        self,
+        repository: Optional[str] = None,
+        *,
+        project_id: Optional[str] = None,
+        root: Optional[str] = None,
+        code: Optional[str] = None,
+        alias: Optional[str] = None,
+        visibility: str = "local",
+    ) -> Optional[dict[str, Any]]:
+        return resolve_project_operation(
+            self,
+            repository,
+            project_id=project_id,
+            root=root,
+            code=code,
+            alias=alias,
+            visibility=visibility,
+        )
+
+    def list_projects(
+        self, *, visibility: str = "local", limit: int = 200
+    ) -> dict[str, Any]:
+        return list_projects_operation(self, visibility=visibility, limit=limit)
+
+    def project_advice(
+        self,
+        project_id: str,
+        *,
+        explicit_squad_id: Optional[str] = None,
+        visibility: str = "local",
+    ) -> dict[str, Any]:
+        return project_advice_operation(
+            self,
+            project_id,
+            explicit_squad_id=explicit_squad_id,
+            visibility=visibility,
+        )
+
+    def roster_snapshot(
+        self,
+        *,
+        as_of: str,
+        recent_since: str,
+        stale_before: str,
+        limit: int = 500,
+        visibility: str = "outbound",
+    ) -> dict[str, Any]:
+        return roster_snapshot_operation(
+            self,
+            as_of=as_of,
+            recent_since=recent_since,
+            stale_before=stale_before,
+            limit=limit,
+            visibility=visibility,
+        )
 
     def transfer_task_owner(
         self,

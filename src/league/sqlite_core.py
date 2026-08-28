@@ -37,3 +37,15 @@ class SQLiteTransactionCore:
             if self.connection.in_transaction:
                 self.connection.execute("ROLLBACK")
             raise
+
+    @contextmanager
+    def _read_transaction(self) -> Iterator[None]:
+        """Hold one consistent read snapshot without reserving the writer lock."""
+        try:
+            self.connection.execute("BEGIN")
+            yield
+            self.connection.execute("COMMIT")
+        except BaseException:
+            if self.connection.in_transaction:
+                self.connection.execute("ROLLBACK")
+            raise

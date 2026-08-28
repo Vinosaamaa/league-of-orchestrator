@@ -12,7 +12,8 @@ STORAGE_TESTS := \
 	tests/test_sqlite_storage_migrations.py \
 	tests/test_sqlite_storage_import_export.py \
 	tests/test_sqlite_storage_commands.py \
-	tests/test_sqlite_storage_concurrency.py
+	tests/test_sqlite_storage_concurrency.py \
+	tests/test_project_catalog_roster.py
 
 REQUEST_LIFECYCLE_TESTS := \
 	tests/test_request_lifecycle.py \
@@ -33,7 +34,7 @@ SKILL_CONTRACT_TESTS := \
 ACCEPTANCE_TESTS := \
 	tests/test_acceptance_harness.py
 
-.PHONY: test test-baseline test-storage test-acceptance test-request-lifecycle test-runtime-lifecycle test-skill-contracts test-affected test-all
+.PHONY: test test-baseline test-storage test-project-roster test-acceptance test-request-lifecycle test-runtime-lifecycle test-skill-contracts test-affected test-all
 test:
 	@$(MAKE) --no-print-directory test-baseline
 
@@ -46,6 +47,9 @@ test-storage:
 	@set -eu; for test in $(STORAGE_TESTS); do \
 		PYTHONDONTWRITEBYTECODE=1 $(PYTHON) $$test; \
 	done
+
+test-project-roster:
+	@PYTHONDONTWRITEBYTECODE=1 $(PYTHON) tests/test_project_catalog_roster.py
 
 test-request-lifecycle:
 	@set -eu; for test in $(REQUEST_LIFECYCLE_TESTS); do \

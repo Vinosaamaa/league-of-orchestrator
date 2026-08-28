@@ -210,10 +210,47 @@ def _add_delivery_commands(groups: argparse._SubParsersAction) -> None:
 
 
 def _add_project_commands(groups: argparse._SubParsersAction) -> None:
-    project = groups.add_parser("project", help="Resolve exact project identity.")
+    project = groups.add_parser("project", help="Maintain and inspect the advisory project catalog.")
     commands = project.add_subparsers(dest="action", required=True)
-    resolve = commands.add_parser("resolve", help="Resolve one exact repository URL.")
-    resolve.add_argument("--repository", required=True)
+    put = commands.add_parser("put", help="Create or update one exact catalog entry with CAS.")
+    for name in ("project-id", "summary", "repository", "root", "at"):
+        put.add_argument(f"--{name}", required=True)
+    put.add_argument("--expected-version", type=int, required=True)
+    put.add_argument("--code")
+    put.add_argument("--alias", action="append", default=[])
+    put.add_argument("--state", choices=("active", "retired"), default="active")
+    resolve = commands.add_parser("resolve", help="Resolve one exact canonical identity.")
+    selectors = resolve.add_mutually_exclusive_group(required=True)
+    for name in ("repository", "project-id", "root", "code", "alias"):
+        selectors.add_argument(f"--{name}")
+    resolve.add_argument("--visibility", choices=("local", "outbound"), default="local")
+    listing = commands.add_parser("list", help="List a deterministic bounded catalog page.")
+    listing.add_argument("--visibility", choices=("local", "outbound"), default="local")
+    listing.add_argument("--limit", type=int, default=200)
+    suggestions = commands.add_parser(
+        "suggest-squads", help="Replace advisory Squads without moving any work."
+    )
+    suggestions.add_argument("--project-id", required=True)
+    suggestions.add_argument("--expected-version", type=int, required=True)
+    suggestions.add_argument("--squad-id", action="append", default=[])
+    suggestions.add_argument("--at", required=True)
+    advice = commands.add_parser(
+        "advise", help="Report explicit routing separately from advisory Squads."
+    )
+    advice.add_argument("--project-id", required=True)
+    advice.add_argument("--explicit-squad-id")
+    advice.add_argument("--visibility", choices=("local", "outbound"), default="local")
+
+
+def _add_roster_commands(groups: argparse._SubParsersAction) -> None:
+    roster = groups.add_parser("roster", help="Read one bounded project-grouped Roster snapshot.")
+    commands = roster.add_subparsers(dest="action", required=True)
+    snapshot = commands.add_parser("snapshot", help="Read needs-action, recent, underway, and unresolved work.")
+    snapshot.add_argument("--as-of", required=True)
+    snapshot.add_argument("--recent-since", required=True)
+    snapshot.add_argument("--stale-before", required=True)
+    snapshot.add_argument("--limit", type=int, default=500)
+    snapshot.add_argument("--visibility", choices=("local", "outbound"), default="outbound")
 
 
 def _add_task_commands(groups: argparse._SubParsersAction) -> None:
@@ -571,6 +608,7 @@ def _parser() -> argparse.ArgumentParser:
         _add_callsign_commands,
         _add_delivery_commands,
         _add_project_commands,
+        _add_roster_commands,
         _add_task_commands,
         _add_runtime_commands,
         _add_skill_commands,
@@ -704,8 +742,57 @@ def _delivery_fail(store: Storage, args: argparse.Namespace) -> CommandResult:
 
 
 def _project_resolve(store: Storage, args: argparse.Namespace) -> CommandResult:
-    value = store.resolve_project(args.repository)
+    value = store.resolve_project(
+        args.repository,
+        project_id=args.project_id,
+        root=args.root,
+        code=args.code,
+        alias=args.alias,
+        visibility=args.visibility,
+    )
     return {"found": value is not None, "project": value}, None
+
+
+def _project_put(store: Storage, args: argparse.Namespace) -> CommandResult:
+    return store.put_project(
+        args.project_id,
+        args.expected_version,
+        args.summary,
+        args.repository,
+        args.root,
+        args.code,
+        args.alias,
+        args.state,
+        args.at,
+    ), None
+
+
+def _project_list(store: Storage, args: argparse.Namespace) -> CommandResult:
+    return store.list_projects(visibility=args.visibility, limit=args.limit), None
+
+
+def _project_suggest_squads(store: Storage, args: argparse.Namespace) -> CommandResult:
+    return store.set_project_suggestions(
+        args.project_id, args.expected_version, args.squad_id, args.at
+    ), None
+
+
+def _project_advise(store: Storage, args: argparse.Namespace) -> CommandResult:
+    return store.project_advice(
+        args.project_id,
+        explicit_squad_id=args.explicit_squad_id,
+        visibility=args.visibility,
+    ), None
+
+
+def _roster_snapshot(store: Storage, args: argparse.Namespace) -> CommandResult:
+    return store.roster_snapshot(
+        as_of=args.as_of,
+        recent_since=args.recent_since,
+        stale_before=args.stale_before,
+        limit=args.limit,
+        visibility=args.visibility,
+    ), None
 
 
 def _task_transfer(store: Storage, args: argparse.Namespace) -> CommandResult:
@@ -1143,7 +1230,12 @@ HANDLERS: dict[str, CommandHandler] = {
     "delivery.ack-outbox": _delivery_ack_outbox,
     "delivery.fail-outbox": _delivery_fail_outbox,
     "delivery.backlog": _delivery_backlog,
+    "project.put": _project_put,
     "project.resolve": _project_resolve,
+    "project.list": _project_list,
+    "project.suggest-squads": _project_suggest_squads,
+    "project.advise": _project_advise,
+    "roster.snapshot": _roster_snapshot,
     "task.transfer-owner": _task_transfer,
     "task.transition": _task_transition,
     "runtime.matrix": _runtime_matrix,
@@ -1194,6 +1286,8 @@ SCHEMA_INVENTORY = (
     "league-skill-validation.schema.json",
     "league-skill-audit.schema.json",
     "league-skill-matrix.schema.json",
+    "league-project-catalog.schema.json",
+    "league-roster-snapshot.schema.json",
 )
 
 CONFIG_ONLY_COMMANDS = {

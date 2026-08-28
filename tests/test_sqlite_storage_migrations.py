@@ -66,8 +66,8 @@ def test_transactional_upgrade_backup_and_rollback(root: Path) -> None:
         assert unchanged["from_version"] == unchanged["to_version"] == 1
         upgraded = store.migrate(backup_name="backups/pre-v2-retry.sqlite3")
         assert upgraded["from_version"] == 1
-        assert upgraded["to_version"] == 4
-        assert upgraded["applied"] == [2, 3, 4]
+        assert upgraded["to_version"] == 5
+        assert upgraded["applied"] == [2, 3, 4, 5]
         assert upgraded["backup"]["database_schema_version"] == 1
         assert store.integrity()["ok"]
         indexes = {
@@ -84,10 +84,14 @@ def test_transactional_upgrade_backup_and_rollback(root: Path) -> None:
             "ix_runtime_task_state",
             "ux_routing_escalation_child",
             "ix_cleanup_actions",
+            "ix_projects_repository_key",
+            "ix_project_alias_lookup",
+            "ix_project_suggestion_squad",
+            "ix_roster_tasks_project_state",
         } <= indexes
-        assert [migration.version for migration in MIGRATIONS] == [1, 2, 3, 4]
-        assert MIGRATIONS[-1].name == "adapter-runtime-cleanup-and-routing"
-        assert MIGRATIONS[-1].checksum == "01892d93311ce0b5486077b00e6d3adea60fd3c91006663358317260ad21cd2d"
+        assert [migration.version for migration in MIGRATIONS] == [1, 2, 3, 4, 5]
+        assert MIGRATIONS[-1].name == "advisory-project-catalog-and-roster-indexes"
+        assert MIGRATIONS[-1].checksum == "6bf4acd02288e1bc8ce92c83c6876ed1f89979289e76d947b50f30a703a1eb25"
 
 
 def test_schema_refusals_without_test_sql(root: Path) -> None:
@@ -120,6 +124,13 @@ def test_v4_preserves_canonical_v3_cleanup_obligation(root: Path) -> None:
         )
         store.connection.execute(
             """
+            INSERT INTO projects(project_id,repository,state,version,updated_at)
+            VALUES('project:legacy','https://EXAMPLE.invalid/synthetic/legacy.git',
+                   'active',1,'2026-01-01T00:00:00Z')
+            """
+        )
+        store.connection.execute(
+            """
             INSERT INTO cleanup_obligations
               (cleanup_obligation_id,task_id,cleanup_state,required_policy,next_action,version,updated_at)
             VALUES('cleanup:v3-cleanup','task:v3-cleanup','pending','terminal_task',
@@ -127,13 +138,15 @@ def test_v4_preserves_canonical_v3_cleanup_obligation(root: Path) -> None:
             """
         )
         receipt = store.migrate(backup_name="backups/pre-v4.sqlite3")
-        assert receipt["from_version"] == 3 and receipt["applied"] == [4]
+        assert receipt["from_version"] == 3 and receipt["applied"] == [4, 5]
         row = store.connection.execute(
             "SELECT * FROM cleanup_obligations WHERE task_id='task:v3-cleanup'"
         ).fetchone()
         assert row["cleanup_obligation_id"] == "cleanup:v3-cleanup"
         assert row["cleanup_state"] == "pending" and row["version"] == 1
         assert row["owner_id"] is None and row["task_class"] is None
+        project = store.resolve_project("git@example.invalid:synthetic/legacy.git")
+        assert project is not None and project["project_id"] == "project:legacy"
         assert store.integrity()["ok"]
 
 

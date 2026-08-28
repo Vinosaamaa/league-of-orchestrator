@@ -7,6 +7,7 @@ import sqlite3
 from typing import Any, Optional
 
 from .sqlite_request_ops import _active_claim, _request_row, _time
+from .sqlite_project_ops import resolve_project
 from .storage_assignment import PrepareAssignmentCommand
 from .storage_types import LIFECYCLE_STATES, StorageRefusal
 
@@ -135,11 +136,12 @@ def _validate_assignment_reservation(
         or lease is not None
     ):
         raise StorageRefusal("callsign_unavailable", "Champion callsign is not available")
-    project = store.connection.execute(
-        "SELECT project_id FROM projects WHERE repository=? AND state='active'",
-        (command.repository,),
-    ).fetchone()
-    return str(project["project_id"]) if project is not None else None
+    project = resolve_project(store, command.repository)
+    return (
+        str(project["project_id"])
+        if project is not None and project["state"] == "active"
+        else None
+    )
 
 
 def _persist_assignment_reservation(

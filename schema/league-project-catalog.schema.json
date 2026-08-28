@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Vinosaamaa/league-of-orchestrator/schema/league-project-catalog.schema.json",
+  "title": "League bounded non-canonical project catalog",
+  "type": "object",
+  "required": ["schema", "canonical", "visibility", "projects", "truncated", "limit"],
+  "properties": {
+    "schema": {"const": "league.project-catalog.v1"},
+    "canonical": {"const": false},
+    "visibility": {"enum": ["local", "outbound"]},
+    "projects": {
+      "type": "array",
+      "maxItems": 500,
+      "items": {"$ref": "#/$defs/project"}
+    },
+    "truncated": {"type": "boolean"},
+    "limit": {"type": "integer", "minimum": 1, "maximum": 500}
+  },
+  "$defs": {
+    "project": {
+      "type": "object",
+      "required": [
+        "project_id", "summary", "aliases", "code", "root", "repository",
+        "state", "version", "updated_at"
+      ],
+      "properties": {
+        "project_id": {"type": "string", "pattern": "^project:[a-z0-9][a-z0-9._-]{0,95}$"},
+        "summary": {"type": "string"},
+        "aliases": {"type": "array", "maxItems": 16, "items": {"type": "string"}},
+        "code": {"type": ["string", "null"]},
+        "root": {"type": ["string", "null"]},
+        "repository": {"type": ["string", "null"]},
+        "state": {"enum": ["active", "retired"]},
+        "version": {"type": "integer", "minimum": 1},
+        "updated_at": {"type": "string", "format": "date-time"}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

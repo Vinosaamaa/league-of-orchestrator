@@ -9,6 +9,7 @@ from .storage_delivery import DeliveryStorage
 from .storage_lifecycle import LifecycleStorage
 from .storage_outbox import OutboxDispatchIdentity, OutboxStorage
 from .storage_project import ProjectStorage
+from .storage_reporting import ReportingStorage
 from .storage_request import (
     AnswerRequestCommand,
     DispatchRequestCommand,
@@ -39,6 +40,7 @@ class Storage(
     OutboxStorage,
     WatcherStorage,
     RuntimeLifecycleStorage,
+    ReportingStorage,
     ProjectStorage,
     RosterStorage,
     CallsignQueueStorage,

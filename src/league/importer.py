@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
-from .sqlite_store import _IMPORT_COLUMNS
+from .sqlite_store import CURRENT_SCHEMA_VERSION, _IMPORT_COLUMNS
 from .sqlite_project_ops import canonical_repository
 from .storage import ImportPlan, StorageRefusal
 from .storage_types import LIFECYCLE_STATES
@@ -340,6 +340,10 @@ class ImportPlanner:
             "root_key": None,
             "code": None,
             "code_key": None,
+            "repository_visibility": "unknown",
+            "export_policy": "deny",
+            "root_classification": "local_only",
+            "repository_classification": "local_only",
         }
         self.projects[project_id] = row
         self.project_by_repository[repository_key] = project_id
@@ -1185,6 +1189,7 @@ class ImportPlanner:
         target_collisions = {table: count for table, count in self.target_counts.items() if count}
         report = {
             "schema": "league.import-report.v1",
+            "target_schema_version": CURRENT_SCHEMA_VERSION,
             "dry_run": True,
             "applied": False,
             "eligible": not target_collisions,
@@ -1216,11 +1221,16 @@ class ImportPlanner:
             "unknown_consumers": [],
             "target_collisions": target_collisions,
         }
-        digest_payload = {"report": report, "rows": self.rows}
+        digest_payload = {
+            "target_schema_version": CURRENT_SCHEMA_VERSION,
+            "report": report,
+            "rows": self.rows,
+        }
         report_digest = hashlib.sha256(_stable_json(digest_payload).encode("utf-8")).hexdigest()
         report["report_digest"] = report_digest
         return {
             "report": report,
+            "target_schema_version": CURRENT_SCHEMA_VERSION,
             "report_digest": report_digest,
             "source_digest": source_digest,
             "applied_at": self.manifest["captured_at"],

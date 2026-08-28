@@ -7,14 +7,17 @@ import hashlib
 import json
 import sqlite3
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, BinaryIO, Callable, Optional
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from . import MAX_ACCEPTANCE_SENTINEL_PATHS, __version__
 from .adapters import builtin_contract_registry
 from .cleanup import CleanupPlanner
 from .importer import build_import_plan
 from .routing import ModelRouter, load_routing_config
+from .reporting import REPORT_FORMATS, render_report
 from .skill_contracts import (
     audit_installations,
     capability_matrix as skill_capability_matrix,
@@ -306,6 +309,12 @@ def _add_project_commands(groups: argparse._SubParsersAction) -> None:
     put.add_argument("--code")
     put.add_argument("--alias", action="append", default=[])
     put.add_argument("--state", choices=("active", "retired"), default="active")
+    put.add_argument(
+        "--repository-visibility", choices=("public", "private", "unknown"), required=True
+    )
+    put.add_argument(
+        "--export-policy", choices=("deny", "metadata_only", "public_repository"), required=True
+    )
     resolve = commands.add_parser("resolve", help="Resolve one exact canonical identity.")
     selectors = resolve.add_mutually_exclusive_group(required=True)
     for name in ("repository", "project-id", "root", "code", "alias"):
@@ -338,6 +347,48 @@ def _add_roster_commands(groups: argparse._SubParsersAction) -> None:
     snapshot.add_argument("--stale-before", required=True)
     snapshot.add_argument("--limit", type=int, default=500)
     snapshot.add_argument("--visibility", choices=("local", "outbound"), default="outbound")
+
+
+def _add_evidence_commands(groups: argparse._SubParsersAction) -> None:
+    evidence = groups.add_parser(
+        "evidence", help="Record bounded outbound-safe evidence while retaining local hashes."
+    )
+    commands = evidence.add_subparsers(dest="action", required=True)
+    record = commands.add_parser("record", help="Record one versioned activity-evidence object.")
+    record.add_argument("--input", type=Path, required=True)
+
+
+def _add_report_options(parser: argparse.ArgumentParser, *, show: bool) -> None:
+    if show:
+        parser.add_argument("report_id")
+    else:
+        mode = parser.add_mutually_exclusive_group()
+        mode.add_argument("--today", action="store_true")
+        mode.add_argument("--since-report")
+        parser.add_argument("--from", dest="from_at")
+        parser.add_argument("--to", dest="to_at")
+        parser.add_argument("--timezone")
+        scope = parser.add_mutually_exclusive_group()
+        scope.add_argument("--owner")
+        scope.add_argument("--squad")
+        scope.add_argument("--project")
+        scope.add_argument("--all", action="store_true")
+    parser.add_argument("--format", choices=tuple(sorted(REPORT_FORMATS)), default="json")
+    parser.add_argument("--limit", type=int, default=500)
+    parser.add_argument("--cursor")
+    parser.add_argument("--local-diagnostic", action="store_true")
+
+
+def _add_report_commands(groups: argparse._SubParsersAction) -> None:
+    report = groups.add_parser(
+        "report", help="Generate or reproduce a deterministic bounded evidence report."
+    )
+    report.set_defaults(action="generate")
+    _add_report_options(report, show=False)
+    commands = report.add_subparsers(dest="report_action")
+    show = commands.add_parser("show", help="Reproduce one immutable stored report specification.")
+    show.set_defaults(action="show")
+    _add_report_options(show, show=True)
 
 
 def _add_task_commands(groups: argparse._SubParsersAction) -> None:
@@ -697,6 +748,8 @@ def _parser() -> argparse.ArgumentParser:
         _add_delivery_commands,
         _add_project_commands,
         _add_roster_commands,
+        _add_evidence_commands,
+        _add_report_commands,
         _add_task_commands,
         _add_runtime_commands,
         _add_skill_commands,
@@ -970,6 +1023,8 @@ def _project_put(store: Storage, args: argparse.Namespace) -> CommandResult:
         code=args.code,
         aliases=args.alias,
         state=args.state,
+        repository_visibility=args.repository_visibility,
+        export_policy=args.export_policy,
         at=args.at,
     ), None
 
@@ -1000,6 +1055,102 @@ def _roster_snapshot(store: Storage, args: argparse.Namespace) -> CommandResult:
         limit=args.limit,
         visibility=args.visibility,
     ), None
+
+
+def _evidence_record(store: Storage, args: argparse.Namespace) -> CommandResult:
+    return store.record_activity_evidence(_read_json_object(args.input)), None
+
+
+def _scope_args(args: argparse.Namespace) -> tuple[Optional[str], Optional[str]]:
+    for kind in ("owner", "squad", "project"):
+        value = getattr(args, kind, None)
+        if value is not None:
+            return kind, value
+    if getattr(args, "all", False):
+        return "all", None
+    return None, None
+
+
+def _report_zone(zone_name: str) -> ZoneInfo:
+    try:
+        return ZoneInfo(zone_name)
+    except (ZoneInfoNotFoundError, ValueError, TypeError) as exc:
+        raise StorageRefusal("invalid_report_timezone", "report timezone is unknown") from exc
+
+
+def _now_rfc3339(zone_name: str) -> str:
+    return datetime.now(_report_zone(zone_name)).astimezone(timezone.utc).isoformat(timespec="seconds").replace(
+        "+00:00", "Z"
+    )
+
+
+def _report_generate(store: Storage, args: argparse.Namespace) -> CommandResult:
+    scope_kind, scope_id = _scope_args(args)
+    timezone_name = args.timezone
+    from_at = args.from_at
+    to_at = args.to_at
+    from_inclusive = True
+    event_watermark = None
+    if (args.today or args.since_report) and args.from_at:
+        raise StorageRefusal("report_range_ambiguous", "report range modes cannot also set from")
+    if args.since_report:
+        prior = store.report_spec(args.since_report)
+        if prior is None:
+            raise StorageRefusal("report_not_found", "since-report specification is unknown")
+        from_at = prior["to_at"]
+        from_inclusive = False
+        timezone_name = timezone_name or prior["timezone"]
+        if scope_kind is None:
+            scope_kind, scope_id = prior["scope_kind"], prior["scope_id"]
+        to_at = to_at or _now_rfc3339(timezone_name)
+    elif args.today:
+        if timezone_name is None:
+            raise StorageRefusal("invalid_report_timezone", "today requires an exact timezone")
+        observed = datetime.now(_report_zone(timezone_name))
+        from_at = observed.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+        to_at = to_at or observed.isoformat(timespec="seconds")
+    if not from_at or not to_at or not timezone_name:
+        raise StorageRefusal(
+            "report_range_required", "report requires exact from, to, and timezone values"
+        )
+    if scope_kind is None:
+        raise StorageRefusal("report_scope_required", "report requires one exact scope")
+    report = store.generate_report(
+        from_at=from_at,
+        to_at=to_at,
+        timezone_name=timezone_name,
+        from_inclusive=from_inclusive,
+        scope_kind=scope_kind,
+        scope_id=scope_id,
+        limit=args.limit,
+        cursor=args.cursor,
+        local_diagnostic=args.local_diagnostic,
+        event_watermark=event_watermark,
+    )
+    return None, render_report(report, args.format)
+
+
+def _report_show(store: Storage, args: argparse.Namespace) -> CommandResult:
+    spec = store.report_spec(args.report_id)
+    if spec is None:
+        raise StorageRefusal("report_not_found", "report specification is unknown")
+    report = store.generate_report(
+        from_at=spec["from_at"],
+        to_at=spec["to_at"],
+        timezone_name=spec["timezone"],
+        from_inclusive=bool(spec["from_inclusive"]),
+        scope_kind=spec["scope_kind"],
+        scope_id=spec["scope_id"],
+        limit=args.limit,
+        cursor=args.cursor,
+        local_diagnostic=args.local_diagnostic,
+        report_id=spec["report_id"],
+        event_watermark=int(spec["event_watermark"]),
+        source_watermark=spec["source_watermark"],
+        persist=False,
+        expected_content_hash=spec["content_hash"],
+    )
+    return None, render_report(report, args.format)
 
 
 def _task_transfer(store: Storage, args: argparse.Namespace) -> CommandResult:
@@ -1454,6 +1605,9 @@ HANDLERS: dict[str, CommandHandler] = {
     "project.suggest-squads": _project_suggest_squads,
     "project.advise": _project_advise,
     "roster.snapshot": _roster_snapshot,
+    "evidence.record": _evidence_record,
+    "report.generate": _report_generate,
+    "report.show": _report_show,
     "task.transfer-owner": _task_transfer,
     "task.transition": _task_transition,
     "runtime.matrix": _runtime_matrix,
@@ -1512,6 +1666,9 @@ SCHEMA_INVENTORY = (
     "league-rollover-pages.schema.json",
     "league-rollover-abort-receipt.schema.json",
     "league-rollover-drain-receipt.schema.json",
+    "league-activity-evidence.schema.json",
+    "league-report.schema.json",
+    "league-outbound-receipt.schema.json",
 )
 
 CONFIG_ONLY_COMMANDS = {

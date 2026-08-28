@@ -17,6 +17,8 @@ class ProjectStorage(Protocol):
         code: Optional[str],
         aliases: Sequence[str],
         state: str,
+        repository_visibility: str,
+        export_policy: str,
         at: str,
     ) -> dict[str, object]: ...
 

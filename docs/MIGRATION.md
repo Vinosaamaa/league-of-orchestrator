@@ -91,15 +91,28 @@ adapter passes. The grouped request-lifecycle implementation remains inert and
 is verified separately with fake adapters against the same explicit-root
 storage boundary.
 
-The repository-local schema is now contiguous `[1,2,3,4,5,6]`. Versions 1 and
-2 remain the issue-#19 store, version 3 is the request lifecycle, version 4 is
-the runtime lifecycle, and canonical v5 is
-`advisory-project-catalog-and-roster-indexes`. Version 6 is
+The repository-local schema is now contiguous `[1,2,3,4,5,6,7]`. Versions 1
+and 2 remain the issue-#19 store, version 3 is the request lifecycle, version 4
+is the runtime lifecycle, and v5 is
+`advisory-project-catalog-and-roster-indexes`. Canonical v6 is
 `guarded-rollover-and-shuffled-callsign-queue`, checksum
 `879ef4addfe6725e31c31a5aa1db9078d7c066a26610eaa2753f749c6e53ab75`.
-It evolves the existing events and callsign-assignment tables, derives queue
-and Squad-intake state during migration/import, and verifies foreign keys
-before restoring enforcement. It creates no parallel request, outbox, runtime,
-or assignment authority. An existing explicit-root database still requires
-the ordinary verified pre-upgrade backup; issue #23 retains installed-state,
-live migration, rollback rehearsal, and cutover ownership.
+It evolves existing event and callsign-assignment tables, derives queue and
+Squad-intake state during migration/import, and verifies foreign keys before
+restoring enforcement.
+
+Version 7 is `bounded-reporting-and-outbound-privacy`, checksum
+`bebe90eb841eac2a0b42d3f89e321cb4f3f8b23b02d92febf5a4ea2a50727cde`. It adds structured project privacy classifications,
+reporting indexes, immutable activity evidence, and report specifications. It
+does not duplicate source evidence or create parallel request, outbox, runtime,
+assignment, rollover, or callsign authority.
+
+Dry-run import plans bind `target_schema_version` into their digest. A plan
+created for an earlier schema is refused as `import_plan_incompatible` before
+row replay and must be regenerated from its retained source artifacts.
+
+An existing explicit-root database still requires the ordinary verified
+pre-upgrade backup. Issue #23 retains installed-state, live migration, rollback
+rehearsal, guidance installation, and cutover ownership. The source-managed
+shared guidance and explicit-root adapter are release inputs only; this
+migration does not mutate a home directory or global harness state.

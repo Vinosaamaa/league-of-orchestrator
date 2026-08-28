@@ -1,6 +1,6 @@
 # Advisory project catalog and project-grouped Roster
 
-> **Status: repository-local v1 contract for issues #9 and #12.** It does not
+> **Status: repository-local v2 contract for issues #9, #12, and #25.** It does not
 > install, import live records, change routing authority, or implement the
 > terminal UI designed in [terminal Roster UI](design/terminal-roster-ui.md).
 
@@ -61,6 +61,7 @@ placeholder identities only.
   --summary 'Example coordination project' \
   --repository https://example.invalid/team/alpha.git \
   --root <exact-local-root> --code ALPHA --alias alpha \
+  --repository-visibility unknown --export-policy metadata_only \
   --state active --at 2026-01-01T00:00:00Z
 
 ./bin/league --state-root <state-root> project resolve --code ALPHA
@@ -82,9 +83,12 @@ SQLite wait.
 
 ## Visibility and deterministic transfer
 
-Local catalog reads include the exact repository and root. Outbound reads keep
-the project ID, summary, aliases, code, state, and version but replace repository
-and root with `[redacted]`. The default Roster command visibility is outbound;
+Local catalog reads include the exact repository and root. Outbound v2 reads
+always return a `local_only` root classification and a null root. `deny` also
+withholds summary, aliases, code, and repository; `metadata_only` permits only
+the validated descriptive fields; `public_repository` permits those fields and
+one validated public HTTPS repository only when visibility is explicitly
+`public`. The default Roster command visibility is outbound;
 local terminal software must request local visibility deliberately.
 Legacy imports use the generic summary `Imported project`; they never derive an
 outbound-visible label from a private repository path.

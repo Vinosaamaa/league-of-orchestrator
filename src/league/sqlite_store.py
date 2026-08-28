@@ -65,6 +65,9 @@ from .sqlite_rollover_ops import prepare_rollover as prepare_rollover_operation
 from .sqlite_rollover_ops import rollover_bindings as rollover_bindings_operation
 from .sqlite_rollover_ops import rollover_status as rollover_status_operation
 from .sqlite_roster_ops import roster_snapshot as roster_snapshot_operation
+from .sqlite_report_ops import generate_report as generate_report_operation
+from .sqlite_report_ops import record_activity_evidence as record_activity_evidence_operation
+from .sqlite_report_ops import report_spec as report_spec_operation
 from .sqlite_transfer_ops import (
     apply_import as apply_import_operation,
     canonical_counts,
@@ -91,7 +94,7 @@ from .sqlite_handoff_schema import STATEMENTS as HANDOFF_MIGRATION_STATEMENTS
 
 
 WAL_MINIMUM = (3, 51, 3)
-CURRENT_SCHEMA_VERSION = 6
+CURRENT_SCHEMA_VERSION = 7
 DATABASE_NAME = "league.sqlite3"
 DEFAULT_BUSY_TIMEOUT_MS = 500
 MAX_BUSY_TIMEOUT_MS = 10_000
@@ -910,6 +913,104 @@ MIGRATIONS = (
         HANDOFF_MIGRATION_STATEMENTS,
         rebuilds_foreign_keys=True,
     ),
+    Migration(
+        7,
+        "bounded-reporting-and-outbound-privacy",
+        (
+            "ALTER TABLE projects ADD COLUMN repository_visibility TEXT NOT NULL DEFAULT 'unknown' CHECK (repository_visibility IN ('public','private','unknown'))",
+            "ALTER TABLE projects ADD COLUMN export_policy TEXT NOT NULL DEFAULT 'deny' CHECK (export_policy IN ('deny','metadata_only','public_repository'))",
+            "ALTER TABLE projects ADD COLUMN root_classification TEXT NOT NULL DEFAULT 'local_only' CHECK (root_classification='local_only')",
+            "ALTER TABLE projects ADD COLUMN repository_classification TEXT NOT NULL DEFAULT 'local_only' CHECK (repository_classification IN ('local_only','outbound_safe'))",
+            "CREATE INDEX ix_projects_visibility_policy ON projects(repository_visibility,export_policy,project_id)",
+            "CREATE INDEX ix_report_prompts_created ON prompts(created_at,prompt_id)",
+            "CREATE INDEX ix_report_requests_updated ON requests(updated_at,request_id)",
+            "CREATE INDEX ix_report_dispatches_decided ON request_dispatches(decided_at,dispatch_id)",
+            "CREATE INDEX ix_report_tasks_updated ON tasks(updated_at,task_id)",
+            "CREATE INDEX ix_report_assignments_created ON task_assignments(created_at,task_assignment_id)",
+            "CREATE INDEX ix_report_assignments_updated ON task_assignments(updated_at,task_assignment_id)",
+            "CREATE INDEX ix_report_callsign_reserved ON callsign_assignments(reserved_at,callsign_assignment_id)",
+            "CREATE INDEX ix_report_callsign_activated ON callsign_assignments(activated_at,callsign_assignment_id) WHERE activated_at IS NOT NULL",
+            "CREATE INDEX ix_report_callsign_released ON callsign_assignments(released_at,callsign_assignment_id) WHERE released_at IS NOT NULL",
+            "CREATE INDEX ix_report_transitions_created ON task_transitions(created_at,transition_id)",
+            "CREATE INDEX ix_report_rollovers_updated ON rollover_operations(updated_at,operation_id)",
+            "CREATE INDEX ix_report_routing_chosen ON model_routing_decisions(chosen_at,decision_id)",
+            "CREATE INDEX ix_report_runtime_created ON runtime_bindings(created_at,binding_id)",
+            "CREATE INDEX ix_report_runtime_updated ON runtime_bindings(updated_at,binding_id)",
+            "CREATE INDEX ix_report_resources_registered ON task_resources(registered_at,resource_id)",
+            "CREATE INDEX ix_report_resources_updated ON task_resources(updated_at,resource_id)",
+            "CREATE INDEX ix_report_cleanup_updated ON cleanup_obligations(updated_at,cleanup_obligation_id)",
+            "CREATE INDEX ix_report_cleanup_receipts_recorded ON cleanup_action_receipts(recorded_at,action_id)",
+            "CREATE INDEX ix_report_teardown_completed ON teardown_receipts(completed_at,receipt_id)",
+            "CREATE INDEX ix_report_outbox_available ON delivery_outbox(available_at,outbox_id)",
+            "CREATE INDEX ix_report_obligations_created ON obligations(created_at,obligation_id)",
+            """
+            CREATE TABLE activity_evidence (
+              evidence_id TEXT PRIMARY KEY,
+              evidence_kind TEXT NOT NULL CHECK (
+                evidence_kind IN ('issue','commit','pull_request','check','merge','install',
+                                  'deployment','smoke','rollback','teardown','resource','authority',
+                                  'handoff','continuation','repair')
+              ),
+              action TEXT NOT NULL,
+              owner_agent_id TEXT REFERENCES agent_instances(agent_id),
+              squad_id TEXT REFERENCES squads(squad_id),
+              project_id TEXT REFERENCES projects(project_id),
+              request_id TEXT REFERENCES requests(request_id),
+              task_id TEXT REFERENCES tasks(task_id),
+              state TEXT NOT NULL CHECK (state IN ('pending','succeeded','failed','cancelled','blocked')),
+              verification TEXT NOT NULL CHECK (verification IN ('verified','unverified','unknown')),
+              summary TEXT NOT NULL,
+              summary_classification TEXT NOT NULL DEFAULT 'outbound_safe'
+                CHECK (summary_classification='outbound_safe'),
+              public_url TEXT,
+              object_hash TEXT,
+              local_evidence_ref TEXT,
+              local_evidence_json TEXT,
+              local_evidence_hash TEXT,
+              local_evidence_classification TEXT NOT NULL DEFAULT 'local_only'
+                CHECK (local_evidence_classification='local_only'),
+              stable_repair_id TEXT,
+              repair_phase TEXT CHECK (
+                repair_phase IS NULL OR repair_phase IN ('failure','attempt','fix','final')
+              ),
+              root_cause_tag TEXT,
+              owning_issue_url TEXT,
+              required_for_completion INTEGER NOT NULL DEFAULT 0
+                CHECK (required_for_completion IN (0,1)),
+              occurred_at TEXT NOT NULL,
+              CHECK (evidence_kind!='repair' OR stable_repair_id IS NOT NULL),
+              CHECK ((local_evidence_ref IS NULL) = (local_evidence_hash IS NULL)),
+              CHECK ((local_evidence_json IS NULL) = (local_evidence_hash IS NULL))
+            )
+            """,
+            "CREATE INDEX ix_activity_evidence_time ON activity_evidence(occurred_at,evidence_id)",
+            "CREATE INDEX ix_activity_evidence_owner ON activity_evidence(owner_agent_id,occurred_at,evidence_id)",
+            "CREATE INDEX ix_activity_evidence_squad ON activity_evidence(squad_id,occurred_at,evidence_id)",
+            "CREATE INDEX ix_activity_evidence_project ON activity_evidence(project_id,occurred_at,evidence_id)",
+            "CREATE INDEX ix_activity_evidence_task ON activity_evidence(task_id,occurred_at,evidence_id)",
+            "CREATE INDEX ix_activity_evidence_repair ON activity_evidence(stable_repair_id,occurred_at,evidence_id)",
+            """
+            CREATE TABLE report_specs (
+              report_id TEXT PRIMARY KEY,
+              report_schema TEXT NOT NULL CHECK (report_schema='league.report.v1'),
+              from_at TEXT NOT NULL,
+              to_at TEXT NOT NULL,
+              timezone TEXT NOT NULL,
+              from_inclusive INTEGER NOT NULL CHECK (from_inclusive IN (0,1)),
+              scope_kind TEXT NOT NULL CHECK (scope_kind IN ('owner','squad','project','all')),
+              scope_id TEXT,
+              event_watermark INTEGER NOT NULL CHECK (event_watermark >= 0),
+              source_watermark TEXT NOT NULL CHECK (length(source_watermark)=64),
+              created_at TEXT NOT NULL,
+              spec_hash TEXT NOT NULL,
+              content_hash TEXT NOT NULL,
+              fact_count INTEGER NOT NULL CHECK (fact_count >= 0),
+              CHECK ((scope_kind='all') = (scope_id IS NULL))
+            )
+            """,
+            "CREATE INDEX ix_report_specs_created ON report_specs(created_at,report_id)",
+        ),
+    ),
 )
 
 
@@ -917,6 +1018,8 @@ _IMPORT_COLUMNS: dict[str, tuple[str, ...]] = {
     "projects": (
         "project_id", "repository", "state", "version", "updated_at", "summary",
         "root_path", "repository_key", "root_key", "code", "code_key",
+        "repository_visibility", "export_policy", "root_classification",
+        "repository_classification",
     ),
     "project_aliases": ("project_id", "alias", "alias_key", "position"),
     "callsigns": ("callsign", "pool_role", "enabled", "pool_position", "last_released_at"),
@@ -1044,6 +1147,19 @@ _IMPORT_COLUMNS: dict[str, tuple[str, ...]] = {
         "metadata_json",
     ),
     "relay_receipts": ("scope_id", "digest", "source_order"),
+    "activity_evidence": (
+        "evidence_id", "evidence_kind", "action", "owner_agent_id", "squad_id",
+        "project_id", "request_id", "task_id", "state", "verification", "summary",
+        "summary_classification", "public_url", "object_hash", "local_evidence_ref",
+        "local_evidence_json", "local_evidence_hash", "local_evidence_classification", "stable_repair_id",
+        "repair_phase", "root_cause_tag", "owning_issue_url",
+        "required_for_completion", "occurred_at",
+    ),
+    "report_specs": (
+        "report_id", "report_schema", "from_at", "to_at", "timezone",
+        "from_inclusive", "scope_kind", "scope_id", "event_watermark", "source_watermark", "created_at",
+        "spec_hash", "content_hash", "fact_count",
+    ),
 }
 
 _IMPORT_ORDER = tuple(_IMPORT_COLUMNS)
@@ -1107,6 +1223,8 @@ _EXPORT_TABLES = (
     "cleanup_actions",
     "cleanup_action_receipts",
     "teardown_receipts",
+    "activity_evidence",
+    "report_specs",
 )
 
 _EXPORT_ORDER = {
@@ -1169,6 +1287,8 @@ _EXPORT_ORDER = {
     "cleanup_actions": "operation_id,ordinal",
     "cleanup_action_receipts": "operation_id,action_id",
     "teardown_receipts": "task_id,receipt_id",
+    "activity_evidence": "occurred_at,evidence_id",
+    "report_specs": "created_at,report_id",
 }
 
 _INSPECTION_REDACTIONS = {
@@ -1228,6 +1348,7 @@ _INSPECTION_REDACTIONS = {
     "task_resources": {"expected_identity_json", "applicability_reason"},
     "cleanup_actions": {"expected_identity_json", "intended_state_json"},
     "cleanup_action_receipts": {"before_json", "after_json", "adapter_receipt_json"},
+    "activity_evidence": {"local_evidence_ref", "local_evidence_json"},
 }
 
 
@@ -1882,6 +2003,8 @@ class SQLiteStorage(SQLiteTransactionCore):
         code: Optional[str],
         aliases: Sequence[str],
         state: str,
+        repository_visibility: str,
+        export_policy: str,
         at: str,
     ) -> dict[str, Any]:
         return put_project_operation(
@@ -1894,6 +2017,8 @@ class SQLiteStorage(SQLiteTransactionCore):
             code=code,
             aliases=aliases,
             state=state,
+            repository_visibility=repository_visibility,
+            export_policy=export_policy,
             at=at,
         )
 
@@ -1964,6 +2089,48 @@ class SQLiteStorage(SQLiteTransactionCore):
             limit=limit,
             visibility=visibility,
         )
+
+    def record_activity_evidence(self, evidence: dict[str, Any]) -> dict[str, Any]:
+        return record_activity_evidence_operation(self, evidence)
+
+    def generate_report(
+        self,
+        *,
+        from_at: str,
+        to_at: str,
+        timezone_name: str,
+        from_inclusive: bool,
+        scope_kind: str,
+        scope_id: Optional[str],
+        limit: int,
+        cursor: Optional[str],
+        local_diagnostic: bool,
+        report_id: Optional[str] = None,
+        event_watermark: Optional[int] = None,
+        source_watermark: Optional[str] = None,
+        persist: bool = True,
+        expected_content_hash: Optional[str] = None,
+    ) -> dict[str, Any]:
+        return generate_report_operation(
+            self,
+            from_at=from_at,
+            to_at=to_at,
+            timezone_name=timezone_name,
+            from_inclusive=from_inclusive,
+            scope_kind=scope_kind,
+            scope_id=scope_id,
+            limit=limit,
+            cursor=cursor,
+            local_diagnostic=local_diagnostic,
+            report_id=report_id,
+            event_watermark=event_watermark,
+            source_watermark=source_watermark,
+            persist=persist,
+            expected_content_hash=expected_content_hash,
+        )
+
+    def report_spec(self, report_id: str) -> Optional[dict[str, Any]]:
+        return report_spec_operation(self, report_id)
 
     def transfer_task_owner(
         self,
@@ -2311,6 +2478,7 @@ class SQLiteStorage(SQLiteTransactionCore):
             self,
             plan,
             expected_digest,
+            current_schema_version=CURRENT_SCHEMA_VERSION,
             columns_by_table=_IMPORT_COLUMNS,
             table_order=_IMPORT_ORDER,
             post_import=initialize_imported_callsign_state,

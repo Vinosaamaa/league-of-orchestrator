@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>League report · {{REPORT_ID}}</title>
+  <style>
+    :root{--ink:#12212f;--muted:#607080;--paper:#f5f8f9;--panel:#fff;--line:#cbd8df;--blue:#1769aa;--blue-soft:#dcecf7;--amber:#ad6900;--amber-soft:#fff0c7;--jade:#167456;--jade-soft:#d9f0e7;--red:#a63b32;--red-soft:#f9dfdc;--shadow:0 16px 44px rgba(18,33,47,.12)}
+    *{box-sizing:border-box}html{background:var(--paper);color:var(--ink);font-family:"Avenir Next",Avenir,system-ui,sans-serif}body{margin:0;min-width:320px;background-image:linear-gradient(rgba(23,105,170,.055) 1px,transparent 1px),linear-gradient(90deg,rgba(23,105,170,.055) 1px,transparent 1px);background-size:24px 24px}code,.eyebrow,.fact-time{font-family:"SFMono-Regular",Consolas,monospace}main{width:min(1180px,calc(100% - 32px));margin:32px auto 64px}.masthead{display:grid;grid-template-columns:minmax(0,1fr) minmax(240px,.42fr);gap:18px;align-items:stretch}.panel{min-width:0;background:rgba(255,255,255,.96);border:1px solid var(--line);border-radius:14px;box-shadow:var(--shadow)}.title{padding:26px}.eyebrow{font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--blue);font-weight:800}.title h1{font-family:"Avenir Next Condensed","Arial Narrow",sans-serif;font-size:clamp(34px,6vw,68px);line-height:.92;letter-spacing:-.03em;margin:12px 0 18px;max-width:14ch}.range{display:flex;gap:10px;flex-wrap:wrap;color:var(--muted);font-size:13px}.range code{overflow-wrap:anywhere}.seal{padding:22px;display:flex;flex-direction:column;justify-content:space-between;border-top:6px solid var(--red)}.seal.finished{border-top-color:var(--jade)}.seal .verdict{font-family:"Avenir Next Condensed","Arial Narrow",sans-serif;font-weight:900;font-size:31px;line-height:1}.seal.unfinished .verdict{color:var(--red)}.seal.finished .verdict{color:var(--jade)}.seal dl{display:grid;grid-template-columns:1fr auto;gap:8px 12px;margin:22px 0 0;font-size:12px}.seal dt{color:var(--muted)}.seal dd{margin:0;font-family:"SFMono-Regular",Consolas,monospace;overflow-wrap:anywhere;text-align:right}.grid{display:grid;grid-template-columns:minmax(0,1.6fr) minmax(260px,.65fr);gap:18px;margin-top:18px}.section{padding:22px;min-width:0}.section h2{font-family:"Avenir Next Condensed","Arial Narrow",sans-serif;font-size:24px;margin:0 0 16px}.gate-list,.owner-list,.repair-list{list-style:none;margin:0;padding:0;display:grid;gap:8px}.gate-list li,.owner-list li,.repair-list li{display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:10px;align-items:center;padding:9px 10px;background:#f8fafb;border:1px solid #e2e9ed;border-radius:8px;font-size:12px}.gate-list li>span,.owner-list li>span,.repair-list li>span{min-width:0;overflow-wrap:anywhere}.owner-list li{grid-template-columns:minmax(0,1fr) auto}.repair-list li{grid-template-columns:minmax(0,1fr) auto auto}.gate-list strong{font-size:10px;text-transform:uppercase;letter-spacing:.08em}.gate-list strong.settled{color:var(--jade)}.gate-list strong.open{color:var(--red)}.fact{display:grid;grid-template-columns:190px minmax(0,1fr);gap:16px;padding:17px 0;border-top:1px solid var(--line);min-width:0}.fact:first-of-type{border-top:0}.fact-time{font-size:11px;color:var(--muted);padding-top:4px}.fact-main{min-width:0}.fact-line{display:flex;gap:9px;align-items:center;flex-wrap:wrap}.category,.state{border-radius:999px;padding:4px 8px;font:700 10px/1 "SFMono-Regular",Consolas,monospace;text-transform:uppercase;letter-spacing:.06em}.category{background:var(--blue-soft);color:var(--blue)}.state{background:var(--amber-soft);color:var(--amber)}.summary{margin:8px 0;color:var(--ink);overflow-wrap:anywhere}.meta{font-size:11px;color:var(--muted);overflow-wrap:anywhere}.meta code{color:var(--ink)}.stack{display:grid;gap:18px}.hashes{margin-top:18px;padding-top:14px;border-top:1px solid var(--line);display:grid;gap:7px;font-size:11px;color:var(--muted)}.hashes code{display:block;color:var(--ink);overflow-wrap:anywhere}.footer{margin-top:18px;display:flex;justify-content:space-between;gap:12px;color:var(--muted);font-size:11px}.empty{padding:28px;border:1px dashed var(--line);color:var(--muted);text-align:center}@media(max-width:820px){.masthead,.grid{grid-template-columns:minmax(0,1fr)}.fact{grid-template-columns:minmax(0,1fr);gap:7px}.footer{flex-direction:column}}@media print{body{background:#fff}main{width:100%;margin:0}.panel{box-shadow:none;break-inside:avoid}}
+  </style>
+</head>
+<body>
+  <main>
+    <header class="masthead">
+      <section class="panel title">
+        <div class="eyebrow">League operational ledger · {{REPORT_ID}}</div>
+        <h1>Bounded evidence report</h1>
+        <div class="range"><code>{{FROM}}</code><span>{{FROM_MODE}} →</span><code>{{TO}}</code><span>{{TIMEZONE}}</span><span>{{SCOPE}}</span></div>
+      </section>
+      <aside class="panel seal {{VERDICT_CLASS}}">
+        <div><div class="eyebrow">Completion verdict</div><div class="verdict">{{VERDICT}}</div></div>
+        <dl><dt>Status</dt><dd>{{COMPLETION_STATUS}}</dd><dt>Facts</dt><dd>{{FACT_TOTAL}}</dd><dt>Page</dt><dd>{{PAGE}}</dd><dt>Next</dt><dd>{{NEXT}}</dd></dl>
+      </aside>
+    </header>
+    <div class="grid">
+      <section class="panel section">
+        <h2>Chronological evidence</h2>
+        {{FACTS}}
+      </section>
+      <aside class="stack">
+        <section class="panel section"><h2>Completion gates</h2><ul class="gate-list">{{GATES}}</ul></section>
+        <section class="panel section"><h2>Owners</h2><ul class="owner-list">{{OWNERS}}</ul></section>
+        <section class="panel section"><h2>Recurring repairs</h2><ul class="repair-list">{{REPAIRS}}</ul></section>
+      </aside>
+    </div>
+    <footer class="panel section footer">
+      <div>Event watermark <code>{{WATERMARK}}</code> · source watermark <code>{{SOURCE_WATERMARK}}</code> · reproduction <code>{{REPRODUCTION}}</code></div>
+      <div class="hashes"><span>specification<code>{{SPEC_HASH}}</code></span><span>content<code>{{CONTENT_HASH}}</code></span></div>
+    </footer>
+  </main>
+</body>
+</html>

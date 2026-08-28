@@ -72,13 +72,15 @@ make test-request-lifecycle
 make test-runtime-lifecycle
 make test-skill-contracts
 make test-handoff-callsigns
+make test-reporting-privacy
 make test-affected
 ```
 
 The staged migration assertion follows `CURRENT_SCHEMA_VERSION`; canonical
 request migrations are `[1,2,3]`, runtime lifecycle appends v4, the advisory
 project/Roster catalog appends v5, and guarded rollover/callsign allocation
-appends v6 without changing the acceptance operation or sentinel contract.
+appends v6. Reporting/privacy appends v7 without changing the acceptance
+operation or sentinel contract.
 
 The skill-contract suite uses only synthetic temporary custom roots and fake
 capability profiles. The current machine inventory was audited separately in a
@@ -86,6 +88,12 @@ read-only command and reduced to the path-free, body-free receipt in
 `docs/research/custom-skill-audit.json`. It does not install, synchronize, or
 rewrite a skill. Release-to-installed parity and a real runtime remain #23
 gates.
+
+The staged release manifest also proves exact source/release/staged parity for
+the portable report HTML template, League report skill, and shared guidance
+source. The guidance adapter tests stage only beneath disposable explicit roots;
+the acceptance harness does not install or cut over global Codex, Cursor, or Pi
+instructions.
 
 The generation switch in this harness is a model exercised beneath the
 disposable namespace. It is not a global cutover command. Canonical cutover,

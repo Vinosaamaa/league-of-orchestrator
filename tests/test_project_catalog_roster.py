@@ -69,6 +69,8 @@ def catalog_project(store: SQLiteStorage) -> dict[str, object]:
         code="LOL",
         aliases=["league", "orchestrator"],
         state="active",
+        repository_visibility="unknown",
+        export_policy="metadata_only",
         at=AT3,
     )
 
@@ -91,6 +93,8 @@ def test_exact_resolution_and_cli(root: Path) -> None:
                 code="LOL",
                 aliases=["league", "orchestrator"],
                 state="active",
+                repository_visibility="unknown",
+                export_policy="metadata_only",
                 at=AT3,
             ),
             "version_conflict",
@@ -125,9 +129,10 @@ def test_exact_resolution_and_cli(root: Path) -> None:
         "outbound",
     )
     assert resolved["command"] == "project.resolve"
-    assert resolved["result"]["project"]["root"] == "[redacted]"
+    assert resolved["result"]["project"]["root"] is None
+    assert resolved["result"]["project"]["repository"] is None
     listing = invoke_cli(state, "project", "list", "--visibility", "outbound")
-    assert listing["result"]["schema"] == "league.project-catalog.v1"
+    assert listing["result"]["schema"] == "league.project-catalog.v2"
 
 
 def test_alias_ambiguity_and_identity_conflict(root: Path) -> None:
@@ -143,6 +148,8 @@ def test_alias_ambiguity_and_identity_conflict(root: Path) -> None:
             code="OTHER",
             aliases=["league"],
             state="active",
+            repository_visibility="unknown",
+            export_policy="metadata_only",
             at=AT3,
         )
         refused(lambda: store.resolve_project(alias="league"), "ambiguous_project")
@@ -156,6 +163,8 @@ def test_alias_ambiguity_and_identity_conflict(root: Path) -> None:
                 code=None,
                 aliases=[],
                 state="active",
+                repository_visibility="unknown",
+                export_policy="metadata_only",
                 at=AT3,
             ),
             "project_identity_conflict",
@@ -171,7 +180,8 @@ def test_outbound_redaction_and_schema_bounds(root: Path) -> None:
         outbound = json.dumps(store.list_projects(visibility="outbound"), sort_keys=True)
         assert ROOT_MARKER not in outbound and REPOSITORY not in outbound
         assert str(project["summary"]) in outbound
-        assert outbound.count("[redacted]") >= 2
+        assert '"root": null' in outbound and '"repository": null' in outbound
+        assert '"root": "local_only"' in outbound
 
     schema = json.loads(
         (ROOT / "schema/league-project-catalog.schema.json").read_text(encoding="utf-8")
@@ -256,6 +266,8 @@ def test_many_to_many_advice_never_rebinds(root: Path) -> None:
             code=None,
             aliases=[],
             state="active",
+            repository_visibility="unknown",
+            export_policy="metadata_only",
             at=AT3,
         )
         store.set_project_suggestions(
@@ -320,6 +332,8 @@ def test_catalog_two_writer_cas_and_deterministic_export(root: Path) -> None:
                 code="LOL",
                 aliases=["league", "orchestrator"],
                 state="active",
+                repository_visibility="unknown",
+                export_policy="metadata_only",
                 at=AT4,
             )
             result = "committed"

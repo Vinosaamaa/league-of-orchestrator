@@ -10,6 +10,7 @@ from datetime import datetime
 from typing import Any, Optional, Sequence
 from urllib.parse import urlsplit
 
+from .privacy import validate_final_rendered_payload
 from .storage_types import StorageRefusal
 
 
@@ -179,18 +180,27 @@ def _project_value(
         if aliases is not None
         else [item["alias"] for item in _alias_rows(store, row["project_id"])]
     )
-    repository = row["repository"]
-    root = row["root_path"]
-    if mode == "outbound":
-        repository = "[redacted]" if repository is not None else None
-        root = "[redacted]" if root is not None else None
+    policy = str(row["export_policy"])
+    metadata_allowed = policy in {"metadata_only", "public_repository"}
+    repository = row["repository"] if mode == "local" else None
+    root = row["root_path"] if mode == "local" else None
+    if mode == "outbound" and row["repository_classification"] == "outbound_safe":
+        repository = row["repository"]
     return {
         "project_id": row["project_id"],
-        "summary": row["summary"],
-        "aliases": alias_values,
-        "code": row["code"],
+        "summary": row["summary"] if mode == "local" or metadata_allowed else None,
+        "aliases": alias_values if mode == "local" or metadata_allowed else [],
+        "code": row["code"] if mode == "local" or metadata_allowed else None,
         "root": root,
         "repository": repository,
+        "repository_visibility": row["repository_visibility"],
+        "export_policy": policy,
+        "classifications": {
+            "root": "local_only",
+            "repository": row["repository_classification"],
+            "summary": "outbound_safe" if metadata_allowed else "local_only",
+            "code": "outbound_safe" if metadata_allowed else "local_only",
+        },
         "state": row["state"],
         "version": int(row["version"]),
         "updated_at": row["updated_at"],
@@ -200,7 +210,9 @@ def _project_value(
 def _row_by_id(store: Any, project_id: str) -> Any:
     return store.connection.execute(
         """
-        SELECT project_id,repository,summary,root_path,code,state,version,updated_at
+        SELECT project_id,repository,summary,root_path,code,state,version,updated_at,
+               repository_visibility,export_policy,root_classification,
+               repository_classification
           FROM projects WHERE project_id=?
         """,
         (project_id,),
@@ -285,6 +297,37 @@ def _normalized_aliases(values: Sequence[str]) -> list[tuple[str, str]]:
     return result
 
 
+def _project_repository_classification(
+    *,
+    summary: str,
+    code: Optional[str],
+    aliases: Sequence[tuple[str, str]],
+    repository: str,
+    export_policy: str,
+) -> str:
+    classification = (
+        "outbound_safe" if export_policy == "public_repository" else "local_only"
+    )
+    if export_policy != "deny":
+        validate_final_rendered_payload(
+            "\n".join(
+                item
+                for item in (summary, code, *(alias for alias, _ in aliases))
+                if item is not None
+            ),
+            destination_visibility="public",
+            field="project.outbound_metadata",
+        )
+    if classification == "outbound_safe":
+        validate_final_rendered_payload(
+            repository,
+            destination_visibility="public",
+            approved_urls=(repository,),
+            field="project.repository",
+        )
+    return classification
+
+
 def put_project(
     store: Any,
     project_id: str,
@@ -296,9 +339,18 @@ def put_project(
     code: Optional[str],
     aliases: Sequence[str],
     state: str,
+    repository_visibility: str,
+    export_policy: str,
     at: str,
 ) -> dict[str, Any]:
-    if not PROJECT_ID.fullmatch(project_id) or expected_version < 0 or state not in {"active", "retired"}:
+    if (
+        not PROJECT_ID.fullmatch(project_id)
+        or expected_version < 0
+        or state not in {"active", "retired"}
+        or repository_visibility not in {"public", "private", "unknown"}
+        or export_policy not in {"deny", "metadata_only", "public_repository"}
+        or (export_policy == "public_repository" and repository_visibility != "public")
+    ):
         raise StorageRefusal("invalid_project", "project identity, version, or state is invalid")
     summary_value = _text(summary, "project summary", 240)
     repository_value, repository_key = canonical_repository(repository)
@@ -308,6 +360,13 @@ def put_project(
     if code is not None:
         code_value, code_key = canonical_token(code, "project code", 24)
     alias_values = _normalized_aliases(aliases)
+    repository_classification = _project_repository_classification(
+        summary=summary_value,
+        code=code_value,
+        aliases=alias_values,
+        repository=repository_value,
+        export_policy=export_policy,
+    )
     _timestamp(at)
     try:
         with store._transaction():
@@ -326,6 +385,10 @@ def put_project(
                 "root_path": root_value,
                 "code": code_value,
                 "state": state,
+                "repository_visibility": repository_visibility,
+                "export_policy": export_policy,
+                "root_classification": "local_only",
+                "repository_classification": repository_classification,
                 "updated_at": at,
             }
             if existing is not None and all(existing[key] == value for key, value in desired.items()) and existing_aliases == alias_values:
@@ -351,22 +414,27 @@ def put_project(
                     """
                     INSERT INTO projects
                       (project_id,repository,state,version,updated_at,summary,root_path,
-                       repository_key,root_key,code,code_key)
-                    VALUES(?,?,?,?,?,?,?,?,?,?,?)
+                       repository_key,root_key,code,code_key,repository_visibility,
+                       export_policy,root_classification,repository_classification)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     """,
                     (project_id, repository_value, state, version, at, summary_value, root_value,
-                     repository_key, root_key, code_value, code_key),
+                     repository_key, root_key, code_value, code_key, repository_visibility,
+                     export_policy, "local_only", repository_classification),
                 )
             else:
                 version = expected_version + 1
                 store.connection.execute(
                     """
                     UPDATE projects SET repository=?,state=?,version=?,updated_at=?,summary=?,
-                           root_path=?,repository_key=?,root_key=?,code=?,code_key=?
+                           root_path=?,repository_key=?,root_key=?,code=?,code_key=?,
+                           repository_visibility=?,export_policy=?,root_classification='local_only',
+                           repository_classification=?
                      WHERE project_id=? AND version=?
                     """,
                     (repository_value, state, version, at, summary_value, root_value,
-                     repository_key, root_key, code_value, code_key, project_id, expected_version),
+                     repository_key, root_key, code_value, code_key, repository_visibility,
+                     export_policy, repository_classification, project_id, expected_version),
                 )
                 store.connection.execute("DELETE FROM project_aliases WHERE project_id=?", (project_id,))
             for position, (alias_value, alias_key) in enumerate(alias_values):
@@ -457,7 +525,7 @@ def list_projects(store: Any, *, visibility: str = "local", limit: int = 200) ->
     sample = list(rows[:limit])
     aliases = _alias_map(store, [str(row["project_id"]) for row in sample])
     return {
-        "schema": "league.project-catalog.v1",
+        "schema": "league.project-catalog.v2",
         "canonical": False,
         "visibility": visibility,
         "projects": [

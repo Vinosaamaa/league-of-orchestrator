@@ -27,7 +27,7 @@ Nothing here installs files, changes hooks, or connects to live Roster state.
 - Synthetic examples, authoring schemas, and focused local regression tests.
 - One standard-library SQLite implementation behind a `Storage` protocol and
   stable `league` command facade.
-- Six contiguous checksummed schema migrations, a loaded-runtime WAL gate, verified
+- Seven contiguous checksummed schema migrations, a loaded-runtime WAL gate, verified
   backups, integrity checks, expected-version writes, and bounded contention.
 - A strict manifest importer covering every canonical issue-#18 artifact
   family, with dry-run digest confirmation before apply.
@@ -57,6 +57,11 @@ Nothing here installs files, changes hooks, or connects to live Roster state.
 - One guarded disposable Shotcaller rollover for a stable Squad with a bounded
   immutable Champion snapshot, exact successor acknowledgement, and one atomic
   owner/event/outbox switch.
+- Deterministic bounded activity reports with stable JSON, exact range/timezone
+  and scope, immutable show/since specifications, completion gates, indexed
+  pagination, and JSON-derived Markdown/portable HTML.
+- Structured local-only project/evidence classification and one fail-closed
+  final-rendered-payload validator shared by every League remote adapter.
 
 The proven watcher remains one deep module. The new storage slice is a small
 modular monolith: one composite `Storage` interface with cohesive administrative,
@@ -78,6 +83,7 @@ make test-runtime-lifecycle
 make test-skill-contracts
 make test-handoff-callsigns
 make test-acceptance
+make test-reporting-privacy
 make test-affected
 make test-all
 ```
@@ -88,10 +94,12 @@ contract, `make test-request-lifecycle` runs the grouped lifecycle
 suite, `make test-runtime-lifecycle` runs issues #7/#11/#14, and
 `make test-skill-contracts` runs issue #10's synthetic provenance, privacy,
 duplicate-parity, CLI, and runtime-fallback contract, while
-`make test-handoff-callsigns` runs issues #8/#13, and `make test-acceptance`
+`make test-handoff-callsigns` runs issues #8/#13, `make test-acceptance`
 runs the isolated issue-#23 foundation. `make test-affected` composes storage,
 acceptance, request lifecycle, runtime/skill lifecycle, and handoff/callsign
-coverage without overlap; `make test-all` adds the inherited baseline once. Every
+coverage, and `make test-reporting-privacy` runs issues #22/#25 report, privacy, staged-guide,
+metadata, incident, renderer, pagination, and latency contracts.
+`make test-all` adds the inherited baseline once. Every
 target uses temporary fixtures only. It does not install files, contact GitHub,
 mutate global agent state, or operate live Herdr/tmux sessions.
 
@@ -129,6 +137,10 @@ matrix commands require explicit config/root/profile inputs and create no state.
 The project catalog and bounded Roster are documented in
 [project catalog](docs/PROJECT_CATALOG.md); the chosen design-only terminal
 direction is [Project Ledger](docs/design/terminal-roster-ui.md).
+The report source, commands, completion gates, renderers, and report skill are
+documented in [reporting](docs/REPORTING.md). The classification, final-byte
+remote boundary, publication metadata gate, and staged shared guidance are in
+[privacy](docs/PRIVACY.md).
 
 ## Repository-local SQLite implementation; cutover still gated
 
@@ -183,6 +195,8 @@ fake adapters.
 - [Repository-local runtime lifecycle](docs/runtime-lifecycle.md)
 - [Skill provenance and runtime capability contract](docs/skill-capabilities.md)
 - [Advisory project catalog and project-grouped Roster](docs/PROJECT_CATALOG.md)
+- [Deterministic activity reports](docs/REPORTING.md)
+- [Outbound privacy boundary](docs/PRIVACY.md)
 - [Terminal-first Project Ledger design](docs/design/terminal-roster-ui.md)
 - [Baseline versus planned issues](docs/ROADMAP.md)
 

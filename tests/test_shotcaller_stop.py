@@ -56,7 +56,6 @@ def add_combined_obligations(store, clock) -> None:
             task_summary="Pending synthetic Champion",
             coordinator_agent_id=SHOTCALLER_ID,
             champion_agent_id=LUX_ID,
-            callsign="Lux",
             repository=REPOSITORY,
             issue=17,
             branch="agent/synthetic/pending",

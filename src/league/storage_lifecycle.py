@@ -21,21 +21,6 @@ class LifecycleStorage(Protocol):
         fault: Optional[FaultInjector] = None,
     ) -> dict[str, Any]: ...
 
-    def reserve_callsign(
-        self,
-        callsign: str,
-        agent_id: str,
-        task_id: str,
-        role: str,
-        status: str,
-        update: str,
-        at: str,
-    ) -> dict[str, Any]: ...
-
-    def release_callsign(
-        self, callsign: str, agent_id: str, expected_version: int, at: str
-    ) -> dict[str, Any]: ...
-
     def transfer_task_owner(
         self,
         task_id: str,

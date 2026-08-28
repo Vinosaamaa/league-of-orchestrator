@@ -27,7 +27,7 @@ Nothing here installs files, changes hooks, or connects to live Roster state.
 - Synthetic examples, authoring schemas, and focused local regression tests.
 - One standard-library SQLite implementation behind a `Storage` protocol and
   stable `league` command facade.
-- Five contiguous checksummed schema migrations, a loaded-runtime WAL gate, verified
+- Six contiguous checksummed schema migrations, a loaded-runtime WAL gate, verified
   backups, integrity checks, expected-version writes, and bounded contention.
 - A strict manifest importer covering every canonical issue-#18 artifact
   family, with dry-run digest confirmation before apply.
@@ -52,6 +52,11 @@ Nothing here installs files, changes hooks, or connects to live Roster state.
   work or override explicit routing.
 - One bounded read-only project-grouped Roster snapshot with exact evidence
   references, outbound redaction, and an accepted terminal-first design.
+- One persisted seeded callsign queue with compatibility-first allocation,
+  exact reservation rollback, tail release, and immutable assignment history.
+- One guarded disposable Shotcaller rollover for a stable Squad with a bounded
+  immutable Champion snapshot, exact successor acknowledgement, and one atomic
+  owner/event/outbox switch.
 
 The proven watcher remains one deep module. The new storage slice is a small
 modular monolith: one composite `Storage` interface with cohesive administrative,
@@ -71,6 +76,7 @@ make test-project-roster
 make test-request-lifecycle
 make test-runtime-lifecycle
 make test-skill-contracts
+make test-handoff-callsigns
 make test-acceptance
 make test-affected
 make test-all
@@ -82,9 +88,10 @@ contract, `make test-request-lifecycle` runs the grouped lifecycle
 suite, `make test-runtime-lifecycle` runs issues #7/#11/#14, and
 `make test-skill-contracts` runs issue #10's synthetic provenance, privacy,
 duplicate-parity, CLI, and runtime-fallback contract, while
-`make test-acceptance` runs the isolated issue-#23 foundation.
-`make test-affected` composes storage, acceptance, request lifecycle, and
-runtime/skill lifecycle without overlap; `make test-all` adds the inherited baseline once. Every
+`make test-handoff-callsigns` runs issues #8/#13, and `make test-acceptance`
+runs the isolated issue-#23 foundation. `make test-affected` composes storage,
+acceptance, request lifecycle, runtime/skill lifecycle, and handoff/callsign
+coverage without overlap; `make test-all` adds the inherited baseline once. Every
 target uses temporary fixtures only. It does not install files, contact GitHub,
 mutate global agent state, or operate live Herdr/tmux sessions.
 
@@ -156,7 +163,7 @@ those gates pass, the filesystem watcher remains the only live authority.
 The repository-local foundation and its one explicit-root command are
 documented in [isolated acceptance](docs/ACCEPTANCE.md). It records the later
 acceptance-receipt extensions for request, assignment, watcher, Stop, and
-teardown as pending. All five now have repository-local implementations and
+teardown as pending. All seven now have repository-local implementations and
 focused deterministic tests, but have not been folded into a cutover receipt;
 the harness does not claim real Codex, Cursor, Pi, Herdr, or tmux support from
 fake adapters.
@@ -169,6 +176,7 @@ fake adapters.
 - [JSON/JSONL dependency audit](docs/research/json-jsonl-state-dependency-audit.md)
 - [SQLite prototype and benchmark](docs/research/sqlite-storage-prototype-benchmark.md)
 - [Reversible migration and install boundary](docs/MIGRATION.md)
+- [Guarded rollover and shuffled callsign queue](docs/HANDOFF_CALLSIGNS.md)
 - [Isolated acceptance and reversible cutover foundation](docs/ACCEPTANCE.md)
 - [Exact source provenance](docs/PROVENANCE.md)
 - [Repository-local request lifecycle](docs/REQUEST_LIFECYCLE.md)

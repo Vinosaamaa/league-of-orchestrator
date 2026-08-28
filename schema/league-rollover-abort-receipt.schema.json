@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Vinosaamaa/league-of-orchestrator/schema/league-rollover-abort-receipt.schema.json",
+  "title": "League pre-switch rollover abort receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "verified", "operation_id", "successor_agent_id", "runtime_instance_id", "runtime_cleanup_receipt_digest", "cleanup_digest"],
+  "properties": {
+    "schema": {"const": "league.rollover-abort-receipt.v1"},
+    "verified": {"const": true},
+    "operation_id": {"type": "string", "minLength": 1},
+    "successor_agent_id": {"type": "string", "minLength": 1},
+    "runtime_instance_id": {"type": "string", "minLength": 1},
+    "runtime_cleanup_receipt_digest": {"type": "string", "minLength": 1},
+    "cleanup_digest": {"type": "string", "minLength": 1}
+  }
+}

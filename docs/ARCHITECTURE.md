@@ -12,11 +12,13 @@
 - **Lead**: an optional relay destination, never a superior authority or
   scheduler.
 
-Disposable Shotcaller handoff remains planned work. The
-storage layer now implements the canonical prompt/request lifecycle, exact
-owner return, adapter-neutral runtime binding, recoverable teardown, advisory
-project catalog, and bounded project-grouped Roster; it does not implement
-autonomous planning, runtime handoff, or an interactive Roster controller.
+Disposable Shotcaller handoff and persistent callsign allocation are now
+implemented repository-locally by contiguous migration v6. The storage layer
+also implements the canonical prompt/request lifecycle, exact owner return,
+adapter-neutral runtime binding, recoverable teardown, advisory project
+catalog, and bounded project-grouped Roster. Installation, live migration,
+cutover, autonomous planning, and an interactive Roster controller remain out
+of scope.
 
 ## Current modules
 
@@ -95,7 +97,8 @@ The repository-local SQLite path is separately testable:
    explicit source root through one validated descriptor. Dry-run is the
    default; apply requires the exact typed-plan digest and an empty target.
 3. Domain writes use short `BEGIN IMMEDIATE` transactions. Agent transition,
-   exact callsign retries, delivery claim expiry/reclaim and acknowledgement,
+   ordered compatibility-scanned callsign allocation, exact reservation
+   rollback, tail release, delivery claim expiry/reclaim and acknowledgement,
    and task/Squad owner transfer enforce stable identity and expected-version
    preconditions.
 4. Inspection export is bounded and redacted. JSONL rows are emitted from
@@ -148,7 +151,7 @@ staged release/rollback proof, a sandbox-only generation pointer and cutover
 lock, fault-injected operation receipts, and exact fake canary cleanup. It has
 no global path defaults and exposes no canonical cutover operation. The
 request, assignment, watcher, Stop, and teardown acceptance-receipt extensions
-remain pending. All five are implemented and tested separately in this
+remain pending. All seven are implemented and tested separately in this
 repository-local candidate; they are not wired into a cutover receipt or live
 runtime by this slice.
 

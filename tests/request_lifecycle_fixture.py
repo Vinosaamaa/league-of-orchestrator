@@ -33,21 +33,38 @@ class SyntheticLifecycleSeeder:
         self.clock = clock
 
     def seed(self) -> None:
-        with self.store._transaction():
-            self.store.connection.executemany(
-                """
-                INSERT INTO callsigns(callsign,pool_role,enabled,pool_position,last_released_at)
-                VALUES(?,?,1,?,NULL)
-                """,
-                (("Jarvan", "shotcaller", 1), ("Ahri", "champion", 99), ("Sona", "champion", 100)),
+        for role, additions in (
+            ("shotcaller", ("Jarvan",)),
+            ("champion", ("Ahri", "Sona")),
+        ):
+            status = self.store.callsign_status(role)
+            catalog = [
+                {
+                    "callsign": entry["callsign"],
+                    "enabled": entry["enabled"],
+                    "capabilities": [],
+                }
+                for entry in status["entries"]
+            ]
+            catalog.extend(
+                {"callsign": callsign, "enabled": True, "capabilities": []}
+                for callsign in additions
             )
-        self.store.reserve_callsign(
-            "Jarvan",
+            self.store.reconcile_callsign_pool(
+                role,
+                status["queue_version"],
+                status["seed"],
+                status["shuffle_version"],
+                catalog,
+                self.clock.now(),
+            )
+        self.store.allocate_callsign(
+            "callsign-assignment:jarvan-request-fixture",
             JARVAN_ID,
-            TASK_ID,
             "shotcaller",
-            "working",
-            "Synthetic Shotcaller ready",
+            "squad",
+            "squad:Jarvan",
+            [],
             self.clock.now(),
         )
 

@@ -22,11 +22,17 @@ from .sqlite_assignment_ops import block_assignment as block_assignment_operatio
 from .sqlite_assignment_ops import mark_assignment_launching as mark_assignment_launching_operation
 from .sqlite_assignment_ops import prepare_assignment as prepare_assignment_operation
 from .sqlite_assignment_ops import transition_task as transition_task_operation
+from .sqlite_callsign_ops import activate_callsign as activate_callsign_operation
+from .sqlite_callsign_ops import allocate_callsign as allocate_callsign_operation
+from .sqlite_callsign_ops import callsign_status as callsign_status_operation
+from .sqlite_callsign_ops import initialize_imported_callsign_state
+from .sqlite_callsign_ops import reconcile_callsign_pool as reconcile_callsign_pool_operation
+from .sqlite_callsign_ops import release_callsign as release_callsign_operation
+from .sqlite_callsign_ops import rollback_callsign as rollback_callsign_operation
+from .sqlite_callsign_ops import shuffle_key as callsign_shuffle_key
 from .sqlite_delivery_ops import claim_delivery as claim_delivery_operation
 from .sqlite_delivery_ops import finish_delivery as finish_delivery_operation
 from .sqlite_lifecycle_ops import agent_status as agent_status_operation
-from .sqlite_lifecycle_ops import release_callsign as release_callsign_operation
-from .sqlite_lifecycle_ops import reserve_callsign as reserve_callsign_operation
 from .sqlite_lifecycle_ops import transfer_task_owner as transfer_task_owner_operation
 from .sqlite_lifecycle_ops import transition as transition_operation
 from .sqlite_project_ops import canonical_repository
@@ -51,6 +57,13 @@ from .sqlite_request_ops import route_request as route_request_operation
 from .sqlite_request_ops import set_request_state as set_request_state_operation
 from .sqlite_request_ops import triage_prompt as triage_prompt_operation
 from .sqlite_request_ops import unresolved_requests as unresolved_requests_operation
+from .sqlite_rollover_ops import abort_rollover as abort_rollover_operation
+from .sqlite_rollover_ops import acknowledge_rollover as acknowledge_rollover_operation
+from .sqlite_rollover_ops import commit_rollover as commit_rollover_operation
+from .sqlite_rollover_ops import complete_rollover_drain as complete_rollover_drain_operation
+from .sqlite_rollover_ops import prepare_rollover as prepare_rollover_operation
+from .sqlite_rollover_ops import rollover_bindings as rollover_bindings_operation
+from .sqlite_rollover_ops import rollover_status as rollover_status_operation
 from .sqlite_roster_ops import roster_snapshot as roster_snapshot_operation
 from .sqlite_transfer_ops import (
     apply_import as apply_import_operation,
@@ -73,10 +86,12 @@ from .storage_request import (
 )
 from .storage_watcher import RuntimeRegistrationCommand
 from .storage_types import LIFECYCLE_STATES
+from .sqlite_handoff_schema import MIGRATION_NAME as HANDOFF_MIGRATION_NAME
+from .sqlite_handoff_schema import STATEMENTS as HANDOFF_MIGRATION_STATEMENTS
 
 
 WAL_MINIMUM = (3, 51, 3)
-CURRENT_SCHEMA_VERSION = 5
+CURRENT_SCHEMA_VERSION = 6
 DATABASE_NAME = "league.sqlite3"
 DEFAULT_BUSY_TIMEOUT_MS = 500
 MAX_BUSY_TIMEOUT_MS = 10_000
@@ -88,6 +103,7 @@ class Migration:
     version: int
     name: str
     statements: tuple[str, ...]
+    rebuilds_foreign_keys: bool = False
 
     @property
     def checksum(self) -> str:
@@ -888,6 +904,12 @@ MIGRATIONS = (
             "CREATE INDEX ix_roster_requests_state ON requests(state,updated_at,request_id)",
         ),
     ),
+    Migration(
+        6,
+        HANDOFF_MIGRATION_NAME,
+        HANDOFF_MIGRATION_STATEMENTS,
+        rebuilds_foreign_keys=True,
+    ),
 )
 
 
@@ -1031,8 +1053,13 @@ _EXPORT_TABLES = (
     "project_aliases",
     "tasks",
     "callsigns",
+    "callsign_queue_meta",
+    "callsign_capabilities",
+    "callsign_queue",
     "agent_instances",
     "squads",
+    "shotcaller_intake",
+    "squad_champions",
     "project_squad_suggestions",
     "callsign_leases",
     "launch_attempts",
@@ -1060,6 +1087,9 @@ _EXPORT_TABLES = (
     "request_result_sources",
     "response_references",
     "callsign_assignments",
+    "rollover_operations",
+    "active_champion_snapshots",
+    "active_champion_snapshot_rows",
     "task_assignments",
     "task_transitions",
     "delivery_outbox",
@@ -1085,8 +1115,13 @@ _EXPORT_ORDER = {
     "project_aliases": "project_id,position,alias_key",
     "tasks": "task_id",
     "callsigns": "pool_role,pool_position,callsign",
+    "callsign_queue_meta": "pool_role",
+    "callsign_capabilities": "callsign,capability",
+    "callsign_queue": "pool_role,queue_position,callsign",
     "agent_instances": "agent_id",
     "squads": "squad_id",
+    "shotcaller_intake": "squad_id,agent_id",
+    "squad_champions": "squad_id,champion_agent_id",
     "project_squad_suggestions": "project_id,position,squad_id",
     "callsign_leases": "callsign",
     "launch_attempts": "attempt_id",
@@ -1114,6 +1149,9 @@ _EXPORT_ORDER = {
     "request_result_sources": "result_id,task_id",
     "response_references": "created_at,response_ref_id",
     "callsign_assignments": "reserved_at,callsign_assignment_id",
+    "rollover_operations": "created_at,operation_id",
+    "active_champion_snapshots": "created_at,snapshot_id",
+    "active_champion_snapshot_rows": "snapshot_id,ordinal",
     "task_assignments": "created_at,task_assignment_id",
     "task_transitions": "created_at,transition_id",
     "delivery_outbox": "available_at,outbox_id",
@@ -1174,6 +1212,7 @@ _INSPECTION_REDACTIONS = {
     "request_results": {"summary", "payload_hash", "idempotency_key"},
     "response_references": {"session_locator", "response_locator", "content_hash"},
     "task_assignments": {"acceptance_receipt_json", "failure_class"},
+    "rollover_operations": {"plan_json"},
     "task_transitions": {"update_text", "next_action", "blocker"},
     "delivery_attempts": {"outcome"},
     "watcher_registrations": {"wake_locator"},
@@ -1263,6 +1302,12 @@ class SQLiteStorage(SQLiteTransactionCore):
                 "league_repository_key",
                 1,
                 lambda value: canonical_repository(str(value))[1],
+                deterministic=True,
+            )
+            self.connection.create_function(
+                "league_shuffle_key",
+                3,
+                callsign_shuffle_key,
                 deterministic=True,
             )
             if not self._database_existed:
@@ -1460,7 +1505,15 @@ class SQLiteStorage(SQLiteTransactionCore):
             if not backup_name:
                 raise StorageRefusal("backup_required", "an existing database requires a verified pre-migration backup")
             backup_receipt = self._verified_backup(self._resolve_output(backup_name))
+        rebuilds_foreign_keys = any(item.rebuilds_foreign_keys for item in pending)
         try:
+            if rebuilds_foreign_keys:
+                self.connection.execute("PRAGMA foreign_keys=OFF")
+                if self.connection.execute("PRAGMA foreign_keys").fetchone()[0]:
+                    raise StorageRefusal(
+                        "migration_policy_refused",
+                        "foreign-key rebuild mode could not be entered",
+                    )
             with self._transaction():
                 for migration in pending:
                     if migration.version != self._current_version(validate=False) + 1:
@@ -1479,10 +1532,25 @@ class SQLiteStorage(SQLiteTransactionCore):
                     self.connection.execute(f"PRAGMA user_version={migration.version}")
                     if fault:
                         fault(f"after_migration_{migration.version}")
+                if rebuilds_foreign_keys:
+                    violations = list(self.connection.execute("PRAGMA foreign_key_check"))
+                    if violations:
+                        raise StorageRefusal(
+                            "migration_foreign_key_violation",
+                            "migration produced invalid foreign-key references",
+                        )
         except StorageRefusal:
             raise
         except sqlite3.DatabaseError as exc:
             raise self._translate_database_error(exc, "transactional migration failed") from exc
+        finally:
+            if rebuilds_foreign_keys:
+                self.connection.execute("PRAGMA foreign_keys=ON")
+                if not self.connection.execute("PRAGMA foreign_keys").fetchone()[0]:
+                    raise StorageRefusal(
+                        "foreign_keys_unavailable",
+                        "foreign-key enforcement could not be restored after migration",
+                    )
         if target_version == CURRENT_SCHEMA_VERSION:
             self._require_schema_current()
         elif self._current_version() != target_version:
@@ -1554,26 +1622,207 @@ class SQLiteStorage(SQLiteTransactionCore):
             fault=fault,
         )
 
-    def reserve_callsign(
+    def reconcile_callsign_pool(
         self,
-        callsign: str,
-        agent_id: str,
-        task_id: str,
         role: str,
-        status: str,
-        update: str,
+        expected_queue_version: int,
+        seed: str,
+        shuffle_version: int,
+        entries: Sequence[dict[str, Any]],
         at: str,
     ) -> dict[str, Any]:
-        return reserve_callsign_operation(
-            self, callsign, agent_id, task_id, role, status, update, at
+        return reconcile_callsign_pool_operation(
+            self,
+            role,
+            expected_queue_version,
+            seed,
+            shuffle_version,
+            entries,
+            at,
+        )
+
+    def allocate_callsign(
+        self,
+        assignment_id: str,
+        agent_id: str,
+        role: str,
+        scope_kind: str,
+        scope_id: str,
+        required_capabilities: Sequence[str],
+        at: str,
+        *,
+        fault: Optional[FaultInjector] = None,
+    ) -> dict[str, Any]:
+        return allocate_callsign_operation(
+            self,
+            assignment_id,
+            agent_id,
+            role,
+            scope_kind,
+            scope_id,
+            required_capabilities,
+            at,
+            fault=fault,
+        )
+
+    def activate_callsign(
+        self,
+        assignment_id: str,
+        expected_version: int,
+        receipt: dict[str, Any],
+        at: str,
+    ) -> dict[str, Any]:
+        return activate_callsign_operation(
+            self, assignment_id, expected_version, receipt, at
+        )
+
+    def rollback_callsign(
+        self,
+        assignment_id: str,
+        expected_version: int,
+        failure_receipt_digest: str,
+        at: str,
+    ) -> dict[str, Any]:
+        return rollback_callsign_operation(
+            self,
+            assignment_id,
+            expected_version,
+            failure_receipt_digest,
+            at,
         )
 
     def release_callsign(
-        self, callsign: str, agent_id: str, expected_version: int, at: str
+        self,
+        assignment_id: str,
+        expected_version: int,
+        release_receipt_digest: str,
+        at: str,
     ) -> dict[str, Any]:
         return release_callsign_operation(
-            self, callsign, agent_id, expected_version, at
+            self,
+            assignment_id,
+            expected_version,
+            release_receipt_digest,
+            at,
         )
+
+    def callsign_status(self, role: str) -> dict[str, Any]:
+        return callsign_status_operation(self, role)
+
+    def prepare_rollover(
+        self,
+        operation_id: str,
+        squad_id: str,
+        predecessor_agent_id: str,
+        successor_agent_id: str,
+        callsign_assignment_id: str,
+        expected_owner_version: int,
+        expected_owner_fence: int,
+        authority_kind: str,
+        authority_digest: str,
+        required_capabilities: Sequence[str],
+        plan: dict[str, Any],
+        at: str,
+    ) -> dict[str, Any]:
+        return prepare_rollover_operation(
+            self,
+            operation_id,
+            squad_id,
+            predecessor_agent_id,
+            successor_agent_id,
+            callsign_assignment_id,
+            expected_owner_version,
+            expected_owner_fence,
+            authority_kind,
+            authority_digest,
+            required_capabilities,
+            plan,
+            at,
+        )
+
+    def rollover_bindings(
+        self,
+        operation_id: str,
+        at: str,
+        *,
+        cursor: Optional[str] = None,
+        limit: Optional[int] = None,
+    ) -> dict[str, Any]:
+        return rollover_bindings_operation(
+            self, operation_id, at, cursor=cursor, limit=limit
+        )
+
+    def acknowledge_rollover(
+        self,
+        operation_id: str,
+        successor_agent_id: str,
+        runtime_instance_id: str,
+        handoff_digest: str,
+        snapshot_version: int,
+        snapshot_count: int,
+        snapshot_digest: str,
+        pages: Sequence[dict[str, Any]],
+        at: str,
+    ) -> dict[str, Any]:
+        return acknowledge_rollover_operation(
+            self,
+            operation_id,
+            successor_agent_id,
+            runtime_instance_id,
+            handoff_digest,
+            snapshot_version,
+            snapshot_count,
+            snapshot_digest,
+            pages,
+            at,
+        )
+
+    def commit_rollover(
+        self,
+        operation_id: str,
+        expected_owner_version: int,
+        expected_owner_fence: int,
+        owner_event_id: str,
+        owner_outbox_id: str,
+        at: str,
+        *,
+        fault: Optional[FaultInjector] = None,
+    ) -> dict[str, Any]:
+        return commit_rollover_operation(
+            self,
+            operation_id,
+            expected_owner_version,
+            expected_owner_fence,
+            owner_event_id,
+            owner_outbox_id,
+            at,
+            fault=fault,
+        )
+
+    def abort_rollover(
+        self,
+        operation_id: str,
+        expected_version: int,
+        cleanup_receipt: dict[str, Any],
+        at: str,
+    ) -> dict[str, Any]:
+        return abort_rollover_operation(
+            self, operation_id, expected_version, cleanup_receipt, at
+        )
+
+    def complete_rollover_drain(
+        self,
+        operation_id: str,
+        expected_version: int,
+        cleanup_receipt: dict[str, Any],
+        at: str,
+    ) -> dict[str, Any]:
+        return complete_rollover_drain_operation(
+            self, operation_id, expected_version, cleanup_receipt, at
+        )
+
+    def rollover_status(self, operation_id: str) -> Optional[dict[str, Any]]:
+        return rollover_status_operation(self, operation_id)
 
     def claim_delivery(
         self,
@@ -2064,6 +2313,7 @@ class SQLiteStorage(SQLiteTransactionCore):
             expected_digest,
             columns_by_table=_IMPORT_COLUMNS,
             table_order=_IMPORT_ORDER,
+            post_import=initialize_imported_callsign_state,
             fault=fault,
         )
 

@@ -17,6 +17,10 @@ teardown; issue #23 owns those gates.
 - Repository initialization/writes, configuration writes, migrations,
   supervised tests, and long work require a visible Champion before mutation.
   User-selected model, effort, and explicit route are recorded unchanged.
+- Shotcaller-owned intake is fenced by the stable Squad owner. A draining or
+  superseded Shotcaller incarnation refuses new prompts; the atomic rollover
+  switch makes only the successor accepting while unresolved durable requests
+  retain their identity and are redirected transactionally.
 - A task becoming `completed` or `ready_to_land` never answers its request.
   The owner records a result and a response reference explicitly.
 - A routed owner result and ownership return commit in one transaction.

@@ -3,11 +3,18 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import sqlite3
 from typing import Any, Optional
 
 from .sqlite_request_ops import _active_claim, _request_row, _time
 from .sqlite_project_ops import resolve_project_routing_identity
+from .sqlite_callsign_ops import (
+    _reserve_in_transaction,
+    _rollback_reserved_in_transaction,
+    capabilities,
+    stable_json,
+)
 from .storage_assignment import PrepareAssignmentCommand
 from .storage_types import LIFECYCLE_STATES, StorageRefusal
 
@@ -65,13 +72,13 @@ def _validate_assignment_command(command: PrepareAssignmentCommand) -> None:
             command.task_summary,
             command.coordinator_agent_id,
             command.champion_agent_id,
-            command.callsign,
             command.repository,
             command.branch,
             command.worktree,
         )
     ) or command.issue < 1:
         raise StorageRefusal("invalid_assignment", "assignment identity is incomplete")
+    capabilities(command.required_capabilities)
 
 
 def _assignment_retry(
@@ -79,10 +86,13 @@ def _assignment_retry(
 ) -> Optional[dict[str, Any]]:
     existing = store.connection.execute(
         """
-        SELECT a.*,t.summary task_summary,i.repository,i.issue,i.branch,i.worktree
+        SELECT a.*,t.summary task_summary,i.repository,i.issue,i.branch,i.worktree,
+               ca.requirements_json callsign_requirements_json
           FROM task_assignments a
           JOIN tasks t ON t.task_id=a.task_id
           JOIN agent_instances i ON i.agent_id=a.champion_agent_id
+          JOIN callsign_assignments ca
+            ON ca.callsign_assignment_id='callsign-assignment:'||a.task_assignment_id
          WHERE a.task_assignment_id=?
         """,
         (command.assignment_id,),
@@ -94,12 +104,13 @@ def _assignment_retry(
         and existing["task_id"] == command.task_id
         and existing["coordinator_agent_id"] == command.coordinator_agent_id
         and existing["champion_agent_id"] == command.champion_agent_id
-        and existing["callsign"] == command.callsign
         and existing["task_summary"] == command.task_summary
         and existing["repository"] == command.repository
         and int(existing["issue"]) == command.issue
         and existing["branch"] == command.branch
         and existing["worktree"] == command.worktree
+        and tuple(json.loads(existing["callsign_requirements_json"]))
+            == capabilities(command.required_capabilities)
     )
     if not exact:
         raise StorageRefusal("assignment_conflict", "assignment retry has different identity")
@@ -108,6 +119,7 @@ def _assignment_retry(
         "task_id": command.task_id,
         "state": existing["state"],
         "version": int(existing["version"]),
+        "callsign": existing["callsign"],
         "idempotent": True,
     }
 
@@ -123,46 +135,23 @@ def _validate_assignment_reservation(
         raise StorageRefusal(
             "dispatch_required", "request must be explicitly dispatched to Champion mode first"
         )
-    callsign_row = store.connection.execute(
-        "SELECT pool_role,enabled FROM callsigns WHERE callsign=?", (command.callsign,)
-    ).fetchone()
-    lease = store.connection.execute(
-        "SELECT 1 FROM callsign_leases WHERE callsign=?", (command.callsign,)
-    ).fetchone()
-    if (
-        callsign_row is None
-        or callsign_row["pool_role"] != "champion"
-        or not callsign_row["enabled"]
-        or lease is not None
-    ):
-        raise StorageRefusal("callsign_unavailable", "Champion callsign is not available")
     project = resolve_project_routing_identity(store, command.repository)
     return project[0] if project is not None and project[1] == "active" else None
 
 
 def _persist_assignment_reservation(
     store: Any, command: PrepareAssignmentCommand, project_id: Optional[str]
-) -> None:
-    store.connection.execute(
-        """
-        INSERT INTO agent_instances
-          (agent_id,callsign,role,shotcaller_agent_id,task_id,kind,address,thread_id,
-           backend,routing_name,display_agent,repository,issue,branch,worktree,status,
-           version,updated_at,update_text,blocker,next_action,metadata_json,retired_at)
-        VALUES(?,?,'champion',?,?, 'unbound',NULL,NULL,NULL,NULL,NULL,?,?,?,?,
-               'active',1,?,'assignment reserved',NULL,'Await verified launch receipt','{}',NULL)
-        """,
-        (
-            command.champion_agent_id,
-            command.callsign,
-            command.coordinator_agent_id,
-            command.task_id,
-            command.repository,
-            command.issue,
-            command.branch,
-            command.worktree,
-            command.at,
-        ),
+) -> str:
+    callsign_assignment_id = f"callsign-assignment:{command.assignment_id}"
+    selected = _reserve_in_transaction(
+        store,
+        callsign_assignment_id,
+        command.champion_agent_id,
+        "champion",
+        "task",
+        command.task_id,
+        capabilities(command.required_capabilities),
+        command.at,
     )
     store.connection.execute(
         """
@@ -184,21 +173,20 @@ def _persist_assignment_reservation(
         ),
     )
     store.connection.execute(
-        "INSERT INTO callsign_leases(callsign,agent_id,launch_attempt_id,reserved_at) VALUES(?,?,NULL,?)",
-        (command.callsign, command.champion_agent_id, command.at),
-    )
-    store.connection.execute(
         """
-        INSERT INTO callsign_assignments
-          (callsign_assignment_id,callsign,task_id,agent_id,state,reserved_at,activated_at,released_at)
-        VALUES(?,?,?,?,'reserved',?,NULL,NULL)
+        UPDATE agent_instances
+           SET shotcaller_agent_id=?,task_id=?,repository=?,issue=?,branch=?,worktree=?,
+               next_action='Await verified launch receipt'
+         WHERE agent_id=?
         """,
         (
-            f"callsign-assignment:{command.assignment_id}",
-            command.callsign,
+            command.coordinator_agent_id,
             command.task_id,
+            command.repository,
+            command.issue,
+            command.branch,
+            command.worktree,
             command.champion_agent_id,
-            command.at,
         ),
     )
     store.connection.execute(
@@ -215,14 +203,17 @@ def _persist_assignment_reservation(
             command.request_id,
             command.coordinator_agent_id,
             command.champion_agent_id,
-            command.callsign,
+            selected["callsign"],
             command.at,
             command.at,
         ),
     )
+    return str(selected["callsign"])
 
 
-def _insert_pending_assignment_event(store: Any, command: PrepareAssignmentCommand) -> None:
+def _insert_pending_assignment_event(
+    store: Any, command: PrepareAssignmentCommand, callsign: str
+) -> None:
     store.connection.execute(
         """
         INSERT INTO events
@@ -235,7 +226,7 @@ def _insert_pending_assignment_event(store: Any, command: PrepareAssignmentComma
             f"assignment:{command.assignment_id}:1",
             command.task_id,
             command.at,
-            _json({"assignment_id": command.assignment_id, "callsign": command.callsign}),
+            _json({"assignment_id": command.assignment_id, "callsign": callsign}),
             command.request_id,
             command.assignment_id,
         ),
@@ -253,8 +244,8 @@ def prepare_assignment(
             if retry is not None:
                 return retry
             project_id = _validate_assignment_reservation(store, command)
-            _persist_assignment_reservation(store, command, project_id)
-            _insert_pending_assignment_event(store, command)
+            callsign = _persist_assignment_reservation(store, command, project_id)
+            _insert_pending_assignment_event(store, command, callsign)
     except StorageRefusal:
         raise
     except sqlite3.DatabaseError as exc:
@@ -264,6 +255,7 @@ def prepare_assignment(
         "task_id": command.task_id,
         "state": "pending",
         "version": 1,
+        "callsign": callsign,
         "idempotent": False,
     }
 
@@ -331,6 +323,7 @@ def activate_assignment(
         "issue",
         "branch",
         "worktree",
+        "capabilities",
     }
     if set(receipt) != required or receipt.get("verified") is not True:
         raise StorageRefusal("receipt_unverified", "assignment activation requires one exact verified receipt")
@@ -374,6 +367,18 @@ def activate_assignment(
                 "SELECT * FROM agent_instances WHERE agent_id=? AND retired_at IS NULL",
                 (assignment["champion_agent_id"],),
             ).fetchone()
+            callsign_assignment = store.connection.execute(
+                "SELECT * FROM callsign_assignments WHERE callsign_assignment_id=?",
+                (f"callsign-assignment:{assignment_id}",),
+            ).fetchone()
+            if callsign_assignment is None:
+                raise StorageRefusal(
+                    "assignment_incomplete", "assignment has no durable callsign reservation"
+                )
+            declared_capabilities = capabilities(receipt["capabilities"])
+            required_capabilities = tuple(
+                json.loads(callsign_assignment["requirements_json"])
+            )
             exact = (
                 receipt["assignment_id"] == assignment_id
                 and receipt["task_id"] == assignment["task_id"]
@@ -385,22 +390,35 @@ def activate_assignment(
                 and receipt["worktree"] == agent["worktree"]
                 and receipt["routing_name"] == str(assignment["callsign"]).lower()
                 and receipt["backend_kind"] in {"herdr", "tmux"}
-                and all(isinstance(receipt[name], str) and receipt[name] for name in required - {"verified", "issue"})
+                and all(
+                    isinstance(receipt[name], str) and receipt[name]
+                    for name in required - {"verified", "issue", "capabilities"}
+                )
+                and all(item in declared_capabilities for item in required_capabilities)
+                and callsign_assignment["state"] == "reserved"
             )
             if not exact:
                 raise StorageRefusal("receipt_mismatch", "launch receipt does not match the reserved Champion identity")
             runtime_conflict = store.connection.execute(
-                "SELECT 1 FROM runtime_instances WHERE runtime_instance_id=?",
-                (receipt["runtime_instance_id"],),
+                """
+                SELECT 1 FROM runtime_instances
+                 WHERE runtime_instance_id=? OR (harness_kind=? AND session_ref=?)
+                """,
+                (
+                    receipt["runtime_instance_id"],
+                    receipt["harness_kind"],
+                    receipt["thread_id"],
+                ),
             ).fetchone()
             if runtime_conflict is not None:
                 raise StorageRefusal("runtime_conflict", "launch receipt runtime identity is already registered")
+            agent_version = int(agent["version"]) + 1
             store.connection.execute(
                 """
                 INSERT INTO runtime_instances
                   (runtime_instance_id,actor_agent_id,harness_kind,backend_kind,session_ref,endpoint,
-                   runtime_generation,status,verified,last_seen_at)
-                VALUES(?,?,?,?,?,?,?,'active',1,?)
+                   runtime_generation,status,verified,last_seen_at,capabilities_json)
+                VALUES(?,?,?,?,?,?,?,'active',1,?,?)
                 """,
                 (
                     receipt["runtime_instance_id"],
@@ -411,13 +429,14 @@ def activate_assignment(
                     receipt["endpoint"],
                     receipt["runtime_generation"],
                     at,
+                    stable_json(declared_capabilities),
                 ),
             )
             store.connection.execute(
                 """
                 UPDATE agent_instances
                    SET kind=?,address=?,thread_id=?,backend=?,routing_name=?,display_agent=?,
-                       status='working',version=version+1,updated_at=?,update_text='assignment accepted',
+                       status='working',version=?,updated_at=?,update_text='assignment accepted',
                        next_action='Perform the assigned task'
                  WHERE agent_id=?
                 """,
@@ -428,6 +447,7 @@ def activate_assignment(
                     receipt["backend_kind"],
                     receipt["routing_name"],
                     receipt["display_agent"],
+                    agent_version,
                     at,
                     assignment["champion_agent_id"],
                 ),
@@ -441,9 +461,63 @@ def activate_assignment(
                 """,
                 (receipt["runtime_instance_id"], _json(receipt), next_version, at, assignment_id),
             )
+            queue_meta = store.connection.execute(
+                "SELECT queue_version FROM callsign_queue_meta WHERE pool_role='champion'"
+            ).fetchone()
+            queue_version = int(queue_meta["queue_version"]) + 1
+            receipt_digest = hashlib.sha256(_json(receipt).encode("utf-8")).hexdigest()
+            queue_changed = store.connection.execute(
+                """
+                UPDATE callsign_queue SET state='active',queue_position=NULL,
+                       reservation_assignment_id=NULL,version=version+1,updated_at=?
+                 WHERE callsign=? AND state='reserved'
+                   AND reservation_assignment_id=?
+                """,
+                (at, assignment["callsign"], f"callsign-assignment:{assignment_id}"),
+            )
+            if queue_changed.rowcount != 1:
+                raise StorageRefusal(
+                    "queue_conflict", "Champion callsign queue reservation is not exact"
+                )
             store.connection.execute(
-                "UPDATE callsign_assignments SET state='active',activated_at=? WHERE task_id=?",
-                (at, assignment["task_id"]),
+                "UPDATE callsign_queue_meta SET queue_version=? WHERE pool_role='champion'",
+                (queue_version,),
+            )
+            store.connection.execute(
+                """
+                UPDATE callsign_assignments SET state='active',acceptance_digest=?,
+                       queue_version=?,version=version+1,activated_at=?
+                 WHERE callsign_assignment_id=?
+                """,
+                (
+                    receipt_digest,
+                    queue_version,
+                    at,
+                    f"callsign-assignment:{assignment_id}",
+                ),
+            )
+            store.connection.execute(
+                """
+                INSERT INTO events
+                  (event_id,agent_id,task_id,squad_id,entity_version,event_type,status,
+                   update_text,occurred_at,detail_json,aggregate_kind,aggregate_id)
+                VALUES(?, ?,NULL,NULL,?,'callsign_activated','active',
+                       'callsign activated',?,?,'agent',?)
+                """,
+                (
+                    f"callsign:callsign-assignment:{assignment_id}:active",
+                    assignment["champion_agent_id"],
+                    agent_version,
+                    at,
+                    _json(
+                        {
+                            "assignment_id": f"callsign-assignment:{assignment_id}",
+                            "acceptance_digest": receipt_digest,
+                            "queue_version": queue_version,
+                        }
+                    ),
+                    assignment["champion_agent_id"],
+                ),
             )
             store.connection.execute(
                 "UPDATE tasks SET state='in_progress',version=version+1,updated_at=? WHERE task_id=?",
@@ -526,20 +600,29 @@ def block_assignment(
                 (at, assignment["task_id"]),
             )
             if state == "blocked":
-                store.connection.execute(
-                    "DELETE FROM callsign_leases WHERE callsign=? AND agent_id=?",
-                    (assignment["callsign"], assignment["champion_agent_id"]),
-                )
-                store.connection.execute(
-                    """
-                    UPDATE callsign_assignments SET state='blocked',released_at=?
-                     WHERE task_id=? AND state='reserved'
-                    """,
-                    (at, assignment["task_id"]),
-                )
-                store.connection.execute(
-                    "UPDATE agent_instances SET retired_at=?,updated_at=?,update_text='launch blocked' WHERE agent_id=?",
-                    (at, at, assignment["champion_agent_id"]),
+                callsign_assignment = store.connection.execute(
+                    "SELECT * FROM callsign_assignments WHERE callsign_assignment_id=?",
+                    (f"callsign-assignment:{assignment_id}",),
+                ).fetchone()
+                if callsign_assignment is None:
+                    raise StorageRefusal(
+                        "assignment_incomplete", "assignment has no callsign reservation"
+                    )
+                failure_digest = hashlib.sha256(
+                    stable_json(
+                        {
+                            "assignment_id": assignment_id,
+                            "failure_class": failure_class,
+                            "cleanup_proven": cleanup_proven,
+                        }
+                    ).encode("utf-8")
+                ).hexdigest()
+                _rollback_reserved_in_transaction(
+                    store,
+                    callsign_assignment,
+                    int(callsign_assignment["version"]),
+                    failure_digest,
+                    at,
                 )
             else:
                 store.connection.execute(

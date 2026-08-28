@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Vinosaamaa/league-of-orchestrator/schema/league-rollover-pages.schema.json",
+  "title": "League active-Champion snapshot page receipts",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["pages"],
+  "properties": {
+    "pages": {
+      "type": "array",
+      "maxItems": 10000,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["offset", "count", "digest", "rows"],
+        "properties": {
+          "offset": {"type": "integer", "minimum": 0},
+          "count": {"type": "integer", "minimum": 0, "maximum": 500},
+          "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "rows": {
+            "type": "array",
+            "maxItems": 500,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["champion_agent_id", "task_id", "callsign", "binding_digest", "row_digest"],
+              "properties": {
+                "champion_agent_id": {"type": "string", "minLength": 1, "maxLength": 256},
+                "task_id": {
+                  "oneOf": [
+                    {"type": "string", "minLength": 1, "maxLength": 256},
+                    {"type": "null"}
+                  ]
+                },
+                "callsign": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z][A-Za-z0-9._-]{0,63}$"
+                },
+                "binding_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                "row_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
-from typing import Any, Iterable, Mapping, Optional
+from typing import Any, Callable, Iterable, Mapping, Optional
 
 from .storage_types import FaultInjector, ImportPlan, StorageRefusal
 
@@ -28,6 +28,7 @@ def apply_import(
     *,
     columns_by_table: Mapping[str, tuple[str, ...]],
     table_order: tuple[str, ...],
+    post_import: Optional[Callable[[Any, str], None]] = None,
     fault: Optional[FaultInjector] = None,
 ) -> dict[str, Any]:
     observed_digest = str(plan.get("report_digest", ""))
@@ -91,6 +92,10 @@ def apply_import(
                         run_id,
                     ),
                 )
+            if post_import is not None:
+                post_import(store, plan["applied_at"])
+            if fault:
+                fault("after_import_reconciliation")
     except StorageRefusal:
         raise
     except sqlite3.DatabaseError as exc:

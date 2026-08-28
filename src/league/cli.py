@@ -130,21 +130,108 @@ def _add_agent_commands(groups: argparse._SubParsersAction) -> None:
 
 
 def _add_callsign_commands(groups: argparse._SubParsersAction) -> None:
-    callsign = groups.add_parser("callsign", help="Reserve or release one exact callsign lease.")
+    callsign = groups.add_parser(
+        "callsign", help="Reconcile and advance the durable shuffled callsign queue."
+    )
     commands = callsign.add_subparsers(dest="action", required=True)
-    reserve = commands.add_parser("reserve", help="Reserve callsign, incarnation, and event atomically.")
-    reserve.add_argument("--callsign", required=True)
-    reserve.add_argument("--agent-id", required=True)
-    reserve.add_argument("--task-id", required=True)
-    reserve.add_argument("--role", choices=("shotcaller", "champion", "hidden-worker"), required=True)
-    reserve.add_argument("--status", required=True)
-    reserve.add_argument("--update", required=True)
-    reserve.add_argument("--at", required=True)
-    release = commands.add_parser("release", help="Release an exact live callsign lease atomically.")
-    release.add_argument("--callsign", required=True)
-    release.add_argument("--agent-id", required=True)
+    reconcile = commands.add_parser(
+        "reconcile", help="Reconcile one explicit catalog without reordering existing entries."
+    )
+    reconcile.add_argument("--role", choices=("shotcaller", "champion", "hidden-worker"), required=True)
+    reconcile.add_argument("--expected-queue-version", type=int, required=True)
+    reconcile.add_argument("--seed", required=True)
+    reconcile.add_argument("--shuffle-version", type=int, required=True)
+    reconcile.add_argument("--catalog", type=Path, required=True)
+    reconcile.add_argument("--at", required=True)
+    allocate = commands.add_parser(
+        "allocate", help="Reserve the first compatible eligible callsign from the queue front."
+    )
+    for name in ("assignment-id", "agent-id", "scope-id", "at"):
+        allocate.add_argument(f"--{name}", required=True)
+    allocate.add_argument("--role", choices=("shotcaller", "champion", "hidden-worker"), required=True)
+    allocate.add_argument("--scope-kind", choices=("squad", "task", "worker"), required=True)
+    allocate.add_argument("--requires", action="append", default=[])
+    activate = commands.add_parser(
+        "activate", help="Activate a reservation from one exact verified runtime receipt."
+    )
+    activate.add_argument("--assignment-id", required=True)
+    activate.add_argument("--expected-version", type=int, required=True)
+    activate.add_argument("--receipt", type=Path, required=True)
+    activate.add_argument("--at", required=True)
+    rollback = commands.add_parser(
+        "rollback", help="Idempotently restore a failed reservation to its original position."
+    )
+    rollback.add_argument("--assignment-id", required=True)
+    rollback.add_argument("--expected-version", type=int, required=True)
+    rollback.add_argument("--failure-receipt-digest", required=True)
+    rollback.add_argument("--at", required=True)
+    release = commands.add_parser(
+        "release", help="Release a cleaned active callsign to the queue tail."
+    )
+    release.add_argument("--assignment-id", required=True)
     release.add_argument("--expected-version", type=int, required=True)
+    release.add_argument("--release-receipt-digest", required=True)
     release.add_argument("--at", required=True)
+    status = commands.add_parser("status", help="Read one role queue without private runtime data.")
+    status.add_argument("--role", choices=("shotcaller", "champion", "hidden-worker"), required=True)
+
+
+def _add_rollover_commands(groups: argparse._SubParsersAction) -> None:
+    rollover = groups.add_parser(
+        "rollover", help="Guard one disposable Shotcaller replacement for a stable Squad."
+    )
+    commands = rollover.add_subparsers(dest="action", required=True)
+    prepare = commands.add_parser(
+        "prepare", help="Freeze the durable plan and bounded active-Champion snapshot."
+    )
+    for name in (
+        "operation-id", "squad-id", "predecessor-agent-id", "successor-agent-id",
+        "callsign-assignment-id", "authority-digest", "at",
+    ):
+        prepare.add_argument(f"--{name}", required=True)
+    prepare.add_argument("--expected-owner-version", type=int, required=True)
+    prepare.add_argument("--expected-owner-fence", type=int, required=True)
+    prepare.add_argument("--authority-kind", choices=("explicit", "automatic"), required=True)
+    prepare.add_argument("--requires", action="append", default=[])
+    prepare.add_argument("--plan", type=Path, required=True)
+    bindings = commands.add_parser(
+        "bindings", help="Read one immutable bounded snapshot page by opaque cursor."
+    )
+    bindings.add_argument("--operation-id", required=True)
+    bindings.add_argument("--cursor")
+    bindings.add_argument(
+        "--limit",
+        type=int,
+        help="Page size; defaults to the immutable snapshot page bound.",
+    )
+    bindings.add_argument("--at", required=True)
+    acknowledge = commands.add_parser(
+        "acknowledge", help="Acknowledge exact successor identity, capability, and snapshot coverage."
+    )
+    for name in (
+        "operation-id", "successor-agent-id", "runtime-instance-id", "handoff-digest",
+        "snapshot-digest", "at",
+    ):
+        acknowledge.add_argument(f"--{name}", required=True)
+    acknowledge.add_argument("--snapshot-version", type=int, required=True)
+    acknowledge.add_argument("--snapshot-count", type=int, required=True)
+    acknowledge.add_argument("--pages", type=Path, required=True)
+    commit = commands.add_parser(
+        "commit", help="Atomically CAS the Squad owner and emit one owner-changed outbox event."
+    )
+    for name in ("operation-id", "owner-event-id", "owner-outbox-id", "at"):
+        commit.add_argument(f"--{name}", required=True)
+    commit.add_argument("--expected-owner-version", type=int, required=True)
+    commit.add_argument("--expected-owner-fence", type=int, required=True)
+    abort = commands.add_parser("abort", help="Abort only before the owner switch.")
+    drain = commands.add_parser("drain", help="Complete old-owner cleanup after the switch.")
+    for command in (abort, drain):
+        command.add_argument("--operation-id", required=True)
+        command.add_argument("--expected-version", type=int, required=True)
+        command.add_argument("--cleanup-receipt", type=Path, required=True)
+        command.add_argument("--at", required=True)
+    status = commands.add_parser("status", help="Read durable rollover state and public digests.")
+    status.add_argument("--operation-id", required=True)
 
 
 def _add_delivery_commands(groups: argparse._SubParsersAction) -> None:
@@ -497,7 +584,6 @@ def _add_assignment_commands(groups: argparse._SubParsersAction) -> None:
         "task-summary",
         "coordinator-agent-id",
         "champion-agent-id",
-        "callsign",
         "repository",
         "branch",
         "worktree",
@@ -505,6 +591,7 @@ def _add_assignment_commands(groups: argparse._SubParsersAction) -> None:
     ):
         prepare.add_argument(f"--{name}", required=True)
     prepare.add_argument("--issue", type=int, required=True)
+    prepare.add_argument("--requires", action="append", default=[])
     launching = commands.add_parser("launching", help="Commit launch intent before adapter work.")
     launching.add_argument("--assignment-id", required=True)
     launching.add_argument("--expected-version", type=int, required=True)
@@ -606,6 +693,7 @@ def _parser() -> argparse.ArgumentParser:
         _add_storage_commands,
         _add_agent_commands,
         _add_callsign_commands,
+        _add_rollover_commands,
         _add_delivery_commands,
         _add_project_commands,
         _add_roster_commands,
@@ -707,16 +795,135 @@ def _agent_transition(store: Storage, args: argparse.Namespace) -> CommandResult
     ), None
 
 
-def _callsign_reserve(store: Storage, args: argparse.Namespace) -> CommandResult:
-    return store.reserve_callsign(
-        args.callsign, args.agent_id, args.task_id, args.role, args.status, args.update, args.at
+def _callsign_reconcile(store: Storage, args: argparse.Namespace) -> CommandResult:
+    catalog = _read_json_object(args.catalog)
+    if set(catalog) != {"entries"} or not isinstance(catalog["entries"], list):
+        raise StorageRefusal("invalid_pool", "callsign catalog must contain one entries array")
+    return store.reconcile_callsign_pool(
+        args.role,
+        args.expected_queue_version,
+        args.seed,
+        args.shuffle_version,
+        catalog["entries"],
+        args.at,
+    ), None
+
+
+def _callsign_allocate(store: Storage, args: argparse.Namespace) -> CommandResult:
+    return store.allocate_callsign(
+        args.assignment_id,
+        args.agent_id,
+        args.role,
+        args.scope_kind,
+        args.scope_id,
+        args.requires,
+        args.at,
+    ), None
+
+
+def _callsign_activate(store: Storage, args: argparse.Namespace) -> CommandResult:
+    return store.activate_callsign(
+        args.assignment_id,
+        args.expected_version,
+        _read_json_object(args.receipt),
+        args.at,
+    ), None
+
+
+def _callsign_rollback(store: Storage, args: argparse.Namespace) -> CommandResult:
+    return store.rollback_callsign(
+        args.assignment_id,
+        args.expected_version,
+        args.failure_receipt_digest,
+        args.at,
     ), None
 
 
 def _callsign_release(store: Storage, args: argparse.Namespace) -> CommandResult:
     return store.release_callsign(
-        args.callsign, args.agent_id, args.expected_version, args.at
+        args.assignment_id,
+        args.expected_version,
+        args.release_receipt_digest,
+        args.at,
     ), None
+
+
+def _callsign_status(store: Storage, args: argparse.Namespace) -> CommandResult:
+    return store.callsign_status(args.role), None
+
+
+def _rollover_prepare(store: Storage, args: argparse.Namespace) -> CommandResult:
+    return store.prepare_rollover(
+        args.operation_id,
+        args.squad_id,
+        args.predecessor_agent_id,
+        args.successor_agent_id,
+        args.callsign_assignment_id,
+        args.expected_owner_version,
+        args.expected_owner_fence,
+        args.authority_kind,
+        args.authority_digest,
+        args.requires,
+        _read_json_object(args.plan),
+        args.at,
+    ), None
+
+
+def _rollover_bindings(store: Storage, args: argparse.Namespace) -> CommandResult:
+    return store.rollover_bindings(
+        args.operation_id, args.at, cursor=args.cursor, limit=args.limit
+    ), None
+
+
+def _rollover_acknowledge(store: Storage, args: argparse.Namespace) -> CommandResult:
+    pages = _read_json_object(args.pages)
+    if set(pages) != {"pages"} or not isinstance(pages["pages"], list):
+        raise StorageRefusal("invalid_handoff", "snapshot acknowledgement requires one pages array")
+    return store.acknowledge_rollover(
+        args.operation_id,
+        args.successor_agent_id,
+        args.runtime_instance_id,
+        args.handoff_digest,
+        args.snapshot_version,
+        args.snapshot_count,
+        args.snapshot_digest,
+        pages["pages"],
+        args.at,
+    ), None
+
+
+def _rollover_commit(store: Storage, args: argparse.Namespace) -> CommandResult:
+    return store.commit_rollover(
+        args.operation_id,
+        args.expected_owner_version,
+        args.expected_owner_fence,
+        args.owner_event_id,
+        args.owner_outbox_id,
+        args.at,
+    ), None
+
+
+def _rollover_abort(store: Storage, args: argparse.Namespace) -> CommandResult:
+    return store.abort_rollover(
+        args.operation_id,
+        args.expected_version,
+        _read_json_object(args.cleanup_receipt),
+        args.at,
+    ), None
+
+
+def _rollover_drain(store: Storage, args: argparse.Namespace) -> CommandResult:
+    return store.complete_rollover_drain(
+        args.operation_id,
+        args.expected_version,
+        _read_json_object(args.cleanup_receipt),
+        args.at,
+    ), None
+
+
+def _rollover_status(store: Storage, args: argparse.Namespace) -> CommandResult:
+    value = store.rollover_status(args.operation_id)
+    return {"found": value is not None, "rollover": value}, None
 
 
 def _delivery_claim(store: Storage, args: argparse.Namespace) -> CommandResult:
@@ -1068,12 +1275,12 @@ def _assign_prepare(store: Storage, args: argparse.Namespace) -> CommandResult:
             task_summary=args.task_summary,
             coordinator_agent_id=args.coordinator_agent_id,
             champion_agent_id=args.champion_agent_id,
-            callsign=args.callsign,
             repository=args.repository,
             issue=args.issue,
             branch=args.branch,
             worktree=args.worktree,
             at=args.at,
+            required_capabilities=tuple(args.requires),
         )
     ), None
 
@@ -1221,8 +1428,19 @@ HANDLERS: dict[str, CommandHandler] = {
     "storage.import": _storage_import,
     "agent.status": _agent_status,
     "agent.transition": _agent_transition,
-    "callsign.reserve": _callsign_reserve,
+    "callsign.reconcile": _callsign_reconcile,
+    "callsign.allocate": _callsign_allocate,
+    "callsign.activate": _callsign_activate,
+    "callsign.rollback": _callsign_rollback,
     "callsign.release": _callsign_release,
+    "callsign.status": _callsign_status,
+    "rollover.prepare": _rollover_prepare,
+    "rollover.bindings": _rollover_bindings,
+    "rollover.acknowledge": _rollover_acknowledge,
+    "rollover.commit": _rollover_commit,
+    "rollover.abort": _rollover_abort,
+    "rollover.drain": _rollover_drain,
+    "rollover.status": _rollover_status,
     "delivery.claim": _delivery_claim,
     "delivery.ack": _delivery_ack,
     "delivery.fail": _delivery_fail,
@@ -1288,6 +1506,12 @@ SCHEMA_INVENTORY = (
     "league-skill-matrix.schema.json",
     "league-project-catalog.schema.json",
     "league-roster-snapshot.schema.json",
+    "league-callsign-catalog.schema.json",
+    "league-runtime-acceptance.schema.json",
+    "league-shotcaller-handoff-plan.schema.json",
+    "league-rollover-pages.schema.json",
+    "league-rollover-abort-receipt.schema.json",
+    "league-rollover-drain-receipt.schema.json",
 )
 
 CONFIG_ONLY_COMMANDS = {

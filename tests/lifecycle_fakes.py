@@ -68,6 +68,7 @@ class FakeLaunchAdapter:
             "issue": spec.issue,
             "branch": spec.branch,
             "worktree": spec.worktree,
+            "capabilities": list(spec.required_capabilities),
         }
 
 

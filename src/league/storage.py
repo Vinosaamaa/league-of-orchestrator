@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from .storage_admin import AdministrativeStorage
 from .storage_assignment import AssignmentStorage, PrepareAssignmentCommand
+from .storage_callsign import CallsignQueueStorage
 from .storage_delivery import DeliveryStorage
 from .storage_lifecycle import LifecycleStorage
 from .storage_outbox import OutboxDispatchIdentity, OutboxStorage
@@ -16,6 +17,7 @@ from .storage_request import (
 )
 from .storage_runtime import RuntimeLifecycleStorage
 from .storage_roster import RosterStorage
+from .storage_rollover import RolloverStorage
 from .storage_transfer import TransferStorage
 from .storage_watcher import RuntimeRegistrationCommand, WatcherStorage
 from .storage_types import (
@@ -39,6 +41,8 @@ class Storage(
     RuntimeLifecycleStorage,
     ProjectStorage,
     RosterStorage,
+    CallsignQueueStorage,
+    RolloverStorage,
 ):
     """The only domain-facing persistence interface.
 

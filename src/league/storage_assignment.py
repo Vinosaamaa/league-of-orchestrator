@@ -15,12 +15,12 @@ class PrepareAssignmentCommand:
     task_summary: str
     coordinator_agent_id: str
     champion_agent_id: str
-    callsign: str
     repository: str
     issue: int
     branch: str
     worktree: str
     at: str
+    required_capabilities: tuple[str, ...] = ()
 
 
 class AssignmentStorage(Protocol):

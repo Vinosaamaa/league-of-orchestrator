@@ -44,3 +44,16 @@ repository supplies no command that writes global state.
 Live Roster migration requires a separately tested schema migration with backup,
 integrity validation, collision refusal, idempotent retry, and rollback. Issue #2
 does not authorize or implement that operation.
+
+ADR 0002 accepts one embedded SQLite canonical store using the complete issue
+#18 dependency audit, but it grants no additional authority. Future migration
+must follow the staged inventory, immutable backup, dry-run import, parity,
+single cutover, and rollback boundaries in
+`docs/research/json-jsonl-state-dependency-audit.md`. Agents must use stable
+`league` commands, never SQL; JSON/JSONL becomes export/backup only after
+cutover, with no permanent dual canonical write path.
+
+Before any future runtime selects WAL, it must verify that the SQLite library
+actually loaded by that released runtime is 3.51.3 or newer. An older or unknown
+binding uses rollback journal. This repository still performs no live install,
+global hook edit, database placement, or state migration.

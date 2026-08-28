@@ -1,6 +1,7 @@
 # ADR 0001: Retain the filesystem Roster for bootstrap
 
-- Status: Accepted for the issue #2 baseline
+- Status: Accepted for the active issue-#2 baseline; ADR 0002 applies only after
+  a separately authorized cutover
 - Date: 2026-08-26
 - Supersession owner: issue #6
 
@@ -30,8 +31,9 @@ The JSON Schemas in `schema/` are authoring aids. The runtime validator remains
 authoritative because it also rejects duplicate keys, enforces record-path
 identity, and validates latest-event parity.
 
-If issue #6 later selects SQLite, the application runtime's loaded SQLite
-library must be version 3.51.3 or newer before WAL is enabled. The upstream
+Issue #6 has selected SQLite for a future canonical store in
+[ADR 0002](0002-sqlite-canonical-store.md). The application runtime's loaded
+SQLite library must be version 3.51.3 or newer before WAL is enabled. The upstream
 [WAL-reset documentation](https://www.sqlite.org/wal.html#the_wal_reset_bug)
 records a rare corruption bug through 3.51.2 and its fix in 3.51.3. A system or
 Homebrew `sqlite3` CLI version is not a substitute for checking the library that
@@ -40,7 +42,6 @@ the application binding actually loads.
 ## Consequences
 
 The bootstrap preserves installed behavior and has no migration side effects.
-It does not solve atomic multi-agent ownership transfer or choose long-term
-storage. Issue [#6](https://github.com/Vinosaamaa/league-of-orchestrator/issues/6)
-owns that decision and any reversible migration tooling, using issue #18 as
-required dependency evidence.
+It does not solve atomic multi-agent ownership transfer. The filesystem remains
+the active runtime contract until a later issue implements and verifies the
+single canonical cutover in ADR 0002, using issue #18 as dependency evidence.

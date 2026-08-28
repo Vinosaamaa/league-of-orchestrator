@@ -14,7 +14,10 @@ STORAGE_TESTS := \
 	tests/test_sqlite_storage_commands.py \
 	tests/test_sqlite_storage_concurrency.py
 
-.PHONY: test test-baseline test-storage test-all
+ACCEPTANCE_TESTS := \
+	tests/test_acceptance_harness.py
+
+.PHONY: test test-baseline test-storage test-acceptance test-affected test-all
 test:
 	@$(MAKE) --no-print-directory test-baseline
 
@@ -28,4 +31,11 @@ test-storage:
 		PYTHONDONTWRITEBYTECODE=1 $(PYTHON) $$test; \
 	done
 
-test-all: test-baseline test-storage
+test-acceptance:
+	@set -eu; for test in $(ACCEPTANCE_TESTS); do \
+		PYTHONDONTWRITEBYTECODE=1 $(PYTHON) $$test; \
+	done
+
+test-affected: test-storage test-acceptance
+
+test-all: test-baseline test-affected

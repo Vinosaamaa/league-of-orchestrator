@@ -23,7 +23,7 @@ related partial behavior:
 - [#19: Implement SQLite storage and atomic canonical cutover](https://github.com/Vinosaamaa/league-of-orchestrator/issues/19) — this candidate implements the repository-local store, audited dry-run import, command facade, and focused tests; the issue remains open through live cutover
 - [#21: Document the SQLite orchestration design and decision trail](https://github.com/Vinosaamaa/league-of-orchestrator/issues/21)
 - [#22: Add evidence-backed League activity and end-of-day reports](https://github.com/Vinosaamaa/league-of-orchestrator/issues/22)
-- [#23: Build an isolated League acceptance sandbox and reversible cutover harness](https://github.com/Vinosaamaa/league-of-orchestrator/issues/23) — owns staged install, read-only shadow, atomic global switch, rollback, and live smoke
+- [#23: Build an isolated League acceptance sandbox and reversible cutover harness](https://github.com/Vinosaamaa/league-of-orchestrator/issues/23) — this candidate implements the repository-local disposable sandbox, fixture shadow, staged rollback, fake canary, and generation-switch fault foundation; merged lifecycle slices, real-runtime canaries, authorized global switch, and live smoke remain open
 
 Issue #19 does not pre-build sibling lifecycle policy or cross the #23 install
 and cutover gates. The filesystem baseline remains live until one coherent

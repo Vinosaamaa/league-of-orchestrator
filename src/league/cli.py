@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 from typing import Any, BinaryIO, Callable, Optional
 
+from . import MAX_ACCEPTANCE_SENTINEL_PATHS, __version__
 from .importer import build_import_plan
 from .sqlite_store import DEFAULT_BUSY_TIMEOUT_MS, MAX_EXPORT_RECORDS, SQLiteStorage
 from .storage import Storage, StorageRefusal
@@ -18,6 +19,42 @@ from .storage import Storage, StorageRefusal
 COMMAND_SCHEMA = "league.command.v1"
 CommandResult = tuple[Any, Optional[bytes]]
 CommandHandler = Callable[[Storage, argparse.Namespace], CommandResult]
+
+
+class _BoundedSentinelPath(argparse.Action):
+    def __call__(
+        self,
+        parser: argparse.ArgumentParser,
+        namespace: argparse.Namespace,
+        value: Path,
+        option_string: Optional[str] = None,
+    ) -> None:
+        paths = list(getattr(namespace, self.dest, None) or [])
+        if len(paths) >= MAX_ACCEPTANCE_SENTINEL_PATHS:
+            raise argparse.ArgumentError(
+                self,
+                f"at most {MAX_ACCEPTANCE_SENTINEL_PATHS} sentinel paths are allowed",
+            )
+        paths.append(value)
+        setattr(namespace, self.dest, paths)
+
+
+def _add_acceptance_commands(groups: argparse._SubParsersAction) -> None:
+    acceptance = groups.add_parser(
+        "acceptance", help="Run isolated acceptance beneath an explicit temporary root."
+    )
+    commands = acceptance.add_subparsers(dest="action", required=True)
+    run = commands.add_parser("run", help="Create and verify one namespaced disposable League home.")
+    run.add_argument("--temporary-root", type=Path, required=True)
+    run.add_argument("--namespace", required=True)
+    run.add_argument(
+        "--sentinel-path",
+        type=Path,
+        action=_BoundedSentinelPath,
+        required=True,
+    )
+    run.add_argument("--config-sentinel", type=Path, required=True)
+    run.add_argument("--process-sentinel", type=Path, required=True)
 
 
 def _add_storage_commands(groups: argparse._SubParsersAction) -> None:
@@ -126,10 +163,10 @@ def _parser() -> argparse.ArgumentParser:
         prog="league",
         description="Operate League's canonical store through stable domain commands; SQL is not exposed.",
     )
+    parser.add_argument("--version", action="version", version=f"league {__version__}")
     parser.add_argument(
         "--state-root",
         type=Path,
-        required=True,
         help="Explicit absolute League state root (the database filename remains internal).",
     )
     parser.add_argument(
@@ -151,6 +188,7 @@ def _parser() -> argparse.ArgumentParser:
         _add_delivery_commands,
         _add_project_commands,
         _add_task_commands,
+        _add_acceptance_commands,
     ):
         builder(groups)
     return parser
@@ -176,6 +214,8 @@ def _envelope_bytes(
 
 
 def _open(args: argparse.Namespace) -> SQLiteStorage:
+    if args.state_root is None:
+        raise StorageRefusal("state_root_required", "this command requires --state-root")
     return SQLiteStorage(
         args.state_root,
         busy_timeout_ms=args.busy_timeout_ms,
@@ -300,7 +340,24 @@ HANDLERS: dict[str, CommandHandler] = {
 
 def _run(args: argparse.Namespace) -> CommandResult:
     command = _command_name(args)
+    if command == "acceptance.run":
+        from .acceptance import run_acceptance
+
+        if args.state_root is not None:
+            raise StorageRefusal(
+                "invalid_acceptance_root",
+                "acceptance uses --temporary-root and refuses --state-root",
+            )
+        return run_acceptance(
+            args.temporary_root,
+            args.namespace,
+            sentinel_paths=tuple(args.sentinel_path),
+            config_sentinel=args.config_sentinel,
+            process_sentinel=args.process_sentinel,
+        ), None
     if command == "storage.migrate":
+        if args.state_root is None:
+            raise StorageRefusal("state_root_required", "storage migrate requires --state-root")
         with SQLiteStorage.for_migration(
             args.state_root,
             busy_timeout_ms=args.busy_timeout_ms,

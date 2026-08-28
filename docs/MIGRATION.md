@@ -79,3 +79,11 @@ staged/released bytes and owns the isolated sandbox, read-only live shadow,
 atomic pointer switch, rollback orchestration, and post-switch smoke. This
 repository still performs no global install, hook edit, live import, watcher
 replacement, or cutover.
+
+The issue-#23 foundation is exercised through `league acceptance run` as
+documented in `docs/ACCEPTANCE.md`. It creates only a namespaced disposable home
+beneath an explicit temporary root, validates caller-specified byte/config/fake
+process sentinels, imports the complete synthetic legacy fixture, stages and
+rolls back the exact repository release beneath its own prefix, and fault-tests
+the generation pointer under its own lock. These are pre-cutover mechanics, not
+authority or a claim that any pending lifecycle slice or real adapter passes.

@@ -17,8 +17,9 @@ related partial behavior:
 - [#10: Declare skill provenance and runtime capabilities](https://github.com/Vinosaamaa/league-of-orchestrator/issues/10) — repository-local schema/config/CLI candidate with sanitized current-root audit and synthetic capability/parity tests; global install remains unchanged
 - [#11: Generalize guarded teardown across task classes](https://github.com/Vinosaamaa/league-of-orchestrator/issues/11) — PR #30 repository-local candidate with proof-first recoverable teardown
 - [#12: Design a terminal-first Roster UI](https://github.com/Vinosaamaa/league-of-orchestrator/issues/12)
-- [#13: Add history-aware callsign allocation and reuse cooldown](https://github.com/Vinosaamaa/league-of-orchestrator/issues/13)
+- [#13: Add a persistent shuffled callsign allocation queue](https://github.com/Vinosaamaa/league-of-orchestrator/issues/13) — accepted queue policy: release appends to the tail, recency ranks rather than bans, and the sole compatible candidate remains allocatable
 - [#14: Route model and effort by durable evidence](https://github.com/Vinosaamaa/league-of-orchestrator/issues/14) — PR #30 repository-local assignment-neutral routing candidate
+- [#15: Design Champion continuation, retirement, and automatic rollover routing](https://github.com/Vinosaamaa/league-of-orchestrator/issues/15) — design-only accepted-policy candidate; implementation remains with #8 and #13
 - [#17: Add a durable request inbox and unresolved-work reconciliation](https://github.com/Vinosaamaa/league-of-orchestrator/issues/17) — merged repository-local request-lifecycle slice with #3, #4, and #5
 - [#18: Audit every JSON/JSONL state dependency before SQLite migration](https://github.com/Vinosaamaa/league-of-orchestrator/issues/18) — completed by the sanitized producer-consumer matrix and cutover inventory
 - [#19: Implement SQLite storage and atomic canonical cutover](https://github.com/Vinosaamaa/league-of-orchestrator/issues/19) — repository-local store, audited dry-run import, command facade, and focused tests are merged; live cutover remains separate

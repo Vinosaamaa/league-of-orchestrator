@@ -54,7 +54,7 @@ def test_launcher_help_and_schemas() -> None:
     )
     assert "SQL is not exposed" in " ".join(launcher.stdout.split())
     assert (
-        "{storage,agent,callsign,delivery,project,task,runtime,routing,resource,cleanup}"
+        "{storage,agent,callsign,delivery,project,task,runtime,routing,resource,cleanup,acceptance}"
         in launcher.stdout
     )
     parser = cli._parser()
@@ -65,6 +65,7 @@ def test_launcher_help_and_schemas() -> None:
         "league-command-output.schema.json",
         "league-import-report.schema.json",
         "league-export.schema.json",
+        "league-acceptance-receipt.schema.json",
     ):
         schema = json.loads((ROOT / "schema" / name).read_text(encoding="utf-8"))
         assert schema["$schema"] == "https://json-schema.org/draft/2020-12/schema"
@@ -77,6 +78,13 @@ def test_launcher_help_and_schemas() -> None:
     assert retained["additionalProperties"] is False
     audit = report_schema["properties"]["audit_coverage"]
     assert len(audit["required"]) == 40 and audit["additionalProperties"] is False
+    missing_state = io.BytesIO()
+    code = cli.main(
+        ["agent", "status", "--agent-id", "synthetic-missing-root"],
+        output=missing_state,
+    )
+    assert code == 2
+    assert json.loads(missing_state.getvalue())["error"]["code"] == "state_root_required"
 
 
 def test_storage_migrate_and_import(root: Path) -> None:

@@ -19,7 +19,10 @@ RUNTIME_LIFECYCLE_TESTS := \
 	tests/test_cleanup_lifecycle.py \
 	tests/test_model_routing.py
 
-.PHONY: test test-baseline test-storage test-runtime-lifecycle test-affected test-all
+ACCEPTANCE_TESTS := \
+	tests/test_acceptance_harness.py
+
+.PHONY: test test-baseline test-storage test-runtime-lifecycle test-acceptance test-affected test-all
 test:
 	@$(MAKE) --no-print-directory test-baseline
 
@@ -38,6 +41,11 @@ test-runtime-lifecycle:
 		PYTHONDONTWRITEBYTECODE=1 $(PYTHON) $$test; \
 	done
 
-test-affected: test-storage test-runtime-lifecycle
+test-acceptance:
+	@set -eu; for test in $(ACCEPTANCE_TESTS); do \
+		PYTHONDONTWRITEBYTECODE=1 $(PYTHON) $$test; \
+	done
 
-test-all: test-baseline test-storage test-runtime-lifecycle
+test-affected: test-storage test-runtime-lifecycle test-acceptance
+
+test-all: test-baseline test-affected

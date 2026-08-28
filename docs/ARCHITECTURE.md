@@ -53,9 +53,9 @@ The repository keeps the proven runtime and new storage boundary separate:
 
 This layout is intentionally a small modular monolith, not a set of shallow
 database wrappers. Issue
-[#7](https://github.com/Vinosaamaa/league-of-orchestrator/issues/7) owns the
-future adapter interfaces; extraction should happen against those acceptance
-criteria while the focused suite preserves behavior.
+[#7](https://github.com/Vinosaamaa/league-of-orchestrator/issues/7) supplies the
+repository-local adapter interfaces and capability matrix; issue #23 retains
+the isolated genuine-canary and cutover gates.
 
 ## Durable flow
 
@@ -100,12 +100,25 @@ The repository-local SQLite path is separately testable:
    obligations/operations/actions/receipts, and routing decisions/outcomes.
    Adapter effects stay outside transactions and are bridged by fences and
    immutable receipts.
+   The parallel request-lifecycle branch also originated from schema v2 and
+   currently proposes its own v3. Integration must assign the two migrations
+   contiguous final numbers and recompute the renumbered candidate checksum
+   before shared release history; an already-applied migration checksum is
+   never rewritten or silently accepted.
 6. Configuration, hooks, guides, launchers, immutable failure/teardown/archive
    evidence, installer backups, and other-product state remain files.
 
 `src/agent_watcher.py` does not import `league`. The filesystem baseline is the
 only live writer until issue #23 switches every consumer at one authorized
 generation; there is no dual canonical write path.
+
+`src/league/acceptance.py` is the issue-#23 repository-local harness. It owns
+explicit-root sentinels, deterministic fake adapters, fixture migration parity,
+staged release/rollback proof, a sandbox-only generation pointer and cutover
+lock, fault-injected operation receipts, and exact fake canary cleanup. It has
+no global path defaults and exposes no canonical cutover operation. The request,
+assignment, watcher, Stop, and teardown extension assertions remain pending
+until their owning issues merge.
 
 ## Portability boundary
 

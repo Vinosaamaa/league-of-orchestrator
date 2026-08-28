@@ -79,6 +79,15 @@ The implementation deliberately leaves `src/agent_watcher.py`,
 state, and immutable archives unchanged. Issue #23 owns staged acceptance and
 any later reversible cutover.
 
+## Issue-#23 acceptance provenance
+
+`src/league/acceptance.py`, `schema/league-acceptance-receipt.schema.json`,
+`docs/ACCEPTANCE.md`, and `tests/test_acceptance_harness.py` are original League
+implementation for issue #23. `VERSION` and the CLI extension are also original
+League work. The canonical behavior, safety boundaries, and verification
+contract live in [`docs/ACCEPTANCE.md`](ACCEPTANCE.md); this file records source
+origin and ownership only.
+
 Tests that require process inspection explicitly inject the single
 `tests/fakes/ps` adapter through `tests/process_adapter.py`; Make targets do not
 alter `PATH` for unrelated tests. This keeps self-process and resource-lifecycle
@@ -106,5 +115,8 @@ the real canary, staged install, global cutover, and rollback gates.
 The parallel issues #3/#4/#5/#17 branch owns prompt/request/assignment/outbox
 and Stop-hook policy. This branch exposes `ModelRouter` and runtime/cleanup
 storage protocols for that slice to consume without duplicating its state
-machines. Both branches begin at schema v2 and must be integrated by preserving
-both checksummed migrations with contiguous final version numbers.
+machines. Both branches begin at schema v2 and currently propose a schema-v3
+migration. Integration must preserve both migration bodies, assign contiguous
+final version numbers, and recompute only the renumbered pre-release candidate
+checksum; migration validation must continue refusing any checksum change for
+an already-applied version.

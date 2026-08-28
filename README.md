@@ -54,7 +54,8 @@ make test-all
 
 For a narrower iteration, use one target instead: `make test` for the inherited
 baseline, `make test-storage` for storage, `make test-runtime-lifecycle` for
-issues #7/#11/#14, or `make test-affected` for the two affected slices.
+issues #7/#11/#14, `make test-acceptance` for the isolated issue-#23
+foundation, or `make test-affected` for every affected slice.
 `make test-all` already composes everything without overlapping test lists.
 Every target uses temporary fixtures only. It does not install files,
 contact GitHub, mutate global agent state, or operate live Herdr/tmux sessions.
@@ -108,6 +109,10 @@ Issue [#23](https://github.com/Vinosaamaa/league-of-orchestrator/issues/23)
 owns the isolated acceptance harness, staged installation, read-only live-state
 shadow, reversible pointer switch, and separately authorized cutover. Until
 those gates pass, the filesystem watcher remains the only live authority.
+The repository-local foundation and its one explicit-root command are
+documented in [isolated acceptance](docs/ACCEPTANCE.md). It records the later
+request, assignment, watcher, Stop, and teardown slices as pending and does not
+claim real Codex, Cursor, Pi, Herdr, or tmux support from fake adapters.
 
 ## Project map
 
@@ -117,6 +122,7 @@ those gates pass, the filesystem watcher remains the only live authority.
 - [JSON/JSONL dependency audit](docs/research/json-jsonl-state-dependency-audit.md)
 - [SQLite prototype and benchmark](docs/research/sqlite-storage-prototype-benchmark.md)
 - [Reversible migration and install boundary](docs/MIGRATION.md)
+- [Isolated acceptance and reversible cutover foundation](docs/ACCEPTANCE.md)
 - [Exact source provenance](docs/PROVENANCE.md)
 - [Runtime lifecycle, cleanup, and routing](docs/runtime-lifecycle.md)
 - [Baseline versus planned issues](docs/ROADMAP.md)

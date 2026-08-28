@@ -125,20 +125,23 @@ def _refuse(category: str, field: str) -> None:
     raise PrivacyRefusal(category, field)
 
 
+def _validate_classification(classification: Any, field: str) -> None:
+    if classification == "local_only":
+        _refuse("local_only", field)
+    if classification != "outbound_safe":
+        _refuse("classification_unknown", field)
+
+
 def validate_structured_fields(value: Any, *, field: str = "payload") -> None:
     """Reject structured local-only values before a remote render is attempted."""
 
     if isinstance(value, ClassifiedValue):
-        if value.classification == "local_only":
-            _refuse("local_only", value.field)
-        if value.classification != "outbound_safe":
-            _refuse("classification_unknown", value.field)
+        _validate_classification(value.classification, value.field)
         validate_structured_fields(value.value, field=value.field)
         return
     if isinstance(value, Mapping):
-        classification = value.get("classification")
-        if classification == "local_only":
-            _refuse("local_only", field)
+        if "classification" in value:
+            _validate_classification(value["classification"], field)
         for key, item in value.items():
             validate_structured_fields(item, field=f"{field}.{key}")
         return
@@ -169,22 +172,20 @@ def _json_text_values(text: str) -> Iterable[str]:
     try:
         value = json.loads(text)
     except (json.JSONDecodeError, UnicodeError):
-        return ()
-    result: list[str] = []
+        return
 
-    def visit(item: Any) -> None:
+    def visit(item: Any) -> Iterable[str]:
         if isinstance(item, str):
-            result.append(item)
+            yield item
         elif isinstance(item, Mapping):
             for key, nested in item.items():
-                result.append(str(key))
-                visit(nested)
+                yield str(key)
+                yield from visit(nested)
         elif isinstance(item, list):
             for nested in item:
-                visit(nested)
+                yield from visit(nested)
 
-    visit(value)
-    return tuple(result)
+    yield from visit(value)
 
 
 def _public_url(url: str) -> bool:
@@ -221,12 +222,11 @@ def _strip_approved_urls(text: str, approved_urls: frozenset[str]) -> str:
     return _URL.sub(replace, text)
 
 
-def _validate_text(text: str, *, approved_urls: frozenset[str], field: str) -> None:
-    normalized = _decode_escaped_forms(text)
-    normalized += "\n" + "\n".join(_json_text_values(normalized))
-    normalized = _strip_approved_urls(normalized, approved_urls)
-    normalized = _APPROVED_LEAGUE_ID.sub("<league-id>", normalized)
-
+def _validate_text_fragment(
+    text: str, *, approved_urls: frozenset[str], field: str
+) -> None:
+    checked = _strip_approved_urls(text, approved_urls)
+    checked = _APPROVED_LEAGUE_ID.sub("<league-id>", checked)
     checks: tuple[tuple[str, re.Pattern[str]], ...] = (
         ("file_url", _FILE_URL),
         ("home_alias", _HOME_ALIAS),
@@ -249,8 +249,17 @@ def _validate_text(text: str, *, approved_urls: frozenset[str], field: str) -> N
         ("personal_data", _PERSONAL_FIELD),
     )
     for category, pattern in checks:
-        if pattern.search(normalized):
+        if pattern.search(checked):
             _refuse(category, field)
+
+
+def _validate_text(text: str, *, approved_urls: frozenset[str], field: str) -> None:
+    normalized = _decode_escaped_forms(text)
+    _validate_text_fragment(normalized, approved_urls=approved_urls, field=field)
+    for item in _json_text_values(normalized):
+        _validate_text_fragment(
+            _decode_escaped_forms(item), approved_urls=approved_urls, field=field
+        )
 
 
 def validate_final_rendered_payload(

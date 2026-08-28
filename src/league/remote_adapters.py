@@ -23,6 +23,7 @@ REMOTE_ADAPTER_KINDS = frozenset(
     }
 )
 _ADAPTER_KIND = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+MAX_REMOTE_RECEIPT_ID = 512
 
 
 class RemoteTransport(Protocol):
@@ -64,7 +65,12 @@ class GuardedRemoteAdapter:
         )
         transport_receipt = self.transport.send(payload.body)
         receipt_id = transport_receipt.get("receipt_id")
-        if not isinstance(receipt_id, str) or not receipt_id:
+        if (
+            not isinstance(receipt_id, str)
+            or not receipt_id
+            or len(receipt_id) > MAX_REMOTE_RECEIPT_ID
+            or "\x00" in receipt_id
+        ):
             raise StorageRefusal(
                 "remote_receipt_invalid", "remote transport returned no bounded receipt identity"
             )
@@ -93,6 +99,7 @@ def remote_adapter(
 
 __all__ = [
     "GuardedRemoteAdapter",
+    "MAX_REMOTE_RECEIPT_ID",
     "REMOTE_ADAPTER_KINDS",
     "RenderedPayload",
     "RemoteTransport",

@@ -12,7 +12,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from league.guidance import SUPPORTED_HARNESSES, stage_guidance  # noqa: E402
+from league.guidance import MAX_GUIDANCE_BYTES, SUPPORTED_HARNESSES, stage_guidance  # noqa: E402
 from league.storage import StorageRefusal  # noqa: E402
 
 
@@ -43,6 +43,17 @@ def main() -> None:
             assert exc.code == "unsupported_harness"
         else:
             raise AssertionError("unsupported harness was staged")
+        oversized = root / "oversized"
+        oversized.mkdir()
+        oversized_target = oversized / "AGENTS.md"
+        oversized_target.write_bytes(b"x" * (MAX_GUIDANCE_BYTES + 1))
+        try:
+            stage_guidance(source.resolve(), "codex", oversized.resolve())
+        except StorageRefusal as exc:
+            assert exc.code == "guidance_target_unsafe"
+        else:
+            raise AssertionError("oversized existing guidance was read for backup")
+        assert oversized_target.stat().st_size == MAX_GUIDANCE_BYTES + 1
     assert source.read_bytes() == original
     print("PASS: explicit-root Codex/Cursor/Pi staging, parity, backup, and no global mutation")
 

@@ -12,6 +12,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "public_safety.py"
 GOOD = "12345+synthetic-agent@users.noreply.github.com"
+LEGACY_GOOD = "synthetic-agent@users.noreply.github.com"
 BAD = "synthetic@example.invalid"
 
 
@@ -52,6 +53,7 @@ def main() -> None:
         root = Path(temporary)
         good_root, good_base = repository(root, "good")
         commit(good_root, "good", GOOD, GOOD)
+        commit(good_root, "legacy-good", LEGACY_GOOD, LEGACY_GOOD)
         passed = gate(good_root, good_base)
         assert passed.returncode == 0 and "author+committer" in passed.stdout
         author_root, author_base = repository(root, "bad-author")

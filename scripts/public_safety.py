@@ -9,7 +9,10 @@ import subprocess
 import sys
 
 
-NOREPLY = re.compile(r"^(?:[0-9]+\+[A-Za-z0-9_.-]+@users\.noreply\.github\.com|noreply@github\.com)$", re.IGNORECASE)
+NOREPLY = re.compile(
+    r"^(?:(?:[0-9]+\+)?[A-Za-z0-9_.-]+@users\.noreply\.github\.com|noreply@github\.com)$",
+    re.IGNORECASE,
+)
 COMMIT = re.compile(r"^[0-9a-f]{40,64}$")
 
 

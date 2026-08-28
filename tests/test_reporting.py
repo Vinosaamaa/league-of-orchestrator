@@ -537,6 +537,17 @@ def generate(store: SQLiteStorage, **overrides):
 
 
 def test_report_contract(root: Path) -> None:
+    report_schema = json.loads(
+        (ROOT / "schema" / "league-report.schema.json").read_text(encoding="utf-8")
+    )
+    definitions = report_schema["$defs"]
+    assert definitions["fact"]["properties"]["details"] == {
+        "$ref": "#/$defs/details"
+    }
+    assert definitions["details"]["maxProperties"] == 32
+    assert "facts" not in definitions["owner_group"]["properties"]
+    assert definitions["owner_group"]["properties"]["fact_ids"]["maxItems"] == 1000
+    assert definitions["repair_group"]["properties"]["underlying_evidence"]["maxItems"] == 100
     state, _ = migrated_state(root, "report-contract")
     with SQLiteStorage(state) as store:
         seed(store)
@@ -548,6 +559,23 @@ def test_report_contract(root: Path) -> None:
             assert exc.code == "invalid_evidence"
         else:
             raise AssertionError("malformed owning issue URL escaped typed refusal")
+        oversized_local = "x" * 4097
+        oversized_payload = evidence("evidence:oversized-local", "issue", "observe", AT1)
+        oversized_payload.update(
+            local_evidence_ref="evidence:oversized-local-value",
+            local_evidence={"value": oversized_local},
+            local_evidence_hash=hashlib.sha256(
+                json.dumps(
+                    {"value": oversized_local}, sort_keys=True, separators=(",", ":")
+                ).encode()
+            ).hexdigest(),
+        )
+        try:
+            store.record_activity_evidence(oversized_payload)
+        except StorageRefusal as exc:
+            assert exc.code == "invalid_evidence"
+        else:
+            raise AssertionError("unbounded local evidence entered report details")
         unfinished = generate(store)
         assert unfinished["completion"]["everything_finished"] is False
         gates = {item["kind"]: item["count"] for item in unfinished["completion"]["gates"]}
@@ -597,7 +625,20 @@ def test_report_contract(root: Path) -> None:
         repairs = unfinished["recurring_repairs"]["groups"]
         assert len(repairs) == 1 and repairs[0]["stable_id"] == "repair:ci-retry"
         assert repairs[0]["phases"] == {"failure": 1, "final": 1, "fix": 1}
-        assert all(group["facts"] for group in unfinished["owner_grouped"])
+        original_repair_bound = report_ops.MAX_REPAIR_EVIDENCE
+        try:
+            report_ops.MAX_REPAIR_EVIDENCE = 2
+            sampled = generate(store, persist=False)["recurring_repairs"]["groups"][0]
+        finally:
+            report_ops.MAX_REPAIR_EVIDENCE = original_repair_bound
+        assert len(sampled["underlying_evidence"]) == 2
+        assert sampled["evidence_truncated"] is True and sampled["repetitions"] == 3
+        assert all(group["fact_ids"] for group in unfinished["owner_grouped"])
+        assert {
+            fact_id
+            for group in unfinished["owner_grouped"]
+            for fact_id in group["fact_ids"]
+        } == {fact["fact_id"] for fact in unfinished["chronological"]}
         assert "/synthetic/" not in render_report(unfinished, "json").decode()
         local = generate(store, local_diagnostic=True)
         assert "/synthetic/local/evidence" in json.dumps(local)
@@ -677,7 +718,20 @@ def test_report_contract(root: Path) -> None:
 
         first = generate(store, limit=5)
         assert first["pagination"]["next_cursor"]
-        second = generate(store, limit=5, cursor=first["pagination"]["next_cursor"])
+        source_calls = 0
+        original_sources = report_ops._source_facts
+
+        def counted_sources(*args, **kwargs):
+            nonlocal source_calls
+            source_calls += 1
+            return original_sources(*args, **kwargs)
+
+        report_ops._source_facts = counted_sources
+        try:
+            second = generate(store, limit=5, cursor=first["pagination"]["next_cursor"])
+        finally:
+            report_ops._source_facts = original_sources
+        assert source_calls == 1
         assert not ({item["fact_id"] for item in first["chronological"]} & {item["fact_id"] for item in second["chronological"]})
 
         stored = store.report_spec(complete["report"]["report_id"])
@@ -753,6 +807,15 @@ def test_report_contract(root: Path) -> None:
     assert today["from"] == "2026-08-28T07:00:00Z"
     assert today["to"] == "2026-08-28T19:00:00Z"
     assert today["timezone"] == "America/Los_Angeles"
+    for arguments in (
+        ("report", "--today", "--timezone", "Invalid/Timezone", "--all"),
+        (
+            "report", "--since-report", complete["report"]["report_id"],
+            "--timezone", "Invalid/Timezone",
+        ),
+    ):
+        refused_timezone = invoke_cli(state, *arguments, expected=2)
+        assert refused_timezone["error"]["code"] == "invalid_report_timezone"
 
 
 def test_completion_scan_is_bounded(root: Path) -> None:

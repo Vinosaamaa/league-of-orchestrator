@@ -1071,12 +1071,15 @@ def _scope_args(args: argparse.Namespace) -> tuple[Optional[str], Optional[str]]
     return None, None
 
 
-def _now_rfc3339(zone_name: str) -> str:
+def _report_zone(zone_name: str) -> ZoneInfo:
     try:
-        zone = ZoneInfo(zone_name)
+        return ZoneInfo(zone_name)
     except (ZoneInfoNotFoundError, ValueError, TypeError) as exc:
         raise StorageRefusal("invalid_report_timezone", "report timezone is unknown") from exc
-    return datetime.now(zone).astimezone(timezone.utc).isoformat(timespec="seconds").replace(
+
+
+def _now_rfc3339(zone_name: str) -> str:
+    return datetime.now(_report_zone(zone_name)).astimezone(timezone.utc).isoformat(timespec="seconds").replace(
         "+00:00", "Z"
     )
 
@@ -1103,11 +1106,7 @@ def _report_generate(store: Storage, args: argparse.Namespace) -> CommandResult:
     elif args.today:
         if timezone_name is None:
             raise StorageRefusal("invalid_report_timezone", "today requires an exact timezone")
-        try:
-            zone = ZoneInfo(timezone_name)
-        except (ZoneInfoNotFoundError, ValueError, TypeError) as exc:
-            raise StorageRefusal("invalid_report_timezone", "report timezone is unknown") from exc
-        observed = datetime.now(zone)
+        observed = datetime.now(_report_zone(timezone_name))
         from_at = observed.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
         to_at = to_at or observed.isoformat(timespec="seconds")
     if not from_at or not to_at or not timezone_name:

@@ -297,6 +297,37 @@ def _normalized_aliases(values: Sequence[str]) -> list[tuple[str, str]]:
     return result
 
 
+def _project_repository_classification(
+    *,
+    summary: str,
+    code: Optional[str],
+    aliases: Sequence[tuple[str, str]],
+    repository: str,
+    export_policy: str,
+) -> str:
+    classification = (
+        "outbound_safe" if export_policy == "public_repository" else "local_only"
+    )
+    if export_policy != "deny":
+        validate_final_rendered_payload(
+            "\n".join(
+                item
+                for item in (summary, code, *(alias for alias, _ in aliases))
+                if item is not None
+            ),
+            destination_visibility="public",
+            field="project.outbound_metadata",
+        )
+    if classification == "outbound_safe":
+        validate_final_rendered_payload(
+            repository,
+            destination_visibility="public",
+            approved_urls=(repository,),
+            field="project.repository",
+        )
+    return classification
+
+
 def put_project(
     store: Any,
     project_id: str,
@@ -329,28 +360,13 @@ def put_project(
     if code is not None:
         code_value, code_key = canonical_token(code, "project code", 24)
     alias_values = _normalized_aliases(aliases)
-    repository_classification = (
-        "outbound_safe" if export_policy == "public_repository" else "local_only"
+    repository_classification = _project_repository_classification(
+        summary=summary_value,
+        code=code_value,
+        aliases=alias_values,
+        repository=repository_value,
+        export_policy=export_policy,
     )
-    if export_policy != "deny":
-        approved_urls = (repository_value,) if repository_classification == "outbound_safe" else ()
-        validate_final_rendered_payload(
-            "\n".join(
-                item
-                for item in (summary_value, code_value, *(item[0] for item in alias_values))
-                if item is not None
-            ),
-            destination_visibility="public",
-            approved_urls=approved_urls,
-            field="project.outbound_metadata",
-        )
-    if repository_classification == "outbound_safe":
-        validate_final_rendered_payload(
-            repository_value,
-            destination_visibility="public",
-            approved_urls=(repository_value,),
-            field="project.repository",
-        )
     _timestamp(at)
     try:
         with store._transaction():

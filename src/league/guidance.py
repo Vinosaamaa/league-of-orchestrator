@@ -62,9 +62,15 @@ def stage_guidance(source: Path, harness: str, destination_root: Path) -> dict[s
     target = root / TARGET_NAME
     if target.is_symlink():
         raise StorageRefusal("guidance_target_unsafe", "guidance target cannot be a symlink")
-    before: bytes | None = target.read_bytes() if target.exists() else None
-    if target.exists() and not target.is_file():
-        raise StorageRefusal("guidance_target_unsafe", "guidance target must be a regular file")
+    before: bytes | None = None
+    if target.exists():
+        if not target.is_file():
+            raise StorageRefusal("guidance_target_unsafe", "guidance target must be a regular file")
+        if target.stat().st_size > MAX_GUIDANCE_BYTES:
+            raise StorageRefusal(
+                "guidance_target_unsafe", "existing guidance exceeds the backup byte bound"
+            )
+        before = target.read_bytes()
     backup = None
     if before is not None:
         backup = root / f".{TARGET_NAME}.league-backup-{_hash(before)[:12]}"

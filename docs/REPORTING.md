@@ -73,6 +73,9 @@ presence signal. Local-diagnostic reports may show the full local value.
 
 Recurring repair facts carry one stable repair ID and phase, so repeated
 failure/attempt/fix/final records group without hiding the underlying facts.
+Each group retains the complete repetition/phase counts and at most 100 sorted
+fact references with an explicit truncation flag. Owner groups similarly point
+to facts in the one chronological payload rather than embedding a second copy.
 Unknown or unverified fields are explicit gaps.
 
 `everything_finished` is true only when all scoped gates are settled:
@@ -91,7 +94,8 @@ all other gates must also be proved.
 
 A report scans at most 100,000 facts, returns at most 1,000 facts per page,
 binds an opaque cursor to the exact specification hash, and caps gaps and
-repair groups. Source timestamp/scope indexes support streaming merge and
+repair groups. Fact details use a bounded three-level JSON shape. Source
+timestamp/scope indexes support streaming merge and
 bounded pagination. Focused synthetic budgets are 500 ms for a 2,000-fact
 typical day and 3,000 ms for a 50,000-fact history on the repository test
 runtime. The test refuses a regression instead of weakening either budget.

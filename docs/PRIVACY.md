@@ -6,17 +6,12 @@
 ## Classification and projection
 
 League stores exact project roots, private repository identities, and full
-canonical JSON local evidence plus its reference and hash as `local_only`. A project also stores an explicit
-repository visibility and export policy:
-
-- `deny` publishes no project metadata;
-- `metadata_only` permits only validated summary, code, and aliases;
-- `public_repository` additionally permits one validated HTTPS repository URL
-  only when repository visibility is explicitly public.
-
-Outbound project values use `null` for withheld fields and include structured
-classifications. Repository-relative paths, approved public HTTPS URLs, opaque
-League IDs, SHA-256 values, and explicit placeholders are allowed.
+canonical JSON local evidence plus its reference and hash as `local_only`.
+Project visibility, export-policy, withheld-value, and classification semantics
+have one canonical definition in the
+[Project Catalog visibility contract](PROJECT_CATALOG.md#visibility-and-deterministic-transfer).
+Repository-relative paths, approved public HTTPS URLs, opaque League IDs,
+SHA-256 values, and explicit placeholders are allowed by this outbound boundary.
 
 ## One final rendered-payload validator
 

@@ -12,15 +12,17 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from league.privacy import ClassifiedValue, PrivacyRefusal, validate_final_rendered_payload  # noqa: E402
 from league.remote_adapters import REMOTE_ADAPTER_KINDS, RenderedPayload, remote_adapter  # noqa: E402
+from league.storage import StorageRefusal  # noqa: E402
 
 
 class FakeTransport:
-    def __init__(self) -> None:
+    def __init__(self, receipt_id: str = "synthetic-remote-receipt") -> None:
         self.calls: list[bytes] = []
+        self.receipt_id = receipt_id
 
     def send(self, payload: bytes) -> dict[str, str]:
         self.calls.append(payload)
-        return {"receipt_id": "synthetic-remote-receipt"}
+        return {"receipt_id": self.receipt_id}
 
 
 def refusal(payload: str, category: str, visibility: str = "public") -> None:
@@ -80,6 +82,20 @@ def test_allowlist_and_structured_classification() -> None:
         assert "hidden" not in str(exc)
     else:
         raise AssertionError("structured local_only value reached outbound rendering")
+    for classification, category in (
+        ("local_only", "local_only"),
+        ("future_classification", "classification_unknown"),
+    ):
+        try:
+            validate_final_rendered_payload(
+                "safe body",
+                destination_visibility="private",
+                structured_fields={"classification": classification, "value": "hidden"},
+            )
+        except PrivacyRefusal as exc:
+            assert exc.category == category
+        else:
+            raise AssertionError("mapping classification diverged from ClassifiedValue")
     refusal("safe body", "local_diagnostic_remote_forbidden") if False else None
     try:
         validate_final_rendered_payload(
@@ -126,6 +142,16 @@ def test_every_remote_adapter_uses_same_guard() -> None:
             assert transport.calls == []
         else:
             raise AssertionError(f"{kind} bypassed final payload validation")
+
+    oversized = FakeTransport("x" * 513)
+    adapter = remote_adapter("future_remote", "private", oversized)
+    try:
+        adapter.send(RenderedPayload(b"safe bounded body"))
+    except StorageRefusal as exc:
+        assert exc.code == "remote_receipt_invalid"
+        assert oversized.calls == [b"safe bounded body"]
+    else:
+        raise AssertionError("oversized remote receipt identity was hashed")
 
 
 def main() -> None:

@@ -6,6 +6,7 @@ import base64
 import hashlib
 import heapq
 import json
+import math
 import re
 import sqlite3
 from collections import Counter
@@ -22,6 +23,7 @@ MAX_REPORT_FACTS = 100_000
 MAX_REPORT_PAGE = 1_000
 MAX_REPORT_GAPS = 200
 MAX_REPAIR_GROUPS = 1_000
+MAX_REPAIR_EVIDENCE = 100
 TYPICAL_DAY_LATENCY_BUDGET_MS = 500
 LARGE_HISTORY_LATENCY_BUDGET_MS = 3_000
 SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,191}$")
@@ -69,7 +71,54 @@ PUBLIC_ID_PREFIXES = frozenset(
 
 
 def _stable_bytes(value: Any) -> bytes:
-    return json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return json.dumps(
+        value, sort_keys=True, separators=(",", ":"), allow_nan=False
+    ).encode("utf-8")
+
+
+def _detail_scalar(value: Any) -> bool:
+    return (
+        value is None
+        or isinstance(value, (bool, int))
+        or (isinstance(value, float) and math.isfinite(value))
+        or (isinstance(value, str) and len(value) <= 4096)
+    )
+
+
+def _detail_leaf(value: Any) -> bool:
+    if _detail_scalar(value):
+        return True
+    if isinstance(value, list):
+        return len(value) <= 32 and all(_detail_scalar(item) for item in value)
+    if isinstance(value, dict):
+        return (
+            len(value) <= 32
+            and all(isinstance(key, str) and len(key) <= 64 for key in value)
+            and all(_detail_scalar(item) for item in value.values())
+        )
+    return False
+
+
+def _detail_value(value: Any) -> bool:
+    if _detail_scalar(value):
+        return True
+    if isinstance(value, list):
+        return len(value) <= 32 and all(_detail_leaf(item) for item in value)
+    if isinstance(value, dict):
+        return (
+            len(value) <= 32
+            and all(isinstance(key, str) and len(key) <= 64 for key in value)
+            and all(_detail_leaf(item) for item in value.values())
+        )
+    return False
+
+
+def _details(value: dict[str, Any]) -> bool:
+    return (
+        len(value) <= 32
+        and all(isinstance(key, str) and len(key) <= 64 for key in value)
+        and all(_detail_value(item) for item in value.values())
+    )
 
 
 def _timestamp(value: str, label: str) -> datetime:
@@ -218,6 +267,10 @@ def record_activity_evidence(store: Any, evidence: dict[str, Any]) -> dict[str, 
         raise StorageRefusal("invalid_evidence", "local evidence, reference, and hash must be paired")
     local_json = None
     if local_evidence is not None:
+        if not _detail_value(local_evidence):
+            raise StorageRefusal(
+                "invalid_evidence", "local evidence exceeds the bounded detail shape"
+            )
         try:
             local_payload = _stable_bytes(local_evidence)
         except (TypeError, ValueError) as exc:
@@ -359,6 +412,11 @@ def _fact(
         }.get(subject_kind, "evidence"),
         subject_id,
     )
+    public_details = _public_details(details or {})
+    if not _details(public_details):
+        raise StorageRefusal(
+            "report_detail_unbounded", "report detail exceeds the bounded value shape"
+        )
     return {
         "fact_id": _public_id("evidence", fact_id),
         "occurred_at": occurred_at,
@@ -369,7 +427,7 @@ def _fact(
         "state": state,
         "verification": verification,
         "summary": summary,
-        "details": _public_details(details or {}),
+        "details": public_details,
         "evidence": evidence
         or [{"kind": "canonical", "ref": f"league://{subject_kind}/{public_subject}"}],
         "gaps": sorted(gaps or []),
@@ -1369,7 +1427,7 @@ def _repair_summary(groups: dict[str, dict[str, Any]], truncated: bool) -> dict[
     return {"groups": values, "truncated": truncated, "total_groups": len(groups)}
 
 
-def generate_report(
+def _report_context(
     store: Any,
     *,
     from_at: str,
@@ -1380,21 +1438,18 @@ def generate_report(
     scope_id: Optional[str],
     limit: int,
     cursor: Optional[str],
-    local_diagnostic: bool,
-    report_id: Optional[str] = None,
-    event_watermark: Optional[int] = None,
-    source_watermark: Optional[str] = None,
-    persist: bool = True,
-    expected_content_hash: Optional[str] = None,
-) -> dict[str, Any]:
-    store._report_owner_cache = {}
+    event_watermark: Optional[int],
+    source_watermark: Optional[str],
+) -> tuple[str, str, str, dict[str, Any], int, str, str, Optional[tuple[str, str]]]:
     from_value = canonical_timestamp(from_at, "from")
     to_value = canonical_timestamp(to_at, "to")
     if _timestamp(from_value, "from") > _timestamp(to_value, "to"):
         raise StorageRefusal("invalid_report_range", "report from time follows its to time")
     zone = validate_timezone(timezone_name)
     if not 1 <= limit <= MAX_REPORT_PAGE:
-        raise StorageRefusal("invalid_report_limit", f"report limit must be between 1 and {MAX_REPORT_PAGE}")
+        raise StorageRefusal(
+            "invalid_report_limit", f"report limit must be between 1 and {MAX_REPORT_PAGE}"
+        )
     scope = _scope_context(store, scope_kind, scope_id)
     if event_watermark is None:
         row = store.connection.execute(
@@ -1416,7 +1471,154 @@ def generate_report(
         "source_watermark": source_watermark,
     }
     spec_hash = hashlib.sha256(_stable_bytes(spec)).hexdigest()
-    after = _cursor(cursor, spec_hash)
+    return (
+        from_value,
+        to_value,
+        zone,
+        scope,
+        event_watermark,
+        source_watermark,
+        spec_hash,
+        _cursor(cursor, spec_hash),
+    )
+
+
+def _reproduction_result(
+    completion: dict[str, Any],
+    *,
+    report_identity: str,
+    content_hash: str,
+    expected_content_hash: Optional[str],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    reproduction = {
+        "requested": expected_content_hash is not None,
+        "matches_stored_hash": expected_content_hash is None
+        or expected_content_hash == content_hash,
+        "expected_content_hash": expected_content_hash,
+        "observed_content_hash": content_hash,
+    }
+    if reproduction["matches_stored_hash"]:
+        return completion, reproduction
+    value = dict(completion)
+    value["everything_finished"] = False
+    value["status"] = "unknown"
+    value["gap_total"] += 1
+    value["gates"] = [
+        {**gate, "count": gate["count"] + 1, "status": "unknown"}
+        if gate["kind"] == "evidence_gaps"
+        else gate
+        for gate in value["gates"]
+    ]
+    if len(value["gaps"]) < MAX_REPORT_GAPS:
+        value["gaps"] = [
+            *value["gaps"],
+            {"kind": "report_reproduction", "subject": report_identity, "status": "unverified"},
+        ]
+    return value, reproduction
+
+
+def _report_public_urls(
+    page: list[dict[str, Any]], repair_groups: dict[str, dict[str, Any]]
+) -> list[str]:
+    values = {
+        link["url"]
+        for fact in page
+        for link in fact["evidence"]
+        if link.get("kind") == "public_url"
+    } | {
+        fact["details"]["owning_issue_url"]
+        for fact in page
+        if fact["details"].get("owning_issue_url") is not None
+    } | {
+        value
+        for group in repair_groups.values()
+        for value in (group.get("owning_issue_url"),)
+        if value is not None
+    }
+    if len(values) > MAX_REPORT_PAGE:
+        raise StorageRefusal(
+            "report_public_urls_too_large",
+            "report approved public URL set exceeds its bound",
+        )
+    return sorted(values)
+
+
+def _persist_report_spec(store: Any, desired: tuple[Any, ...]) -> None:
+    report_identity = desired[0]
+    columns = (
+        "report_id", "report_schema", "from_at", "to_at", "timezone", "from_inclusive",
+        "scope_kind", "scope_id", "event_watermark", "source_watermark", "created_at",
+        "spec_hash", "content_hash", "fact_count",
+    )
+    try:
+        with store._transaction():
+            existing = store.connection.execute(
+                "SELECT * FROM report_specs WHERE report_id=?", (report_identity,)
+            ).fetchone()
+            if existing is None:
+                store.connection.execute(
+                    """
+                    INSERT INTO report_specs
+                      (report_id,report_schema,from_at,to_at,timezone,from_inclusive,
+                       scope_kind,scope_id,event_watermark,source_watermark,created_at,
+                       spec_hash,content_hash,fact_count)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    desired,
+                )
+            elif tuple(existing[column] for column in columns) != desired:
+                raise StorageRefusal(
+                    "report_spec_conflict", "immutable report identity already differs"
+                )
+    except StorageRefusal:
+        raise
+    except sqlite3.DatabaseError as exc:
+        raise store._translate_database_error(
+            exc, "report specification write conflicted"
+        ) from exc
+
+
+def generate_report(
+    store: Any,
+    *,
+    from_at: str,
+    to_at: str,
+    timezone_name: str,
+    from_inclusive: bool,
+    scope_kind: str,
+    scope_id: Optional[str],
+    limit: int,
+    cursor: Optional[str],
+    local_diagnostic: bool,
+    report_id: Optional[str] = None,
+    event_watermark: Optional[int] = None,
+    source_watermark: Optional[str] = None,
+    persist: bool = True,
+    expected_content_hash: Optional[str] = None,
+) -> dict[str, Any]:
+    store._report_owner_cache = {}
+    (
+        from_value,
+        to_value,
+        zone,
+        scope,
+        event_watermark,
+        source_watermark,
+        spec_hash,
+        after,
+    ) = _report_context(
+        store,
+        from_at=from_at,
+        to_at=to_at,
+        timezone_name=timezone_name,
+        from_inclusive=from_inclusive,
+        scope_kind=scope_kind,
+        scope_id=scope_id,
+        limit=limit,
+        cursor=cursor,
+        event_watermark=event_watermark,
+        source_watermark=source_watermark,
+    )
     facts = heapq.merge(
         *_source_facts(store, from_value, to_value, from_inclusive, local_diagnostic),
         key=lambda item: (item["occurred_at"], item["fact_id"]),
@@ -1430,6 +1632,7 @@ def generate_report(
     content = hashlib.sha256()
     content.update(spec_hash.encode("ascii"))
     fact_count = 0
+    consumed = 0
     for fact in facts:
         if not _matches_scope(fact, scope):
             continue
@@ -1455,6 +1658,7 @@ def generate_report(
                         "owning_issue_url": fact["details"].get("owning_issue_url"),
                         "root_cause_tag": fact["details"].get("root_cause_tag"),
                         "underlying_evidence": [],
+                        "evidence_truncated": False,
                     },
                 )
                 group["repetitions"] += 1
@@ -1462,9 +1666,13 @@ def generate_report(
                 group["phases"][phase] += 1
                 if phase == "final":
                     group["final_state"] = fact["state"]
-                group["underlying_evidence"].append(fact["fact_id"])
+                if len(group["underlying_evidence"]) < MAX_REPAIR_EVIDENCE:
+                    group["underlying_evidence"].append(fact["fact_id"])
+                else:
+                    group["evidence_truncated"] = True
         key = (fact["occurred_at"], fact["fact_id"])
         if after is not None and key <= after:
+            consumed += 1
             continue
         if len(page) < limit:
             page.append(_display_fact(fact))
@@ -1481,68 +1689,20 @@ def generate_report(
             owner_key = owner["actor_id"] if owner else "unowned"
             group = owners.setdefault(
                 owner_key,
-                {"owner": owner, "facts": [], "count": 0},
+                {"owner": owner, "fact_ids": [], "count": 0},
             )
-            group["facts"].append(fact)
+            group["fact_ids"].append(fact["fact_id"])
             group["count"] += 1
     next_cursor = None
-    consumed = 0
-    if after is not None:
-        consumed = sum(
-            1
-            for source in _source_facts(store, from_value, to_value, from_inclusive, False)
-            for fact in source
-            if _matches_scope(fact, scope)
-            and (fact["occurred_at"], fact["fact_id"]) <= after
-        )
     if consumed + len(page) < fact_count and page:
         next_cursor = _encode_cursor(spec_hash, page[-1])
-    reproduction = {
-        "requested": expected_content_hash is not None,
-        "matches_stored_hash": expected_content_hash is None or expected_content_hash == content_hash,
-        "expected_content_hash": expected_content_hash,
-        "observed_content_hash": content_hash,
-    }
-    if expected_content_hash is not None and expected_content_hash != content_hash:
-        completion = dict(completion)
-        completion["everything_finished"] = False
-        completion["status"] = "unknown"
-        completion["gap_total"] += 1
-        completion["gates"] = [
-            {
-                **gate,
-                "count": gate["count"] + 1,
-                "status": "unknown",
-            }
-            if gate["kind"] == "evidence_gaps"
-            else gate
-            for gate in completion["gates"]
-        ]
-        if len(completion["gaps"]) < MAX_REPORT_GAPS:
-            completion["gaps"] = [
-                *completion["gaps"],
-                {"kind": "report_reproduction", "subject": report_identity, "status": "unverified"},
-            ]
-    approved_public_urls = {
-        link["url"]
-        for fact in page
-        for link in fact["evidence"]
-        if link.get("kind") == "public_url"
-    } | {
-        fact["details"]["owning_issue_url"]
-        for fact in page
-        if fact["details"].get("owning_issue_url") is not None
-    } | {
-        value
-        for group in repair_groups.values()
-        for value in (group.get("owning_issue_url"),)
-        if value is not None
-    }
-    if len(approved_public_urls) > MAX_REPORT_PAGE:
-        raise StorageRefusal(
-            "report_public_urls_too_large",
-            "report approved public URL set exceeds its bound",
-        )
+    completion, reproduction = _reproduction_result(
+        completion,
+        report_identity=report_identity,
+        content_hash=content_hash,
+        expected_content_hash=expected_content_hash,
+    )
+    approved_public_urls = _report_public_urls(page, repair_groups)
     report = {
         "schema": REPORT_SCHEMA,
         "mode": "local_diagnostic" if local_diagnostic else "outbound_safe",
@@ -1579,51 +1739,28 @@ def generate_report(
         "chronological": page,
         "owner_grouped": [owners[key] for key in sorted(owners)],
         "recurring_repairs": _repair_summary(repair_groups, repair_truncated),
-        "approved_public_urls": sorted(approved_public_urls),
+        "approved_public_urls": approved_public_urls,
     }
     if persist:
-        try:
-            with store._transaction():
-                existing = store.connection.execute(
-                    "SELECT * FROM report_specs WHERE report_id=?", (report_identity,)
-                ).fetchone()
-                desired = (
-                    report_identity,
-                    REPORT_SCHEMA,
-                    from_value,
-                    to_value,
-                    zone,
-                    int(from_inclusive),
-                    scope_kind,
-                    scope["id"],
-                    event_watermark,
-                    source_watermark,
-                    to_value,
-                    spec_hash,
-                    content_hash,
-                    fact_count,
-                )
-                if existing is None:
-                    store.connection.execute(
-                        """
-                        INSERT INTO report_specs
-                          (report_id,report_schema,from_at,to_at,timezone,from_inclusive,
-                           scope_kind,scope_id,event_watermark,source_watermark,created_at,spec_hash,content_hash,fact_count)
-                        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                        """,
-                        desired,
-                    )
-                else:
-                    observed = tuple(existing[column] for column in (
-                        "report_id","report_schema","from_at","to_at","timezone","from_inclusive",
-                        "scope_kind","scope_id","event_watermark","source_watermark","created_at","spec_hash","content_hash","fact_count",
-                    ))
-                    if observed != desired:
-                        raise StorageRefusal("report_spec_conflict", "immutable report identity already differs")
-        except StorageRefusal:
-            raise
-        except sqlite3.DatabaseError as exc:
-            raise store._translate_database_error(exc, "report specification write conflicted") from exc
+        _persist_report_spec(
+            store,
+            (
+                report_identity,
+                REPORT_SCHEMA,
+                from_value,
+                to_value,
+                zone,
+                int(from_inclusive),
+                scope_kind,
+                scope["id"],
+                event_watermark,
+                source_watermark,
+                to_value,
+                spec_hash,
+                content_hash,
+                fact_count,
+            ),
+        )
     return report
 
 
@@ -1640,6 +1777,7 @@ __all__ = [
     "LARGE_HISTORY_LATENCY_BUDGET_MS",
     "MAX_REPORT_FACTS",
     "MAX_REPORT_PAGE",
+    "MAX_REPAIR_EVIDENCE",
     "REPORT_SCHEMA",
     "TYPICAL_DAY_LATENCY_BUDGET_MS",
     "canonical_timestamp",

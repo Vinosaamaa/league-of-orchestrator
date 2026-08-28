@@ -18,7 +18,9 @@ _TEMPLATE = Path(__file__).with_name("report_template.html")
 
 
 def _json_bytes(report: dict[str, Any]) -> bytes:
-    return (json.dumps(report, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+    return (
+        json.dumps(report, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n"
+    ).encode("utf-8")
 
 
 def _display(value: Any) -> str:

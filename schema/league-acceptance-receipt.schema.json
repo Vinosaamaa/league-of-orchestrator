@@ -1,0 +1,290 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Vinosaamaa/league-of-orchestrator/schema/league-acceptance-receipt.schema.json",
+  "title": "League isolated acceptance receipt",
+  "type": "object",
+  "required": [
+    "schema",
+    "version",
+    "namespace",
+    "home",
+    "determinism",
+    "sentinels",
+    "migration_shadow",
+    "staged_install",
+    "cutover",
+    "canary",
+    "adapters",
+    "pending_assertions",
+    "runtime_claims"
+  ],
+  "properties": {
+    "schema": {"const": "league.acceptance-receipt.v1"},
+    "version": {"type": "string", "minLength": 1},
+    "namespace": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"},
+    "home": {"type": "string", "minLength": 1},
+    "determinism": {
+      "type": "object",
+      "required": ["clock", "ids_allocated"],
+      "properties": {
+        "clock": {"type": "string", "format": "date-time"},
+        "ids_allocated": {"type": "integer", "minimum": 1}
+      },
+      "additionalProperties": false
+    },
+    "sentinels": {
+      "type": "object",
+      "required": ["unchanged", "byte_paths", "config_sha256", "process_sha256", "process_count"],
+      "properties": {
+        "unchanged": {"const": true},
+        "byte_paths": {"type": "integer", "minimum": 1},
+        "config_sha256": {"$ref": "#/$defs/sha256"},
+        "process_sha256": {"$ref": "#/$defs/sha256"},
+        "process_count": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "migration_shadow": {
+      "type": "object",
+      "required": ["migration", "dry_run", "apply", "exact_parity", "parity_sha256", "legacy_unchanged"],
+      "properties": {
+        "migration": {"type": "object"},
+        "dry_run": {
+          "type": "object",
+          "required": ["eligible", "report_digest", "source_digest", "artifact_counts"],
+          "properties": {
+            "eligible": {"const": true},
+            "report_digest": {"$ref": "#/$defs/sha256"},
+            "source_digest": {"$ref": "#/$defs/sha256"},
+            "artifact_counts": {
+              "type": "object",
+              "additionalProperties": {"type": "integer", "minimum": 0}
+            }
+          },
+          "additionalProperties": false
+        },
+        "apply": {
+          "type": "object",
+          "required": ["applied", "row_counts"],
+          "properties": {
+            "applied": {"const": true},
+            "row_counts": {
+              "type": "object",
+              "additionalProperties": {"type": "integer", "minimum": 0}
+            }
+          },
+          "additionalProperties": false
+        },
+        "exact_parity": {"const": true},
+        "parity_sha256": {"$ref": "#/$defs/sha256"},
+        "legacy_unchanged": {"const": true}
+      },
+      "additionalProperties": false
+    },
+    "staged_install": {
+      "type": "object",
+      "required": [
+        "prefix",
+        "version",
+        "source_release_staged_parity",
+        "source_manifest_sha256",
+        "release_manifest_sha256",
+        "staged_manifest_sha256",
+        "file_count",
+        "launcher_resolution",
+        "help_checked",
+        "schemas_checked",
+        "schema_migration",
+        "hook_fixtures",
+        "permissions_checked",
+        "path_leaks",
+        "rollback"
+      ],
+      "properties": {
+        "prefix": {"type": "string", "minLength": 1},
+        "version": {"type": "string", "minLength": 1},
+        "source_release_staged_parity": {"const": true},
+        "source_manifest_sha256": {"$ref": "#/$defs/sha256"},
+        "release_manifest_sha256": {"$ref": "#/$defs/sha256"},
+        "staged_manifest_sha256": {"$ref": "#/$defs/sha256"},
+        "file_count": {"type": "integer", "minimum": 1},
+        "launcher_resolution": {"const": true},
+        "help_checked": {"const": true},
+        "schemas_checked": {"type": "integer", "minimum": 1},
+        "schema_migration": {
+          "type": "object",
+          "required": ["to_version", "journal_mode", "integrity"],
+          "properties": {
+            "to_version": {"type": "integer", "minimum": 1},
+            "journal_mode": {"enum": ["DELETE", "WAL"]},
+            "integrity": {"const": true}
+          },
+          "additionalProperties": false
+        },
+        "hook_fixtures": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "items": {"$ref": "#/$defs/hookFixture"}
+        },
+        "permissions_checked": {"const": true},
+        "path_leaks": {"const": false},
+        "rollback": {
+          "type": "object",
+          "required": ["completed", "restored_target", "observed_version"],
+          "properties": {
+            "completed": {"const": true},
+            "restored_target": {"type": "string", "minLength": 1},
+            "observed_version": {"type": "string", "minLength": 1}
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "cutover": {
+      "type": "object",
+      "required": ["pointer_schema", "generation_bound", "exclusive_lock", "fault_stages", "cases", "never_two_writers"],
+      "properties": {
+        "pointer_schema": {"const": "league.writer-pointer.v1"},
+        "generation_bound": {"const": true},
+        "exclusive_lock": {"const": true},
+        "fault_stages": {
+          "type": "array",
+          "minItems": 7,
+          "maxItems": 7,
+          "items": {"$ref": "#/$defs/faultStage"}
+        },
+        "cases": {
+          "type": "array",
+          "minItems": 8,
+          "maxItems": 8,
+          "items": {"$ref": "#/$defs/cutoverCase"}
+        },
+        "never_two_writers": {"const": true}
+      },
+      "additionalProperties": false
+    },
+    "canary": {
+      "type": "object",
+      "required": ["registered_exactly", "resource_id", "generation", "cleanup_exact", "wrong_generation_refused", "adapter_receipt", "real_runtime_proven"],
+      "properties": {
+        "registered_exactly": {"const": true},
+        "resource_id": {"type": "string", "minLength": 1},
+        "generation": {"type": "string", "minLength": 1},
+        "cleanup_exact": {"const": true},
+        "wrong_generation_refused": {"const": true},
+        "adapter_receipt": {"type": "string", "minLength": 1},
+        "real_runtime_proven": {"const": false}
+      },
+      "additionalProperties": false
+    },
+    "adapters": {
+      "type": "object",
+      "required": ["harness", "terminal_backend", "git", "github", "process_resource", "notification", "deployment", "hook"],
+      "properties": {
+        "harness": {"$ref": "#/$defs/adapterReceipt"},
+        "terminal_backend": {"$ref": "#/$defs/adapterReceipt"},
+        "git": {"$ref": "#/$defs/adapterReceipt"},
+        "github": {"$ref": "#/$defs/adapterReceipt"},
+        "process_resource": {"$ref": "#/$defs/adapterReceipt"},
+        "notification": {"$ref": "#/$defs/adapterReceipt"},
+        "deployment": {"$ref": "#/$defs/adapterReceipt"},
+        "hook": {"$ref": "#/$defs/adapterReceipt"}
+      },
+      "additionalProperties": false
+    },
+    "pending_assertions": {
+      "type": "array",
+      "minItems": 5,
+      "items": {
+        "type": "object",
+        "required": ["slice", "issue", "status", "passed", "reason"],
+        "properties": {
+          "slice": {"enum": ["request", "assignment", "watcher", "stop", "teardown"]},
+          "issue": {"type": "integer", "minimum": 1},
+          "status": {"const": "pending"},
+          "passed": {"const": false},
+          "reason": {"type": "string", "minLength": 1}
+        },
+        "additionalProperties": false
+      }
+    },
+    "runtime_claims": {
+      "type": "array",
+      "minItems": 5,
+      "items": {
+        "type": "object",
+        "required": ["runtime", "status", "mock_proof"],
+        "properties": {
+          "runtime": {"enum": ["codex", "cursor", "pi", "herdr", "tmux"]},
+          "status": {"const": "unverified"},
+          "mock_proof": {"const": false}
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "hookFixture": {
+      "type": "object",
+      "required": ["harness", "fixture_consumed", "configuration_mutated", "runtime_support_proven"],
+      "properties": {
+        "harness": {"enum": ["codex", "cursor", "pi"]},
+        "fixture_consumed": {"const": true},
+        "configuration_mutated": {"const": false},
+        "runtime_support_proven": {"const": false}
+      },
+      "additionalProperties": false
+    },
+    "faultStage": {
+      "enum": [
+        "lock_acquired",
+        "backup_recorded",
+        "old_writer_quiesced",
+        "pointer_prepared",
+        "pointer_switched",
+        "new_writer_activated",
+        "generation_verified"
+      ]
+    },
+    "operationHistory": {
+      "type": "object",
+      "required": ["state", "at"],
+      "properties": {
+        "state": {"enum": ["planned", "executing", "completed", "blocked"]},
+        "at": {"type": "string", "format": "date-time"},
+        "stage": {"type": ["string", "null"]},
+        "resumable": {"type": "boolean"},
+        "outcome": {"enum": ["old", "new"]}
+      },
+      "additionalProperties": false
+    },
+    "cutoverCase": {
+      "type": "object",
+      "required": ["fault_stage", "terminal_state", "final_generation", "history", "max_active_writers", "lock_exclusive", "coherent"],
+      "properties": {
+        "fault_stage": {"oneOf": [{"$ref": "#/$defs/faultStage"}, {"type": "null"}]},
+        "terminal_state": {"enum": ["completed", "blocked"]},
+        "final_generation": {"enum": ["generation-old", "generation-new"]},
+        "history": {"type": "array", "minItems": 3, "items": {"$ref": "#/$defs/operationHistory"}},
+        "max_active_writers": {"type": "integer", "minimum": 1, "maximum": 1},
+        "lock_exclusive": {"const": true},
+        "coherent": {"const": true}
+      },
+      "additionalProperties": false
+    },
+    "adapterReceipt": {
+      "type": "object",
+      "required": ["kind", "calls", "real"],
+      "properties": {
+        "kind": {"type": "string", "pattern": "^fake-"},
+        "calls": {"type": "integer", "minimum": 1},
+        "real": {"const": false}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

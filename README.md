@@ -48,13 +48,17 @@ Requirements: Python 3, Git, and a POSIX shell.
 ```sh
 make test
 make test-storage
+make test-acceptance
+make test-affected
 make test-all
 ```
 
 `make test` runs the inherited baseline once, `make test-storage` runs the
-storage slice once, and `make test-all` composes both without overlapping test
-lists. Every target uses temporary fixtures only. It does not install files,
-contact GitHub, mutate global agent state, or operate live Herdr/tmux sessions.
+storage slice once, `make test-acceptance` runs the isolated issue-#23
+foundation, and `make test-affected` composes storage plus acceptance without
+overlap. `make test-all` composes baseline plus the affected suite. Every
+target uses temporary fixtures only. It does not install files, contact GitHub,
+mutate global agent state, or operate live Herdr/tmux sessions.
 
 The repository does not yet own live installation. The currently installed
 watcher and rollback process remain owned by `terminal-environment-toolkit`
@@ -105,6 +109,10 @@ Issue [#23](https://github.com/Vinosaamaa/league-of-orchestrator/issues/23)
 owns the isolated acceptance harness, staged installation, read-only live-state
 shadow, reversible pointer switch, and separately authorized cutover. Until
 those gates pass, the filesystem watcher remains the only live authority.
+The repository-local foundation and its one explicit-root command are
+documented in [isolated acceptance](docs/ACCEPTANCE.md). It records the later
+request, assignment, watcher, Stop, and teardown slices as pending and does not
+claim real Codex, Cursor, Pi, Herdr, or tmux support from fake adapters.
 
 ## Project map
 
@@ -114,6 +122,7 @@ those gates pass, the filesystem watcher remains the only live authority.
 - [JSON/JSONL dependency audit](docs/research/json-jsonl-state-dependency-audit.md)
 - [SQLite prototype and benchmark](docs/research/sqlite-storage-prototype-benchmark.md)
 - [Reversible migration and install boundary](docs/MIGRATION.md)
+- [Isolated acceptance and reversible cutover foundation](docs/ACCEPTANCE.md)
 - [Exact source provenance](docs/PROVENANCE.md)
 - [Baseline versus planned issues](docs/ROADMAP.md)
 

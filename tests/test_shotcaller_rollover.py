@@ -253,6 +253,18 @@ def test_guarded_switch_crash_retry_and_drain(root: Path) -> None:
         assert prepared["snapshot"]["count"] == len(context["champion_ids"])
         assert prepared["snapshot"]["page_bound"] == 2
         assert "rows" not in prepared["snapshot"]
+        default_page = store.rollover_bindings(prepared["operation_id"], AT3)
+        assert default_page["page"]["count"] == 2
+        try:
+            store.rollover_bindings(
+                prepared["operation_id"],
+                AT3,
+                cursor=default_page["next_cursor"] + "x",
+            )
+        except StorageRefusal as exc:
+            assert exc.code == "invalid_cursor"
+        else:
+            raise AssertionError("tampered snapshot cursor was accepted")
         store.activate_callsign(
             context["successor"]["assignment_id"],
             1,

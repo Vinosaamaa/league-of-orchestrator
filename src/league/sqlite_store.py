@@ -1746,7 +1746,7 @@ class SQLiteStorage(SQLiteTransactionCore):
         at: str,
         *,
         cursor: Optional[str] = None,
-        limit: int = 100,
+        limit: Optional[int] = None,
     ) -> dict[str, Any]:
         return rollover_bindings_operation(
             self, operation_id, at, cursor=cursor, limit=limit

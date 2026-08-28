@@ -322,16 +322,18 @@ def reconcile_callsign_pool(
                     "callsign_history_immutable",
                     "persisted callsigns must remain in the catalog and may only be disabled",
                 )
-            observed = {
-                name: tuple(
-                    row[0]
-                    for row in store.connection.execute(
-                        "SELECT capability FROM callsign_capabilities WHERE callsign=? ORDER BY capability",
-                        (name,),
-                    )
-                )
-                for name in existing
-            }
+            observed_lists: dict[str, list[str]] = {name: [] for name in existing}
+            for row in store.connection.execute(
+                """
+                SELECT cc.callsign,cc.capability
+                  FROM callsign_capabilities cc
+                  JOIN callsign_queue q ON q.callsign=cc.callsign
+                 WHERE q.pool_role=? ORDER BY cc.callsign,cc.capability
+                """,
+                (role,),
+            ):
+                observed_lists[str(row["callsign"])].append(str(row["capability"]))
+            observed = {name: tuple(values) for name, values in observed_lists.items()}
             exact = set(existing) == set(normalized) and all(
                 existing[name] == normalized[name][0] and observed[name] == normalized[name][1]
                 for name in existing
@@ -427,6 +429,19 @@ def _availability(store: Any, role: str, required: tuple[str, ...]) -> tuple[Any
     ).fetchall()
     active = sum(row["state"] == "active" for row in rows)
     reserved = sum(row["state"] == "reserved" for row in rows)
+    offered_by_callsign: dict[str, set[str]] = {}
+    for capability_row in store.connection.execute(
+        """
+        SELECT cc.callsign,cc.capability
+          FROM callsign_capabilities cc
+          JOIN callsign_queue q ON q.callsign=cc.callsign
+         WHERE q.pool_role=? ORDER BY cc.callsign,cc.capability
+        """,
+        (role,),
+    ):
+        offered_by_callsign.setdefault(str(capability_row["callsign"]), set()).add(
+            str(capability_row["capability"])
+        )
     reasons: dict[str, int] = {}
     incompatible = 0
     selected = None
@@ -437,13 +452,7 @@ def _availability(store: Any, role: str, required: tuple[str, ...]) -> tuple[Any
             incompatible += 1
             reasons["disabled"] = reasons.get("disabled", 0) + 1
             continue
-        offered = {
-            item[0]
-            for item in store.connection.execute(
-                "SELECT capability FROM callsign_capabilities WHERE callsign=?",
-                (row["callsign"],),
-            )
-        }
+        offered = offered_by_callsign.get(str(row["callsign"]), set())
         missing = [item for item in required if item not in offered]
         if missing:
             incompatible += 1

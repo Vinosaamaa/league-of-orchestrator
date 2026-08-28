@@ -56,12 +56,13 @@ STATEMENTS = (
     """,
     """
     WITH classified AS (
-      SELECT c.callsign,c.pool_role,
+      SELECT c.callsign,c.pool_role,m.seed,
              CASE WHEN l.callsign IS NULL THEN 'available'
                   WHEN a.agent_id IS NULL OR a.kind='unbound' THEN 'reserved'
                   ELSE 'active' END queue_state,
              COALESCE(l.reserved_at,c.last_released_at,'1970-01-01T00:00:00Z') changed_at
         FROM callsigns c
+        JOIN callsign_queue_meta m ON m.pool_role=c.pool_role
         LEFT JOIN callsign_leases l ON l.callsign=c.callsign
         LEFT JOIN agent_instances a ON a.agent_id=l.agent_id
     ), positioned AS (
@@ -69,12 +70,7 @@ STATEMENTS = (
              CASE WHEN queue_state='active' THEN NULL ELSE
                ROW_NUMBER() OVER (
                  PARTITION BY pool_role
-                 ORDER BY league_shuffle_key(
-                            CASE pool_role
-                              WHEN 'shotcaller' THEN 'league.callsign.queue.v1:shotcaller'
-                              WHEN 'champion' THEN 'league.callsign.queue.v1:champion'
-                              ELSE 'league.callsign.queue.v1:hidden-worker' END,
-                            pool_role,callsign),callsign
+                 ORDER BY league_shuffle_key(seed,pool_role,callsign),callsign
                ) - 1 END queue_position
         FROM classified
     )
@@ -92,33 +88,32 @@ STATEMENTS = (
       FROM positioned p
     """,
     """
+    WITH ordered AS (
+      SELECT pool_role,callsign,
+             LAG(callsign) OVER (PARTITION BY pool_role ORDER BY queue_position) previous
+        FROM callsign_queue WHERE queue_position IS NOT NULL
+    ), pool_order AS (
+      SELECT pool_role,COUNT(*) queue_count,
+             SUM(CASE WHEN previous IS NOT NULL AND previous>callsign THEN 1 ELSE 0 END)
+               inversions
+        FROM ordered GROUP BY pool_role
+    )
     UPDATE callsign_queue SET queue_position=queue_position+1000000
      WHERE pool_role IN (
-       SELECT role.pool_role
-         FROM callsign_queue role
-        WHERE role.queue_position IS NOT NULL
-        GROUP BY role.pool_role
-       HAVING COUNT(*)>1 AND NOT EXISTS (
-         SELECT 1 FROM callsign_queue earlier
-         JOIN callsign_queue later ON later.pool_role=earlier.pool_role
-          AND later.queue_position>earlier.queue_position
-        WHERE earlier.pool_role=role.pool_role
-          AND earlier.callsign>later.callsign
-       )
+       SELECT pool_role FROM pool_order WHERE queue_count>1 AND inversions=0
      )
     """,
     """
-    UPDATE callsign_queue
-       SET queue_position=(queue_position-1000000-1+(
-         SELECT COUNT(*) FROM callsign_queue members
-          WHERE members.pool_role=callsign_queue.pool_role
-            AND members.queue_position IS NOT NULL
-       ))%(
-         SELECT COUNT(*) FROM callsign_queue members
-          WHERE members.pool_role=callsign_queue.pool_role
-            AND members.queue_position IS NOT NULL
-       )
-     WHERE queue_position>=1000000
+    WITH pool_counts AS (
+      SELECT pool_role,COUNT(*) queue_count FROM callsign_queue
+       WHERE queue_position IS NOT NULL GROUP BY pool_role
+    )
+    UPDATE callsign_queue AS queue
+       SET queue_position=(queue.queue_position-1000000-1+pool_counts.queue_count)
+                          %pool_counts.queue_count
+      FROM pool_counts
+     WHERE queue.queue_position>=1000000
+       AND pool_counts.pool_role=queue.pool_role
     """,
     "ALTER TABLE callsign_assignments RENAME TO callsign_assignments_legacy",
     """

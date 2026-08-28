@@ -9,7 +9,7 @@ Issue #23 retains those gates.
 
 The slice is contiguous migration v6,
 `guarded-rollover-and-shuffled-callsign-queue`, checksum
-`e2a2a2ec80840923f351b96f40c16e45c4c3d156567fb585254c5be9c73efa0d`.
+`194d02864c5aa8587e6c0d6b1c4af7f452c8e878822afc0483517f9eaa12ddd2`.
 Canonical project/Squad
 migration v5 remains unchanged. Migration v6 evolves the existing callsign
 assignment and event tables rather than creating parallel assignment, event,

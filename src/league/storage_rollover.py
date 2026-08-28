@@ -30,7 +30,7 @@ class RolloverStorage(Protocol):
         at: str,
         *,
         cursor: Optional[str] = None,
-        limit: int = 100,
+        limit: Optional[int] = None,
     ) -> dict[str, Any]: ...
 
     def acknowledge_rollover(

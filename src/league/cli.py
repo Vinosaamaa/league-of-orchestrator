@@ -199,7 +199,11 @@ def _add_rollover_commands(groups: argparse._SubParsersAction) -> None:
     )
     bindings.add_argument("--operation-id", required=True)
     bindings.add_argument("--cursor")
-    bindings.add_argument("--limit", type=int, default=100)
+    bindings.add_argument(
+        "--limit",
+        type=int,
+        help="Page size; defaults to the immutable snapshot page bound.",
+    )
     bindings.add_argument("--at", required=True)
     acknowledge = commands.add_parser(
         "acknowledge", help="Acknowledge exact successor identity, capability, and snapshot coverage."

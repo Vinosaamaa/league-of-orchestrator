@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
+import hmac
 import json
 import re
 import sqlite3
@@ -214,9 +217,49 @@ def _snapshot_digest(rows: Sequence[Mapping[str, Any]]) -> str:
 
 
 def _cursor(snapshot_id: str, offset: int, snapshot_digest: str) -> str:
-    return digest(
-        {"snapshot_id": snapshot_id, "offset": offset, "snapshot_digest": snapshot_digest}
+    value = {
+        "offset": offset,
+        "signature": digest(
+            {"snapshot_id": snapshot_id, "offset": offset, "snapshot_digest": snapshot_digest}
+        ),
+    }
+    return base64.urlsafe_b64encode(stable_json(value).encode("utf-8")).decode("ascii").rstrip("=")
+
+
+def _cursor_offset(cursor: str, snapshot: Any) -> int:
+    if not isinstance(cursor, str) or not 1 <= len(cursor) <= 512:
+        raise StorageRefusal("invalid_cursor", "snapshot cursor is invalid or belongs elsewhere")
+    try:
+        padding = "=" * (-len(cursor) % 4)
+        value = json.loads(
+            base64.b64decode(cursor + padding, altchars=b"-_", validate=True).decode("utf-8")
+        )
+    except (binascii.Error, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise StorageRefusal(
+            "invalid_cursor", "snapshot cursor is invalid or belongs elsewhere"
+        ) from exc
+    if not isinstance(value, dict) or set(value) != {"offset", "signature"}:
+        raise StorageRefusal("invalid_cursor", "snapshot cursor is invalid or belongs elsewhere")
+    offset = value["offset"]
+    signature = value["signature"]
+    total = int(snapshot["total_count"])
+    if (
+        isinstance(offset, bool)
+        or not isinstance(offset, int)
+        or not 1 <= offset < total
+        or not isinstance(signature, str)
+    ):
+        raise StorageRefusal("invalid_cursor", "snapshot cursor is invalid or belongs elsewhere")
+    expected = digest(
+        {
+            "snapshot_id": snapshot["snapshot_id"],
+            "offset": offset,
+            "snapshot_digest": snapshot["digest"],
+        }
     )
+    if not hmac.compare_digest(signature, expected):
+        raise StorageRefusal("invalid_cursor", "snapshot cursor is invalid or belongs elsewhere")
+    return offset
 
 
 def _operation(store: Any, operation_id: str) -> Any:
@@ -502,7 +545,7 @@ def rollover_bindings(
     at: str,
     *,
     cursor: Optional[str] = None,
-    limit: int = 100,
+    limit: Optional[int] = None,
 ) -> dict[str, Any]:
     timestamp(at, "snapshot read time")
     operation = _operation(store, operation_id)
@@ -516,19 +559,13 @@ def rollover_bindings(
         raise StorageRefusal(
             "active_champion_snapshot_stale", "active Champion binding snapshot has expired"
         )
-    if not 1 <= limit <= int(snapshot["page_bound"]):
+    page_limit = int(snapshot["page_bound"]) if limit is None else limit
+    if not isinstance(page_limit, int) or isinstance(page_limit, bool) or not 1 <= page_limit <= int(snapshot["page_bound"]):
         raise StorageRefusal("invalid_limit", "snapshot limit exceeds its configured page bound")
     total = int(snapshot["total_count"])
     offset = 0
     if cursor is not None:
-        matches = [
-            candidate
-            for candidate in range(1, total + 1)
-            if _cursor(snapshot["snapshot_id"], candidate, snapshot["digest"]) == cursor
-        ]
-        if len(matches) != 1:
-            raise StorageRefusal("invalid_cursor", "snapshot cursor is invalid or belongs elsewhere")
-        offset = matches[0]
+        offset = _cursor_offset(cursor, snapshot)
     rows = [
         dict(row)
         for row in store.connection.execute(
@@ -537,7 +574,7 @@ def rollover_bindings(
               FROM active_champion_snapshot_rows
              WHERE snapshot_id=? AND ordinal>=? ORDER BY ordinal LIMIT ?
             """,
-            (snapshot["snapshot_id"], offset, limit),
+            (snapshot["snapshot_id"], offset, page_limit),
         )
     ]
     next_offset = offset + len(rows)
@@ -599,21 +636,25 @@ def _verify_pages(
         raise StorageRefusal(
             "active_champion_snapshot_incomplete", "snapshot pages do not cover the frozen digest"
         )
-    canonical = [
-        dict(row)
-        for row in store.connection.execute(
-            """
-            SELECT champion_agent_id,task_id,callsign,binding_digest,row_digest
-              FROM active_champion_snapshot_rows WHERE snapshot_id=? ORDER BY ordinal
-            """,
-            (snapshot["snapshot_id"],),
-        )
-    ]
-    if canonical != all_rows:
+    canonical = store.connection.execute(
+        """
+        SELECT champion_agent_id,task_id,callsign,binding_digest,row_digest
+          FROM active_champion_snapshot_rows WHERE snapshot_id=? ORDER BY ordinal
+        """,
+        (snapshot["snapshot_id"],),
+    )
+    for expected in all_rows:
+        observed = canonical.fetchone()
+        if observed is None or dict(observed) != expected:
+            raise StorageRefusal(
+                "active_champion_snapshot_incomplete",
+                "snapshot page rows differ from canonical rows",
+            )
+    if canonical.fetchone() is not None:
         raise StorageRefusal(
             "active_champion_snapshot_incomplete", "snapshot page rows differ from canonical rows"
         )
-    return canonical
+    return all_rows
 
 
 def acknowledge_rollover(

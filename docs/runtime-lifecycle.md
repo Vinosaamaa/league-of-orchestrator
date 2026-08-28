@@ -9,6 +9,14 @@ claim a real harness/backend canary. Issue
 [#23](https://github.com/Vinosaamaa/league-of-orchestrator/issues/23) owns that
 final gate.
 
+The canonical request-lifecycle migrations remain versions 1, 2, and 3.
+This slice is contiguous migration v4,
+`adapter-runtime-cleanup-and-routing`, checksum
+`01892d93311ce0b5486077b00e6d3adea60fd3c91006663358317260ad21cd2d`.
+It evolves v3's existing one-per-task `cleanup_obligations` row with optional
+verified-teardown metadata; it does not create a parallel request, assignment,
+outbox, watcher, or Stop lifecycle.
+
 ## Adapter boundary
 
 Core session and endpoint identities are `namespace:opaque-value` strings;
@@ -49,8 +57,10 @@ The planner selects one versioned policy:
 | rejected/cancelled | the applicable local evidence plus explicit decision; no invented PR/deploy proof |
 | failed | the applicable local evidence plus preserved-failure proof |
 
-A completed, rejected, cancelled, or failed task creates a separate
-`cleanup_pending` obligation. The planner validates every policy field,
+A completed, rejected, cancelled, or failed task advances the task's separate
+cleanup obligation to `cleanup_pending`. If the request lifecycle already
+created that obligation, v4 preserves its identity and advances its version.
+The planner validates every policy field,
 resource, pending-decision gate, and legacy identity pointer before it writes a
 plan. It then claims one cleanup revision whose actions are fixed in this
 order: archive validated identity/policy/evidence; task-owned resource actions;
@@ -91,7 +101,7 @@ success, corrections, latency, and cost by routing decision and role. Storage
 atomically permits only one child for each prior decision. Outcome retries are
 idempotent by `outcome_id` only when every recorded field matches.
 
-The issues #3/#4/#5/#17 assignment branch consumes this API. This slice does
+The merged #3/#4/#5/#17 assignment slice can consume this API. This slice does
 not create prompt inbox, request claim, assignment, outbox, or Stop-hook state.
 
 ## Verification

@@ -1,7 +1,7 @@
-# Proposed SQLite request lifecycle
+# SQLite request lifecycle
 
-> **Status: proposed v1 design for review under issue #21.** This document is
-> not an implementation claim. Issue #19 owns implementation, issue #23 owns
+> **Status: canonical v1 design accepted and merged under issue #21.** This document is
+> the invariant source for request-lifecycle implementation. Issue #23 owns
 > isolated acceptance and cutover, and a separate explicit decision is required
 > before any live install or migration.
 

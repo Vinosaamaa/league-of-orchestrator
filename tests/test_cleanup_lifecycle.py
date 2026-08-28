@@ -379,6 +379,34 @@ def test_resource_registration_and_cleanup_plan_are_atomic(root: Path) -> None:
         )
 
 
+def test_request_cleanup_obligation_advances_into_verified_teardown(root: Path) -> None:
+    _, state, _ = seeded_state(root, "request-cleanup-bridge")
+    with SQLiteStorage(state) as store:
+        store.connection.execute(
+            """
+            INSERT INTO cleanup_obligations
+              (cleanup_obligation_id,task_id,cleanup_state,required_policy,next_action,version,updated_at)
+            VALUES('cleanup:request-bridge',?,'pending','terminal_task','Reconcile exact task resources',1,?)
+            """,
+            (TASK_ID, AT3),
+        )
+        value = manifest("local_git", "completed", with_resources=False)
+        value["expected_cleanup_version"] = 1
+        result = CleanupPlanner(store).plan(
+            value, operation_id="operation:request-cleanup-bridge", at=AT4
+        )
+        assert result["state"] == "cleanup_pending"
+        obligation = store.connection.execute(
+            "SELECT * FROM cleanup_obligations WHERE task_id=?", (TASK_ID,)
+        ).fetchone()
+        assert obligation["cleanup_obligation_id"] == "cleanup:request-bridge"
+        assert obligation["version"] == 2
+        assert obligation["owner_id"] == CHAMPION_ID
+        assert obligation["task_class"] == "local_git"
+        operation = store.cleanup_operation("operation:request-cleanup-bridge")
+        assert operation is not None and operation["cleanup_revision"] == 2
+
+
 def planned_execution(root: Path, suffix: str) -> tuple[SQLiteStorage, CleanupExecutor, dict, dict, list[str]]:
     _, state, _ = seeded_state(root, suffix)
     store = SQLiteStorage(state)

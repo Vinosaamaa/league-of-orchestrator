@@ -13,8 +13,9 @@
   scheduler.
 
 Disposable Shotcaller handoff and project aliases remain planned work. The
-storage layer can represent exact projects, tasks, Squads, and owner transfers;
-it does not implement request triage or runtime handoff policy.
+storage layer now implements the canonical prompt/request lifecycle, exact
+owner return, adapter-neutral runtime binding, and recoverable teardown; it
+does not implement autonomous planning or runtime handoff.
 
 ## Current modules
 
@@ -29,23 +30,23 @@ The repository keeps the proven runtime and new storage boundary separate:
 - `schema/`, `examples/`, and `config/` define the public authoring surface.
 - `tests/` exercises the imported behavior with temporary synthetic fixtures.
 - `src/league/storage.py` composes the only domain-facing persistence interface
-  from cohesive administrative, lifecycle, delivery, and transfer protocols;
+  from cohesive administrative, lifecycle, request, assignment, outbox,
+  watcher, delivery, and transfer protocols;
   `storage_types.py` owns the stable refusal and typed import-plan contract.
 - `src/league/sqlite_store.py` is the sole SQLite implementation and facade.
   `sqlite_core.py` owns the shared transaction mechanics; focused
-  `sqlite_*_ops.py` modules own lifecycle, delivery, import, and export SQL,
+  `sqlite_*_ops.py` modules own lifecycle, request, assignment, delivery,
+  watcher, import, and export SQL,
   while the facade owns connection policy, migrations, integrity, and backup.
-- `adapter_types.py`, `adapters.py`, and `runtime.py` own opaque namespaced
-  identity, capability registration, and the generic harness/backend runtime
-  sequence. They contain no Codex UUID, Herdr, or tmux branch in lifecycle core.
-- `cleanup.py` owns task-class policy selection, typed-resource rules, ordered
-  proof-first plans, and crash-resumable adapter execution;
-  `sqlite_runtime_ops.py` owns the matching bindings, routing evidence,
-  cleanup obligations, fences, actions, and immutable receipts.
-- `routing.py` exposes the assignment-neutral semantic routing API. It neither
-  creates assignments nor imports request lifecycle code.
 - `src/league/importer.py` strictly decodes the explicit issue-#18 manifest and
   produces an in-memory plan; it never opens a database or writes legacy files.
+- `src/league/request_services.py` owns injected visible-launch and delivery
+  adapter boundaries; production adapter selection remains outside the store.
+- `src/league/adapters.py`, `adapter_types.py`, and `runtime.py` own opaque
+  capability contracts and orchestration over injected harness and terminal
+  adapters. `cleanup.py` and `routing.py` own proof-first teardown policy and
+  assignment-neutral model/effort selection; `sqlite_runtime_ops.py` persists
+  their bindings, decisions, resources, operations, and receipts.
 - `src/league/cli.py` and `bin/league` expose stable domain commands and
   versioned JSON envelopes without a general query or SQL command.
 - `schema/league-*.schema.json` defines command, import-report, and export
@@ -53,9 +54,9 @@ The repository keeps the proven runtime and new storage boundary separate:
 
 This layout is intentionally a small modular monolith, not a set of shallow
 database wrappers. Issue
-[#7](https://github.com/Vinosaamaa/league-of-orchestrator/issues/7) supplies the
-repository-local adapter interfaces and capability matrix; issue #23 retains
-the isolated genuine-canary and cutover gates.
+[#7](https://github.com/Vinosaamaa/league-of-orchestrator/issues/7) owns the
+repository-local adapter interfaces; issue #23 still owns installed-driver and
+real-runtime acceptance against those contracts.
 
 ## Durable flow
 
@@ -96,16 +97,30 @@ The repository-local SQLite path is separately testable:
    ordered cursors without a second complete in-memory copy. Rollback export is
    deterministic, written mode `0600` beneath the explicit state root, and
    reported by digest without exposing its path.
-5. Schema v3 adds runtime bindings, typed task resources, cleanup
-   obligations/operations/actions/receipts, and routing decisions/outcomes.
-   Adapter effects stay outside transactions and are bridged by fences and
-   immutable receipts.
-   The parallel request-lifecycle branch also originated from schema v2 and
-   currently proposes its own v3. Integration must assign the two migrations
-   contiguous final numbers and recompute the renumbered candidate checksum
-   before shared release history; an already-applied migration checksum is
-   never rewritten or silently accepted.
-6. Configuration, hooks, guides, launchers, immutable failure/teardown/archive
+5. Prompt capture is idempotent by adapter/session/source event. Complete
+   triage creates ordered prompt items and independently finishable requests;
+   request claims, execution mode, request state, and task state stay separate.
+6. Routes, owner results, task transitions, and their exact event/outbox rows
+   commit atomically. Transport is at least once; unique recipient receipts
+   apply the database effect once. Request, dispatch, and watcher leases remain
+   distinct.
+7. Assignment is recoverable across pending, launching, active, blocked, and
+   cleanup-pending states. Active requires one exact verified Champion receipt.
+8. The role-aware Stop decision combines unresolved requests, active tasks,
+   assignments, deliveries, and cleanup, while blocking at most once per fresh
+   wait generation and yielding to ordinary user messages.
+9. Schema v4 evolves v3's one-per-task cleanup obligation rather than adding a
+   competing lifecycle record. Request/assignment paths may create the initial
+   obligation; verified teardown atomically advances it with ownership,
+   task-class, disposition, one cleanup operation, and ordered actions.
+10. Runtime bindings persist opaque namespaced session/endpoint identity,
+   endpoint generation, and declared capabilities. Cleanup validates every
+   action before its first external effect and then records immutable,
+   fence-bound receipts for crash-safe resumption.
+11. Routing records semantic tier, configured model/effort, explicit overrides,
+   reason, and at most one atomically unique escalation child. It exposes no
+   request claim, assignment, or outbox state machine.
+12. Configuration, hooks, guides, launchers, immutable failure/teardown/archive
    evidence, installer backups, and other-product state remain files.
 
 `src/agent_watcher.py` does not import `league`. The filesystem baseline is the
@@ -116,19 +131,22 @@ generation; there is no dual canonical write path.
 explicit-root sentinels, deterministic fake adapters, fixture migration parity,
 staged release/rollback proof, a sandbox-only generation pointer and cutover
 lock, fault-injected operation receipts, and exact fake canary cleanup. It has
-no global path defaults and exposes no canonical cutover operation. The request,
-assignment, watcher, Stop, and teardown extension assertions remain pending
-until their owning issues merge.
+no global path defaults and exposes no canonical cutover operation. The
+request, assignment, watcher, Stop, and teardown acceptance-receipt extensions
+remain pending. All five are implemented and tested separately in this
+repository-local candidate; they are not wired into a cutover receipt or live
+runtime by this slice.
 
 ## Portability boundary
 
-The repository-local lifecycle core is adapter-neutral and accepts opaque
-namespaced session/endpoint identity. Named Codex, Herdr, and tmux compatibility
-contracts preserve the baseline capability surface, while Pi proves the shared
-flow only through deterministic doubles. The imported watcher and installed
-runtime remain Codex/Herdr/tmux-specific and unchanged. Agent/backend agnosticism
-therefore remains unverified until issue #23 runs a fully isolated genuine
-canary and an authorized cutover; this branch makes no stronger claim.
+The repository-local runtime core uses opaque namespaced session identity and
+declared capabilities. Codex+Herdr and Codex+tmux remain named contracts, and a
+deterministic Pi adapter proves the shared lifecycle without being labeled a
+real-runtime canary. The imported live watcher is unchanged: its Champion UUID,
+Codex hook, Herdr/tmux branch, and Herdr launch assumptions remain until issue
+#23 verifies and authorizes a cutover. Provider model names remain configuration
+data. Repository-local portability is implemented without claiming installed
+portability.
 
 ## Dependencies and side effects
 

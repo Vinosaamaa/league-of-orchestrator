@@ -441,11 +441,42 @@ def plan_cleanup(store: Any, plan: Mapping[str, Any]) -> dict[str, Any]:
                 obligation_id = str(obligation["cleanup_obligation_id"])
                 if int(obligation["version"]) != expected:
                     raise StorageRefusal("version_conflict", "cleanup obligation expected-version precondition failed")
-                if obligation["cleanup_state"] == "cleanup_completed":
+                if obligation["cleanup_state"] in {"completed", "cleanup_completed"}:
                     raise StorageRefusal("cleanup_completed", "cleanup obligation is already complete")
-                if obligation["required_policy"] != plan["required_policy"]:
-                    raise StorageRefusal("cleanup_policy_conflict", "cleanup policy changed for an existing obligation")
-                cleanup_revision = expected
+                if obligation["owner_id"] is None:
+                    cleanup_revision = expected + 1
+                    store.connection.execute(
+                        """
+                        UPDATE cleanup_obligations
+                           SET owner_id=?,task_class=?,disposition=?,cleanup_state='cleanup_pending',
+                               required_policy=?,next_action='Execute the verified cleanup plan.',
+                               version=?,updated_at=?
+                         WHERE cleanup_obligation_id=? AND version=? AND owner_id IS NULL
+                        """,
+                        (
+                            plan["owner_id"],
+                            plan["task_class"],
+                            plan["disposition"],
+                            plan["required_policy"],
+                            cleanup_revision,
+                            plan["at"],
+                            obligation_id,
+                            expected,
+                        ),
+                    )
+                else:
+                    if obligation["required_policy"] != plan["required_policy"]:
+                        raise StorageRefusal("cleanup_policy_conflict", "cleanup policy changed for an existing obligation")
+                    if (
+                        obligation["owner_id"] != plan["owner_id"]
+                        or obligation["task_class"] != plan["task_class"]
+                        or obligation["disposition"] != plan["disposition"]
+                    ):
+                        raise StorageRefusal(
+                            "cleanup_identity_mismatch",
+                            "cleanup obligation ownership or disposition changed",
+                        )
+                    cleanup_revision = expected
             existing = store.connection.execute(
                 "SELECT * FROM cleanup_operations WHERE cleanup_obligation_id=? AND cleanup_revision=?",
                 (obligation_id, cleanup_revision),

@@ -18,7 +18,7 @@ used for that comparison.
 | --- | --- | --- | --- |
 | `src/agent_watcher.py` | `agent_watcher.py` | `ab77f3f0d97cb1b09e34c005c45e90b94a8c0e0612f115169bc62827e524e0d7` | None; byte-for-byte import. |
 | `bin/agent-watcher` | `agent-watcher` | `3a049f5315e131bda3deed22cbd18f5b14f7d54b2821fcb8dddbda3d9fbba034` | Launch target changed to `src/agent_watcher.py`. |
-| `config/agent-routing.example.json` | `global-agent-instructions/agent-routing.example.json` | `2d475dd727526336b6635d4cf7b9af14c7e2497456ebdff3117ae4adcea3bbdb` | Deliberately upgraded to schema 2 for strongest-worker baseline, evaluation-gated downgrade, and one escalation. The installed legacy router is unchanged. |
+| `config/agent-routing.example.json` | `global-agent-instructions/agent-routing.example.json` | `2d475dd727526336b6635d4cf7b9af14c7e2497456ebdff3117ae4adcea3bbdb` | None. |
 | `tests/test_agent_watcher.py` | `shell-completions/test-agent-watcher.py` | `203540768c12be053871cf287f5c7a32cf28319eac9be0f2e0d38f634fabad70` | CLI path, description, synthetic identity, and test-only subprocess ceilings. |
 | `tests/test_lifecycle.py` | `shell-completions/test-agent-lifecycle.py` | `3bf652906b86f6eb164a43a80625587d6f0f68d35dd3033fe7d67b92251dc780` | CLI path plus synthetic launch identity, URLs, endpoints, and secret-rejection sentinels. |
 | `tests/test_delivery.py` | `shell-completions/test-agent-delivery.py` | `9c321d6410455b4246f38415bd4934d2e1d6f9ab6c67db5c76d4995f01763e9c` | CLI path, description, synthetic identity, and test-only subprocess ceiling. |
@@ -42,12 +42,11 @@ These toolkit files were inventoried but not copied:
 | `AGENT_ORCHESTRATION_REFERENCE.md` | `ec2eff727ac52d23434d92c1f07ee7806206b4574fb7e33dbd3bf30040baccd4` | Installed global policy is not silently replaced. |
 | `global-agent-instructions/shared-AGENTS.md` | `e1dff2fcb7fac2afe4704584221d5fb19a25b21c887c2cf48792ad69804f4c35` | Global guide ownership changes require a release gate. |
 
-The Roster status/update examples and their schemas are new, synthetic
-authoring artifacts derived from the runtime validator rather than copies of
-live Roster records. They document the optional paired `routing_name` and
-`display_agent` fields; runtime validation additionally requires the routing
-name to equal the lowercase callsign. The routing example is the deliberately
-adapted import listed above, while its schema is repository-local.
+The example and schema files in this repository are new, synthetic authoring
+artifacts derived from the runtime validator rather than copies of live Roster
+records. They document the optional paired `routing_name` and `display_agent`
+fields; runtime validation additionally requires the routing name to equal the
+lowercase callsign.
 
 ## Storage-decision evidence refresh
 
@@ -95,28 +94,36 @@ contracts testable in restricted CI and agent sandboxes that deny host process
 inspection. The adapter is test-only; production process inspection and
 behavior are unchanged.
 
-## Issues #7/#11/#14 implementation provenance
+## Grouped request-lifecycle implementation provenance
 
-The adapter, runtime, cleanup, routing, runtime-storage, schema-v3, CLI, and
-focused test files are original League implementation. No source or installed
-watcher file, live JSON record, multiplexer session, browser/profile, global
-hook, or canonical pointer was changed.
+The issue-#21 request-lifecycle design merged at `ff72125` is the canonical
+invariant source for this grouped #3/#4/#5/#17 slice. The third reviewed SQLite
+migration, request/assignment/outbox/watcher operation modules, injected
+adapter services, CLI families, schemas, and focused tests are original League
+implementation. They extend the merged issue-#19 repository-local facade and
+do not modify `src/agent_watcher.py`, installed files, global hooks, live
+Roster/callsign/watcher state, or canonical authority. Issue #23 retains all
+installation, live import, real-runtime canary, reversible cutover, and rollback
+ownership.
 
-The deliberate routing difference is narrow and covered by
-`tests/test_model_routing.py`: the repository-local `ModelRouter` keeps bounded
-work on the strongest worker baseline until representative downgrade evidence
-is explicitly approved. The imported `agent-watcher route-model` compatibility
-path remains byte-behavior compatible and is not installed from this branch.
+The grouped implementation was squash-merged from PR #31 as
+`fa2c5f862c5bd223057a6b9b34f5b11607a747be`. Its schema migrations 1, 2, and 3
+remain byte-for-byte canonical in this descendant; the runtime slice does not
+renumber or rewrite their names, statements, or checksums.
 
-The Pi lifecycle evidence comes only from `tests/runtime_doubles.py`; it is an
-isolated deterministic double, not a real Pi runtime claim. Issue #23 retains
-the real canary, staged install, global cutover, and rollback gates.
+## Runtime-lifecycle implementation provenance
 
-The parallel issues #3/#4/#5/#17 branch owns prompt/request/assignment/outbox
-and Stop-hook policy. This branch exposes `ModelRouter` and runtime/cleanup
-storage protocols for that slice to consume without duplicating its state
-machines. Both branches begin at schema v2 and currently propose a schema-v3
-migration. Integration must preserve both migration bodies, assign contiguous
-final version numbers, and recompute only the renumbered pre-release candidate
-checksum; migration validation must continue refusing any checksum change for
-an already-applied version.
+The issue-#7/#11/#14 adapter, runtime, cleanup, resource, routing, storage, CLI,
+documentation, and focused-test modules are original League implementation.
+They extend the canonical request-lifecycle store with contiguous migration v4,
+`adapter-runtime-cleanup-and-routing`, checksum
+`01892d93311ce0b5486077b00e6d3adea60fd3c91006663358317260ad21cd2d`.
+Migration v4 evolves v3's existing one-per-task cleanup obligation and adds
+opaque runtime bindings, typed resources, cleanup operations/actions/receipts,
+and durable routing evidence; it does not duplicate request claims,
+assignments, delivery outbox, watcher, or Stop state machines.
+
+Codex+Herdr and Codex+tmux are named adapter contracts. Pi and all destructive
+cleanup adapters in the suite are deterministic isolated doubles, not
+real-runtime evidence. Installed drivers, a genuine isolated canary, global
+installation, live migration, cutover, and rollback remain issue-#23 gates.

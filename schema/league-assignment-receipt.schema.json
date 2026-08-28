@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Vinosaamaa/league-of-orchestrator/schema/league-assignment-receipt.schema.json",
+  "title": "League verified Champion assignment receipt",
+  "type": "object",
+  "required": ["verified", "assignment_id", "task_id", "champion_agent_id", "callsign", "runtime_instance_id", "thread_id", "endpoint", "runtime_generation", "harness_kind", "backend_kind", "routing_name", "display_agent", "repository", "issue", "branch", "worktree"],
+  "properties": {
+    "verified": {"const": true},
+    "assignment_id": {"type": "string", "minLength": 1},
+    "task_id": {"type": "string", "minLength": 1},
+    "champion_agent_id": {"type": "string", "minLength": 1},
+    "callsign": {"type": "string", "minLength": 1},
+    "runtime_instance_id": {"type": "string", "minLength": 1},
+    "thread_id": {"type": "string", "minLength": 1},
+    "endpoint": {"type": "string", "minLength": 1},
+    "runtime_generation": {"type": "string", "minLength": 1},
+    "harness_kind": {"type": "string", "minLength": 1},
+    "backend_kind": {"enum": ["herdr", "tmux"]},
+    "routing_name": {"type": "string", "minLength": 1},
+    "display_agent": {"type": "string", "minLength": 1},
+    "repository": {"type": "string", "minLength": 1},
+    "issue": {"type": "integer", "minimum": 1},
+    "branch": {"type": "string", "minLength": 1},
+    "worktree": {"type": "string", "minLength": 1}
+  },
+  "additionalProperties": false
+}

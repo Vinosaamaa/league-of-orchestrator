@@ -15,7 +15,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
+from . import sqlite_runtime_ops
 from .sqlite_core import SQLiteTransactionCore
+from .sqlite_assignment_ops import activate_assignment as activate_assignment_operation
+from .sqlite_assignment_ops import block_assignment as block_assignment_operation
+from .sqlite_assignment_ops import mark_assignment_launching as mark_assignment_launching_operation
+from .sqlite_assignment_ops import prepare_assignment as prepare_assignment_operation
+from .sqlite_assignment_ops import transition_task as transition_task_operation
 from .sqlite_delivery_ops import claim_delivery as claim_delivery_operation
 from .sqlite_delivery_ops import finish_delivery as finish_delivery_operation
 from .sqlite_lifecycle_ops import agent_status as agent_status_operation
@@ -24,22 +30,52 @@ from .sqlite_lifecycle_ops import reserve_callsign as reserve_callsign_operation
 from .sqlite_lifecycle_ops import resolve_project as resolve_project_operation
 from .sqlite_lifecycle_ops import transfer_task_owner as transfer_task_owner_operation
 from .sqlite_lifecycle_ops import transition as transition_operation
-from . import sqlite_runtime_ops
+from .sqlite_outbox_ops import acknowledge_outbox as acknowledge_outbox_operation
+from .sqlite_outbox_ops import claim_outbox as claim_outbox_operation
+from .sqlite_outbox_ops import delivery_target as delivery_target_operation
+from .sqlite_outbox_ops import fail_outbox as fail_outbox_operation
+from .sqlite_outbox_ops import outbox_envelope as outbox_envelope_operation
+from .sqlite_outbox_ops import pending_backlog as pending_backlog_operation
+from .sqlite_request_ops import answer_request as answer_request_operation
+from .sqlite_request_ops import claim_request as claim_request_operation
+from .sqlite_request_ops import dispatch_request as dispatch_request_operation
+from .sqlite_request_ops import intake_prompt as intake_prompt_operation
+from .sqlite_request_ops import record_request_result as record_request_result_operation
+from .sqlite_request_ops import release_request_claim as release_request_claim_operation
+from .sqlite_request_ops import route_request as route_request_operation
+from .sqlite_request_ops import set_request_state as set_request_state_operation
+from .sqlite_request_ops import triage_prompt as triage_prompt_operation
+from .sqlite_request_ops import unresolved_requests as unresolved_requests_operation
 from .sqlite_transfer_ops import (
     apply_import as apply_import_operation,
     canonical_counts,
     export_bytes as export_operation,
 )
+from .sqlite_watcher_ops import note_user_message as note_user_message_operation
+from .sqlite_watcher_ops import rearm_wait as rearm_wait_operation
+from .sqlite_watcher_ops import register_runtime as register_runtime_operation
+from .sqlite_watcher_ops import register_watcher as register_watcher_operation
+from .sqlite_watcher_ops import set_allow_stop_once as set_allow_stop_once_operation
+from .sqlite_watcher_ops import stop_decision as stop_decision_operation
 from .storage import ConnectionPolicy, FaultInjector, ImportPlan, StorageRefusal
+from .storage_assignment import PrepareAssignmentCommand
+from .storage_outbox import OutboxDispatchIdentity
+from .storage_request import (
+    AnswerRequestCommand,
+    DispatchRequestCommand,
+    RequestResultCommand,
+)
+from .storage_watcher import RuntimeRegistrationCommand
 from .storage_types import LIFECYCLE_STATES
 
 
 WAL_MINIMUM = (3, 51, 3)
-CURRENT_SCHEMA_VERSION = 3
+CURRENT_SCHEMA_VERSION = 4
 DATABASE_NAME = "league.sqlite3"
 DEFAULT_BUSY_TIMEOUT_MS = 500
 MAX_BUSY_TIMEOUT_MS = 10_000
 MAX_EXPORT_RECORDS = 10_000
+MAX_EXPORT_PAYLOAD_BYTES = 16 * 1024 * 1024
 
 @dataclass(frozen=True)
 class Migration:
@@ -329,6 +365,315 @@ MIGRATIONS = (
     ),
     Migration(
         3,
+        "request-assignment-outbox-and-stop-lifecycle",
+        (
+            """
+            CREATE TABLE runtime_instances (
+              runtime_instance_id TEXT PRIMARY KEY,
+              actor_agent_id TEXT NOT NULL REFERENCES agent_instances(agent_id),
+              harness_kind TEXT NOT NULL,
+              backend_kind TEXT NOT NULL,
+              session_ref TEXT NOT NULL,
+              endpoint TEXT NOT NULL,
+              runtime_generation TEXT NOT NULL,
+              status TEXT NOT NULL CHECK (status IN ('active','idle','closed','failed')),
+              verified INTEGER NOT NULL CHECK (verified IN (0,1)),
+              last_seen_at TEXT NOT NULL,
+              UNIQUE (actor_agent_id, runtime_generation)
+            )
+            """,
+            """
+            CREATE TABLE prompts (
+              prompt_id TEXT PRIMARY KEY,
+              intake_actor_id TEXT NOT NULL REFERENCES agent_instances(agent_id),
+              runtime_instance_id TEXT NOT NULL REFERENCES runtime_instances(runtime_instance_id),
+              adapter_kind TEXT NOT NULL,
+              session_ref TEXT NOT NULL,
+              source_event_key TEXT NOT NULL,
+              triage_state TEXT NOT NULL CHECK (triage_state IN ('untriaged','complete')),
+              triage_digest TEXT,
+              created_at TEXT NOT NULL,
+              UNIQUE (adapter_kind, session_ref, source_event_key)
+            )
+            """,
+            """
+            CREATE TABLE prompt_payloads (
+              prompt_id TEXT PRIMARY KEY REFERENCES prompts(prompt_id),
+              body TEXT,
+              body_hash TEXT NOT NULL,
+              byte_count INTEGER NOT NULL CHECK (byte_count >= 0),
+              pruned_at TEXT
+            )
+            """,
+            """
+            CREATE TABLE requests (
+              request_id TEXT PRIMARY KEY,
+              summary TEXT NOT NULL,
+              requester_agent_id TEXT NOT NULL REFERENCES agent_instances(agent_id),
+              owner_agent_id TEXT NOT NULL REFERENCES agent_instances(agent_id),
+              return_to_agent_id TEXT REFERENCES agent_instances(agent_id),
+              execution_mode TEXT CHECK (
+                execution_mode IS NULL OR execution_mode IN ('direct','hidden','champion')
+              ),
+              state TEXT NOT NULL CHECK (
+                state IN ('open','routed','accepted','in_progress','awaiting_user','blocked',
+                          'awaiting_requester','deferred','answered','cancelled')
+              ),
+              latest_result_id TEXT REFERENCES request_results(result_id),
+              last_route_event_id TEXT REFERENCES events(event_id),
+              resolution_summary TEXT,
+              next_attention_at TEXT,
+              version INTEGER NOT NULL CHECK (version > 0),
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            )
+            """,
+            """
+            CREATE TABLE prompt_items (
+              prompt_item_id TEXT PRIMARY KEY,
+              prompt_id TEXT NOT NULL REFERENCES prompts(prompt_id),
+              ordinal INTEGER NOT NULL CHECK (ordinal > 0),
+              summary TEXT NOT NULL,
+              disposition TEXT NOT NULL CHECK (
+                disposition IN ('new_request','follow_up','context','acknowledgement','duplicate','deferred')
+              ),
+              UNIQUE (prompt_id, ordinal)
+            )
+            """,
+            """
+            CREATE TABLE request_sources (
+              request_id TEXT NOT NULL REFERENCES requests(request_id),
+              prompt_item_id TEXT NOT NULL REFERENCES prompt_items(prompt_item_id),
+              source_role TEXT NOT NULL CHECK (source_role IN ('origin','follow_up','duplicate')),
+              PRIMARY KEY (request_id, prompt_item_id)
+            )
+            """,
+            """
+            CREATE TABLE request_claims (
+              request_id TEXT PRIMARY KEY REFERENCES requests(request_id),
+              runtime_instance_id TEXT NOT NULL REFERENCES runtime_instances(runtime_instance_id),
+              claim_proof_hash TEXT NOT NULL,
+              leased_until TEXT NOT NULL,
+              claim_version INTEGER NOT NULL CHECK (claim_version > 0),
+              claimed_at TEXT NOT NULL,
+              released_at TEXT
+            )
+            """,
+            """
+            CREATE TABLE request_dispatches (
+              dispatch_id TEXT PRIMARY KEY,
+              request_id TEXT NOT NULL REFERENCES requests(request_id),
+              request_version INTEGER NOT NULL,
+              work_kind TEXT NOT NULL,
+              execution_mode TEXT NOT NULL CHECK (execution_mode IN ('direct','hidden','champion')),
+              reason TEXT NOT NULL,
+              requested_mode TEXT,
+              requested_model TEXT,
+              requested_effort TEXT,
+              explicit_route TEXT,
+              input_json TEXT NOT NULL,
+              decided_at TEXT NOT NULL,
+              UNIQUE (request_id, request_version)
+            )
+            """,
+            """
+            CREATE TABLE request_results (
+              result_id TEXT PRIMARY KEY,
+              request_id TEXT NOT NULL REFERENCES requests(request_id),
+              produced_by_agent_id TEXT NOT NULL REFERENCES agent_instances(agent_id),
+              outcome TEXT NOT NULL,
+              summary TEXT NOT NULL,
+              payload_hash TEXT,
+              idempotency_key TEXT NOT NULL,
+              return_event_id TEXT REFERENCES events(event_id) DEFERRABLE INITIALLY DEFERRED,
+              return_outbox_id TEXT REFERENCES delivery_outbox(outbox_id) DEFERRABLE INITIALLY DEFERRED,
+              created_at TEXT NOT NULL,
+              UNIQUE (request_id, idempotency_key)
+            )
+            """,
+            """
+            CREATE TABLE request_result_sources (
+              result_id TEXT NOT NULL REFERENCES request_results(result_id),
+              task_id TEXT NOT NULL REFERENCES tasks(task_id),
+              source_kind TEXT NOT NULL,
+              PRIMARY KEY (result_id, task_id)
+            )
+            """,
+            """
+            CREATE TABLE response_references (
+              response_ref_id TEXT PRIMARY KEY,
+              request_id TEXT NOT NULL REFERENCES requests(request_id),
+              runtime_instance_id TEXT NOT NULL REFERENCES runtime_instances(runtime_instance_id),
+              adapter_kind TEXT NOT NULL,
+              session_locator TEXT NOT NULL,
+              response_locator TEXT NOT NULL,
+              durability TEXT NOT NULL CHECK (durability IN ('durable','ephemeral')),
+              content_hash TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              UNIQUE (request_id, content_hash)
+            )
+            """,
+            "ALTER TABLE tasks ADD COLUMN request_id TEXT REFERENCES requests(request_id)",
+            "ALTER TABLE tasks ADD COLUMN coordinator_agent_id TEXT REFERENCES agent_instances(agent_id)",
+            "ALTER TABLE tasks ADD COLUMN champion_agent_id TEXT REFERENCES agent_instances(agent_id)",
+            "ALTER TABLE tasks ADD COLUMN result_summary TEXT",
+            """
+            CREATE TABLE callsign_assignments (
+              callsign_assignment_id TEXT PRIMARY KEY,
+              callsign TEXT NOT NULL REFERENCES callsigns(callsign),
+              task_id TEXT NOT NULL REFERENCES tasks(task_id),
+              agent_id TEXT NOT NULL REFERENCES agent_instances(agent_id),
+              state TEXT NOT NULL CHECK (state IN ('reserved','active','released','blocked')),
+              reserved_at TEXT NOT NULL,
+              activated_at TEXT,
+              released_at TEXT
+            )
+            """,
+            """
+            CREATE TABLE task_assignments (
+              task_assignment_id TEXT PRIMARY KEY,
+              task_id TEXT NOT NULL UNIQUE REFERENCES tasks(task_id),
+              request_id TEXT NOT NULL REFERENCES requests(request_id),
+              coordinator_agent_id TEXT NOT NULL REFERENCES agent_instances(agent_id),
+              champion_agent_id TEXT NOT NULL REFERENCES agent_instances(agent_id),
+              runtime_instance_id TEXT REFERENCES runtime_instances(runtime_instance_id),
+              callsign TEXT NOT NULL REFERENCES callsigns(callsign),
+              state TEXT NOT NULL CHECK (state IN ('pending','launching','active','blocked','cleanup_pending')),
+              acceptance_receipt_json TEXT,
+              failure_class TEXT,
+              cleanup_required INTEGER NOT NULL DEFAULT 0 CHECK (cleanup_required IN (0,1)),
+              version INTEGER NOT NULL CHECK (version > 0),
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            )
+            """,
+            """
+            CREATE TABLE task_transitions (
+              transition_id TEXT PRIMARY KEY,
+              transition_key TEXT NOT NULL UNIQUE,
+              task_id TEXT NOT NULL REFERENCES tasks(task_id),
+              from_state TEXT NOT NULL,
+              to_state TEXT NOT NULL,
+              update_text TEXT NOT NULL,
+              next_action TEXT NOT NULL,
+              blocker TEXT,
+              created_at TEXT NOT NULL,
+              event_id TEXT NOT NULL UNIQUE
+            )
+            """,
+            "ALTER TABLE events ADD COLUMN request_id TEXT REFERENCES requests(request_id)",
+            "ALTER TABLE events ADD COLUMN aggregate_kind TEXT",
+            "ALTER TABLE events ADD COLUMN aggregate_id TEXT",
+            "ALTER TABLE events ADD COLUMN event_seq INTEGER",
+            "ALTER TABLE events ADD COLUMN source_event_id TEXT",
+            "UPDATE events SET aggregate_kind=CASE WHEN task_id IS NOT NULL THEN 'task' ELSE 'agent' END, aggregate_id=COALESCE(task_id,agent_id), event_seq=rowid WHERE aggregate_kind IS NULL",
+            "CREATE UNIQUE INDEX ux_events_event_seq ON events(event_seq)",
+            "CREATE INDEX ix_events_aggregate ON events(aggregate_kind,aggregate_id,event_seq)",
+            """
+            CREATE TRIGGER events_fill_sequence
+            AFTER INSERT ON events WHEN NEW.event_seq IS NULL
+            BEGIN
+              UPDATE events SET event_seq=NEW.rowid WHERE rowid=NEW.rowid;
+            END
+            """,
+            """
+            CREATE TABLE delivery_outbox (
+              outbox_id TEXT PRIMARY KEY,
+              event_id TEXT NOT NULL REFERENCES events(event_id),
+              recipient_agent_id TEXT NOT NULL REFERENCES agent_instances(agent_id),
+              state TEXT NOT NULL CHECK (state IN ('pending','in_flight','awaiting_receipt','delivered','cancelled')),
+              available_at TEXT NOT NULL,
+              attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+              first_attempt_at TEXT,
+              last_attempt_at TEXT,
+              last_outcome TEXT,
+              delivered_at TEXT,
+              UNIQUE (event_id, recipient_agent_id)
+            )
+            """,
+            """
+            CREATE TABLE outbox_dispatch_leases (
+              outbox_id TEXT PRIMARY KEY REFERENCES delivery_outbox(outbox_id),
+              dispatcher_id TEXT NOT NULL,
+              leased_until TEXT NOT NULL,
+              fence INTEGER NOT NULL CHECK (fence > 0)
+            )
+            """,
+            """
+            CREATE TABLE delivery_attempts (
+              attempt_id TEXT PRIMARY KEY,
+              outbox_id TEXT NOT NULL REFERENCES delivery_outbox(outbox_id),
+              adapter_kind TEXT NOT NULL,
+              started_at TEXT NOT NULL,
+              finished_at TEXT,
+              outcome TEXT
+            )
+            """,
+            """
+            CREATE TABLE recipient_receipts (
+              event_id TEXT NOT NULL REFERENCES events(event_id),
+              recipient_agent_id TEXT NOT NULL REFERENCES agent_instances(agent_id),
+              received_at TEXT NOT NULL,
+              effect_kind TEXT NOT NULL,
+              effect_id TEXT NOT NULL,
+              PRIMARY KEY (event_id, recipient_agent_id)
+            )
+            """,
+            """
+            CREATE TABLE watcher_registrations (
+              watcher_id TEXT PRIMARY KEY,
+              actor_agent_id TEXT NOT NULL REFERENCES agent_instances(agent_id),
+              runtime_instance_id TEXT NOT NULL REFERENCES runtime_instances(runtime_instance_id),
+              wake_locator TEXT NOT NULL,
+              leased_until TEXT NOT NULL,
+              fence INTEGER NOT NULL CHECK (fence > 0),
+              registered_at TEXT NOT NULL
+            )
+            """,
+            "CREATE UNIQUE INDEX ux_watcher_actor ON watcher_registrations(actor_agent_id)",
+            "ALTER TABLE watcher_scopes ADD COLUMN actor_agent_id TEXT REFERENCES agent_instances(agent_id)",
+            "ALTER TABLE watcher_scopes ADD COLUMN block_on_obligations INTEGER NOT NULL DEFAULT 1 CHECK (block_on_obligations IN (0,1))",
+            "ALTER TABLE watcher_scopes ADD COLUMN last_blocked_wait_generation INTEGER NOT NULL DEFAULT -1",
+            "ALTER TABLE watcher_scopes ADD COLUMN last_user_priority_generation INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE watcher_scopes ADD COLUMN last_terminal_generation TEXT",
+            """
+            CREATE TABLE obligations (
+              obligation_id TEXT PRIMARY KEY,
+              owner_agent_id TEXT NOT NULL REFERENCES agent_instances(agent_id),
+              kind TEXT NOT NULL,
+              aggregate_id TEXT NOT NULL,
+              dedupe_key TEXT NOT NULL UNIQUE,
+              state TEXT NOT NULL CHECK (state IN ('open','satisfied','cancelled')),
+              next_attention_at TEXT,
+              details_json TEXT NOT NULL DEFAULT '{}',
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            )
+            """,
+            """
+            CREATE TABLE cleanup_obligations (
+              cleanup_obligation_id TEXT PRIMARY KEY,
+              task_id TEXT NOT NULL UNIQUE REFERENCES tasks(task_id),
+              cleanup_state TEXT NOT NULL CHECK (
+                cleanup_state IN ('not_due','pending','awaiting_authority','verifying','planned','executing','blocked','completed')
+              ),
+              required_policy TEXT NOT NULL,
+              next_action TEXT NOT NULL,
+              version INTEGER NOT NULL CHECK (version > 0),
+              updated_at TEXT NOT NULL
+            )
+            """,
+            "CREATE INDEX ix_prompts_untriaged ON prompts(intake_actor_id,triage_state,created_at)",
+            "CREATE INDEX ix_requests_unresolved ON requests(owner_agent_id,state,next_attention_at,updated_at)",
+            "CREATE INDEX ix_outbox_pending ON delivery_outbox(state,available_at,outbox_id)",
+            "CREATE INDEX ix_outbox_recipient_state ON delivery_outbox(recipient_agent_id,state,available_at)",
+            "CREATE INDEX ix_assignments_state ON task_assignments(coordinator_agent_id,state,updated_at)",
+            "CREATE INDEX ix_tasks_coordinator_state ON tasks(coordinator_agent_id,state,task_id)",
+            "CREATE INDEX ix_obligations_due ON obligations(owner_agent_id,state,next_attention_at,created_at)",
+        ),
+    ),
+    Migration(
+        4,
         "adapter-runtime-cleanup-and-routing",
         (
             """
@@ -402,20 +747,38 @@ MIGRATIONS = (
               updated_at TEXT NOT NULL
             )
             """,
+            "ALTER TABLE cleanup_obligations RENAME TO cleanup_obligations_v3",
             """
             CREATE TABLE cleanup_obligations (
               cleanup_obligation_id TEXT PRIMARY KEY,
               task_id TEXT NOT NULL UNIQUE REFERENCES tasks(task_id),
-              owner_id TEXT NOT NULL,
-              task_class TEXT NOT NULL CHECK (task_class IN ('analysis','local_git','pr_ci','deployed_service')),
-              disposition TEXT NOT NULL CHECK (disposition IN ('completed','rejected','cancelled','failed')),
-              cleanup_state TEXT NOT NULL CHECK (cleanup_state IN ('cleanup_pending','awaiting_authority','verifying','planned','executing','blocked','cleanup_completed')),
+              cleanup_state TEXT NOT NULL CHECK (
+                cleanup_state IN ('not_due','pending','cleanup_pending','awaiting_authority','verifying','planned','executing','blocked','completed','cleanup_completed')
+              ),
               required_policy TEXT NOT NULL,
               next_action TEXT NOT NULL,
               version INTEGER NOT NULL CHECK (version > 0),
-              updated_at TEXT NOT NULL
+              updated_at TEXT NOT NULL,
+              owner_id TEXT,
+              task_class TEXT CHECK (
+                task_class IS NULL OR task_class IN ('analysis','local_git','pr_ci','deployed_service')
+              ),
+              disposition TEXT CHECK (
+                disposition IS NULL OR disposition IN ('completed','rejected','cancelled','failed')
+              ),
+              CHECK (
+                (owner_id IS NULL AND task_class IS NULL AND disposition IS NULL)
+                OR (owner_id IS NOT NULL AND task_class IS NOT NULL AND disposition IS NOT NULL)
+              )
             )
             """,
+            """
+            INSERT INTO cleanup_obligations
+              (cleanup_obligation_id,task_id,cleanup_state,required_policy,next_action,version,updated_at)
+            SELECT cleanup_obligation_id,task_id,cleanup_state,required_policy,next_action,version,updated_at
+              FROM cleanup_obligations_v3
+            """,
+            "DROP TABLE cleanup_obligations_v3",
             """
             CREATE TABLE cleanup_operations (
               operation_id TEXT PRIMARY KEY,
@@ -628,11 +991,31 @@ _EXPORT_TABLES = (
     "relay_receipts",
     "import_runs",
     "imported_artifacts",
+    "runtime_instances",
+    "prompts",
+    "prompt_payloads",
+    "prompt_items",
+    "requests",
+    "request_sources",
+    "request_claims",
+    "request_dispatches",
+    "request_results",
+    "request_result_sources",
+    "response_references",
+    "callsign_assignments",
+    "task_assignments",
+    "task_transitions",
+    "delivery_outbox",
+    "outbox_dispatch_leases",
+    "delivery_attempts",
+    "recipient_receipts",
+    "watcher_registrations",
+    "obligations",
+    "cleanup_obligations",
     "runtime_bindings",
     "model_routing_decisions",
     "model_routing_outcomes",
     "task_resources",
-    "cleanup_obligations",
     "cleanup_operations",
     "cleanup_actions",
     "cleanup_action_receipts",
@@ -660,11 +1043,31 @@ _EXPORT_ORDER = {
     "relay_receipts": "scope_id,source_order,digest",
     "import_runs": "run_id",
     "imported_artifacts": "source_order,artifact_id",
+    "runtime_instances": "runtime_instance_id",
+    "prompts": "created_at,prompt_id",
+    "prompt_payloads": "prompt_id",
+    "prompt_items": "prompt_id,ordinal,prompt_item_id",
+    "requests": "created_at,request_id",
+    "request_sources": "request_id,prompt_item_id",
+    "request_claims": "request_id",
+    "request_dispatches": "decided_at,dispatch_id",
+    "request_results": "created_at,result_id",
+    "request_result_sources": "result_id,task_id",
+    "response_references": "created_at,response_ref_id",
+    "callsign_assignments": "reserved_at,callsign_assignment_id",
+    "task_assignments": "created_at,task_assignment_id",
+    "task_transitions": "created_at,transition_id",
+    "delivery_outbox": "available_at,outbox_id",
+    "outbox_dispatch_leases": "outbox_id",
+    "delivery_attempts": "started_at,attempt_id",
+    "recipient_receipts": "received_at,event_id,recipient_agent_id",
+    "watcher_registrations": "actor_agent_id,watcher_id",
+    "obligations": "created_at,obligation_id",
+    "cleanup_obligations": "task_id",
     "runtime_bindings": "binding_id",
     "model_routing_decisions": "chosen_at,decision_id",
     "model_routing_outcomes": "recorded_at,outcome_id",
     "task_resources": "task_id,resource_id",
-    "cleanup_obligations": "task_id",
     "cleanup_operations": "cleanup_obligation_id,cleanup_revision",
     "cleanup_actions": "operation_id,ordinal",
     "cleanup_action_receipts": "operation_id,action_id",
@@ -697,7 +1100,32 @@ _INSPECTION_REDACTIONS = {
     "watcher_cursors": {"source_id"},
     "runtime_reconciliation": {"evidence_json"},
     "resource_leases": {"endpoint", "process_pid", "process_start", "metadata_json"},
-    "runtime_bindings": {"session_identity", "endpoint_identity", "endpoint_generation", "capabilities_json", "last_receipt_json"},
+    "runtime_instances": {"session_ref", "endpoint", "runtime_generation"},
+    "prompt_payloads": {"body"},
+    "prompt_items": {"summary"},
+    "requests": {"summary", "resolution_summary"},
+    "request_claims": {"claim_proof_hash"},
+    "request_dispatches": {
+        "reason",
+        "requested_model",
+        "requested_effort",
+        "explicit_route",
+        "input_json",
+    },
+    "request_results": {"summary", "payload_hash", "idempotency_key"},
+    "response_references": {"session_locator", "response_locator", "content_hash"},
+    "task_assignments": {"acceptance_receipt_json", "failure_class"},
+    "task_transitions": {"update_text", "next_action", "blocker"},
+    "delivery_attempts": {"outcome"},
+    "watcher_registrations": {"wake_locator"},
+    "obligations": {"details_json"},
+    "runtime_bindings": {
+        "session_identity",
+        "endpoint_identity",
+        "endpoint_generation",
+        "capabilities_json",
+        "last_receipt_json",
+    },
     "model_routing_decisions": {"model", "reason"},
     "task_resources": {"expected_identity_json", "applicability_reason"},
     "cleanup_actions": {"expected_identity_json", "intended_state_json"},
@@ -1144,6 +1572,322 @@ class SQLiteStorage(SQLiteTransactionCore):
             self, task_id, expected_version, owner_kind, owner_id, at
         )
 
+    def intake_prompt(
+        self,
+        prompt_id: str,
+        intake_actor_id: str,
+        runtime_instance_id: str,
+        adapter_kind: str,
+        session_ref: str,
+        source_event_key: str,
+        body: str,
+        at: str,
+    ) -> dict[str, Any]:
+        return intake_prompt_operation(
+            self,
+            prompt_id,
+            intake_actor_id,
+            runtime_instance_id,
+            adapter_kind,
+            session_ref,
+            source_event_key,
+            body,
+            at,
+        )
+
+    def triage_prompt(
+        self, prompt_id: str, items: list[dict[str, Any]], at: str
+    ) -> dict[str, Any]:
+        return triage_prompt_operation(self, prompt_id, items, at)
+
+    def claim_request(
+        self,
+        request_id: str,
+        runtime_instance_id: str,
+        claim_token: str,
+        leased_until: str,
+        at: str,
+    ) -> dict[str, Any]:
+        return claim_request_operation(
+            self, request_id, runtime_instance_id, claim_token, leased_until, at
+        )
+
+    def release_request_claim(
+        self, request_id: str, runtime_instance_id: str, claim_token: str, at: str
+    ) -> dict[str, Any]:
+        return release_request_claim_operation(
+            self, request_id, runtime_instance_id, claim_token, at
+        )
+
+    def dispatch_request(self, command: DispatchRequestCommand) -> dict[str, Any]:
+        return dispatch_request_operation(self, command)
+
+    def route_request(
+        self,
+        request_id: str,
+        claim_token: str,
+        expected_version: int,
+        recipient_agent_id: str,
+        event_id: str,
+        outbox_id: str,
+        at: str,
+    ) -> dict[str, Any]:
+        return route_request_operation(
+            self,
+            request_id,
+            claim_token,
+            expected_version,
+            recipient_agent_id,
+            event_id,
+            outbox_id,
+            at,
+        )
+
+    def set_request_state(
+        self,
+        request_id: str,
+        claim_token: str,
+        expected_version: int,
+        state: str,
+        summary: str,
+        event_id: str,
+        at: str,
+        *,
+        next_attention_at: Optional[str] = None,
+    ) -> dict[str, Any]:
+        return set_request_state_operation(
+            self,
+            request_id,
+            claim_token,
+            expected_version,
+            state,
+            summary,
+            event_id,
+            at,
+            next_attention_at=next_attention_at,
+        )
+
+    def record_request_result(self, command: RequestResultCommand) -> dict[str, Any]:
+        return record_request_result_operation(self, command)
+
+    def answer_request(self, command: AnswerRequestCommand) -> dict[str, Any]:
+        return answer_request_operation(self, command)
+
+    def unresolved_requests(
+        self,
+        owner_agent_id: str,
+        *,
+        limit: int = 100,
+        before_action: Optional[str] = None,
+    ) -> dict[str, Any]:
+        return unresolved_requests_operation(
+            self, owner_agent_id, limit=limit, before_action=before_action
+        )
+
+    def prepare_assignment(self, command: PrepareAssignmentCommand) -> dict[str, Any]:
+        return prepare_assignment_operation(self, command)
+
+    def mark_assignment_launching(
+        self, assignment_id: str, expected_version: int, at: str
+    ) -> dict[str, Any]:
+        return mark_assignment_launching_operation(
+            self, assignment_id, expected_version, at
+        )
+
+    def activate_assignment(
+        self,
+        assignment_id: str,
+        expected_version: int,
+        receipt: dict[str, Any],
+        event_id: str,
+        outbox_id: str,
+        at: str,
+    ) -> dict[str, Any]:
+        return activate_assignment_operation(
+            self, assignment_id, expected_version, receipt, event_id, outbox_id, at
+        )
+
+    def block_assignment(
+        self,
+        assignment_id: str,
+        expected_version: int,
+        failure_class: str,
+        cleanup_required: bool,
+        cleanup_proven: bool,
+        at: str,
+    ) -> dict[str, Any]:
+        return block_assignment_operation(
+            self,
+            assignment_id,
+            expected_version,
+            failure_class,
+            cleanup_required,
+            cleanup_proven,
+            at,
+        )
+
+    def transition_task(
+        self,
+        task_id: str,
+        runtime_instance_id: str,
+        expected_version: int,
+        state: str,
+        update: str,
+        next_action: str,
+        blocker: Optional[str],
+        transition_id: str,
+        transition_key: str,
+        event_id: str,
+        outbox_id: str,
+        recipient_agent_id: str,
+        at: str,
+    ) -> dict[str, Any]:
+        return transition_task_operation(
+            self,
+            task_id,
+            runtime_instance_id,
+            expected_version,
+            state,
+            update,
+            next_action,
+            blocker,
+            transition_id,
+            transition_key,
+            event_id,
+            outbox_id,
+            recipient_agent_id,
+            at,
+        )
+
+    def claim_outbox(
+        self,
+        identity: OutboxDispatchIdentity,
+        lease_expires_at: str,
+        at: str,
+    ) -> dict[str, Any]:
+        return claim_outbox_operation(self, identity, lease_expires_at, at)
+
+    def acknowledge_outbox(
+        self,
+        identity: OutboxDispatchIdentity,
+        fence: int,
+        adapter_kind: str,
+        effect_kind: str,
+        effect_id: str,
+        at: str,
+    ) -> dict[str, Any]:
+        return acknowledge_outbox_operation(
+            self,
+            identity,
+            fence,
+            adapter_kind,
+            effect_kind,
+            effect_id,
+            at,
+        )
+
+    def fail_outbox(
+        self,
+        identity: OutboxDispatchIdentity,
+        fence: int,
+        adapter_kind: str,
+        reason: str,
+        retry_at: str,
+        at: str,
+    ) -> dict[str, Any]:
+        return fail_outbox_operation(
+            self,
+            identity,
+            fence,
+            adapter_kind,
+            reason,
+            retry_at,
+            at,
+        )
+
+    def pending_backlog(
+        self,
+        at: str,
+        *,
+        limit: int = 100,
+        per_recipient: int = 2,
+        exclude_outbox_id: Optional[str] = None,
+    ) -> list[dict[str, Any]]:
+        return pending_backlog_operation(
+            self,
+            at,
+            limit=limit,
+            per_recipient=per_recipient,
+            exclude_outbox_id=exclude_outbox_id,
+        )
+
+    def delivery_target(
+        self, recipient_agent_id: str, at: str
+    ) -> Optional[dict[str, Any]]:
+        return delivery_target_operation(self, recipient_agent_id, at)
+
+    def outbox_envelope(
+        self, outbox_id: str, event_id: str, recipient_agent_id: str
+    ) -> dict[str, Any]:
+        return outbox_envelope_operation(
+            self, outbox_id, event_id, recipient_agent_id
+        )
+
+    def register_runtime(self, command: RuntimeRegistrationCommand) -> dict[str, Any]:
+        return register_runtime_operation(self, command)
+
+    def register_watcher(
+        self,
+        scope_id: str,
+        watcher_id: str,
+        actor_agent_id: str,
+        runtime_instance_id: str,
+        wake_locator: str,
+        leased_until: str,
+        fence: int,
+        at: str,
+        *,
+        block_on_obligations: bool = True,
+    ) -> dict[str, Any]:
+        return register_watcher_operation(
+            self,
+            scope_id,
+            watcher_id,
+            actor_agent_id,
+            runtime_instance_id,
+            wake_locator,
+            leased_until,
+            fence,
+            at,
+            block_on_obligations=block_on_obligations,
+        )
+
+    def note_user_message(
+        self, scope_id: str, actor_agent_id: str, at: str
+    ) -> dict[str, Any]:
+        return note_user_message_operation(self, scope_id, actor_agent_id, at)
+
+    def rearm_wait(
+        self, scope_id: str, actor_agent_id: str, event_id: str, at: str
+    ) -> dict[str, Any]:
+        return rearm_wait_operation(self, scope_id, actor_agent_id, event_id, at)
+
+    def set_allow_stop_once(
+        self, scope_id: str, actor_agent_id: str
+    ) -> dict[str, Any]:
+        return set_allow_stop_once_operation(self, scope_id, actor_agent_id)
+
+    def stop_decision(
+        self,
+        scope_id: str,
+        actor_agent_id: str,
+        terminal_generation: str,
+        at: str,
+    ) -> dict[str, Any]:
+        return stop_decision_operation(
+            self, scope_id, actor_agent_id, terminal_generation, at
+        )
+
     def _canonical_counts(self) -> dict[str, int]:
         return canonical_counts(self, _IMPORT_ORDER)
 
@@ -1174,6 +1918,7 @@ class SQLiteStorage(SQLiteTransactionCore):
             purpose=purpose,
             max_records=max_records,
             maximum_records=MAX_EXPORT_RECORDS,
+            maximum_payload_bytes=MAX_EXPORT_PAYLOAD_BYTES,
             current_schema_version=CURRENT_SCHEMA_VERSION,
             export_tables=_EXPORT_TABLES,
             export_order=_EXPORT_ORDER,

@@ -3,10 +3,19 @@
 from __future__ import annotations
 
 from .storage_admin import AdministrativeStorage
+from .storage_assignment import AssignmentStorage, PrepareAssignmentCommand
 from .storage_delivery import DeliveryStorage
 from .storage_lifecycle import LifecycleStorage
+from .storage_outbox import OutboxDispatchIdentity, OutboxStorage
+from .storage_request import (
+    AnswerRequestCommand,
+    DispatchRequestCommand,
+    RequestResultCommand,
+    RequestStorage,
+)
 from .storage_runtime import RuntimeLifecycleStorage
 from .storage_transfer import TransferStorage
+from .storage_watcher import RuntimeRegistrationCommand, WatcherStorage
 from .storage_types import (
     ConnectionPolicy,
     FaultInjector,
@@ -21,6 +30,10 @@ class Storage(
     LifecycleStorage,
     DeliveryStorage,
     TransferStorage,
+    RequestStorage,
+    AssignmentStorage,
+    OutboxStorage,
+    WatcherStorage,
     RuntimeLifecycleStorage,
 ):
     """The only domain-facing persistence interface.
@@ -36,6 +49,12 @@ __all__ = [
     "FaultInjector",
     "ImportArtifact",
     "ImportPlan",
+    "AnswerRequestCommand",
+    "DispatchRequestCommand",
+    "OutboxDispatchIdentity",
+    "PrepareAssignmentCommand",
+    "RequestResultCommand",
+    "RuntimeRegistrationCommand",
     "Storage",
     "StorageRefusal",
 ]

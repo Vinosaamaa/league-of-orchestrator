@@ -19,13 +19,13 @@ def _row(row: Optional[sqlite3.Row]) -> Optional[dict[str, Any]]:
     return dict(row) if row is not None else None
 
 
-def _time(value: str, label: str) -> datetime:
+def _time(value: str, label: str, code: str = "cleanup_lease_invalid") -> datetime:
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except (AttributeError, ValueError) as exc:
-        raise StorageRefusal("cleanup_lease_invalid", f"{label} must be RFC3339") from exc
+        raise StorageRefusal(code, f"{label} must be RFC3339") from exc
     if parsed.tzinfo is None:
-        raise StorageRefusal("cleanup_lease_invalid", f"{label} must include a UTC offset")
+        raise StorageRefusal(code, f"{label} must include a UTC offset")
     return parsed
 
 
@@ -98,7 +98,7 @@ def update_runtime_binding(
     at: str,
     receipt: Mapping[str, Any],
 ) -> dict[str, Any]:
-    if state not in {"active", "idle", "interrupted", "closed", "failed"}:
+    if state not in {"active", "idle", "interrupted", "closing", "closed", "failed"}:
         raise StorageRefusal("binding_state_invalid", "runtime binding state is unsupported")
     next_version = expected_version + 1
     try:
@@ -117,6 +117,128 @@ def update_runtime_binding(
     except sqlite3.DatabaseError as exc:
         raise store._translate_database_error(exc, "runtime binding update failed") from exc
     return {"binding_id": binding_id, "state": state, "version": next_version}
+
+
+def claim_runtime_exit(
+    store: Any,
+    binding_id: str,
+    expected_version: int,
+    expected_fence: int,
+    executor_id: str,
+    leased_until: str,
+    at: str,
+) -> dict[str, Any]:
+    if not executor_id:
+        raise StorageRefusal("runtime_exit_lease_invalid", "runtime exit executor is required")
+    claim_time = _time(at, "runtime exit claim time", "runtime_exit_lease_invalid")
+    try:
+        with store._transaction():
+            current = store.connection.execute(
+                "SELECT state,version,exit_fence,exit_leased_until FROM runtime_bindings WHERE binding_id=?",
+                (binding_id,),
+            ).fetchone()
+            if current is None:
+                raise StorageRefusal("binding_unknown", "runtime binding does not exist")
+            if int(current["version"]) != expected_version or int(current["exit_fence"]) != expected_fence:
+                raise StorageRefusal("version_conflict", "runtime exit claim precondition changed")
+            if current["state"] == "closed":
+                return {
+                    "binding_id": binding_id,
+                    "state": "closed",
+                    "version": expected_version,
+                    "fence": expected_fence,
+                    "idempotent": True,
+                }
+            lease_expiry = _time(
+                leased_until, "runtime exit lease expiry", "runtime_exit_lease_invalid"
+            )
+            if lease_expiry <= claim_time:
+                raise StorageRefusal(
+                    "runtime_exit_lease_invalid",
+                    "runtime exit lease expiry must be after claim time",
+                )
+            if (
+                current["state"] == "closing"
+                and current["exit_leased_until"] is not None
+                and _time(
+                    current["exit_leased_until"],
+                    "stored runtime exit lease expiry",
+                    "runtime_exit_lease_invalid",
+                )
+                > claim_time
+            ):
+                raise StorageRefusal(
+                    "runtime_exit_busy",
+                    "runtime exit has an unexpired executor lease",
+                    retryable=True,
+                )
+            next_version = expected_version + 1
+            next_fence = expected_fence + 1
+            changed = store.connection.execute(
+                """
+                UPDATE runtime_bindings
+                   SET state='closing',version=?,exit_fence=?,exit_executor_id=?,exit_leased_until=?,updated_at=?
+                 WHERE binding_id=? AND version=? AND exit_fence=?
+                """,
+                (
+                    next_version,
+                    next_fence,
+                    executor_id,
+                    leased_until,
+                    at,
+                    binding_id,
+                    expected_version,
+                    expected_fence,
+                ),
+            )
+            if changed.rowcount != 1:
+                raise StorageRefusal("version_conflict", "runtime exit claim lost its fence")
+    except StorageRefusal:
+        raise
+    except sqlite3.DatabaseError as exc:
+        raise store._translate_database_error(exc, "runtime exit claim failed") from exc
+    return {
+        "binding_id": binding_id,
+        "state": "closing",
+        "version": next_version,
+        "fence": next_fence,
+        "idempotent": False,
+    }
+
+
+def finalize_runtime_exit(
+    store: Any,
+    binding_id: str,
+    expected_version: int,
+    fence: int,
+    at: str,
+    receipt: Mapping[str, Any],
+) -> dict[str, Any]:
+    next_version = expected_version + 1
+    try:
+        with store._transaction():
+            changed = store.connection.execute(
+                """
+                UPDATE runtime_bindings
+                   SET state='closed',version=?,updated_at=?,last_receipt_json=?,
+                       exit_executor_id=NULL,exit_leased_until=NULL
+                 WHERE binding_id=? AND state='closing' AND version=? AND exit_fence=?
+                """,
+                (next_version, at, _json(receipt), binding_id, expected_version, fence),
+            )
+            if changed.rowcount != 1:
+                raise StorageRefusal("runtime_exit_fence_conflict", "runtime exit finalization fence changed")
+    except StorageRefusal:
+        raise
+    except sqlite3.DatabaseError as exc:
+        raise store._translate_database_error(exc, "runtime exit finalization failed") from exc
+    return {
+        "binding_id": binding_id,
+        "state": "closed",
+        "version": next_version,
+        "fence": fence,
+        "idempotent": False,
+    }
 
 
 def record_routing_decision(store: Any, decision: Mapping[str, Any]) -> dict[str, Any]:
@@ -138,12 +260,36 @@ def record_routing_decision(store: Any, decision: Mapping[str, Any]) -> dict[str
                 result = dict(existing)
                 result["idempotent"] = True
                 return result
+            if decision.get("prior_decision_id") is not None:
+                child = store.connection.execute(
+                    "SELECT decision_id FROM model_routing_decisions WHERE prior_decision_id=?",
+                    (decision["prior_decision_id"],),
+                ).fetchone()
+                if child is not None:
+                    raise StorageRefusal(
+                        "routing_escalation_conflict",
+                        "prior routing decision already has an escalation child",
+                    )
             store.connection.execute(
                 f"INSERT INTO model_routing_decisions({','.join(columns)}) VALUES({','.join('?' for _ in columns)})",
                 normalized,
             )
     except StorageRefusal:
         raise
+    except sqlite3.IntegrityError as exc:
+        prior_decision_id = decision.get("prior_decision_id")
+        child = None
+        if prior_decision_id is not None:
+            child = store.connection.execute(
+                "SELECT decision_id FROM model_routing_decisions WHERE prior_decision_id=?",
+                (prior_decision_id,),
+            ).fetchone()
+        if child is not None:
+            raise StorageRefusal(
+                "routing_escalation_conflict",
+                "prior routing decision already has an escalation child",
+            ) from exc
+        raise store._translate_database_error(exc, "routing decision conflicted with canonical state") from exc
     except sqlite3.DatabaseError as exc:
         raise store._translate_database_error(exc, "routing decision conflicted with canonical state") from exc
     result = dict(zip(columns, normalized))
@@ -163,49 +309,97 @@ def record_routing_outcome(store: Any, outcome: Mapping[str, Any]) -> dict[str, 
     normalized = values[:2] + (int(bool(values[2])),) + values[3:]
     try:
         with store._transaction():
+            existing = store.connection.execute(
+                "SELECT * FROM model_routing_outcomes WHERE outcome_id=?",
+                (outcome["outcome_id"],),
+            ).fetchone()
+            if existing is not None:
+                if tuple(existing[column] for column in columns) != normalized:
+                    raise StorageRefusal(
+                        "routing_outcome_conflict",
+                        "routing outcome id has different evidence",
+                    )
+                result = dict(existing)
+                result["idempotent"] = True
+                return result
             store.connection.execute(
                 f"INSERT INTO model_routing_outcomes({','.join(columns)}) VALUES({','.join('?' for _ in columns)})",
                 normalized,
             )
+    except StorageRefusal:
+        raise
     except sqlite3.DatabaseError as exc:
         raise store._translate_database_error(exc, "routing outcome conflicted with canonical state") from exc
-    return dict(zip(columns, normalized))
+    result = dict(zip(columns, normalized))
+    result["idempotent"] = False
+    return result
+
+
+RESOURCE_COMPARE_KEYS = (
+    "task_id",
+    "owner_id",
+    "owner_role",
+    "resource_type",
+    "lifetime",
+    "expected_identity_json",
+    "cleanup_action",
+    "adapter_kind",
+    "applicable",
+    "applicability_reason",
+)
+
+
+def _register_task_resource_row(
+    store: Any, resource: Mapping[str, Any], at: str
+) -> dict[str, Any]:
+    encoded_identity = _json(resource["expected_identity"])
+    existing = store.connection.execute(
+        "SELECT * FROM task_resources WHERE resource_id=?", (resource["resource_id"],)
+    ).fetchone()
+    comparable = (
+        resource["task_id"],
+        resource["owner_id"],
+        resource["owner_role"],
+        resource["resource_type"],
+        resource["lifetime"],
+        encoded_identity,
+        resource["cleanup_action"],
+        resource["adapter_kind"],
+        int(resource["applicable"]),
+        resource["applicability_reason"],
+    )
+    if existing is not None:
+        if (
+            tuple(existing[key] for key in RESOURCE_COMPARE_KEYS) != comparable
+            or existing["state"] != "active"
+        ):
+            raise StorageRefusal("resource_conflict", "task resource identity conflicts")
+        return {
+            "resource_id": resource["resource_id"],
+            "version": int(existing["version"]),
+            "idempotent": True,
+        }
+    store.connection.execute(
+        """
+        INSERT INTO task_resources
+          (resource_id,task_id,owner_id,owner_role,resource_type,lifetime,expected_identity_json,
+           cleanup_action,adapter_kind,applicable,applicability_reason,state,version,registered_at,updated_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,'active',1,?,?)
+        """,
+        (resource["resource_id"], *comparable, at, at),
+    )
+    return {"resource_id": resource["resource_id"], "version": 1, "idempotent": False}
 
 
 def register_task_resource(store: Any, resource: Mapping[str, Any], at: str) -> dict[str, Any]:
-    encoded_identity = _json(resource["expected_identity"])
     try:
         with store._transaction():
-            existing = store.connection.execute(
-                "SELECT * FROM task_resources WHERE resource_id=?", (resource["resource_id"],)
-            ).fetchone()
-            comparable = (
-                resource["task_id"], resource["owner_id"], resource["owner_role"], resource["resource_type"],
-                resource["lifetime"], encoded_identity, resource["cleanup_action"], resource["adapter_kind"],
-                int(bool(resource["applicable"])), resource["applicability_reason"],
-            )
-            keys = (
-                "task_id", "owner_id", "owner_role", "resource_type", "lifetime", "expected_identity_json",
-                "cleanup_action", "adapter_kind", "applicable", "applicability_reason",
-            )
-            if existing is not None:
-                if tuple(existing[key] for key in keys) != comparable or existing["state"] != "active":
-                    raise StorageRefusal("resource_conflict", "task resource identity conflicts")
-                return {"resource_id": resource["resource_id"], "version": int(existing["version"]), "idempotent": True}
-            store.connection.execute(
-                """
-                INSERT INTO task_resources
-                  (resource_id,task_id,owner_id,owner_role,resource_type,lifetime,expected_identity_json,
-                   cleanup_action,adapter_kind,applicable,applicability_reason,state,version,registered_at,updated_at)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,'active',1,?,?)
-                """,
-                (resource["resource_id"], *comparable, at, at),
-            )
+            result = _register_task_resource_row(store, resource, at)
     except StorageRefusal:
         raise
     except sqlite3.DatabaseError as exc:
         raise store._translate_database_error(exc, "task resource conflicted with canonical state") from exc
-    return {"resource_id": resource["resource_id"], "version": 1, "idempotent": False}
+    return result
 
 
 def task_resources(store: Any, task_id: str) -> list[dict[str, Any]]:
@@ -260,6 +454,24 @@ def plan_cleanup(store: Any, plan: Mapping[str, Any]) -> dict[str, Any]:
                 if existing["operation_id"] != plan["operation_id"] or existing["plan_digest"] != plan["plan_digest"]:
                     raise StorageRefusal("cleanup_claim_conflict", "cleanup revision is already claimed")
                 return {"operation_id": plan["operation_id"], "fence": int(existing["fence"]), "idempotent": True}
+            planned_resources = {
+                resource["resource_id"]: resource for resource in plan.get("resources", [])
+            }
+            active_resource_ids = {
+                row["resource_id"]
+                for row in store.connection.execute(
+                    "SELECT resource_id FROM task_resources WHERE task_id=? AND state='active'",
+                    (plan["task_id"],),
+                )
+            }
+            omitted = active_resource_ids - set(planned_resources)
+            if omitted:
+                raise StorageRefusal(
+                    "resource_proof_missing",
+                    "active canonical task resource is absent from the cleanup plan",
+                )
+            for resource in planned_resources.values():
+                _register_task_resource_row(store, resource, plan["at"])
             store.connection.execute(
                 """
                 INSERT INTO cleanup_operations
@@ -387,7 +599,11 @@ def record_cleanup_action_receipt(
                     raise StorageRefusal("cleanup_receipt_conflict", "cleanup action already has another receipt")
                 return {"action_id": action_id, "receipt_hash": digest, "idempotent": True}
             action = store.connection.execute(
-                "SELECT state FROM cleanup_actions WHERE action_id=? AND operation_id=?", (action_id, operation_id)
+                """
+                SELECT state,resource_id,action_kind FROM cleanup_actions
+                 WHERE action_id=? AND operation_id=?
+                """,
+                (action_id, operation_id),
             ).fetchone()
             if action is None or action["state"] not in {"planned", "executing"}:
                 raise StorageRefusal("cleanup_action_conflict", "cleanup action is not receipt-eligible")
@@ -402,14 +618,11 @@ def record_cleanup_action_receipt(
             store.connection.execute(
                 "UPDATE cleanup_actions SET state='completed' WHERE action_id=?", (action_id,)
             )
-            resource = store.connection.execute(
-                "SELECT resource_id,action_kind FROM cleanup_actions WHERE action_id=?", (action_id,)
-            ).fetchone()
-            if resource is not None and resource["resource_id"] is not None:
-                state = "retained" if resource["action_kind"] == "retain" else "released"
+            if action["resource_id"] is not None:
+                state = "retained" if action["action_kind"] == "retain" else "released"
                 store.connection.execute(
                     "UPDATE task_resources SET state=?,version=version+1,updated_at=? WHERE resource_id=?",
-                    (state, at, resource["resource_id"]),
+                    (state, at, action["resource_id"]),
                 )
     except StorageRefusal:
         raise

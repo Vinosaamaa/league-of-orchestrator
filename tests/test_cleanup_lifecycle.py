@@ -12,7 +12,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / "src"), str(ROOT / "tests")]
 
-from league.cleanup import CleanupAdapterRegistry, CleanupExecutor, CleanupPlanner  # noqa: E402
+from league.cleanup import (  # noqa: E402
+    CLEANUP_ADAPTER_KINDS,
+    CleanupAdapterRegistry,
+    CleanupExecutor,
+    CleanupPlanner,
+)
 from league.cli import MAX_JSON_INPUT_BYTES  # noqa: E402
 from league.sqlite_store import SQLiteStorage  # noqa: E402
 from league.storage import StorageRefusal  # noqa: E402
@@ -49,7 +54,7 @@ def resource(resource_id: str, lifetime: str, action: str) -> dict:
         "lifetime": lifetime,
         "expected_identity": {"resource_id": resource_id, "generation": "exact"},
         "cleanup_action": action,
-        "adapter_kind": "fixture",
+        "adapter_kind": "process",
         "applicable": True,
         "applicability_reason": "Synthetic task-scoped cleanup contract.",
     }
@@ -82,7 +87,13 @@ def manifest(
         "final_actions": [
             {
                 "action_kind": name,
-                "adapter_kind": "fixture",
+                "adapter_kind": {
+                    "session_exit": "harness",
+                    "endpoint_close": "backend",
+                    "worktree_remove": "git",
+                    "branch_delete": "git",
+                    "callsign_release": "callsign",
+                }[name],
                 "expected_identity": {"action": name, "generation": "exact"},
                 "intended_state": {"completed": True, "action": name},
             }
@@ -107,6 +118,28 @@ def assert_plan_refused(
         assert exc.code == code, (operation_id, exc.code)
     else:
         raise AssertionError(f"cleanup refusal was not enforced: {operation_id}")
+
+
+def assert_registration_refused(
+    planner: CleanupPlanner,
+    value: dict,
+    code: str,
+) -> None:
+    try:
+        planner.register_resource(value, AT3)
+    except StorageRefusal as exc:
+        assert exc.code == code, (value.get("resource_id"), exc.code)
+    else:
+        raise AssertionError(f"resource registration refusal was not enforced: {value.get('resource_id')}")
+
+
+def cleanup_registry(
+    states: dict[str, dict], effects: list[str]
+) -> CleanupAdapterRegistry:
+    registry = CleanupAdapterRegistry()
+    for kind in CLEANUP_ADAPTER_KINDS:
+        registry.register(StateCleanupAdapter(kind, states, effects))
+    return registry
 
 
 def test_supported_policies_reach_cleanup_completed(root: Path) -> None:
@@ -135,9 +168,7 @@ def test_supported_policies_reach_cleanup_completed(root: Path) -> None:
                 action["action_id"]: dict(action["expected_identity"])
                 for action in operation["actions"]
             }
-            registry = CleanupAdapterRegistry()
-            registry.register(StateCleanupAdapter("archive", states, []))
-            registry.register(StateCleanupAdapter("fixture", states, []))
+            registry = cleanup_registry(states, [])
             completed = CleanupExecutor(store, registry).execute(
                 result["operation_id"],
                 expected_fence=0,
@@ -203,8 +234,8 @@ def test_cleanup_and_resource_commands_are_bounded(root: Path) -> None:
     assert refused["error"]["code"] == "input_too_large"
 
 
-def test_cleanup_manifest_and_resource_refusals(root: Path) -> None:
-    _, state, _ = seeded_state(root, "refusals")
+def test_cleanup_manifest_refusals(root: Path) -> None:
+    _, state, _ = seeded_state(root, "manifest-refusals")
     with SQLiteStorage(state) as store:
         planner = CleanupPlanner(store)
         for name, mutate, code in (
@@ -220,6 +251,11 @@ def test_cleanup_manifest_and_resource_refusals(root: Path) -> None:
             mutate(value)
             assert_plan_refused(planner, value, f"operation:{name}", code)
 
+
+def test_resource_registration_refusals(root: Path) -> None:
+    _, state, _ = seeded_state(root, "resource-refusals")
+    with SQLiteStorage(state) as store:
+        planner = CleanupPlanner(store)
         for item, code in (
             (resource("shared-stop", "shared_lease", "release_lease"), "shared_resource_refused"),
             (resource("persistent-stop", "persistent_retain", "retain"), "persistent_resource_refused"),
@@ -232,12 +268,57 @@ def test_cleanup_manifest_and_resource_refusals(root: Path) -> None:
             (resource("shared-invalid", "shared_lease", "terminate"), "shared_resource_refused"),
             (resource("persistent-invalid", "persistent_retain", "terminate"), "persistent_resource_refused"),
         ):
-            try:
-                planner.register_resource(item, AT3)
-            except StorageRefusal as exc:
-                assert exc.code == code
-            else:
-                raise AssertionError("invalid shared/persistent cleanup action was registered")
+            assert_registration_refused(planner, item, code)
+
+        invalid_applicability = resource("applicability-string", "task_owned", "terminate")
+        invalid_applicability["applicable"] = "true"
+        assert_registration_refused(planner, invalid_applicability, "resource_invalid")
+
+
+def test_cleanup_adapter_and_shape_refusals(root: Path) -> None:
+    _, state, _ = seeded_state(root, "adapter-refusals")
+    with SQLiteStorage(state) as store:
+        planner = CleanupPlanner(store)
+        for name, mutate, code in (
+            (
+                "resource-adapter",
+                lambda value: value["resources"][0].update(adapter_kind="undeclared"),
+                "cleanup_adapter_unknown",
+            ),
+            (
+                "resource-identity",
+                lambda value: value["resources"][0].update(expected_identity={}),
+                "resource_invalid",
+            ),
+            (
+                "final-adapter",
+                lambda value: value["final_actions"][0].update(adapter_kind="undeclared"),
+                "cleanup_adapter_unknown",
+            ),
+            (
+                "final-adapter-category",
+                lambda value: value["final_actions"][0].update(adapter_kind="git"),
+                "cleanup_adapter_mismatch",
+            ),
+            (
+                "final-identity",
+                lambda value: value["final_actions"][0].update(expected_identity={}),
+                "cleanup_manifest_invalid",
+            ),
+            (
+                "final-state",
+                lambda value: value["final_actions"][0].update(intended_state={}),
+                "cleanup_manifest_invalid",
+            ),
+            (
+                "duplicate-resource",
+                lambda value: value["resources"].append(dict(value["resources"][0])),
+                "resource_invalid",
+            ),
+        ):
+            value = manifest()
+            mutate(value)
+            assert_plan_refused(planner, value, f"operation:{name}", code)
 
 
 def test_registered_resources_cannot_be_hidden(root: Path) -> None:
@@ -251,6 +332,40 @@ def test_registered_resources_cannot_be_hidden(root: Path) -> None:
             "operation:hidden-shared",
             "shared_resource_refused",
         )
+
+
+def test_resource_registration_and_cleanup_plan_are_atomic(root: Path) -> None:
+    _, state, _ = seeded_state(root, "atomic-plan")
+    with SQLiteStorage(state) as store:
+        store.connection.execute(
+            """
+            CREATE TRIGGER synthetic_cleanup_action_failure
+            BEFORE INSERT ON cleanup_actions
+            BEGIN
+              SELECT RAISE(ABORT, 'synthetic cleanup action failure');
+            END
+            """
+        )
+        try:
+            CleanupPlanner(store).plan(
+                manifest(), operation_id="operation:atomic", at=AT3
+            )
+        except StorageRefusal:
+            pass
+        else:
+            raise AssertionError("synthetic cleanup planning failure did not fire")
+        assert store.task_resources(TASK_ID) == []
+        assert store.connection.execute("SELECT COUNT(*) FROM cleanup_obligations").fetchone()[0] == 0
+        assert store.connection.execute("SELECT COUNT(*) FROM cleanup_operations").fetchone()[0] == 0
+        assert store.connection.execute("SELECT COUNT(*) FROM cleanup_actions").fetchone()[0] == 0
+
+        store.connection.execute("DROP TRIGGER synthetic_cleanup_action_failure")
+        planned = CleanupPlanner(store).plan(
+            manifest(), operation_id="operation:atomic", at=AT3
+        )
+        assert planned["state"] == "cleanup_pending"
+        assert [item["resource_id"] for item in store.task_resources(TASK_ID)] == ["task-process"]
+        assert store.cleanup_operation("operation:atomic") is not None
 
     _, omitted_state, _ = seeded_state(root, "omitted-task-resource")
     with SQLiteStorage(omitted_state) as store:
@@ -273,9 +388,7 @@ def planned_execution(root: Path, suffix: str) -> tuple[SQLiteStorage, CleanupEx
     assert operation is not None
     states = {action["action_id"]: dict(action["expected_identity"]) for action in operation["actions"]}
     effects: list[str] = []
-    registry = CleanupAdapterRegistry()
-    registry.register(StateCleanupAdapter("archive", states, effects))
-    registry.register(StateCleanupAdapter("fixture", states, effects))
+    registry = cleanup_registry(states, effects)
     return store, CleanupExecutor(store, registry), operation, states, effects
 
 
@@ -404,8 +517,11 @@ def main() -> None:
         root = Path(temporary)
         test_supported_policies_reach_cleanup_completed(root)
         test_cleanup_and_resource_commands_are_bounded(root)
-        test_cleanup_manifest_and_resource_refusals(root)
+        test_cleanup_manifest_refusals(root)
+        test_resource_registration_refusals(root)
+        test_cleanup_adapter_and_shape_refusals(root)
         test_registered_resources_cannot_be_hidden(root)
+        test_resource_registration_and_cleanup_plan_are_atomic(root)
         test_crash_after_every_external_action_and_duplicate(root)
         test_already_closed_or_missing_exact_resources_and_stale_identity(root)
     test_public_candidate_has_no_private_paths()

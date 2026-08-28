@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import deque
 from typing import Any, Mapping
 
 from league.adapter_types import (
@@ -22,12 +23,14 @@ class DeterministicBackend:
     ) -> None:
         self.contract = AdapterContract(
             kind,
+            "backend",
             frozenset(capabilities),
             "isolated-double",
+            "available",
             "Deterministic in-memory runtime double.",
         )
         self.endpoints: dict[str, dict[str, Any]] = {}
-        self.operations: list[tuple[str, str]] = []
+        self.operations: deque[tuple[str, str]] = deque(maxlen=4096)
         self.sequence = 0
 
     def allocate(self, specification: Mapping[str, Any]) -> AdapterReceipt:
@@ -72,6 +75,9 @@ class DeterministicBackend:
     def close(self, endpoint: OpaqueIdentity) -> AdapterReceipt:
         state = self.endpoints[endpoint.encoded]
         state["state"] = "missing"
+        state["session_identity"] = None
+        state["title"] = None
+        state.pop("messages", None)
         self.operations.append(("close", endpoint.encoded))
         return AdapterReceipt("close", endpoint, "missing", {"isolated_double": True})
 

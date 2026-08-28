@@ -7,6 +7,7 @@ from typing import Any, Mapping, Protocol
 
 from .adapter_types import (
     BACKEND_CAPABILITIES,
+    EVIDENCE_LEVELS,
     HARNESS_CAPABILITIES,
     AdapterContract,
     AdapterInstruction,
@@ -49,7 +50,7 @@ class DeclaredHarnessAdapter:
     def _instruction(
         self, capability: str, session: OpaqueIdentity | None = None, **payload: Any
     ) -> AdapterInstruction:
-        self.contract.require(capability, HARNESS_CAPABILITIES)
+        self.contract.require(capability)
         if session is not None:
             if session.namespace != self.contract.kind:
                 raise StorageRefusal("identity_mismatch", "session namespace does not match harness adapter")
@@ -60,7 +61,7 @@ class DeclaredHarnessAdapter:
         return self._instruction("create", specification=dict(specification))
 
     def identify(self, observation: RuntimeObservation) -> OpaqueIdentity:
-        self.contract.require("identify", HARNESS_CAPABILITIES)
+        self.contract.require("identify")
         encoded = observation.details.get("session_identity")
         identity = OpaqueIdentity.decode(str(encoded))
         if identity.namespace != self.contract.kind:
@@ -78,7 +79,7 @@ class DeclaredHarnessAdapter:
         return self._instruction("prompt", session, prompt=prompt)
 
     def status(self, session: OpaqueIdentity, observation: RuntimeObservation) -> str:
-        self.contract.require("status", HARNESS_CAPABILITIES)
+        self.contract.require("status")
         if session.namespace != self.contract.kind:
             raise StorageRefusal("identity_mismatch", "session namespace does not match harness adapter")
         observed = observation.details.get("session_identity")
@@ -109,9 +110,13 @@ class AdapterRegistry:
         self._backends: dict[str, BackendAdapter] = {}
 
     def register_harness(self, adapter: HarnessAdapter) -> None:
+        if adapter.contract.category != "harness":
+            raise StorageRefusal("adapter_contract_invalid", "harness registry requires a harness contract")
         self._register(self._harnesses, adapter.contract.kind, adapter)
 
     def register_backend(self, adapter: BackendAdapter) -> None:
+        if adapter.contract.category != "backend":
+            raise StorageRefusal("adapter_contract_invalid", "backend registry requires a backend contract")
         self._register(self._backends, adapter.contract.kind, adapter)
 
     @staticmethod
@@ -138,23 +143,24 @@ class AdapterRegistry:
             for backend in sorted(self._backends.values(), key=lambda item: item.contract.kind):
                 pair_evidence = min(
                     (harness.contract.evidence, backend.contract.evidence),
-                    key=("unverified", "inherited-contract", "isolated-double", "real-canary").index,
+                    key=EVIDENCE_LEVELS.index,
                 )
+                driver_available = backend.contract.availability == "available"
+
+                def status(capability: str, declared: frozenset[str]) -> str:
+                    if capability not in declared:
+                        return "unsupported"
+                    if not driver_available:
+                        return "driver_unavailable"
+                    return "unverified" if pair_evidence == "unverified" else "supported"
+
                 operations = {
-                    capability: (
-                        "unsupported"
-                        if capability not in harness.contract.capabilities
-                        else ("unverified" if pair_evidence == "unverified" else "supported")
-                    )
+                    capability: status(capability, harness.contract.capabilities)
                     for capability in sorted(HARNESS_CAPABILITIES)
                 }
                 operations.update(
                     {
-                        f"backend.{capability}": (
-                            "unsupported"
-                            if capability not in backend.contract.capabilities
-                            else ("unverified" if pair_evidence == "unverified" else "supported")
-                        )
+                        f"backend.{capability}": status(capability, backend.contract.capabilities)
                         for capability in sorted(BACKEND_CAPABILITIES)
                     }
                 )
@@ -163,6 +169,9 @@ class AdapterRegistry:
                         "harness": harness.contract.kind,
                         "backend": backend.contract.kind,
                         "evidence": pair_evidence,
+                        "availability": (
+                            "operational" if driver_available else "contract-only"
+                        ),
                         "operations": operations,
                     }
                 )
@@ -174,16 +183,20 @@ def builtin_harness_contracts() -> tuple[DeclaredHarnessAdapter, ...]:
         DeclaredHarnessAdapter(
             AdapterContract(
                 "codex",
+                "harness",
                 frozenset(HARNESS_CAPABILITIES - {"resume"}),
                 "inherited-contract",
+                "available",
                 "Compatibility contract for the proven Codex watcher behavior; real cutover canary is issue #23.",
             )
         ),
         DeclaredHarnessAdapter(
             AdapterContract(
                 "pi",
+                "harness",
                 frozenset(HARNESS_CAPABILITIES),
                 "unverified",
+                "available",
                 "Non-Codex contract exercised only through deterministic isolated doubles until issue #23.",
             )
         ),
@@ -197,7 +210,7 @@ class ContractOnlyBackendAdapter:
     contract: AdapterContract
 
     def _unavailable(self, capability: str) -> Any:
-        self.contract.require(capability, BACKEND_CAPABILITIES)
+        self.contract.require(capability)
         raise StorageRefusal(
             "runtime_driver_unavailable",
             f"backend {self.contract.kind} requires the separately gated runtime driver",
@@ -221,16 +234,20 @@ def builtin_backend_contracts() -> tuple[ContractOnlyBackendAdapter, ...]:
         ContractOnlyBackendAdapter(
             AdapterContract(
                 "herdr",
+                "backend",
                 frozenset(BACKEND_CAPABILITIES),
                 "inherited-contract",
+                "contract-only",
                 "Compatibility contract for inherited Herdr allocation/input/inspection/close behavior.",
             )
         ),
         ContractOnlyBackendAdapter(
             AdapterContract(
                 "tmux",
+                "backend",
                 frozenset(BACKEND_CAPABILITIES - {"allocate"}),
                 "inherited-contract",
+                "contract-only",
                 "Compatibility contract for inherited tmux input/inspection/close behavior; allocation remains unsupported.",
             )
         ),

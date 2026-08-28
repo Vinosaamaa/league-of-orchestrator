@@ -13,6 +13,16 @@ from .storage_types import StorageRefusal
 TASK_CLASSES = frozenset({"analysis", "local_git", "pr_ci", "deployed_service"})
 DISPOSITIONS = frozenset({"completed", "rejected", "cancelled", "failed"})
 RESOURCE_LIFETIMES = frozenset({"task_owned", "shared_lease", "persistent_retain"})
+CLEANUP_ADAPTER_KINDS = frozenset(
+    {"archive", "harness", "backend", "git", "callsign", "process"}
+)
+FINAL_ACTION_ADAPTERS = {
+    "session_exit": "harness",
+    "endpoint_close": "backend",
+    "worktree_remove": "git",
+    "branch_delete": "git",
+    "callsign_release": "callsign",
+}
 
 POLICY_REQUIREMENTS: dict[str, tuple[str, ...]] = {
     "analysis": ("identity.exact", "endpoint.terminal_or_idle"),
@@ -97,6 +107,8 @@ class ResourceRegistration:
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> "ResourceRegistration":
+        if not isinstance(value, Mapping):
+            raise StorageRefusal("resource_invalid", "task resource registration must be an object")
         required = (
             "resource_id",
             "task_id",
@@ -112,10 +124,31 @@ class ResourceRegistration:
         )
         if any(key not in value for key in required):
             raise StorageRefusal("resource_invalid", "task resource registration is incomplete")
-        if value["lifetime"] not in RESOURCE_LIFETIMES:
+        if not isinstance(value["lifetime"], str) or value["lifetime"] not in RESOURCE_LIFETIMES:
             raise StorageRefusal("resource_invalid", "task resource lifetime is unsupported")
+        string_fields = (
+            "resource_id",
+            "task_id",
+            "owner_id",
+            "owner_role",
+            "resource_type",
+            "cleanup_action",
+            "adapter_kind",
+            "applicability_reason",
+        )
+        if any(
+            not isinstance(value[field], str)
+            or not value[field]
+            or value[field].strip() != value[field]
+            for field in string_fields
+        ):
+            raise StorageRefusal("resource_invalid", "task resource string fields are not exact")
         if value["owner_role"] == "shotcaller":
             raise StorageRefusal("resource_owner_refused", "Shotcaller-owned resources are ineligible for task cleanup")
+        if value["owner_role"] not in {"champion", "hidden-worker", "task"}:
+            raise StorageRefusal("resource_invalid", "task resource owner role is unsupported")
+        if not isinstance(value["applicable"], bool):
+            raise StorageRefusal("resource_invalid", "task resource applicability must be Boolean")
         if not isinstance(value["expected_identity"], Mapping) or not value["expected_identity"]:
             raise StorageRefusal("resource_invalid", "task resource expected identity is missing")
         if value["lifetime"] == "shared_lease" and value["cleanup_action"] != "release_lease":
@@ -187,20 +220,48 @@ class CleanupAdapterRegistry:
 
 
 class CleanupPlanner:
-    def __init__(self, storage: CleanupStorage) -> None:
+    def __init__(
+        self,
+        storage: CleanupStorage,
+        adapter_kinds: frozenset[str] = CLEANUP_ADAPTER_KINDS,
+    ) -> None:
         self.storage = storage
+        self.adapter_kinds = frozenset(adapter_kinds)
+        if "archive" not in self.adapter_kinds or any(
+            not isinstance(kind, str) or not kind for kind in self.adapter_kinds
+        ):
+            raise StorageRefusal("cleanup_adapter_unknown", "cleanup adapter declarations are invalid")
+
+    def _validate_resource_adapter(self, resource: ResourceRegistration) -> None:
+        if resource.adapter_kind not in self.adapter_kinds:
+            raise StorageRefusal(
+                "cleanup_adapter_unknown",
+                f"cleanup adapter is not declared: {resource.adapter_kind}",
+            )
 
     def register_resource(self, value: Mapping[str, Any], at: str) -> dict[str, Any]:
         resource = ResourceRegistration.from_mapping(value)
+        self._validate_resource_adapter(resource)
         return self.storage.register_task_resource(resource.as_record(), at)
 
     def plan(self, manifest: Mapping[str, Any], *, operation_id: str, at: str) -> dict[str, Any]:
         task_id = manifest.get("task_id")
         owner = manifest.get("owner")
-        if not isinstance(task_id, str) or not task_id or not isinstance(owner, Mapping):
+        identity = manifest.get("identity")
+        if (
+            not isinstance(task_id, str)
+            or not task_id
+            or not isinstance(owner, Mapping)
+            or not isinstance(owner.get("id"), str)
+            or not owner.get("id")
+            or not isinstance(identity, Mapping)
+            or not identity
+        ):
             raise StorageRefusal("cleanup_manifest_invalid", "cleanup task identity is incomplete")
         if owner.get("role") == "shotcaller" or owner.get("persistent") is True:
             raise StorageRefusal("cleanup_owner_refused", "Shotcallers and persistent supervisors are ineligible")
+        if owner.get("role") not in {"champion", "hidden-worker", "task"} or owner.get("persistent") is not False:
+            raise StorageRefusal("cleanup_owner_refused", "cleanup owner identity is not an eligible task owner")
         if manifest.get("pending_decisions_clear") is not True:
             raise StorageRefusal("pending_decision", "cleanup has a pending owner decision")
         policy = select_cleanup_policy(str(manifest.get("task_class")), str(manifest.get("disposition")))
@@ -217,11 +278,20 @@ class CleanupPlanner:
         resources_value = manifest.get("resources", [])
         if not isinstance(resources_value, Sequence) or isinstance(resources_value, (str, bytes)):
             raise StorageRefusal("resource_invalid", "cleanup resources must be a list")
+        if any(not isinstance(item, Mapping) for item in resources_value):
+            raise StorageRefusal("resource_invalid", "cleanup resource entries must be objects")
         resources = [ResourceRegistration.from_mapping(item) for item in resources_value]
+        resource_ids = [resource.resource_id for resource in resources]
+        if len(resource_ids) != len(set(resource_ids)):
+            raise StorageRefusal("resource_invalid", "cleanup resource ids must be unique")
+        for resource in resources:
+            self._validate_resource_adapter(resource)
         registered = [
             ResourceRegistration.from_mapping(item)
             for item in self.storage.task_resources(task_id)
         ]
+        for resource in registered:
+            self._validate_resource_adapter(resource)
         manifest_resources = {resource.resource_id: resource for resource in resources}
         for resource in registered:
             if resource.lifetime == "shared_lease":
@@ -294,13 +364,7 @@ class CleanupPlanner:
         final_actions = manifest.get("final_actions", [])
         if not isinstance(final_actions, list):
             raise StorageRefusal("cleanup_manifest_invalid", "cleanup final actions must be a list")
-        allowed_final = {
-            "session_exit",
-            "endpoint_close",
-            "worktree_remove",
-            "branch_delete",
-            "callsign_release",
-        }
+        allowed_final = set(FINAL_ACTION_ADAPTERS)
         required_final = ["session_exit", "endpoint_close"]
         if policy["task_class"] != "analysis":
             required_final.extend(("worktree_remove", "branch_delete"))
@@ -314,15 +378,29 @@ class CleanupPlanner:
         for item in final_actions:
             if not isinstance(item, Mapping) or item.get("action_kind") not in allowed_final:
                 raise StorageRefusal("cleanup_action_unsupported", "cleanup final action is unsupported")
+            adapter_kind = item.get("adapter_kind")
+            expected_identity = item.get("expected_identity")
+            intended_state = item.get("intended_state")
+            if not isinstance(adapter_kind, str) or adapter_kind not in self.adapter_kinds:
+                raise StorageRefusal("cleanup_adapter_unknown", "cleanup final action adapter is not declared")
+            if adapter_kind != FINAL_ACTION_ADAPTERS[item["action_kind"]]:
+                raise StorageRefusal(
+                    "cleanup_adapter_mismatch",
+                    "cleanup final action uses the wrong adapter category",
+                )
+            if not isinstance(expected_identity, Mapping) or not expected_identity:
+                raise StorageRefusal("cleanup_manifest_invalid", "cleanup final expected identity is missing")
+            if not isinstance(intended_state, Mapping) or not intended_state:
+                raise StorageRefusal("cleanup_manifest_invalid", "cleanup final intended state is missing")
             actions.append(
                 {
                     "action_id": f"{operation_id}:{ordinal:03d}",
                     "ordinal": ordinal,
                     "action_kind": item["action_kind"],
-                    "adapter_kind": item.get("adapter_kind"),
+                    "adapter_kind": adapter_kind,
                     "resource_id": item.get("resource_id"),
-                    "expected_identity": item.get("expected_identity", {}),
-                    "intended_state": item.get("intended_state", {"completed": True}),
+                    "expected_identity": dict(expected_identity),
+                    "intended_state": dict(intended_state),
                 }
             )
             ordinal += 1
@@ -333,8 +411,13 @@ class CleanupPlanner:
         if release_positions != sorted(release_positions):
             raise StorageRefusal("cleanup_order_invalid", "cleanup release actions are out of order")
         digest = hashlib.sha256(_stable_json({"policy": policy, "actions": actions}).encode("utf-8")).hexdigest()
-        for resource in resources:
-            self.storage.register_task_resource(resource.as_record(), at)
+        expected_cleanup_version = manifest.get("expected_cleanup_version", 0)
+        if (
+            isinstance(expected_cleanup_version, bool)
+            or not isinstance(expected_cleanup_version, int)
+            or expected_cleanup_version < 0
+        ):
+            raise StorageRefusal("cleanup_manifest_invalid", "cleanup expected version is invalid")
         return self.storage.plan_cleanup(
             {
                 "operation_id": operation_id,
@@ -343,8 +426,9 @@ class CleanupPlanner:
                 "task_class": policy["task_class"],
                 "disposition": policy["disposition"],
                 "required_policy": policy["policy"],
-                "expected_cleanup_version": int(manifest.get("expected_cleanup_version", 0)),
+                "expected_cleanup_version": expected_cleanup_version,
                 "plan_digest": digest,
+                "resources": [resource.as_record() for resource in resources],
                 "actions": actions,
                 "at": at,
             }

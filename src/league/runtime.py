@@ -7,42 +7,12 @@ request, assignment, outbox, or Stop-hook state machine.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Mapping, Optional, Protocol
+from typing import Any, Callable, Mapping, Optional
 
-from .adapter_types import (
-    BACKEND_CAPABILITIES,
-    HARNESS_CAPABILITIES,
-    AdapterReceipt,
-    OpaqueIdentity,
-)
+from .adapter_types import AdapterReceipt, OpaqueIdentity
 from .adapters import AdapterRegistry
+from .storage_runtime import RuntimeBindingStorage
 from .storage_types import StorageRefusal
-
-
-class RuntimeStorage(Protocol):
-    def register_runtime_binding(
-        self,
-        binding_id: str,
-        task_id: str,
-        harness_kind: str,
-        backend_kind: str,
-        session_identity: str,
-        endpoint_identity: str,
-        endpoint_generation: str,
-        capabilities: Mapping[str, Any],
-        at: str,
-    ) -> dict[str, Any]: ...
-
-    def runtime_binding(self, binding_id: str) -> Optional[dict[str, Any]]: ...
-
-    def update_runtime_binding(
-        self,
-        binding_id: str,
-        expected_version: int,
-        state: str,
-        at: str,
-        receipt: Mapping[str, Any],
-    ) -> dict[str, Any]: ...
 
 
 @dataclass(frozen=True)
@@ -60,7 +30,7 @@ class RuntimeCreateSpec:
 class RuntimeLifecycle:
     """One generic create/identify/route/wake/resume/exit flow."""
 
-    def __init__(self, storage: RuntimeStorage, registry: AdapterRegistry) -> None:
+    def __init__(self, storage: RuntimeBindingStorage, registry: AdapterRegistry) -> None:
         self.storage = storage
         self.registry = registry
 
@@ -68,9 +38,9 @@ class RuntimeLifecycle:
         harness = self.registry.harness(specification.harness_kind)
         backend = self.registry.backend(specification.backend_kind)
         for capability in ("create", "identify", "title", "status", "exit"):
-            harness.contract.require(capability, HARNESS_CAPABILITIES)
+            harness.contract.require(capability)
         for capability in ("allocate", "input", "inspect", "close"):
-            backend.contract.require(capability, BACKEND_CAPABILITIES)
+            backend.contract.require(capability)
 
         allocation = backend.allocate(specification.backend)
         endpoint = allocation.identity
@@ -108,28 +78,38 @@ class RuntimeLifecycle:
                 specification.at,
             )
             return {**binding, "session_identity": session.encoded, "endpoint_identity": endpoint.encoded}
-        except BaseException as original:
+        except BaseException:
             try:
-                observation = backend.inspect(endpoint)
-                if observation.endpoint_identity != endpoint:
-                    raise StorageRefusal("identity_mismatch", "partial runtime endpoint identity changed")
-                if endpoint_generation is not None and observation.generation != endpoint_generation:
-                    raise StorageRefusal("identity_mismatch", "partial runtime endpoint generation changed")
-                if session is not None and observation.state not in {"closed", "missing"}:
-                    if harness.identify(observation) != session:
-                        raise StorageRefusal("identity_mismatch", "partial runtime session identity changed")
-                    backend.input(endpoint, harness.exit(session))
-                    observation = backend.inspect(endpoint)
-                if observation.state != "missing":
-                    backend.close(endpoint)
-                if backend.inspect(endpoint).state not in {"closed", "missing"}:
-                    raise StorageRefusal("runtime_rollback_failed", "partial runtime endpoint remained active")
+                self._rollback_create(harness, backend, endpoint, session, endpoint_generation)
             except BaseException as rollback:
                 raise StorageRefusal(
                     "runtime_rollback_failed",
                     "partial runtime could not be rolled back with exact identity",
                 ) from rollback
-            raise original
+            raise
+
+    @staticmethod
+    def _rollback_create(
+        harness: Any,
+        backend: Any,
+        endpoint: OpaqueIdentity,
+        session: OpaqueIdentity | None,
+        endpoint_generation: str | None,
+    ) -> None:
+        observation = backend.inspect(endpoint)
+        if observation.endpoint_identity != endpoint:
+            raise StorageRefusal("identity_mismatch", "partial runtime endpoint identity changed")
+        if endpoint_generation is not None and observation.generation != endpoint_generation:
+            raise StorageRefusal("identity_mismatch", "partial runtime endpoint generation changed")
+        if session is not None and observation.state not in {"closed", "missing"}:
+            if harness.identify(observation) != session:
+                raise StorageRefusal("identity_mismatch", "partial runtime session identity changed")
+            backend.input(endpoint, harness.exit(session))
+            observation = backend.inspect(endpoint)
+        if observation.state != "missing":
+            backend.close(endpoint)
+        if backend.inspect(endpoint).state not in {"closed", "missing"}:
+            raise StorageRefusal("runtime_rollback_failed", "partial runtime endpoint remained active")
 
     @staticmethod
     def _inspect_exact(backend: Any, endpoint: OpaqueIdentity, generation: str | None = None) -> Any:
@@ -172,27 +152,27 @@ class RuntimeLifecycle:
     def prompt(self, binding_id: str, prompt: str) -> AdapterReceipt:
         _, harness, backend, session, endpoint, generation = self._bound(binding_id)
         for capability in ("identify", "prompt"):
-            harness.contract.require(capability, HARNESS_CAPABILITIES)
+            harness.contract.require(capability)
         for capability in ("inspect", "input"):
-            backend.contract.require(capability, BACKEND_CAPABILITIES)
+            backend.contract.require(capability)
         self._guard_input(harness, backend, session, endpoint, generation)
         return backend.input(endpoint, harness.prompt(session, prompt))
 
     def wake(self, binding_id: str, event: str) -> AdapterReceipt:
         _, harness, backend, session, endpoint, generation = self._bound(binding_id)
         for capability in ("identify", "hook"):
-            harness.contract.require(capability, HARNESS_CAPABILITIES)
+            harness.contract.require(capability)
         for capability in ("inspect", "input"):
-            backend.contract.require(capability, BACKEND_CAPABILITIES)
+            backend.contract.require(capability)
         self._guard_input(harness, backend, session, endpoint, generation)
         return backend.input(endpoint, harness.hook(session, event))
 
     def resume(self, binding_id: str) -> AdapterReceipt:
         _, harness, backend, session, endpoint, generation = self._bound(binding_id)
         for capability in ("identify", "resume"):
-            harness.contract.require(capability, HARNESS_CAPABILITIES)
+            harness.contract.require(capability)
         for capability in ("inspect", "input"):
-            backend.contract.require(capability, BACKEND_CAPABILITIES)
+            backend.contract.require(capability)
         observation = self._inspect_exact(backend, endpoint, generation)
         observed = harness.identify(observation)
         if observed != session:
@@ -202,43 +182,67 @@ class RuntimeLifecycle:
     def interrupt(self, binding_id: str) -> AdapterReceipt:
         _, harness, backend, session, endpoint, generation = self._bound(binding_id)
         for capability in ("identify", "interrupt"):
-            harness.contract.require(capability, HARNESS_CAPABILITIES)
+            harness.contract.require(capability)
         for capability in ("inspect", "input"):
-            backend.contract.require(capability, BACKEND_CAPABILITIES)
+            backend.contract.require(capability)
         self._guard_input(harness, backend, session, endpoint, generation)
         return backend.input(endpoint, harness.interrupt(session))
 
     def status(self, binding_id: str) -> str:
         _, harness, backend, session, endpoint, generation = self._bound(binding_id)
-        harness.contract.require("status", HARNESS_CAPABILITIES)
-        backend.contract.require("inspect", BACKEND_CAPABILITIES)
+        harness.contract.require("status")
+        backend.contract.require("inspect")
         return harness.status(session, self._inspect_exact(backend, endpoint, generation))
 
-    def guarded_exit(self, binding_id: str, expected_version: int, at: str) -> dict[str, Any]:
-        binding, harness, backend, session, endpoint, generation = self._bound(binding_id)
+    def guarded_exit(
+        self,
+        binding_id: str,
+        *,
+        expected_version: int,
+        expected_fence: int,
+        executor_id: str,
+        leased_until: str,
+        at: str,
+        fault: Optional[Callable[[str], None]] = None,
+    ) -> dict[str, Any]:
+        _, harness, backend, session, endpoint, generation = self._bound(binding_id)
         for capability in ("identify", "exit"):
-            harness.contract.require(capability, HARNESS_CAPABILITIES)
+            harness.contract.require(capability)
         for capability in ("input", "inspect", "close"):
-            backend.contract.require(capability, BACKEND_CAPABILITIES)
-        if int(binding["version"]) != expected_version:
-            raise StorageRefusal("version_conflict", "runtime binding version changed")
+            backend.contract.require(capability)
+        claimed = self.storage.claim_runtime_exit(
+            binding_id,
+            expected_version,
+            expected_fence,
+            executor_id,
+            leased_until,
+            at,
+        )
+        if claimed["state"] == "closed":
+            return claimed
+        claimed_version = int(claimed["version"])
+        fence = int(claimed["fence"])
         observation = self._inspect_exact(backend, endpoint, generation)
         if observation.state not in {"closed", "missing"}:
             if harness.identify(observation) != session:
                 raise StorageRefusal("identity_mismatch", "exit observation conflicts with persisted session")
             backend.input(endpoint, harness.exit(session))
+            if fault is not None:
+                fault("after_runtime_exit")
         after_exit = self._inspect_exact(backend, endpoint, generation)
         if after_exit.state not in {"closed", "idle", "missing"}:
             raise StorageRefusal("runtime_exit_unverified", "harness exit did not reach a safe state")
         if after_exit.state != "missing":
             backend.close(endpoint)
+            if fault is not None:
+                fault("after_endpoint_close")
         closed = self._inspect_exact(backend, endpoint, generation)
         if closed.state not in {"closed", "missing"}:
             raise StorageRefusal("endpoint_close_unverified", "backend endpoint close was not verified")
-        return self.storage.update_runtime_binding(
+        return self.storage.finalize_runtime_exit(
             binding_id,
-            expected_version,
-            "closed",
+            claimed_version,
+            fence,
             at,
             {
                 "session_identity": session.encoded,

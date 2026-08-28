@@ -42,11 +42,12 @@ These toolkit files were inventoried but not copied:
 | `AGENT_ORCHESTRATION_REFERENCE.md` | `ec2eff727ac52d23434d92c1f07ee7806206b4574fb7e33dbd3bf30040baccd4` | Installed global policy is not silently replaced. |
 | `global-agent-instructions/shared-AGENTS.md` | `e1dff2fcb7fac2afe4704584221d5fb19a25b21c887c2cf48792ad69804f4c35` | Global guide ownership changes require a release gate. |
 
-The example and schema files in this repository are new, synthetic authoring
-artifacts derived from the runtime validator rather than copies of live Roster
-records. They document the optional paired `routing_name` and `display_agent`
-fields; runtime validation additionally requires the routing name to equal the
-lowercase callsign.
+The Roster status/update examples and their schemas are new, synthetic
+authoring artifacts derived from the runtime validator rather than copies of
+live Roster records. They document the optional paired `routing_name` and
+`display_agent` fields; runtime validation additionally requires the routing
+name to equal the lowercase callsign. The routing example is the deliberately
+adapted import listed above, while its schema is repository-local.
 
 ## Storage-decision evidence refresh
 

@@ -20,17 +20,11 @@ and exit semantics. A backend adapter owns allocation, input transport,
 inspection, and close. Missing declarations return `unsupported_capability`;
 unknown adapters return `adapter_unknown`.
 
-The compatibility matrix is intentionally honest:
-
-| Harness/backend | Create | Identify/prompt/status/hook/interrupt/exit | Resume | Allocate | Input/inspect/close | Evidence |
-| --- | --- | --- | --- | --- | --- | --- |
-| Codex + Herdr | supported | supported | unsupported | supported | supported | inherited contract |
-| Codex + tmux | supported at harness boundary | supported | unsupported | unsupported | supported | inherited contract |
-| Pi + Herdr | unverified | unverified | unverified | unverified | unverified | real canary pending |
-| Pi + tmux | unverified | unverified | unverified | unsupported | unverified | real canary pending |
-| Pi + deterministic backend double | exercised | exercised | exercised | exercised | exercised | isolated test only |
-
-`league runtime matrix` exposes the machine-readable matrix. The deterministic
+`league runtime matrix` is the authoritative, generated compatibility matrix.
+It distinguishes undeclared operations (`unsupported`) from declared contracts
+whose repository-local driver is absent (`driver_unavailable`). Herdr and tmux
+are named contract-only backends in this branch; tmux allocation is additionally
+undeclared. The deterministic
 Pi test covers create → identify → route/prompt → durable transition → wake →
 interrupt → resume → exact guarded exit. It is never reported as real-runtime
 proof. Separate deterministic contract tests cover Codex+Herdr creation and
@@ -63,6 +57,10 @@ order: archive validated identity/policy/evidence; task-owned resource actions;
 harness exit; backend close; applicable exact worktree and local branch; and
 callsign release last.
 
+New resource registrations, the cleanup obligation, its claimed operation, and
+all actions commit in one SQLite transaction. A planning conflict or injected
+failure rolls the entire set back, so it cannot leave active orphan resources.
+
 External effects run outside SQLite. Every pending adapter and identity is
 preflighted read-only before the first effect, each action is inspected again
 before use, verified afterwards, and receives one immutable receipt. A crash after the
@@ -71,6 +69,12 @@ intended state records `already_applied` instead of repeating the effect. A
 fence prevents a stale executor from writing receipts. Cleanup becomes
 `cleanup_completed` only after every action receipt and the final teardown
 receipt exist.
+
+Runtime exit uses the same recoverable shape: it atomically claims a binding
+version and monotonically increasing exit fence before sending exit or close,
+then verifies and finalizes. An expired lease may be reclaimed after a crash;
+inspection reconciles an already-exited session or missing endpoint without
+repeating the external action.
 
 ## Model and effort routing
 
@@ -83,7 +87,9 @@ representative evaluation explicitly approves `WORKER_FAST`. Explicit user
 model or effort values are preserved exactly. Only the enumerated concrete
 failure classes permit one safe-boundary escalation; a second escalation, or a
 route already at the strongest worker tier, records `blocked`. Outcomes record
-success, corrections, latency, and cost by routing decision and role.
+success, corrections, latency, and cost by routing decision and role. Storage
+atomically permits only one child for each prior decision. Outcome retries are
+idempotent by `outcome_id` only when every recorded field matches.
 
 The issues #3/#4/#5/#17 assignment branch consumes this API. This slice does
 not create prompt inbox, request claim, assignment, outbox, or Stop-hook state.

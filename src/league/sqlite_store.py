@@ -341,8 +341,11 @@ MIGRATIONS = (
               endpoint_identity TEXT NOT NULL UNIQUE,
               endpoint_generation TEXT NOT NULL,
               capabilities_json TEXT NOT NULL,
-              state TEXT NOT NULL CHECK (state IN ('active','idle','interrupted','closed','failed')),
+              state TEXT NOT NULL CHECK (state IN ('active','idle','interrupted','closing','closed','failed')),
               version INTEGER NOT NULL CHECK (version > 0),
+              exit_fence INTEGER NOT NULL DEFAULT 0 CHECK (exit_fence >= 0),
+              exit_executor_id TEXT,
+              exit_leased_until TEXT,
               created_at TEXT NOT NULL,
               updated_at TEXT NOT NULL,
               last_receipt_json TEXT NOT NULL DEFAULT '{}',
@@ -467,6 +470,7 @@ MIGRATIONS = (
             """,
             "CREATE INDEX ix_runtime_task_state ON runtime_bindings(task_id,state)",
             "CREATE INDEX ix_routing_subject ON model_routing_decisions(subject_kind,subject_id,chosen_at)",
+            "CREATE UNIQUE INDEX ux_routing_escalation_child ON model_routing_decisions(prior_decision_id) WHERE prior_decision_id IS NOT NULL",
             "CREATE INDEX ix_routing_outcomes ON model_routing_outcomes(decision_id,recorded_at)",
             "CREATE INDEX ix_task_resources_task ON task_resources(task_id,state,resource_id)",
             "CREATE INDEX ix_cleanup_state ON cleanup_obligations(cleanup_state,updated_at)",
@@ -1227,6 +1231,37 @@ class SQLiteStorage(SQLiteTransactionCore):
     ) -> dict[str, Any]:
         return sqlite_runtime_ops.update_runtime_binding(
             self, binding_id, expected_version, state, at, receipt
+        )
+
+    def claim_runtime_exit(
+        self,
+        binding_id: str,
+        expected_version: int,
+        expected_fence: int,
+        executor_id: str,
+        leased_until: str,
+        at: str,
+    ) -> dict[str, Any]:
+        return sqlite_runtime_ops.claim_runtime_exit(
+            self,
+            binding_id,
+            expected_version,
+            expected_fence,
+            executor_id,
+            leased_until,
+            at,
+        )
+
+    def finalize_runtime_exit(
+        self,
+        binding_id: str,
+        expected_version: int,
+        fence: int,
+        at: str,
+        receipt: dict[str, Any],
+    ) -> dict[str, Any]:
+        return sqlite_runtime_ops.finalize_runtime_exit(
+            self, binding_id, expected_version, fence, at, receipt
         )
 
     def record_routing_decision(self, decision: dict[str, Any]) -> dict[str, Any]:

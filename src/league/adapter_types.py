@@ -21,6 +21,12 @@ HARNESS_CAPABILITIES = frozenset(
     {"create", "identify", "title", "prompt", "status", "hook", "interrupt", "resume", "exit"}
 )
 BACKEND_CAPABILITIES = frozenset({"allocate", "input", "inspect", "close"})
+ADAPTER_CAPABILITIES = {
+    "harness": HARNESS_CAPABILITIES,
+    "backend": BACKEND_CAPABILITIES,
+}
+EVIDENCE_LEVELS = ("unverified", "inherited-contract", "isolated-double", "real-canary")
+ADAPTER_AVAILABILITY = frozenset({"available", "contract-only"})
 
 
 @dataclass(frozen=True)
@@ -81,12 +87,31 @@ class AdapterReceipt:
 @dataclass(frozen=True)
 class AdapterContract:
     kind: str
+    category: str
     capabilities: frozenset[str]
     evidence: str
+    availability: str
     notes: str
 
-    def require(self, capability: str, allowed: frozenset[str]) -> None:
-        if capability not in allowed:
+    def __post_init__(self) -> None:
+        if not isinstance(self.category, str):
+            raise StorageRefusal("adapter_contract_invalid", "adapter category is unsupported")
+        allowed = ADAPTER_CAPABILITIES.get(self.category)
+        if allowed is None:
+            raise StorageRefusal("adapter_contract_invalid", "adapter category is unsupported")
+        if not isinstance(self.kind, str) or not NAMESPACE.fullmatch(self.kind):
+            raise StorageRefusal("adapter_contract_invalid", "adapter kind is invalid")
+        if not isinstance(self.capabilities, frozenset) or not self.capabilities <= allowed:
+            raise StorageRefusal("adapter_contract_invalid", "adapter capabilities conflict with its category")
+        if not isinstance(self.evidence, str) or self.evidence not in EVIDENCE_LEVELS:
+            raise StorageRefusal("adapter_contract_invalid", "adapter evidence label is unsupported")
+        if not isinstance(self.availability, str) or self.availability not in ADAPTER_AVAILABILITY:
+            raise StorageRefusal("adapter_contract_invalid", "adapter availability is unsupported")
+        if not isinstance(self.notes, str) or not self.notes:
+            raise StorageRefusal("adapter_contract_invalid", "adapter contract notes are required")
+
+    def require(self, capability: str) -> None:
+        if capability not in ADAPTER_CAPABILITIES[self.category]:
             raise StorageRefusal("unknown_capability", f"capability is not part of this adapter contract: {capability}")
         if capability not in self.capabilities:
             raise StorageRefusal(

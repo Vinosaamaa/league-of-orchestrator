@@ -71,11 +71,7 @@ class RoutingChoice:
         }
 
 
-def load_routing_config(path: Path) -> dict[str, Any]:
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise StorageRefusal("routing_config_invalid", "routing configuration could not be read") from exc
+def validate_routing_config(value: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(value, dict) or value.get("schema") not in {1, 2}:
         raise StorageRefusal("routing_config_invalid", "routing configuration schema is unsupported")
     tiers = value.get("tiers")
@@ -87,14 +83,43 @@ def load_routing_config(path: Path) -> dict[str, Any]:
             raise StorageRefusal("routing_config_invalid", f"routing tier is incomplete: {name}")
         if not isinstance(tier.get("effort"), str) or not tier["effort"]:
             raise StorageRefusal("routing_config_invalid", f"routing tier is incomplete: {name}")
-    return value
+    evaluations = value.get("evaluations", {})
+    if not isinstance(evaluations, Mapping):
+        raise StorageRefusal("routing_config_invalid", "routing evaluations must be an object")
+    fast = evaluations.get(WORKER_FAST)
+    if fast is not None:
+        if not isinstance(fast, Mapping):
+            raise StorageRefusal("routing_config_invalid", "bounded-worker evaluation must be an object")
+        approved = fast.get("approved")
+        samples = fast.get("representative_tasks")
+        if not isinstance(approved, bool) or isinstance(samples, bool) or not isinstance(samples, int) or samples < 0:
+            raise StorageRefusal("routing_config_invalid", "bounded-worker evaluation fields are invalid")
+    policy = value.get("policy")
+    if policy is not None and (
+        not isinstance(policy, Mapping)
+        or policy.get("quality_baseline") != WORKER_STRONG
+        or isinstance(policy.get("safe_boundary_escalations"), bool)
+        or policy.get("safe_boundary_escalations") != 1
+    ):
+        raise StorageRefusal("routing_config_invalid", "routing policy must preserve the safe quality baseline")
+    return dict(value)
+
+
+def load_routing_config(path: Path) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise StorageRefusal("routing_config_invalid", "routing configuration could not be read") from exc
+    if not isinstance(value, dict):
+        raise StorageRefusal("routing_config_invalid", "routing configuration must be an object")
+    return validate_routing_config(value)
 
 
 class ModelRouter:
     """Stable API consumed by assignment code without owning assignment state."""
 
     def __init__(self, config: Mapping[str, Any], storage: RoutingStorage) -> None:
-        self.config = dict(config)
+        self.config = validate_routing_config(config)
         self.storage = storage
 
     def _tier(self, profile: str) -> tuple[str, str]:
@@ -208,8 +233,19 @@ class ModelRouter:
         cost_microunits: int,
         recorded_at: str,
     ) -> dict[str, Any]:
-        if min(corrections, latency_ms, cost_microunits) < 0:
-            raise StorageRefusal("routing_outcome_invalid", "routing outcome measures cannot be negative")
+        measures = (corrections, latency_ms, cost_microunits)
+        if (
+            not isinstance(outcome_id, str)
+            or not outcome_id
+            or not isinstance(decision_id, str)
+            or not decision_id
+            or not isinstance(success, bool)
+            or any(isinstance(value, bool) or not isinstance(value, int) for value in measures)
+            or min(measures) < 0
+            or not isinstance(recorded_at, str)
+            or not recorded_at
+        ):
+            raise StorageRefusal("routing_outcome_invalid", "routing outcome fields are invalid")
         return self.storage.record_routing_outcome(
             {
                 "outcome_id": outcome_id,

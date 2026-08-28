@@ -49,17 +49,14 @@ branch cannot become a second live canonical writer.
 Requirements: Python 3, Git, and a POSIX shell.
 
 ```sh
-make test
-make test-storage
-make test-runtime-lifecycle
-make test-affected
 make test-all
 ```
 
-`make test` runs the inherited baseline once, `make test-storage` runs the
-storage slice once, `make test-runtime-lifecycle` runs issues #7/#11/#14, and
-`make test-affected` combines the two affected suites. `make test-all` composes
-everything without overlapping test lists. Every target uses temporary fixtures only. It does not install files,
+For a narrower iteration, use one target instead: `make test` for the inherited
+baseline, `make test-storage` for storage, `make test-runtime-lifecycle` for
+issues #7/#11/#14, or `make test-affected` for the two affected slices.
+`make test-all` already composes everything without overlapping test lists.
+Every target uses temporary fixtures only. It does not install files,
 contact GitHub, mutate global agent state, or operate live Herdr/tmux sessions.
 
 The repository does not yet own live installation. The currently installed

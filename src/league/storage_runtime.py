@@ -5,7 +5,9 @@ from __future__ import annotations
 from typing import Any, Mapping, Optional, Protocol
 
 
-class RuntimeLifecycleStorage(Protocol):
+class RuntimeBindingStorage(Protocol):
+    """Canonical binding contract consumed by runtime orchestration."""
+
     def register_runtime_binding(
         self,
         binding_id: str,
@@ -29,6 +31,29 @@ class RuntimeLifecycleStorage(Protocol):
         at: str,
         receipt: Mapping[str, Any],
     ) -> dict[str, Any]: ...
+
+    def claim_runtime_exit(
+        self,
+        binding_id: str,
+        expected_version: int,
+        expected_fence: int,
+        executor_id: str,
+        leased_until: str,
+        at: str,
+    ) -> dict[str, Any]: ...
+
+    def finalize_runtime_exit(
+        self,
+        binding_id: str,
+        expected_version: int,
+        fence: int,
+        at: str,
+        receipt: Mapping[str, Any],
+    ) -> dict[str, Any]: ...
+
+
+class RuntimeLifecycleStorage(RuntimeBindingStorage, Protocol):
+    """Composite protocol exposed by the SQLite facade."""
 
     def record_routing_decision(self, decision: Mapping[str, Any]) -> dict[str, Any]: ...
     def routing_decision(self, decision_id: str) -> Optional[dict[str, Any]]: ...

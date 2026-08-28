@@ -25,11 +25,11 @@
       ],
       "properties": {
         "project_id": {"type": "string", "pattern": "^project:[a-z0-9][a-z0-9._-]{0,95}$"},
-        "summary": {"type": "string"},
-        "aliases": {"type": "array", "maxItems": 16, "items": {"type": "string"}},
-        "code": {"type": ["string", "null"]},
-        "root": {"type": ["string", "null"]},
-        "repository": {"type": ["string", "null"]},
+        "summary": {"type": "string", "maxLength": 240},
+        "aliases": {"type": "array", "maxItems": 16, "items": {"type": "string", "maxLength": 64}},
+        "code": {"type": ["string", "null"], "maxLength": 24},
+        "root": {"type": ["string", "null"], "maxLength": 2048},
+        "repository": {"type": ["string", "null"], "maxLength": 2048},
         "state": {"enum": ["active", "retired"]},
         "version": {"type": "integer", "minimum": 1},
         "updated_at": {"type": "string", "format": "date-time"}

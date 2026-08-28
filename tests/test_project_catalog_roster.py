@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / "src"), str(ROOT / "tests")]
 
 from league.sqlite_store import SQLiteStorage  # noqa: E402
+from league.sqlite_project_ops import resolve_project_routing_identity  # noqa: E402
 from league.storage import StorageRefusal  # noqa: E402
 from storage_fixture import AT1, AT2, CHAMPION_ID, REPOSITORY, TASK_ID  # noqa: E402
 from storage_test_support import invoke_cli, migrated_state, seeded_state  # noqa: E402
@@ -84,6 +85,14 @@ def test_exact_identity_ambiguity_redaction_and_cli(root: Path) -> None:
         assert store.resolve_project(root=f"{ROOT_MARKER}/")["project_id"] == project_id
         assert store.resolve_project(code="lol")["project_id"] == project_id
         assert store.resolve_project(alias="ORCHESTRATOR")["project_id"] == project_id
+        traced: list[str] = []
+        store.connection.set_trace_callback(traced.append)
+        assert resolve_project_routing_identity(
+            store, "https://EXAMPLE.invalid/league"
+        ) == (project_id, "active")
+        store.connection.set_trace_callback(None)
+        assert sum("SELECT project_id,state FROM projects" in item for item in traced) == 1
+        assert not any("project_aliases" in item for item in traced)
 
         store.put_project(
             "project:other",
@@ -114,6 +123,16 @@ def test_exact_identity_ambiguity_redaction_and_cli(root: Path) -> None:
         outbound = json.dumps(store.list_projects(visibility="outbound"), sort_keys=True)
         assert ROOT_MARKER not in outbound and REPOSITORY not in outbound
         assert outbound.count("[redacted]") >= 4
+
+    schema = json.loads(
+        (ROOT / "schema/league-project-catalog.schema.json").read_text(encoding="utf-8")
+    )
+    properties = schema["$defs"]["project"]["properties"]
+    assert properties["summary"]["maxLength"] == 240
+    assert properties["aliases"]["items"]["maxLength"] == 64
+    assert properties["code"]["maxLength"] == 24
+    assert properties["root"]["maxLength"] == 2048
+    assert properties["repository"]["maxLength"] == 2048
 
     resolved = invoke_cli(
         state,

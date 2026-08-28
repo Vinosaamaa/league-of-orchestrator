@@ -167,6 +167,28 @@ def _row_by_id(store: Any, project_id: str) -> Any:
     ).fetchone()
 
 
+def resolve_project_routing_identity(
+    store: Any, repository: str
+) -> Optional[tuple[str, str]]:
+    """Resolve only the project identity needed by assignment reservation."""
+    exact, key = canonical_repository(repository)
+    rows = store.connection.execute(
+        """
+        SELECT project_id,state FROM projects
+         WHERE repository_key=? OR (repository_key IS NULL AND repository=?)
+         ORDER BY project_id LIMIT 2
+        """,
+        (key, exact),
+    ).fetchall()
+    if len(rows) > 1:
+        raise StorageRefusal(
+            "ambiguous_project", "project identity matches more than one catalog entry"
+        )
+    if not rows:
+        return None
+    return str(rows[0]["project_id"]), str(rows[0]["state"])
+
+
 def resolve_project(
     store: Any,
     repository: Optional[str] = None,

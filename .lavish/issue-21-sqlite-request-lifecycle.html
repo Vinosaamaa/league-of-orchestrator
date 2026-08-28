@@ -1,0 +1,1925 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>League SQLite request lifecycle · issue 21</title>
+  <style>
+    :root {
+      --canvas: #edf2f7;
+      --paper: #ffffff;
+      --paper-blue: #f4f8fd;
+      --ink: #16243d;
+      --muted: #596a82;
+      --line: #c8d3e1;
+      --line-strong: #91a4bc;
+      --blue: #26547c;
+      --blue-soft: #eaf1fb;
+      --amber: #b87912;
+      --amber-soft: #fff4d6;
+      --jade: #3f7d6d;
+      --jade-soft: #e9f5f1;
+      --violet: #6f5a9b;
+      --violet-soft: #f0ecfa;
+      --danger: #9b3c4b;
+      --danger-soft: #fbecef;
+      --shadow: 0 18px 45px rgba(22, 36, 61, 0.09);
+      --radius: 18px;
+      --display: "Avenir Next Condensed", "Avenir Next", "Helvetica Neue", sans-serif;
+      --body: "Avenir Next", "Helvetica Neue", Arial, sans-serif;
+      --mono: "SFMono-Regular", "Cascadia Mono", Menlo, monospace;
+    }
+
+    * {
+      box-sizing: border-box;
+      min-width: 0;
+    }
+
+    html {
+      scroll-behavior: smooth;
+      overflow-x: clip;
+    }
+
+    body {
+      margin: 0;
+      overflow-x: clip;
+      color: var(--ink);
+      background:
+        linear-gradient(rgba(38, 84, 124, 0.035) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(38, 84, 124, 0.035) 1px, transparent 1px),
+        var(--canvas);
+      background-size: 24px 24px;
+      font-family: var(--body);
+      line-height: 1.55;
+    }
+
+    a {
+      color: var(--blue);
+      text-underline-offset: 0.18em;
+    }
+
+    a:hover {
+      text-decoration-thickness: 2px;
+    }
+
+    :focus-visible {
+      outline: 3px solid var(--amber);
+      outline-offset: 3px;
+    }
+
+    .skip-link {
+      position: fixed;
+      z-index: 100;
+      top: 12px;
+      left: 12px;
+      padding: 10px 14px;
+      border-radius: 10px;
+      color: var(--paper);
+      background: var(--ink);
+      transform: translateY(-180%);
+    }
+
+    .skip-link:focus {
+      transform: translateY(0);
+    }
+
+    .page-shell {
+      width: min(1500px, calc(100% - 32px));
+      margin: 0 auto;
+    }
+
+    .masthead {
+      padding: 46px 0 28px;
+    }
+
+    .masthead-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.45fr) minmax(290px, 0.55fr);
+      gap: 28px;
+      align-items: end;
+    }
+
+    .eyebrow,
+    .section-kicker,
+    .ledger-label {
+      margin: 0 0 9px;
+      color: var(--blue);
+      font: 700 0.76rem/1.2 var(--mono);
+      letter-spacing: 0.11em;
+      text-transform: uppercase;
+    }
+
+    h1,
+    h2,
+    h3,
+    p {
+      overflow-wrap: anywhere;
+    }
+
+    h1 {
+      max-width: 980px;
+      margin: 0;
+      font: 800 clamp(2.7rem, 7vw, 6.7rem)/0.89 var(--display);
+      letter-spacing: -0.045em;
+    }
+
+    h1 span {
+      display: block;
+      color: var(--blue);
+    }
+
+    .lede {
+      max-width: 790px;
+      margin: 22px 0 0;
+      color: var(--muted);
+      font-size: clamp(1.02rem, 1.8vw, 1.3rem);
+    }
+
+    .status-card {
+      padding: 20px;
+      border: 1px solid var(--line-strong);
+      border-radius: var(--radius);
+      background: rgba(255, 255, 255, 0.86);
+      box-shadow: var(--shadow);
+    }
+
+    .status-card strong {
+      display: block;
+      margin-bottom: 6px;
+      font: 800 1.35rem/1.1 var(--display);
+    }
+
+    .status-card p {
+      margin: 0;
+      color: var(--muted);
+    }
+
+    .status-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 15px;
+      padding: 7px 10px;
+      border-radius: 999px;
+      color: var(--blue);
+      background: var(--blue-soft);
+      font: 700 0.72rem/1 var(--mono);
+      text-transform: uppercase;
+    }
+
+    .status-chip::before {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--amber);
+      content: "";
+    }
+
+    .local-nav {
+      position: sticky;
+      z-index: 30;
+      top: 0;
+      margin-bottom: 24px;
+      border-block: 1px solid rgba(145, 164, 188, 0.75);
+      background: rgba(237, 242, 247, 0.94);
+      backdrop-filter: blur(14px);
+    }
+
+    .local-nav-inner {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      width: min(1500px, calc(100% - 32px));
+      margin: 0 auto;
+      padding: 9px 0;
+    }
+
+    .local-nav a {
+      padding: 8px 11px;
+      border-radius: 9px;
+      color: var(--muted);
+      font: 700 0.75rem/1 var(--mono);
+      text-decoration: none;
+    }
+
+    .local-nav a:hover,
+    .local-nav a:focus-visible {
+      color: var(--ink);
+      background: var(--paper);
+    }
+
+    main {
+      padding-bottom: 80px;
+    }
+
+    .section {
+      margin: 28px 0;
+      padding: clamp(24px, 4vw, 52px);
+      border: 1px solid var(--line);
+      border-radius: calc(var(--radius) + 5px);
+      background: rgba(255, 255, 255, 0.94);
+      box-shadow: var(--shadow);
+    }
+
+    .section-header {
+      display: grid;
+      grid-template-columns: minmax(0, 0.7fr) minmax(0, 1.3fr);
+      gap: 26px;
+      align-items: start;
+      margin-bottom: 30px;
+    }
+
+    h2 {
+      margin: 0;
+      font: 800 clamp(2rem, 4vw, 3.7rem)/0.97 var(--display);
+      letter-spacing: -0.035em;
+    }
+
+    .section-header > p {
+      max-width: 760px;
+      margin: 4px 0 0;
+      color: var(--muted);
+      font-size: 1.03rem;
+    }
+
+    h3 {
+      margin: 0 0 10px;
+      font: 800 1.45rem/1.05 var(--display);
+    }
+
+    code,
+    .mono {
+      font-family: var(--mono);
+      font-size: 0.9em;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }
+
+    code {
+      padding: 0.08em 0.32em;
+      border: 1px solid rgba(145, 164, 188, 0.7);
+      border-radius: 5px;
+      color: #163c60;
+      background: var(--paper-blue);
+    }
+
+    .resolutions {
+      counter-reset: accepted;
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .resolutions li {
+      position: relative;
+      min-height: 112px;
+      padding: 19px 18px 17px 58px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: var(--paper-blue);
+      counter-increment: accepted;
+    }
+
+    .resolutions li::before {
+      position: absolute;
+      top: 18px;
+      left: 17px;
+      display: grid;
+      width: 28px;
+      height: 28px;
+      place-items: center;
+      border-radius: 50%;
+      color: var(--paper);
+      background: var(--blue);
+      content: counter(accepted);
+      font: 800 0.8rem/1 var(--mono);
+    }
+
+    .resolutions strong {
+      color: var(--blue);
+    }
+
+    .scenario-strip {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 14px;
+    }
+
+    .scenario-card {
+      position: relative;
+      padding: 22px;
+      border: 1px solid var(--line);
+      border-top: 5px solid var(--jade);
+      border-radius: 14px;
+      background: var(--paper);
+    }
+
+    .scenario-card.r2 {
+      border-top-color: var(--blue);
+      box-shadow: 0 12px 30px rgba(38, 84, 124, 0.14);
+    }
+
+    .scenario-card.r3 {
+      border-top-color: var(--violet);
+    }
+
+    .scenario-card .id {
+      color: var(--muted);
+      font: 800 0.75rem/1 var(--mono);
+    }
+
+    .scenario-card h3 {
+      margin-top: 16px;
+    }
+
+    .scenario-card p {
+      margin: 0;
+      color: var(--muted);
+    }
+
+    .diagram-frame {
+      margin-top: 22px;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: #fff;
+    }
+
+    .diagram-frame img {
+      display: block;
+      width: 100%;
+      height: auto;
+      max-width: 100%;
+    }
+
+    .diagram-frame figcaption {
+      padding: 12px 8px 4px;
+      color: var(--muted);
+      font-size: 0.9rem;
+    }
+
+    .r2-shell {
+      display: grid;
+      grid-template-columns: minmax(270px, 0.72fr) minmax(0, 1.28fr);
+      gap: 24px;
+      align-items: start;
+    }
+
+    .step-list {
+      display: grid;
+      gap: 8px;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .step-button {
+      display: grid;
+      grid-template-columns: 38px minmax(0, 1fr);
+      gap: 12px;
+      width: 100%;
+      padding: 13px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      color: var(--ink);
+      background: #fff;
+      text-align: left;
+      cursor: pointer;
+      transition: border-color 140ms ease, background 140ms ease, transform 140ms ease;
+    }
+
+    .step-button:hover {
+      border-color: var(--blue);
+      transform: translateX(3px);
+    }
+
+    .step-button[aria-selected="true"] {
+      border-color: var(--blue);
+      background: var(--blue-soft);
+      box-shadow: inset 5px 0 0 var(--blue);
+    }
+
+    .step-number {
+      display: grid;
+      width: 34px;
+      height: 34px;
+      place-items: center;
+      border-radius: 10px;
+      color: var(--paper);
+      background: var(--ink);
+      font: 800 0.8rem/1 var(--mono);
+    }
+
+    .step-button[aria-selected="true"] .step-number {
+      background: var(--blue);
+    }
+
+    .step-copy strong {
+      display: block;
+      margin-bottom: 3px;
+      font-size: 0.95rem;
+    }
+
+    .step-copy span {
+      display: block;
+      color: var(--muted);
+      font: 650 0.74rem/1.25 var(--mono);
+    }
+
+    .inspector {
+      position: sticky;
+      top: 62px;
+      overflow: hidden;
+      border: 1px solid var(--line-strong);
+      border-radius: var(--radius);
+      background: #fff;
+      box-shadow: 0 22px 48px rgba(22, 36, 61, 0.13);
+    }
+
+    .inspector::before {
+      display: block;
+      height: 9px;
+      background:
+        repeating-linear-gradient(
+          90deg,
+          var(--blue) 0,
+          var(--blue) 22px,
+          var(--amber) 22px,
+          var(--amber) 27px,
+          var(--paper) 27px,
+          var(--paper) 32px
+        );
+      content: "";
+    }
+
+    .inspector-head {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 16px;
+      align-items: start;
+      padding: 22px 24px 18px;
+      border-bottom: 1px solid var(--line);
+      background: var(--paper-blue);
+    }
+
+    .inspector-title {
+      margin: 0;
+      font: 800 clamp(1.7rem, 3vw, 2.5rem)/0.98 var(--display);
+    }
+
+    .inspector-index {
+      display: grid;
+      width: 56px;
+      height: 56px;
+      place-items: center;
+      border-radius: 16px;
+      color: #fff;
+      background: var(--blue);
+      font: 800 1rem/1 var(--mono);
+    }
+
+    .state-snapshot {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(0, 1fr));
+      border-bottom: 1px solid var(--line);
+      background: #fff;
+    }
+
+    .state-cell {
+      padding: 13px 11px;
+      border-right: 1px solid var(--line);
+    }
+
+    .state-cell:last-child {
+      border-right: 0;
+    }
+
+    .state-cell small {
+      display: block;
+      margin-bottom: 5px;
+      color: var(--muted);
+      font: 700 0.63rem/1.1 var(--mono);
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+
+    .state-cell strong {
+      display: block;
+      color: var(--blue);
+      font: 800 0.78rem/1.25 var(--mono);
+      overflow-wrap: anywhere;
+    }
+
+    .inspector-body {
+      max-height: calc(100vh - 245px);
+      overflow-y: auto;
+      overscroll-behavior: contain;
+      padding: 21px 24px 26px;
+    }
+
+    .ledger-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .ledger-card {
+      padding: 15px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: #fff;
+    }
+
+    .ledger-card.wide {
+      grid-column: 1 / -1;
+    }
+
+    .ledger-card p,
+    .ledger-card ul {
+      margin: 0;
+      color: var(--muted);
+      font-size: 0.92rem;
+    }
+
+    .ledger-card ul {
+      padding-left: 18px;
+    }
+
+    .ledger-card li + li {
+      margin-top: 4px;
+    }
+
+    .command-strip {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr);
+      gap: 11px;
+      align-items: start;
+      margin-bottom: 13px;
+      padding: 12px 14px;
+      border-radius: 11px;
+      color: #fff;
+      background: var(--ink);
+    }
+
+    .command-strip .actor {
+      padding: 4px 7px;
+      border-radius: 6px;
+      color: var(--ink);
+      background: var(--amber-soft);
+      font: 800 0.72rem/1 var(--mono);
+    }
+
+    .command-strip code {
+      border: 0;
+      color: #fff;
+      background: transparent;
+    }
+
+    .state-diagrams {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 18px;
+    }
+
+    .diagram-card {
+      padding: 22px;
+      border: 1px solid var(--line);
+      border-radius: 15px;
+      background: #fff;
+    }
+
+    .state-track {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 8px;
+      margin-top: 18px;
+    }
+
+    .state-node {
+      position: relative;
+      display: grid;
+      min-height: 68px;
+      place-items: center;
+      padding: 10px 8px;
+      border: 1px solid var(--line-strong);
+      border-radius: 11px;
+      color: var(--blue);
+      background: var(--blue-soft);
+      font: 800 0.72rem/1.2 var(--mono);
+      text-align: center;
+      overflow-wrap: anywhere;
+    }
+
+    .state-node::after {
+      position: absolute;
+      top: 50%;
+      right: -9px;
+      z-index: 2;
+      color: var(--line-strong);
+      content: "→";
+      transform: translate(50%, -50%);
+    }
+
+    .state-node:last-child::after {
+      content: none;
+    }
+
+    .state-node.jade {
+      color: var(--jade);
+      background: var(--jade-soft);
+    }
+
+    .state-node.amber {
+      color: var(--amber);
+      background: var(--amber-soft);
+    }
+
+    .state-node.violet {
+      color: var(--violet);
+      background: var(--violet-soft);
+    }
+
+    .branch-states {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 9px;
+    }
+
+    .branch-states span {
+      padding: 7px 9px;
+      border: 1px dashed var(--line-strong);
+      border-radius: 9px;
+      color: var(--muted);
+      font: 700 0.72rem/1 var(--mono);
+    }
+
+    .lease-grid,
+    .schema-grid,
+    .policy-grid,
+    .cutover-grid {
+      display: grid;
+      gap: 14px;
+    }
+
+    .lease-grid {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+
+    .schema-grid {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+
+    .policy-grid {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .cutover-grid {
+      grid-template-columns: repeat(7, minmax(0, 1fr));
+      counter-reset: cutover;
+    }
+
+    .lease-card,
+    .schema-card,
+    .policy-card,
+    .cutover-card {
+      padding: 19px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: #fff;
+    }
+
+    .lease-card {
+      border-top: 5px solid var(--blue);
+    }
+
+    .lease-card:nth-child(2) {
+      border-top-color: var(--amber);
+    }
+
+    .lease-card:nth-child(3) {
+      border-top-color: var(--violet);
+    }
+
+    .lease-card p,
+    .schema-card p,
+    .policy-card p,
+    .cutover-card p {
+      margin: 8px 0 0;
+      color: var(--muted);
+      font-size: 0.92rem;
+    }
+
+    .schema-card .tables {
+      display: block;
+      margin-top: 13px;
+      color: var(--blue);
+      font: 700 0.78rem/1.7 var(--mono);
+      overflow-wrap: anywhere;
+    }
+
+    .cutover-card {
+      position: relative;
+      padding-top: 50px;
+      counter-increment: cutover;
+    }
+
+    .cutover-card::before {
+      position: absolute;
+      top: 15px;
+      left: 17px;
+      display: grid;
+      width: 26px;
+      height: 26px;
+      place-items: center;
+      border-radius: 50%;
+      color: #fff;
+      background: var(--blue);
+      content: counter(cutover);
+      font: 800 0.7rem/1 var(--mono);
+    }
+
+    .sequence {
+      margin: 0;
+      padding: 0;
+      list-style: none;
+      counter-reset: sequence;
+    }
+
+    .sequence li {
+      position: relative;
+      margin-left: 18px;
+      padding: 0 0 25px 40px;
+      border-left: 2px solid var(--line);
+      counter-increment: sequence;
+    }
+
+    .sequence li:last-child {
+      padding-bottom: 0;
+      border-left-color: transparent;
+    }
+
+    .sequence li::before {
+      position: absolute;
+      top: 0;
+      left: -17px;
+      display: grid;
+      width: 32px;
+      height: 32px;
+      place-items: center;
+      border: 2px solid #fff;
+      border-radius: 50%;
+      color: #fff;
+      background: var(--blue);
+      content: counter(sequence);
+      font: 800 0.72rem/1 var(--mono);
+      box-shadow: 0 0 0 1px var(--blue);
+    }
+
+    .sequence strong {
+      display: block;
+      margin-bottom: 4px;
+    }
+
+    .sequence p {
+      margin: 0;
+      color: var(--muted);
+    }
+
+    .callout {
+      margin-top: 20px;
+      padding: 18px 20px;
+      border-left: 5px solid var(--amber);
+      border-radius: 0 12px 12px 0;
+      background: var(--amber-soft);
+    }
+
+    .callout strong {
+      display: block;
+      margin-bottom: 5px;
+    }
+
+    .table-wrap {
+      width: 100%;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: #fff;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      table-layout: fixed;
+    }
+
+    th,
+    td {
+      padding: 13px 12px;
+      border-bottom: 1px solid var(--line);
+      vertical-align: top;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+      text-align: left;
+    }
+
+    th {
+      color: var(--blue);
+      background: var(--paper-blue);
+      font: 800 0.74rem/1.2 var(--mono);
+    }
+
+    td {
+      color: var(--muted);
+      font-size: 0.9rem;
+    }
+
+    tr:last-child td {
+      border-bottom: 0;
+    }
+
+    details {
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: #fff;
+    }
+
+    details + details {
+      margin-top: 10px;
+    }
+
+    summary {
+      padding: 15px 17px;
+      color: var(--ink);
+      font-weight: 800;
+      cursor: pointer;
+    }
+
+    details > div {
+      padding: 0 17px 17px;
+      color: var(--muted);
+    }
+
+    footer {
+      padding: 24px 0 50px;
+      color: var(--muted);
+      font-size: 0.9rem;
+    }
+
+    .mobile-state-bar {
+      display: none;
+    }
+
+    @media (max-width: 1180px) {
+      .cutover-grid {
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+      }
+
+      .schema-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .state-snapshot {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+      }
+
+      .state-cell:nth-child(3) {
+        border-right: 0;
+      }
+
+      .state-cell:nth-child(-n + 3) {
+        border-bottom: 1px solid var(--line);
+      }
+    }
+
+    @media (max-width: 960px) {
+      .masthead-grid,
+      .section-header,
+      .r2-shell {
+        grid-template-columns: minmax(0, 1fr);
+      }
+
+      .masthead {
+        padding-top: 34px;
+      }
+
+      .status-card {
+        max-width: 620px;
+      }
+
+      .resolutions,
+      .state-diagrams,
+      .policy-grid {
+        grid-template-columns: minmax(0, 1fr);
+      }
+
+      .step-list {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .inspector {
+        position: relative;
+        top: auto;
+      }
+
+      .inspector-body {
+        max-height: none;
+        overflow: visible;
+      }
+
+      .lease-grid {
+        grid-template-columns: minmax(0, 1fr);
+      }
+
+      .mobile-state-bar {
+        position: sticky;
+        z-index: 40;
+        bottom: 10px;
+        display: grid;
+        grid-template-columns: auto minmax(0, 1fr) auto;
+        gap: 10px;
+        align-items: center;
+        width: min(640px, calc(100% - 20px));
+        margin: 10px auto;
+        padding: 10px 12px;
+        border: 1px solid var(--line-strong);
+        border-radius: 13px;
+        color: #fff;
+        background: rgba(22, 36, 61, 0.96);
+        box-shadow: 0 15px 35px rgba(22, 36, 61, 0.22);
+        text-decoration: none;
+        backdrop-filter: blur(12px);
+      }
+
+      .mobile-state-bar strong,
+      .mobile-state-bar span {
+        overflow-wrap: anywhere;
+      }
+
+      .mobile-state-bar strong {
+        font: 800 0.76rem/1.2 var(--mono);
+      }
+
+      .mobile-state-bar span {
+        color: #dbe7f5;
+        font-size: 0.78rem;
+      }
+    }
+
+    @media (max-width: 680px) {
+      .page-shell,
+      .local-nav-inner {
+        width: min(100% - 20px, 1500px);
+      }
+
+      .section {
+        padding: 21px 16px;
+        border-radius: 17px;
+      }
+
+      .local-nav-inner {
+        gap: 2px;
+      }
+
+      .local-nav a {
+        padding: 7px 8px;
+      }
+
+      .scenario-strip,
+      .step-list,
+      .schema-grid,
+      .cutover-grid,
+      .ledger-grid {
+        grid-template-columns: minmax(0, 1fr);
+      }
+
+      .resolutions li {
+        padding-left: 52px;
+      }
+
+      .inspector-head {
+        padding: 18px 16px 15px;
+      }
+
+      .inspector-body {
+        padding: 17px 16px 20px;
+      }
+
+      .state-snapshot {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .state-cell,
+      .state-cell:nth-child(3) {
+        border-right: 1px solid var(--line);
+        border-bottom: 1px solid var(--line);
+      }
+
+      .state-cell:nth-child(even) {
+        border-right: 0;
+      }
+
+      .state-cell:nth-last-child(-n + 2) {
+        border-bottom: 0;
+      }
+
+      .state-track {
+        grid-template-columns: minmax(0, 1fr);
+      }
+
+      .state-node::after {
+        top: auto;
+        right: 50%;
+        bottom: -10px;
+        transform: translate(50%, 50%) rotate(90deg);
+      }
+
+      .command-strip {
+        grid-template-columns: minmax(0, 1fr);
+      }
+
+      table,
+      thead,
+      tbody,
+      tr,
+      th,
+      td {
+        display: block;
+      }
+
+      thead {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        overflow: hidden;
+        clip: rect(0 0 0 0);
+      }
+
+      tr {
+        padding: 10px 12px;
+        border-bottom: 1px solid var(--line);
+      }
+
+      tr:last-child {
+        border-bottom: 0;
+      }
+
+      td {
+        display: grid;
+        grid-template-columns: minmax(90px, 0.42fr) minmax(0, 1fr);
+        gap: 10px;
+        padding: 7px 0;
+        border: 0;
+      }
+
+      td::before {
+        color: var(--blue);
+        content: attr(data-label);
+        font: 800 0.7rem/1.2 var(--mono);
+      }
+
+      h1 {
+        font-size: clamp(2.65rem, 16vw, 4.5rem);
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      html {
+        scroll-behavior: auto;
+      }
+
+      *,
+      *::before,
+      *::after {
+        scroll-behavior: auto !important;
+        transition: none !important;
+        animation: none !important;
+      }
+    }
+
+    @media print {
+      body {
+        background: #fff;
+      }
+
+      .local-nav,
+      .mobile-state-bar {
+        display: none;
+      }
+
+      .section {
+        break-inside: avoid;
+        box-shadow: none;
+      }
+
+      .inspector {
+        position: static;
+        box-shadow: none;
+      }
+    }
+  </style>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to design</a>
+
+  <header class="masthead page-shell">
+    <div class="masthead-grid">
+      <div>
+        <p class="eyebrow">League of Orchestrator · issue 21 · proposed v1</p>
+        <h1>One prompt. <span>Three requests.</span></h1>
+        <p class="lede">A beginner-first walkthrough of the SQLite request lifecycle, from exact prompt capture through routed work, idempotent delivery, synthesis, user answer, reconciliation, and deterministic cleanup.</p>
+      </div>
+      <aside class="status-card" aria-label="Design status">
+        <span class="status-chip">Design review only</span>
+        <strong>No runtime behavior changes.</strong>
+        <p>Implementation belongs to issue 19. Isolated acceptance and reversible cutover belong to issue 23. No install, migration, merge, or teardown is performed here.</p>
+      </aside>
+    </div>
+  </header>
+
+  <nav class="local-nav" aria-label="Page sections">
+    <div class="local-nav-inner">
+      <a href="#resolutions">Resolutions</a>
+      <a href="#scenario">P100</a>
+      <a href="#r2-ledger">R2 ledger</a>
+      <a href="#states">States</a>
+      <a href="#schema">Schema</a>
+      <a href="#delivery">Delivery</a>
+      <a href="#cleanup">Cleanup</a>
+      <a href="#cutover">Cutover</a>
+      <a href="#traceability">Sources</a>
+    </div>
+  </nav>
+
+  <main id="main" class="page-shell">
+    <section id="resolutions" class="section" aria-labelledby="resolutions-title">
+      <div class="section-header">
+        <div>
+          <p class="section-kicker">00 · fixed points</p>
+          <h2 id="resolutions-title">Accepted resolutions</h2>
+        </div>
+        <p>An invariant is a rule that must stay true. These are the controlling invariant definitions; later sections add step evidence without redefining them. A Shotcaller is a visible coordinator; a Champion is an issue-bound worker; a runtime is one live window or process; and an adapter is the boundary to a harness or terminal backend. Garen and Jarvan are synthetic Shotcaller names.</p>
+      </div>
+      <ol class="resolutions">
+        <li><strong>Modes are not states.</strong> <code>direct</code>, <code>hidden</code>, and <code>champion</code> describe who executes.</li>
+        <li><strong>Prompt-once invariant.</strong> Its body lives in <code>prompt_payloads</code>; <code>prompt_items</code> and <code>request_sources</code> describe the split.</li>
+        <li><strong>Request states are exact.</strong> open, routed, accepted, in_progress, awaiting_user, blocked, awaiting_requester, deferred, answered, cancelled.</li>
+        <li><strong>Task/request invariant.</strong> Champion <code>completed</code> never answers a request without Shotcaller synthesis and response evidence.</li>
+        <li><strong>R2 return invariant.</strong> Jarvan's result, owner=Garen, awaiting_requester, event, and return outbox commit together.</li>
+        <li><strong>Delivery-completion invariant.</strong> Transport may repeat. One acknowledgement commits the unique receipt, recipient effect, delivered outbox state, and dispatch-lease removal together.</li>
+        <li><strong>Lease-separation invariant.</strong> A lease is expiring permission. A request claim permits one request mutation, an outbox dispatch lease permits one queued send, and a watcher registration lease names the live wake receiver. They never substitute for one another.</li>
+      </ol>
+    </section>
+
+    <section id="scenario" class="section" aria-labelledby="scenario-title">
+      <div class="section-header">
+        <div>
+          <p class="section-kicker">01 · literal example</p>
+          <h2 id="scenario-title">P100 becomes R1, R2, and R3</h2>
+        </div>
+        <p>A prompt is one submitted message. A request is one independently finishable question, decision, or action extracted from that message. Splitting never duplicates the full payload.</p>
+      </div>
+      <div class="scenario-strip">
+        <article class="scenario-card">
+          <span class="id">R1 · self-owned</span>
+          <h3>Direct Garen answer</h3>
+          <p>Garen claims R1, records direct mode, answers, stores a bounded response reference, and marks R1 answered.</p>
+        </article>
+        <article class="scenario-card r2">
+          <span class="id">R2 · routed</span>
+          <h3>Garen → Jarvan → two Champions → Garen</h3>
+          <p>Owner transfer, task outcomes, result synthesis, return delivery, and final user answer stay separate and visible.</p>
+        </article>
+        <article class="scenario-card r3">
+          <span class="id">R3 · self-owned</span>
+          <h3>Local Champion</h3>
+          <p>Garen remains request owner. The Champion completes a task; Garen still must synthesize and answer R3.</p>
+        </article>
+      </div>
+      <figure class="diagram-frame">
+        <img src="sqlite-request-lifecycle.drawio.svg" alt="Lifecycle diagram showing P100 split into R1, R2, and R3; R2 routed from Garen to Jarvan, two Champion tasks, RES9, owner return, user answer, delivery receipts, and stable table groups.">
+        <figcaption>Editable draw.io lifecycle and relationship map. The HTML and Markdown use these same table names, request states, and example IDs.</figcaption>
+      </figure>
+    </section>
+
+    <section id="r2-ledger" class="section" aria-labelledby="r2-title">
+      <div class="section-header">
+        <div>
+          <p class="section-kicker">02 · signature walkthrough</p>
+          <h2 id="r2-title">R2 transaction tape</h2>
+        </div>
+        <p>Select a step. The persistent inspector shows actor, exact League command, tables read, rows written, transaction boundary, external work, outbox state, visible effect, retry, and failure state. Use Up/Down or Left/Right to move between steps.</p>
+      </div>
+
+      <div class="r2-shell">
+        <ol id="step-list" class="step-list" role="tablist" aria-label="R2 lifecycle steps"></ol>
+
+        <aside id="r2-inspector" class="inspector" role="tabpanel" aria-live="polite" aria-labelledby="inspector-title">
+          <div class="inspector-head">
+            <div>
+              <p id="inspector-kicker" class="ledger-label">Transaction 01</p>
+              <h3 id="inspector-title" class="inspector-title">Capture P100</h3>
+            </div>
+            <span id="inspector-index" class="inspector-index" aria-hidden="true">01</span>
+          </div>
+          <div id="state-snapshot" class="state-snapshot" aria-label="R2 state after selected step"></div>
+          <div class="inspector-body">
+            <div class="command-strip">
+              <span id="inspector-actor" class="actor">Adapter</span>
+              <code id="inspector-command">league request intake</code>
+            </div>
+            <div class="ledger-grid">
+              <section class="ledger-card">
+                <p class="ledger-label">Tables read</p>
+                <ul id="inspector-reads"></ul>
+              </section>
+              <section class="ledger-card">
+                <p class="ledger-label">Rows written</p>
+                <ul id="inspector-writes"></ul>
+              </section>
+              <section class="ledger-card wide">
+                <p class="ledger-label">SQLite transaction boundary</p>
+                <p id="inspector-transaction"></p>
+              </section>
+              <section class="ledger-card">
+                <p class="ledger-label">External work</p>
+                <p id="inspector-external"></p>
+              </section>
+              <section class="ledger-card">
+                <p class="ledger-label">Outbox after commit</p>
+                <p id="inspector-outbox"></p>
+              </section>
+              <section class="ledger-card">
+                <p class="ledger-label">Visible effect</p>
+                <p id="inspector-visible"></p>
+              </section>
+              <section class="ledger-card">
+                <p class="ledger-label">Retry behavior</p>
+                <p id="inspector-retry"></p>
+              </section>
+              <section class="ledger-card wide">
+                <p class="ledger-label">Failure state</p>
+                <p id="inspector-failure"></p>
+              </section>
+            </div>
+          </div>
+        </aside>
+      </div>
+    </section>
+
+    <a id="mobile-state-bar" class="mobile-state-bar" href="#r2-inspector" aria-label="Jump to persistent R2 state inspector">
+      <strong id="mobile-step">R2 · step 01</strong>
+      <span id="mobile-state">owner Garen · open</span>
+      <span aria-hidden="true">↑</span>
+    </a>
+
+    <section id="states" class="section" aria-labelledby="states-title">
+      <div class="section-header">
+        <div>
+          <p class="section-kicker">03 · independent state machines</p>
+          <h2 id="states-title">Do not collapse the facts</h2>
+        </div>
+        <p>Request state, execution mode, Champion task state, delivery state, and cleanup state answer different questions. A truthful design keeps each transition explicit.</p>
+      </div>
+      <div class="state-diagrams">
+        <article class="diagram-card">
+          <h3>Request main path</h3>
+          <p>Routed cross-Shotcaller work follows this primary path. Branch states remain visible rather than hidden in prose.</p>
+          <div class="state-track" aria-label="Request main state path">
+            <span class="state-node">open</span>
+            <span class="state-node amber">routed</span>
+            <span class="state-node amber">accepted</span>
+            <span class="state-node violet">in_progress</span>
+            <span class="state-node jade">awaiting_requester</span>
+          </div>
+          <div class="state-track" aria-label="Final request state">
+            <span class="state-node jade">answered</span>
+          </div>
+          <div class="branch-states" aria-label="Request branch states">
+            <span>awaiting_user</span>
+            <span>blocked</span>
+            <span>deferred</span>
+            <span>cancelled</span>
+          </div>
+        </article>
+
+        <article class="diagram-card">
+          <h3>Task and cleanup are two tracks</h3>
+          <p>A completed task may still own resources, require landing evidence, or need authority. Cleanup never rewrites the task outcome.</p>
+          <p class="ledger-label" style="margin-top:18px">Task state</p>
+          <div class="state-track" aria-label="Champion task states">
+            <span class="state-node violet">pending</span>
+            <span class="state-node violet">accepted</span>
+            <span class="state-node violet">in_progress</span>
+            <span class="state-node jade">ready_to_land</span>
+            <span class="state-node jade">completed</span>
+          </div>
+          <p class="ledger-label" style="margin-top:18px">Cleanup state</p>
+          <div class="state-track" aria-label="Cleanup states">
+            <span class="state-node amber">pending</span>
+            <span class="state-node amber">verifying</span>
+            <span class="state-node amber">planned</span>
+            <span class="state-node amber">executing</span>
+            <span class="state-node jade">completed</span>
+          </div>
+          <div class="branch-states">
+            <span>awaiting_authority</span>
+            <span>blocked</span>
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <section id="schema" class="section" aria-labelledby="schema-title">
+      <div class="section-header">
+        <div>
+          <p class="section-kicker">04 · stable proposed v1 schema</p>
+          <h2 id="schema-title">One vocabulary from start to finish</h2>
+        </div>
+        <p>These table names are exact inside this design. Implementation can add indexes and bookkeeping columns, but semantic renames or splits require an explicit issue 19 design change.</p>
+      </div>
+      <div class="schema-grid">
+        <article class="schema-card">
+          <h3>Identity + runtime</h3>
+          <p>Logical identities stay separate from live windows and adapter-owned locators.</p>
+          <span class="tables">actors<br>runtime_instances<br>adapter_locators<br>callsigns<br>callsign_queue<br>callsign_assignments</span>
+        </article>
+        <article class="schema-card">
+          <h3>Prompts</h3>
+          <p>One full prompt payload, ordered semantic items, and source links.</p>
+          <span class="tables">prompts<br>prompt_payloads<br>prompt_items<br>request_sources</span>
+        </article>
+        <article class="schema-card">
+          <h3>Requests + responses</h3>
+          <p>Permanent request state, temporary mutation claim, owner results, and opaque response references.</p>
+          <span class="tables">requests<br>request_claims<br>request_results<br>request_result_sources<br>response_references</span>
+        </article>
+        <article class="schema-card">
+          <h3>Events + delivery</h3>
+          <p>Immutable source event, recipient outbox, dispatch attempt, and exactly-once database receipt.</p>
+          <span class="tables">events<br>delivery_outbox<br>outbox_dispatch_leases<br>delivery_attempts<br>recipient_receipts</span>
+        </article>
+        <article class="schema-card">
+          <h3>Tasks + cleanup</h3>
+          <p>Champion execution, exact resources, recoverable actions, archives, and immutable teardown proof.</p>
+          <span class="tables">tasks<br>task_assignments<br>task_transitions<br>task_resources<br>resource_leases<br>cleanup_obligations<br>cleanup_operations<br>cleanup_actions<br>teardown_receipts<br>archive_bundles<br>evidence_references</span>
+        </article>
+        <article class="schema-card">
+          <h3>Operations</h3>
+          <p>Bounded obligations, watcher observations, policy, maintenance, reporting, and migration receipts.</p>
+          <span class="tables">obligations<br>watcher_registrations<br>watcher_observations<br>configuration<br>maintenance_runs<br>report_specs<br>storage_metadata<br>schema_migrations<br>migration_runs<br>migration_items</span>
+        </article>
+      </div>
+
+      <div class="table-wrap" style="margin-top:22px">
+        <table aria-label="Synthetic P100 request rows">
+          <thead>
+            <tr>
+              <th>Request</th>
+              <th>Requester</th>
+              <th>Owner</th>
+              <th>Execution mode</th>
+              <th>State after triage</th>
+              <th>Summary</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td data-label="Request"><code>R1</code></td>
+              <td data-label="Requester">Garen</td>
+              <td data-label="Owner">Garen</td>
+              <td data-label="Execution mode">direct</td>
+              <td data-label="State after triage">open</td>
+              <td data-label="Summary">Answer a bounded question</td>
+            </tr>
+            <tr>
+              <td data-label="Request"><code>R2</code></td>
+              <td data-label="Requester">Garen</td>
+              <td data-label="Owner">Garen</td>
+              <td data-label="Execution mode">unclassified</td>
+              <td data-label="State after triage">open</td>
+              <td data-label="Summary">Investigate a cross-project concern</td>
+            </tr>
+            <tr>
+              <td data-label="Request"><code>R3</code></td>
+              <td data-label="Requester">Garen</td>
+              <td data-label="Owner">Garen</td>
+              <td data-label="Execution mode">champion</td>
+              <td data-label="State after triage">open</td>
+              <td data-label="Summary">Coordinate a local implementation</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="delivery" class="section" aria-labelledby="delivery-title">
+      <div class="section-header">
+        <div>
+          <p class="section-kicker">05 · concurrency + delivery</p>
+          <h2 id="delivery-title">Repeat the envelope, never the effect</h2>
+        </div>
+        <p>External transport can be uncertain. League stays truthful by making database effects idempotent and keeping each lease scoped to one responsibility.</p>
+      </div>
+
+      <div class="lease-grid">
+        <article class="lease-card">
+          <p class="ledger-label">Request claim</p>
+          <h3>Who may mutate R2?</h3>
+          <p>One runtime, one request, one expiring claim. Different windows can still claim R1 and R3 concurrently.</p>
+        </article>
+        <article class="lease-card">
+          <p class="ledger-label">Dispatch lease</p>
+          <h3>Who may attempt O205?</h3>
+          <p>One dispatcher at a time. Expiry permits a retry after an uncertain send; it does not prove receipt.</p>
+        </article>
+        <article class="lease-card">
+          <p class="ledger-label">Watcher registration</p>
+          <h3>Which runtime gets a wake?</h3>
+          <p>One short-lived receiver. It owns no request and cannot acknowledge an event without a recipient receipt.</p>
+        </article>
+      </div>
+
+      <div class="state-diagrams" style="margin-top:22px">
+        <article class="diagram-card">
+          <h3>Delivery retry sequence</h3>
+          <ol class="sequence">
+            <li><strong>Commit source event and outbox.</strong><p>The domain change, event, and recipient row are one transaction.</p></li>
+            <li><strong>Lease, then send outside SQLite.</strong><p>No writer lock remains open during adapter transport.</p></li>
+            <li><strong>Apply recipient receipt and effect together.</strong><p>Unique event + recipient rejects a second database effect.</p></li>
+            <li><strong>Retry after uncertainty.</strong><p>A missing acknowledgement may duplicate transport, never the guarded effect.</p></li>
+            <li><strong>Reconcile lost wake.</strong><p>Indexed pending rows survive process crash or an offline Shotcaller.</p></li>
+          </ol>
+        </article>
+        <article class="diagram-card">
+          <h3>Multi-window rule</h3>
+          <div class="policy-grid">
+            <div class="policy-card">
+              <p class="ledger-label">Allowed</p>
+              <p>Window A claims R1 while Window B claims R3. SQLite serializes only their short commits.</p>
+            </div>
+            <div class="policy-card">
+              <p class="ledger-label">Refused</p>
+              <p>Window A and Window B race for R2. Exactly one request claim succeeds; the loser performs no R2 work.</p>
+            </div>
+          </div>
+          <div class="callout">
+            <strong>A fence stops late writers.</strong>
+            A recovered lease receives a newer fence. The expired holder cannot later commit a stale result even if its process resumes.
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <section id="cleanup" class="section" aria-labelledby="cleanup-title">
+      <div class="section-header">
+        <div>
+          <p class="section-kicker">06 · resources + maintenance</p>
+          <h2 id="cleanup-title">External work gets a receipt, not a pretend rollback</h2>
+        </div>
+        <p>SQLite cannot restart a stopped process or recreate a removed worktree. League plans and claims cleanup in one short transaction, performs one exact external action, and records the observed result in another short transaction.</p>
+      </div>
+
+      <div class="policy-grid">
+        <article class="policy-card">
+          <h3>Typed resource lifetime</h3>
+          <p><strong>Task-exclusive:</strong> revalidate, stop gracefully, prove exit. <strong>Shared lease:</strong> release only this task's lease. <strong>Retained handoff:</strong> transfer to an accepted owner. <strong>External unmanaged:</strong> never touch.</p>
+        </article>
+        <article class="policy-card">
+          <h3>Deterministic cleanup order</h3>
+          <p>Archive evidence; release shared leases; transfer retained resources; stop exact exclusive resources; close exact Champion runtime; remove only the eligible clean worktree/local branch; release the callsign last.</p>
+        </article>
+        <article class="policy-card">
+          <h3>Archive layout</h3>
+          <p><code>v1/tasks/{prefix}/{task-id}/bundles/{bundle-id}/</code> contains a manifest, receipt, and escaped artifact names. SQLite stores hashes and stable bundle references.</p>
+        </article>
+        <article class="policy-card">
+          <h3>Crash recovery</h3>
+          <p>After a crash, re-inspect reality before acting. Already-exited is a receipt; reused process identity is preserved; unknown ownership blocks cleanup.</p>
+        </article>
+        <article class="policy-card">
+          <h3>Bounded pruning</h3>
+          <p>Defaults: 90 resolved days, 256 MB database gate, 500 rows per run. Full prompt bodies and proved terminal delivery-attempt detail are removable. Attempt totals/times/final outcome remain on the permanent outbox; pending attempts, events, and receipts remain.</p>
+        </article>
+        <article class="policy-card">
+          <h3>Explicit reclamation</h3>
+          <p>Pruning makes pages reusable. File shrinking requires <code>league maintain reclaim-space</code> after a visible threshold reminder; it never runs inside a prompt hook.</p>
+        </article>
+      </div>
+
+      <div class="callout">
+        <strong>Authority stays narrow.</strong>
+        Automatic cleanup never grants merge or deployment authority. Missing authority creates <code>awaiting_authority</code>; the Stop hook reports it but performs no destructive action.
+      </div>
+    </section>
+
+    <section id="cutover" class="section" aria-labelledby="cutover-title">
+      <div class="section-header">
+        <div>
+          <p class="section-kicker">07 · acceptance + rollback</p>
+          <h2 id="cutover-title">Prove it in layers, switch once</h2>
+        </div>
+        <p>Feature tests and global cutover are different risk boundaries. Every stage is isolated until one separately authorized, quiescent pointer switch makes SQLite the only canonical writer.</p>
+      </div>
+      <div class="cutover-grid">
+        <article class="cutover-card"><h3>Feature PR</h3><p>Temporary database/archive, fake clock, deterministic IDs, fake adapters, crash and concurrency tests.</p></article>
+        <article class="cutover-card"><h3>Merged main</h3><p>Full synthetic lifecycle in a namespaced sandbox with global-state sentinels.</p></article>
+        <article class="cutover-card"><h3>Read-only shadow</h3><p>Dry-run/import isolated legacy snapshot, compare parity, never acknowledge live events.</p></article>
+        <article class="cutover-card"><h3>Staged install</h3><p>Release byte parity, permissions, help, hook fixtures, backup, and rollback under an isolated prefix.</p></article>
+        <article class="cutover-card"><h3>Real canary</h3><p>Separate namespace and synthetic identities for every claimed harness/backend pair.</p></article>
+        <article class="cutover-card"><h3>Atomic switch</h3><p>Quiesce, drain old writer, backup, delta import, pointer/writer-epoch switch, synthetic smoke.</p></article>
+        <article class="cutover-card"><h3>Rollback</h3><p>Keep intake blocked, restore exact old pointer/hooks/state, verify old watcher, never dual-write.</p></article>
+      </div>
+
+      <div class="policy-grid" style="margin-top:22px">
+        <article class="policy-card">
+          <h3>SQLite runtime gate</h3>
+          <p><a href="https://github.com/Vinosaamaa/league-of-orchestrator/blob/main/docs/adr/0002-sqlite-canonical-store.md">ADR 0002</a> accepts SQLite after a separately authorized cutover; ADR 0001 stays live until then. Application-linked SQLite 3.51.3 or newer enables WAL. Older libraries use rollback-journal mode.</p>
+        </article>
+        <article class="policy-card">
+          <h3>Evidence-derived hook budget</h3>
+          <p>Measure disabled/enabled, cold/warm, empty/small/large, and concurrent writers per adapter. Approve p50/p95/p99/max only from the complete installed path—never invent a number in design.</p>
+        </article>
+      </div>
+    </section>
+
+    <section id="traceability" class="section" aria-labelledby="traceability-title">
+      <div class="section-header">
+        <div>
+          <p class="section-kicker">08 · ownership</p>
+          <h2 id="traceability-title">Every decision has an issue</h2>
+        </div>
+        <p>The Markdown document is the complete implementation contract. This surface teaches the same material choices and links each boundary to its owner.</p>
+      </div>
+      <div class="table-wrap">
+        <table aria-label="Design traceability">
+          <thead>
+            <tr><th>Boundary</th><th>Owner issue</th><th>What remains separate</th></tr>
+          </thead>
+          <tbody>
+            <tr><td data-label="Boundary">Event binding + recipient effect</td><td data-label="Owner issue"><a href="https://github.com/Vinosaamaa/league-of-orchestrator/issues/3">#3</a></td><td data-label="What remains separate">Retryable transport versus unique database receipt</td></tr>
+            <tr><td data-label="Boundary">Dispatch mode + assignment</td><td data-label="Owner issue"><a href="https://github.com/Vinosaamaa/league-of-orchestrator/issues/4">#4</a></td><td data-label="What remains separate">Request state and Champion transition</td></tr>
+            <tr><td data-label="Boundary">Stop + wake continuity</td><td data-label="Owner issue"><a href="https://github.com/Vinosaamaa/league-of-orchestrator/issues/5">#5</a></td><td data-label="What remains separate">No polling daemon or inferred status</td></tr>
+            <tr><td data-label="Boundary">SQLite + runtime gate</td><td data-label="Owner issue"><a href="https://github.com/Vinosaamaa/league-of-orchestrator/issues/6">#6</a></td><td data-label="What remains separate">Implementation and cutover</td></tr>
+            <tr><td data-label="Boundary">Adapter-neutral identity</td><td data-label="Owner issue"><a href="https://github.com/Vinosaamaa/league-of-orchestrator/issues/7">#7</a></td><td data-label="What remains separate">Opaque provider locators</td></tr>
+            <tr><td data-label="Boundary">Resources + teardown</td><td data-label="Owner issue"><a href="https://github.com/Vinosaamaa/league-of-orchestrator/issues/11">#11</a></td><td data-label="What remains separate">Task outcome and cleanup state</td></tr>
+            <tr><td data-label="Boundary">Callsign reuse queue</td><td data-label="Owner issue"><a href="https://github.com/Vinosaamaa/league-of-orchestrator/issues/13">#13</a></td><td data-label="What remains separate">Persistent order versus active assignment</td></tr>
+            <tr><td data-label="Boundary">Prompt/request inbox</td><td data-label="Owner issue"><a href="https://github.com/Vinosaamaa/league-of-orchestrator/issues/17">#17</a></td><td data-label="What remains separate">Prompt source and independent request</td></tr>
+            <tr><td data-label="Boundary">Legacy dependency inventory</td><td data-label="Owner issue"><a href="https://github.com/Vinosaamaa/league-of-orchestrator/issues/18">#18</a></td><td data-label="What remains separate">Completed audit versus implementation mapping</td></tr>
+            <tr><td data-label="Boundary">SQLite CLI + migration</td><td data-label="Owner issue"><a href="https://github.com/Vinosaamaa/league-of-orchestrator/issues/19">#19</a></td><td data-label="What remains separate">No direct SQL for agents</td></tr>
+            <tr><td data-label="Boundary">Design contract</td><td data-label="Owner issue"><a href="https://github.com/Vinosaamaa/league-of-orchestrator/issues/21">#21</a></td><td data-label="What remains separate">No runtime claim</td></tr>
+            <tr><td data-label="Boundary">Reports</td><td data-label="Owner issue"><a href="https://github.com/Vinosaamaa/league-of-orchestrator/issues/22">#22</a></td><td data-label="What remains separate">Read-only fact derivation</td></tr>
+            <tr><td data-label="Boundary">Sandbox + cutover</td><td data-label="Owner issue"><a href="https://github.com/Vinosaamaa/league-of-orchestrator/issues/23">#23</a></td><td data-label="What remains separate">Separate global authority</td></tr>
+            <tr><td data-label="Boundary">Outbound privacy enforcement</td><td data-label="Owner issue"><a href="https://github.com/Vinosaamaa/league-of-orchestrator/issues/25">#25</a></td><td data-label="What remains separate">Policy enforcement versus schema classification</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div style="margin-top:22px">
+        <details>
+          <summary>Why SQLite rather than more JSON files?</summary>
+          <div>League needs atomic owner transfer, event/outbox insertion, unique recipient effects, per-request claims, and indexed reconciliation across local processes. JSON remains useful for export, backup, compatibility import, and immutable archive evidence—not as a second writer.</div>
+        </details>
+        <details>
+          <summary>What is the scaling limit?</summary>
+          <div>SQLite serializes writes. League keeps transactions short, indexes hot queries, and performs every external action after commit. This is appropriate for bounded local coordination. Sustained remote multi-host coordination would justify a server database and durable queue behind the same storage/event interfaces.</div>
+        </details>
+        <details>
+          <summary>What remains owner approval?</summary>
+          <div>Measured hook ceilings, any revision to the proposed one-second busy timeout and three-attempt retry, the portable wake adapter, supported real-canary matrix, reclaim thresholds, archive root, implementation mapping of the completed migration inventory, and global cutover authority.</div>
+        </details>
+      </div>
+    </section>
+  </main>
+
+  <footer class="page-shell">
+    <p>Source-managed companion for <code>docs/design/sqlite-request-lifecycle.md</code>. Visual system: repository-derived terminal-first coordination ledger; no product design assets existed in the bootstrap.</p>
+  </footer>
+
+  <script>
+    (function () {
+      "use strict";
+
+      var steps = [
+        {
+          title: "Capture P100",
+          short: "one immutable prompt",
+          actor: "Prompt adapter",
+          command: "league request intake",
+          reads: ["runtime_instances", "prompts by unique source_event_key"],
+          writes: ["prompts(P100)", "prompt_payloads(P100)"],
+          transaction: "The prompt envelope and its single full payload row commit together. A replay of the same source event returns P100.",
+          external: "None. The hook captures only; it does not split questions.",
+          outbox: "No outbox row.",
+          visible: "Garen can see one untriaged prompt. The user sees no extra message.",
+          retry: "The source-event unique key makes hook replay idempotent.",
+          failure: "A storage failure refuses substantive work and reports intake_failed; no partial prompt exists.",
+          state: {owner: "Garen", request: "not created", mode: "—", version: "—", outbox: "none", tasks: "0"}
+        },
+        {
+          title: "Triage P100",
+          short: "create R1, R2, R3",
+          actor: "Garen",
+          command: "league request triage P100",
+          reads: ["prompts(P100)", "prompt_payloads(P100)", "prompt_items", "expected prompt revision"],
+          writes: ["prompt_items(PI100-1..3)", "requests(R1..R3)", "request_sources(R1..R3)", "prompts.triage_state=complete"],
+          transaction: "All items, requests, source links, and complete triage state commit together. Partial triage is refused.",
+          external: "Garen decides the independent outcomes before invoking the command.",
+          outbox: "No outbox row.",
+          visible: "Three ordered requests appear; the full P100 body still exists once.",
+          retry: "Same deterministic triage input returns the existing rows.",
+          failure: "Conflicting boundaries return triage_conflict and leave P100 unchanged.",
+          state: {owner: "Garen", request: "open", mode: "unclassified", version: "1", outbox: "none", tasks: "0"}
+        },
+        {
+          title: "Claim R2",
+          short: "Garen gets mutation authority",
+          actor: "Garen",
+          command: "league request claim R2",
+          reads: ["requests(R2)", "request_claims(R2)", "runtime_instances(Garen window)"],
+          writes: ["request_claims(R2, Garen window, lease)", "events(request_claimed)"],
+          transaction: "Claim and audit event commit only when no unexpired claim exists.",
+          external: "None.",
+          outbox: "No outbox row; claim audit is non-material.",
+          visible: "This Garen window may mutate R2. Another Garen window loses the race.",
+          retry: "The same holder renews idempotently.",
+          failure: "A live competing claim returns its holder. An expired holder cannot write after a newer fence.",
+          state: {owner: "Garen", request: "open", mode: "unclassified", version: "1", outbox: "none", tasks: "0"}
+        },
+        {
+          title: "Route R2 to Jarvan",
+          short: "owner transfer + E201 + O201",
+          actor: "Garen",
+          command: "league handoff Jarvan --request R2 --expected-version 1",
+          reads: ["requests(R2)", "request_claims(R2)", "actors(Garen, Jarvan)", "runtime_instances(Jarvan)", "watcher_registrations(Jarvan)"],
+          writes: ["R2 owner=Jarvan, return_to=Garen, state=routed, version=2", "release Garen claim", "events(E201 request_routed)", "delivery_outbox(O201 pending)", "acknowledgement obligation"],
+          transaction: "Owner, state, released claim, event, outbox, and obligation commit together.",
+          external: "None before commit. Dispatch begins only after the database is authoritative.",
+          outbox: "O201 = pending; attempts = 0.",
+          visible: "Garen sees routed. Jarvan sees nothing until recipient receipt.",
+          retry: "Expected version 1 returns the already committed version 2 and E201.",
+          failure: "Unknown Jarvan, stale version, or invalid claim leaves every row unchanged.",
+          state: {owner: "Jarvan", request: "routed", mode: "unclassified", version: "2", outbox: "O201 pending", tasks: "0"}
+        },
+        {
+          title: "Deliver E201",
+          short: "retryable transport, one effect",
+          actor: "League dispatcher",
+          command: "league delivery claim O201; league delivery ack O201 --event E201 --recipient Jarvan",
+          reads: ["delivery_outbox(O201)", "outbox_dispatch_leases(O201)", "watcher_registrations(Jarvan)", "runtime_instances", "adapter_locators"],
+          writes: ["outbox_dispatch_leases(O201)", "delivery_attempts(DA201-1)", "recipient_receipts(E201, Jarvan)", "O201 state=delivered", "delete outbox_dispatch_leases(O201)", "obligation satisfied"],
+          transaction: "Dispatch claim commits before transport. The accepted delivery-completion invariant commits receipt, recipient effect, delivered state, lease deletion, and obligation together after transport.",
+          external: "Send a bounded envelope through Jarvan's verified adapter. Full P100 text is excluded.",
+          outbox: "in_flight or awaiting_receipt; then delivered only after receipt.",
+          visible: "Jarvan sees one routed request. Garen sees delivery, not acceptance.",
+          retry: "A lost acknowledgement may resend the envelope.",
+          failure: "Offline Jarvan leaves O201 pending. The unique event-recipient receipt blocks duplicate database effect.",
+          state: {owner: "Jarvan", request: "routed", mode: "unclassified", version: "2", outbox: "O201 delivered", tasks: "0"}
+        },
+        {
+          title: "Jarvan accepts R2",
+          short: "claim + accepted",
+          actor: "Jarvan",
+          command: "league request claim R2",
+          reads: ["requests(R2 version 2)", "recipient_receipts(E201, Jarvan)", "request_claims(R2)", "runtime_instances(Jarvan window)"],
+          writes: ["Jarvan request_claims row", "R2 state=accepted, version=3", "events(E202 request_accepted)", "acknowledgement obligation resolved"],
+          transaction: "Claim, acceptance, request version, event, and obligation update commit together.",
+          external: "None.",
+          outbox: "O201 remains delivered. E202 creates no routine wake to Garen.",
+          visible: "Jarvan may execute R2. Garen can query accepted status.",
+          retry: "A duplicate accept returns version 3.",
+          failure: "Wrong owner, absent route receipt, or stale claim refuses without mutation.",
+          state: {owner: "Jarvan", request: "accepted", mode: "unclassified", version: "3", outbox: "O201 delivered", tasks: "0"}
+        },
+        {
+          title: "Create T201 + T202",
+          short: "two recoverable Champion assignments",
+          actor: "Jarvan",
+          command: "league assign R2 --task \"Collect dependency evidence\"; league assign R2 --task \"Evaluate failure paths\"",
+          reads: ["R2 and Jarvan claim", "callsign_queue", "actors and adapter capabilities", "existing idempotent task brief"],
+          writes: ["tasks(T201, T202)", "task_assignments pending then active", "callsign_assignments reserved then active", "task assignment events/outboxes", "R2 mode=champion, state=in_progress, version=4"],
+          transaction: "Each reservation commits before launch. Verified launch is external. Each activation commits in a second transaction.",
+          external: "Launch and verify two Champions; deliver assignment envelopes after activation.",
+          outbox: "One task-assignment outbox per active task; each waits for its own receipt.",
+          visible: "Jarvan sees two accepted tasks. Garen sees R2 in progress under Jarvan.",
+          retry: "Retry resumes the same pending assignment rather than creating a new Champion.",
+          failure: "A failed launch cleans only proven partial resources and preserves the request/other task.",
+          state: {owner: "Jarvan", request: "in_progress", mode: "champion", version: "4", outbox: "task outboxes", tasks: "2 active"}
+        },
+        {
+          title: "Champions complete tasks",
+          short: "task results return to Jarvan",
+          actor: "Two Champions",
+          command: "league transition --task T201 --state completed --update \"Dependency evidence collected\"; league transition --task T202 --state completed --update \"Failure paths evaluated\"",
+          reads: ["tasks and task_assignments", "current runtime identity", "expected task version", "task_resources"],
+          writes: ["tasks state/result_summary", "task_transitions", "events", "delivery_outbox to Jarvan", "cleanup_obligations when resources exist"],
+          transaction: "Task state, immutable transition, event, Jarvan outbox, and cleanup obligation commit together.",
+          external: "Post-commit wake/transport only. No merge, deployment, or cleanup runs.",
+          outbox: "Each task event progresses independently to delivered for Jarvan.",
+          visible: "Jarvan sees two completed task summaries. R2 remains in_progress; Garen's request is not answered.",
+          retry: "A duplicate transition returns its original event.",
+          failure: "A missing transition becomes champion_stalled after stable observations; League never guesses completion.",
+          state: {owner: "Jarvan", request: "in_progress", mode: "champion", version: "4", outbox: "task events delivered", tasks: "2 completed"}
+        },
+        {
+          title: "Record RES9 + return owner",
+          short: "the critical atomic boundary",
+          actor: "Jarvan",
+          command: "league request resolve R2 --summary \"Combined dependency and failure findings\" --return-to-requester",
+          reads: ["requests(R2 version 4)", "Jarvan request claim", "tasks(T201, T202)", "delivered task results", "existing result idempotency key"],
+          writes: ["request_results(RES9)", "request_result_sources(RES9, T201/T202)", "R2 owner=Garen, state=awaiting_requester, latest_result=RES9, version=5", "release Jarvan claim", "events(E205)", "delivery_outbox(O205 pending)", "Garen attention obligation"],
+          transaction: "Result, source tasks, owner return, state, claim release, event, outbox, and obligation are one atomic commit.",
+          external: "None before commit. Garen delivery begins after commit.",
+          outbox: "O205 = pending; attempts = 0.",
+          visible: "Jarvan sees returned. Garen and the user see nothing until delivery.",
+          retry: "A duplicate resolve returns RES9, E205, and O205.",
+          failure: "Missing task result, stale version, or expired claim leaves Jarvan as owner and prevents a partial return.",
+          state: {owner: "Garen", request: "awaiting_requester", mode: "champion", version: "5", outbox: "O205 pending", tasks: "2 completed"}
+        },
+        {
+          title: "Garen is offline",
+          short: "O205 remains durable",
+          actor: "League dispatcher",
+          command: "league delivery claim O205; league delivery fail O205 --reason receiver_unavailable",
+          reads: ["delivery_outbox(O205)", "dispatch lease", "Garen watcher/runtime/locator rows", "prior delivery_attempts"],
+          writes: ["delivery_attempts append", "O205 available_at backoff", "deduplicated undelivered obligation"],
+          transaction: "Lease and attempt recording are short transactions around the external send.",
+          external: "Verified adapter send fails because no Garen receiver is available.",
+          outbox: "O205 remains pending; attempt_count increases.",
+          visible: "Jarvan sees return pending. Garen and user see nothing.",
+          retry: "Reconnect, supervise, or Stop obligations query makes O205 eligible again without model polling.",
+          failure: "No send call alone can mark delivered. Ambiguous endpoint remains blocked and preserved.",
+          state: {owner: "Garen", request: "awaiting_requester", mode: "champion", version: "5", outbox: "O205 pending · retry", tasks: "2 completed"}
+        },
+        {
+          title: "Garen receives + claims",
+          short: "unique receipt, separate claim",
+          actor: "Garen",
+          command: "league delivery ack O205 --event E205 --recipient Garen; league request claim R2",
+          reads: ["O205 and E205", "R2 owner/version", "recipient_receipts", "Garen runtime", "current request claim"],
+          writes: ["recipient_receipts(E205, Garen)", "O205 state=delivered", "delete outbox_dispatch_leases(O205)", "delivery obligation satisfied", "Garen request_claims row"],
+          transaction: "The accepted delivery-completion invariant commits receipt, recipient effect, delivered state, and lease deletion together. Request claim is a separate transaction and mechanism.",
+          external: "Duplicate envelopes may still arrive.",
+          outbox: "O205 = delivered.",
+          visible: "Garen sees RES9 and both source tasks. The user still has no answer.",
+          retry: "Duplicate E205 returns the existing receipt.",
+          failure: "Another Garen window loses the request-claim race and must not answer R2.",
+          state: {owner: "Garen", request: "awaiting_requester", mode: "champion", version: "5", outbox: "O205 delivered", tasks: "2 completed"}
+        },
+        {
+          title: "Garen answers",
+          short: "response evidence closes R2",
+          actor: "Garen",
+          command: "league request resolve R2 --summary \"User-facing synthesis delivered\"",
+          reads: ["R2 version 5", "Garen request claim", "RES9", "response adapter capability", "response idempotency key"],
+          writes: ["response_references", "R2 state=answered and resolution_summary", "release Garen claim", "events(E206 request_answered)", "attention obligation satisfied"],
+          transaction: "Response reference, final state, permanent summary, claim release, event, and obligation commit together after response evidence exists.",
+          external: "The harness delivers the answer and supplies an opaque response locator. Ephemeral capability is recorded honestly.",
+          outbox: "No cross-Shotcaller outbox; requester and answerer are Garen.",
+          visible: "The user sees the answer. Garen sees R2 answered. Jarvan can query the final state.",
+          retry: "The response idempotency key returns the existing reference and E206.",
+          failure: "Without response evidence, R2 remains awaiting_requester and reconciliation surfaces it. Task completion never substitutes.",
+          state: {owner: "Garen", request: "answered", mode: "champion", version: "6", outbox: "none", tasks: "2 completed"}
+        }
+      ];
+
+      var view = {
+        list: document.getElementById("step-list"),
+        buttons: [],
+        inspector: {
+          kicker: document.getElementById("inspector-kicker"),
+          title: document.getElementById("inspector-title"),
+          index: document.getElementById("inspector-index"),
+          actor: document.getElementById("inspector-actor"),
+          command: document.getElementById("inspector-command"),
+          reads: document.getElementById("inspector-reads"),
+          writes: document.getElementById("inspector-writes"),
+          transaction: document.getElementById("inspector-transaction"),
+          external: document.getElementById("inspector-external"),
+          outbox: document.getElementById("inspector-outbox"),
+          visible: document.getElementById("inspector-visible"),
+          retry: document.getElementById("inspector-retry"),
+          failure: document.getElementById("inspector-failure")
+        },
+        snapshot: document.getElementById("state-snapshot"),
+        mobile: {
+          step: document.getElementById("mobile-step"),
+          state: document.getElementById("mobile-state")
+        }
+      };
+      var current = 0;
+
+      function escapeHtml(value) {
+        return String(value)
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;")
+          .replace(/"/g, "&quot;")
+          .replace(/'/g, "&#039;");
+      }
+
+      function renderList(target, values) {
+        target.innerHTML = values.map(function (value) {
+          return "<li><code>" + escapeHtml(value) + "</code></li>";
+        }).join("");
+      }
+
+      function renderSnapshot(step) {
+        var labels = [
+          ["Owner", step.state.owner],
+          ["Request", step.state.request],
+          ["Mode", step.state.mode],
+          ["Version", step.state.version],
+          ["Outbox", step.state.outbox],
+          ["Tasks", step.state.tasks]
+        ];
+        view.snapshot.innerHTML = labels.map(function (pair) {
+          return "<div class=\"state-cell\"><small>" + escapeHtml(pair[0]) + "</small><strong>" + escapeHtml(pair[1]) + "</strong></div>";
+        }).join("");
+      }
+
+      function renderSelection(focusButton) {
+        view.buttons.forEach(function (button, buttonIndex) {
+          var active = buttonIndex === current;
+          button.setAttribute("aria-selected", active ? "true" : "false");
+          button.tabIndex = active ? 0 : -1;
+        });
+
+        if (focusButton && view.buttons[current]) {
+          view.buttons[current].focus();
+        }
+      }
+
+      function renderInspector(step, displayIndex) {
+        view.inspector.kicker.textContent = "Transaction " + displayIndex;
+        view.inspector.title.textContent = step.title;
+        view.inspector.index.textContent = displayIndex;
+        view.inspector.actor.textContent = step.actor;
+        view.inspector.command.textContent = step.command;
+        renderList(view.inspector.reads, step.reads);
+        renderList(view.inspector.writes, step.writes);
+        view.inspector.transaction.textContent = step.transaction;
+        view.inspector.external.textContent = step.external;
+        view.inspector.outbox.textContent = step.outbox;
+        view.inspector.visible.textContent = step.visible;
+        view.inspector.retry.textContent = step.retry;
+        view.inspector.failure.textContent = step.failure;
+      }
+
+      function renderMobileStatus(step, displayIndex) {
+        view.mobile.step.textContent = "R2 · step " + displayIndex;
+        view.mobile.state.textContent = "owner " + step.state.owner + " · " + step.state.request;
+      }
+
+      function selectStep(index, focusButton) {
+        current = Math.max(0, Math.min(steps.length - 1, index));
+        var step = steps[current];
+        var displayIndex = String(current + 1).padStart(2, "0");
+        renderSelection(focusButton);
+        renderInspector(step, displayIndex);
+        renderSnapshot(step);
+        renderMobileStatus(step, displayIndex);
+      }
+
+      steps.forEach(function (step, index) {
+        var item = document.createElement("li");
+        var button = document.createElement("button");
+        var number = String(index + 1).padStart(2, "0");
+        button.type = "button";
+        button.className = "step-button";
+        button.id = "step-" + number;
+        button.setAttribute("role", "tab");
+        button.setAttribute("aria-controls", "r2-inspector");
+        button.setAttribute("aria-selected", index === 0 ? "true" : "false");
+        button.tabIndex = index === 0 ? 0 : -1;
+        button.innerHTML =
+          "<span class=\"step-number\">" + number + "</span>" +
+          "<span class=\"step-copy\"><strong>" + escapeHtml(step.title) + "</strong><span>" + escapeHtml(step.short) + "</span></span>";
+        button.addEventListener("click", function () {
+          selectStep(index, false);
+        });
+        button.addEventListener("keydown", function (event) {
+          var next = null;
+          if (event.key === "ArrowDown" || event.key === "ArrowRight") next = current + 1;
+          if (event.key === "ArrowUp" || event.key === "ArrowLeft") next = current - 1;
+          if (event.key === "Home") next = 0;
+          if (event.key === "End") next = steps.length - 1;
+          if (next !== null) {
+            event.preventDefault();
+            selectStep(next, true);
+          }
+        });
+        item.appendChild(button);
+        view.buttons.push(button);
+        view.list.appendChild(item);
+      });
+
+      selectStep(0, false);
+    }());
+  </script>
+</body>
+</html>

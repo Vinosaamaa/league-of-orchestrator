@@ -18,7 +18,12 @@ related partial behavior:
 - [#11: Generalize guarded teardown across task classes](https://github.com/Vinosaamaa/league-of-orchestrator/issues/11)
 - [#12: Design a terminal-first Roster UI](https://github.com/Vinosaamaa/league-of-orchestrator/issues/12)
 - [#13: Add history-aware callsign allocation and reuse cooldown](https://github.com/Vinosaamaa/league-of-orchestrator/issues/13)
+- [#17: Add a durable request inbox and unresolved-work reconciliation](https://github.com/Vinosaamaa/league-of-orchestrator/issues/17)
 - [#18: Audit every JSON/JSONL state dependency before SQLite migration](https://github.com/Vinosaamaa/league-of-orchestrator/issues/18) — completed by the sanitized producer-consumer matrix and cutover inventory
+- [#19: Implement SQLite storage and atomic canonical cutover](https://github.com/Vinosaamaa/league-of-orchestrator/issues/19)
+- [#21: Document the SQLite orchestration design and decision trail](https://github.com/Vinosaamaa/league-of-orchestrator/issues/21)
+- [#22: Add evidence-backed League activity and end-of-day reports](https://github.com/Vinosaamaa/league-of-orchestrator/issues/22)
+- [#23: Build an isolated League acceptance sandbox and reversible cutover harness](https://github.com/Vinosaamaa/league-of-orchestrator/issues/23)
 
 The bootstrap does not pre-build those interfaces, storage choices, UI, handoff,
 catalog, or allocation rules.

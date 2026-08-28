@@ -1,0 +1,142 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Vinosaamaa/league-of-orchestrator/schema/league-skill-contracts.schema.json",
+  "title": "League custom-skill provenance and capability contract",
+  "type": "object",
+  "required": ["schema", "roots", "skills", "installations"],
+  "properties": {
+    "schema": {"const": "league.skill-contracts.v1"},
+    "roots": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "required": ["label"],
+        "properties": {"label": {"$ref": "#/$defs/identifier"}},
+        "additionalProperties": false
+      }
+    },
+    "skills": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/skill"}
+    },
+    "installations": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/installation"}
+    }
+  },
+  "$defs": {
+    "identifier": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,63}$"},
+    "capability": {"type": "string", "pattern": "^[a-z][a-z0-9.-]{0,63}$"},
+    "capabilityMap": {
+      "type": "object",
+      "required": ["harness", "tool", "platform", "browser", "forge", "delegation", "multiplexer"],
+      "properties": {
+        "harness": {"$ref": "#/$defs/capabilityList"},
+        "tool": {"$ref": "#/$defs/capabilityList"},
+        "platform": {"$ref": "#/$defs/capabilityList"},
+        "browser": {"$ref": "#/$defs/capabilityList"},
+        "forge": {"$ref": "#/$defs/capabilityList"},
+        "delegation": {"$ref": "#/$defs/capabilityList"},
+        "multiplexer": {"$ref": "#/$defs/capabilityList"}
+      },
+      "additionalProperties": false
+    },
+    "capabilityList": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/capability"}
+    },
+    "provenance": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["classification", "owner"],
+          "properties": {
+            "classification": {"const": "recorded"},
+            "owner": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}/[A-Za-z0-9][A-Za-z0-9._-]{0,99}$"}
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["classification", "reason"],
+          "properties": {
+            "classification": {"const": "unrecorded"},
+            "reason": {"const": "no-authoritative-source-record"}
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "version": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["classification", "value"],
+          "properties": {
+            "classification": {"const": "declared"},
+            "value": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$"}
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["classification"],
+          "properties": {"classification": {"const": "unrecorded"}},
+          "additionalProperties": false
+        }
+      ]
+    },
+    "skill": {
+      "type": "object",
+      "required": ["identity", "scope", "provenance", "version", "capabilities", "fallback"],
+      "properties": {
+        "identity": {"$ref": "#/$defs/identifier"},
+        "scope": {"enum": ["shared", "specialist"]},
+        "provenance": {"$ref": "#/$defs/provenance"},
+        "version": {"$ref": "#/$defs/version"},
+        "capabilities": {
+          "type": "object",
+          "required": ["required", "optional"],
+          "properties": {
+            "required": {"$ref": "#/$defs/capabilityMap"},
+            "optional": {"$ref": "#/$defs/capabilityMap"}
+          },
+          "additionalProperties": false
+        },
+        "fallback": {
+          "type": "object",
+          "required": ["mode", "when_missing", "when_available"],
+          "properties": {
+            "mode": {"enum": ["inline", "refuse"]},
+            "when_available": {"enum": ["declared", "delegate"]},
+            "when_missing": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {"type": "string", "pattern": "^(harness|tool|platform|browser|forge|delegation|multiplexer)\\.[a-z][a-z0-9.-]{0,63}$"}
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "installation": {
+      "type": "object",
+      "required": ["root", "skill", "entry_kind", "content_sha256", "source_parity"],
+      "properties": {
+        "root": {"$ref": "#/$defs/identifier"},
+        "skill": {"$ref": "#/$defs/identifier"},
+        "entry_kind": {"enum": ["directory", "symlink"]},
+        "content_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "source_parity": {"enum": ["matched", "mismatched", "unverified"]}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

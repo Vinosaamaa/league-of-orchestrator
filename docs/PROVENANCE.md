@@ -127,3 +127,20 @@ Codex+Herdr and Codex+tmux are named adapter contracts. Pi and all destructive
 cleanup adapters in the suite are deterministic isolated doubles, not
 real-runtime evidence. Installed drivers, a genuine isolated canary, global
 installation, live migration, cutover, and rollback remain issue-#23 gates.
+
+## Skill-contract implementation provenance
+
+`src/league/skill_contracts.py`, the `league skill` CLI family, skill JSON
+schemas/config, `docs/skill-capabilities.md`, the sanitized audit receipt, and
+`tests/test_skill_contracts.py` are original League implementation for issue
+#10. The current custom-root audit read only direct custom-skill entries and a
+separate existing lockfile's public source-owner identifiers. It did not copy
+skill bodies, symlink targets, machine paths, runtime identity, credentials, or
+private endpoints into repository bytes.
+
+Ten skills have one recorded public source owner from that lock record. The
+remaining thirteen are explicitly `unrecorded`; all versions and source-byte
+parity remain unrecorded/unverified where no authoritative versioned source
+bytes were proved. Per-copy hashes use League's documented deterministic tree
+hash, while duplicate parity compares those declared copy hashes. No installed
+skill, global config, hook, adapter, or runtime was modified.

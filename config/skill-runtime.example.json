@@ -1,0 +1,16 @@
+{
+  "schema": "league.skill-runtime-profile.v1",
+  "adapter": {
+    "harness": "codex",
+    "backend": "herdr"
+  },
+  "capabilities": {
+    "harness": [],
+    "tool": ["repository-files", "repository-write", "test-runner", "web-search"],
+    "platform": ["posix"],
+    "browser": [],
+    "forge": [],
+    "delegation": [],
+    "multiplexer": []
+  }
+}

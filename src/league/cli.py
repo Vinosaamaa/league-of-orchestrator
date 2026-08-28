@@ -15,6 +15,12 @@ from .adapters import builtin_contract_registry
 from .cleanup import CleanupPlanner
 from .importer import build_import_plan
 from .routing import ModelRouter, load_routing_config
+from .skill_contracts import (
+    audit_installations,
+    capability_matrix as skill_capability_matrix,
+    load_json_object as load_skill_json_object,
+    validate_contract as validate_skill_contract,
+)
 from .sqlite_store import DEFAULT_BUSY_TIMEOUT_MS, MAX_EXPORT_RECORDS, SQLiteStorage
 from .storage import (
     DispatchRequestCommand,
@@ -246,6 +252,31 @@ def _add_runtime_commands(groups: argparse._SubParsersAction) -> None:
     runtime = groups.add_parser("runtime", help="Inspect registered harness/backend capabilities.")
     commands = runtime.add_subparsers(dest="action", required=True)
     commands.add_parser("matrix", help="Report supported, unsupported, and unverified adapter operations.")
+
+
+def _add_skill_commands(groups: argparse._SubParsersAction) -> None:
+    skill = groups.add_parser(
+        "skill", help="Validate skill provenance, installation parity, and runtime capabilities."
+    )
+    commands = skill.add_subparsers(dest="action", required=True)
+    validate = commands.add_parser("validate", help="Validate one repository-local skill contract.")
+    validate.add_argument("--config", type=Path, required=True)
+    audit = commands.add_parser(
+        "audit", help="Audit explicit custom roots without returning local paths or skill bodies."
+    )
+    audit.add_argument("--config", type=Path, required=True)
+    audit.add_argument(
+        "--root",
+        action="append",
+        required=True,
+        metavar="LABEL=ABSOLUTE_PATH",
+        help="Bind one declared public root label to one exact local custom root.",
+    )
+    matrix = commands.add_parser(
+        "matrix", help="Resolve skill availability against one explicit runtime capability profile."
+    )
+    matrix.add_argument("--config", type=Path, required=True)
+    matrix.add_argument("--profile", type=Path, required=True)
 
 
 def _add_routing_commands(groups: argparse._SubParsersAction) -> None:
@@ -518,8 +549,8 @@ def _parser() -> argparse.ArgumentParser:
         "--state-root",
         type=Path,
         help=(
-            "Explicit absolute League state root; required except for help inventory "
-            "and the separately rooted acceptance command."
+            "Explicit absolute League state root; required for state-backed commands. "
+            "Help, skill validation, and separately rooted acceptance create no state here."
         ),
     )
     parser.add_argument(
@@ -542,6 +573,7 @@ def _parser() -> argparse.ArgumentParser:
         _add_project_commands,
         _add_task_commands,
         _add_runtime_commands,
+        _add_skill_commands,
         _add_routing_commands,
         _add_resource_commands,
         _add_cleanup_commands,
@@ -721,6 +753,35 @@ def _read_json_object(path: Path) -> dict[str, Any]:
 
 def _runtime_matrix(_: Storage, __: argparse.Namespace) -> CommandResult:
     return builtin_contract_registry().capability_matrix(), None
+
+
+def _skill_contract(args: argparse.Namespace) -> dict[str, Any]:
+    return load_skill_json_object(args.config, label="skill contract")
+
+
+def _skill_validate(args: argparse.Namespace) -> CommandResult:
+    return validate_skill_contract(_skill_contract(args)), None
+
+
+def _skill_audit(args: argparse.Namespace) -> CommandResult:
+    bindings: dict[str, Path] = {}
+    for raw in args.root:
+        if not isinstance(raw, str) or "=" not in raw:
+            raise StorageRefusal(
+                "skill_root_invalid", "skill root must use LABEL=ABSOLUTE_PATH"
+            )
+        label, raw_path = raw.split("=", 1)
+        if not label or not raw_path or label in bindings:
+            raise StorageRefusal("skill_root_invalid", "skill root binding is invalid or duplicated")
+        bindings[label] = Path(raw_path)
+    return audit_installations(_skill_contract(args), bindings), None
+
+
+def _skill_matrix(args: argparse.Namespace) -> CommandResult:
+    profile = load_skill_json_object(args.profile, label="skill runtime profile")
+    return skill_capability_matrix(
+        _skill_contract(args), profile, builtin_contract_registry()
+    ), None
 
 
 def _router(store: Storage, args: argparse.Namespace) -> ModelRouter:
@@ -1128,7 +1189,18 @@ SCHEMA_INVENTORY = (
     "league-request-triage.schema.json",
     "league-assignment-receipt.schema.json",
     "league-stop-decision.schema.json",
+    "league-skill-contracts.schema.json",
+    "league-skill-runtime-profile.schema.json",
+    "league-skill-validation.schema.json",
+    "league-skill-audit.schema.json",
+    "league-skill-matrix.schema.json",
 )
+
+CONFIG_ONLY_COMMANDS = {
+    "skill.validate": _skill_validate,
+    "skill.audit": _skill_audit,
+    "skill.matrix": _skill_matrix,
+}
 
 
 def _help_inventory() -> dict[str, Any]:
@@ -1136,7 +1208,13 @@ def _help_inventory() -> dict[str, Any]:
         "schema": "league.help.v1",
         "command_schema": COMMAND_SCHEMA,
         "commands": sorted(
-            (*HANDLERS, "storage.migrate", "acceptance.run", "help.inventory")
+            (
+                *HANDLERS,
+                *CONFIG_ONLY_COMMANDS,
+                "storage.migrate",
+                "acceptance.run",
+                "help.inventory",
+            )
         ),
         "schemas": list(SCHEMA_INVENTORY),
         "execution_modes": ["direct", "hidden", "champion"],
@@ -1176,6 +1254,13 @@ def _run(args: argparse.Namespace) -> CommandResult:
             config_sentinel=args.config_sentinel,
             process_sentinel=args.process_sentinel,
         ), None
+    if command in CONFIG_ONLY_COMMANDS:
+        if args.state_root is not None:
+            raise StorageRefusal(
+                "invalid_skill_state_root",
+                "skill validation uses explicit config/root inputs and refuses --state-root",
+            )
+        return CONFIG_ONLY_COMMANDS[command](args)
     if command == "storage.migrate":
         if args.state_root is None:
             raise StorageRefusal(

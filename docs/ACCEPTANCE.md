@@ -70,12 +70,20 @@ Focused and combined affected verification are:
 make test-acceptance
 make test-request-lifecycle
 make test-runtime-lifecycle
+make test-skill-contracts
 make test-affected
 ```
 
 The staged migration assertion follows `CURRENT_SCHEMA_VERSION`; after PR #31,
 canonical request migrations are `[1,2,3]` and runtime lifecycle appends
 checksummed v4 without changing the acceptance operation or sentinel contract.
+
+The skill-contract suite uses only synthetic temporary custom roots and fake
+capability profiles. The current machine inventory was audited separately in a
+read-only command and reduced to the path-free, body-free receipt in
+`docs/research/custom-skill-audit.json`. It does not install, synchronize, or
+rewrite a skill. Release-to-installed parity and a real runtime remain #23
+gates.
 
 The generation switch in this harness is a model exercised beneath the
 disposable namespace. It is not a global cutover command. Canonical cutover,

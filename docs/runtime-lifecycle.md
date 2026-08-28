@@ -38,6 +38,11 @@ interrupt → resume → exact guarded exit. It is never reported as real-runtim
 proof. Separate deterministic contract tests cover Codex+Herdr creation and
 Codex+tmux attach/input/inspect/close behavior without launching either backend.
 
+Issue #10's `league skill matrix` reuses this generated adapter matrix as its
+runtime-pair evidence. Skill requirements remain a separate provider/model-
+neutral capability vector; they do not add adapter kinds or driver selection.
+See [skill capabilities](skill-capabilities.md).
+
 ## Typed resources and cleanup
 
 Each task resource declares owner, type, lifetime, expected identity, cleanup

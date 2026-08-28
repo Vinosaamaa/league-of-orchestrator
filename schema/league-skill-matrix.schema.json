@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Vinosaamaa/league-of-orchestrator/schema/league-skill-matrix.schema.json",
+  "title": "League skill availability matrix",
+  "type": "object",
+  "required": ["schema", "contract_sha256", "adapter", "skills"],
+  "properties": {
+    "schema": {"const": "league.skill-matrix.v1"},
+    "contract_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "adapter": {
+      "type": "object",
+      "required": ["harness", "backend", "evidence", "availability", "operations"],
+      "properties": {
+        "harness": {"type": "string"},
+        "backend": {"type": "string"},
+        "evidence": {"enum": ["unverified", "inherited-contract", "isolated-double", "real-canary"]},
+        "availability": {"enum": ["operational", "contract-only"]},
+        "operations": {"type": "object", "additionalProperties": {"enum": ["supported", "unsupported", "unverified", "driver_unavailable"]}}
+      },
+      "additionalProperties": false
+    },
+    "skills": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["skill", "scope", "status", "execution", "required_missing", "optional_missing"],
+        "properties": {
+          "skill": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,63}$"},
+          "scope": {"enum": ["shared", "specialist"]},
+          "status": {"enum": ["available", "available_inline", "unavailable"]},
+          "execution": {"enum": ["declared", "delegate", "inline", "refuse"]},
+          "required_missing": {"type": "array", "uniqueItems": true, "items": {"type": "string"}},
+          "optional_missing": {"type": "array", "uniqueItems": true, "items": {"type": "string"}}
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

@@ -55,7 +55,7 @@ def test_launcher_help_and_schemas() -> None:
     )
     assert "SQL is not exposed" in " ".join(launcher.stdout.split())
     assert (
-        "{storage,agent,callsign,delivery,project,task,runtime,routing,resource,cleanup,request,assign,hook,help,acceptance}"
+        "{storage,agent,callsign,delivery,project,task,runtime,skill,routing,resource,cleanup,request,assign,hook,help,acceptance}"
         in launcher.stdout
     )
     parser = cli._parser()
@@ -71,6 +71,11 @@ def test_launcher_help_and_schemas() -> None:
         "league-request-triage.schema.json",
         "league-assignment-receipt.schema.json",
         "league-stop-decision.schema.json",
+        "league-skill-contracts.schema.json",
+        "league-skill-runtime-profile.schema.json",
+        "league-skill-validation.schema.json",
+        "league-skill-audit.schema.json",
+        "league-skill-matrix.schema.json",
     ):
         schema = json.loads((ROOT / "schema" / name).read_text(encoding="utf-8"))
         assert schema["$schema"] == "https://json-schema.org/draft/2020-12/schema"

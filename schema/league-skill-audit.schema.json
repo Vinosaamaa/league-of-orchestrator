@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Vinosaamaa/league-of-orchestrator/schema/league-skill-audit.schema.json",
+  "title": "Sanitized League custom-skill installation audit",
+  "type": "object",
+  "required": ["schema", "contract_sha256", "summary", "roots", "copies", "duplicates", "local_paths_included", "skill_bodies_included"],
+  "properties": {
+    "schema": {"const": "league.skill-audit.v1"},
+    "contract_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "summary": {"$ref": "league-skill-validation.schema.json#/$defs/summary"},
+    "roots": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["label", "copies"],
+        "properties": {
+          "label": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,63}$"},
+          "copies": {"type": "integer", "minimum": 0}
+        },
+        "additionalProperties": false
+      }
+    },
+    "copies": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["root", "skill", "entry_kind", "content_sha256", "source_parity", "install_parity"],
+        "properties": {
+          "root": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,63}$"},
+          "skill": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,63}$"},
+          "entry_kind": {"enum": ["directory", "symlink"]},
+          "content_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "source_parity": {"enum": ["matched", "mismatched", "unverified"]},
+          "install_parity": {"const": "matched"}
+        },
+        "additionalProperties": false
+      }
+    },
+    "duplicates": {"type": "array", "items": {"$ref": "league-skill-validation.schema.json#/$defs/duplicate"}},
+    "local_paths_included": {"const": false},
+    "skill_bodies_included": {"const": false}
+  },
+  "additionalProperties": false
+}

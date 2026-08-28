@@ -1,0 +1,289 @@
+{
+  "schema": "league.skill-contracts.v1",
+  "roots": [
+    {"label": "agents-custom"},
+    {"label": "codex-custom"}
+  ],
+  "skills": [
+    {
+      "identity": "competency-unpacker",
+      "scope": "shared",
+      "provenance": {"classification": "unrecorded", "reason": "no-authoritative-source-record"},
+      "version": {"classification": "unrecorded"},
+      "capabilities": {
+        "required": {"harness": [], "tool": [], "platform": [], "browser": [], "forge": [], "delegation": [], "multiplexer": []},
+        "optional": {"harness": [], "tool": [], "platform": [], "browser": [], "forge": [], "delegation": [], "multiplexer": []}
+      },
+      "fallback": {"mode": "inline", "when_missing": [], "when_available": "declared"}
+    },
+    {
+      "identity": "cover-letter",
+      "scope": "shared",
+      "provenance": {"classification": "unrecorded", "reason": "no-authoritative-source-record"},
+      "version": {"classification": "unrecorded"},
+      "capabilities": {
+        "required": {"harness": [], "tool": [], "platform": [], "browser": [], "forge": [], "delegation": [], "multiplexer": []},
+        "optional": {"harness": [], "tool": ["document-export"], "platform": [], "browser": ["web-research"], "forge": [], "delegation": [], "multiplexer": []}
+      },
+      "fallback": {"mode": "inline", "when_missing": ["browser.web-research", "tool.document-export"], "when_available": "declared"}
+    },
+    {
+      "identity": "drawio-skill",
+      "scope": "specialist",
+      "provenance": {"classification": "recorded", "owner": "Agents365-ai/365-skills"},
+      "version": {"classification": "unrecorded"},
+      "capabilities": {
+        "required": {"harness": [], "tool": ["drawio-cli"], "platform": [], "browser": [], "forge": [], "delegation": [], "multiplexer": []},
+        "optional": {"harness": [], "tool": [], "platform": ["desktop-ui"], "browser": [], "forge": [], "delegation": [], "multiplexer": []}
+      },
+      "fallback": {"mode": "refuse", "when_missing": [], "when_available": "declared"}
+    },
+    {
+      "identity": "find-skills",
+      "scope": "specialist",
+      "provenance": {"classification": "recorded", "owner": "vercel-labs/skills"},
+      "version": {"classification": "unrecorded"},
+      "capabilities": {
+        "required": {"harness": [], "tool": ["skill-catalog-search"], "platform": [], "browser": [], "forge": [], "delegation": [], "multiplexer": []},
+        "optional": {"harness": [], "tool": [], "platform": [], "browser": [], "forge": [], "delegation": [], "multiplexer": []}
+      },
+      "fallback": {"mode": "refuse", "when_missing": [], "when_available": "declared"}
+    },
+    {
+      "identity": "frontend-design",
+      "scope": "shared",
+      "provenance": {"classification": "unrecorded", "reason": "no-authoritative-source-record"},
+      "version": {"classification": "unrecorded"},
+      "capabilities": {
+        "required": {"harness": [], "tool": [], "platform": [], "browser": [], "forge": [], "delegation": [], "multiplexer": []},
+        "optional": {"harness": [], "tool": ["repository-files"], "platform": [], "browser": ["visual-preview"], "forge": [], "delegation": [], "multiplexer": []}
+      },
+      "fallback": {"mode": "inline", "when_missing": ["browser.visual-preview", "tool.repository-files"], "when_available": "declared"}
+    },
+    {
+      "identity": "greploop",
+      "scope": "specialist",
+      "provenance": {"classification": "unrecorded", "reason": "no-authoritative-source-record"},
+      "version": {"classification": "unrecorded"},
+      "capabilities": {
+        "required": {"harness": [], "tool": ["greptile-review"], "platform": [], "browser": [], "forge": ["hosted-code-review"], "delegation": [], "multiplexer": []},
+        "optional": {"harness": [], "tool": [], "platform": [], "browser": [], "forge": [], "delegation": [], "multiplexer": []}
+      },
+      "fallback": {"mode": "refuse", "when_missing": [], "when_available": "declared"}
+    },
+    {
+      "identity": "grill-me",
+      "scope": "shared",
+      "provenance": {"classification": "recorded", "owner": "mattpocock/skills"},
+      "version": {"classification": "unrecorded"},
+      "capabilities": {
+        "required": {"harness": [], "tool": [], "platform": [], "browser": [], "forge": [], "delegation": [], "multiplexer": []},
+        "optional": {"harness": [], "tool": [], "platform": [], "browser": [], "forge": [], "delegation": [], "multiplexer": []}
+      },
+      "fallback": {"mode": "inline", "when_missing": [], "when_available": "declared"}
+    },
+    {
+      "identity": "grill-with-docs",
+      "scope": "shared",
+      "provenance": {"classification": "recorded", "owner": "mattpocock/skills"},
+      "version": {"classification": "unrecorded"},
+      "capabilities": {
+        "required": {"harness": [], "tool": [], "platform": [], "browser": [], "forge": [], "delegation": [], "multiplexer": []},
+        "optional": {"harness": [], "tool": ["repository-files"], "platform": [], "browser": [], "forge": [], "delegation": [], "multiplexer": []}
+      },
+      "fallback": {"mode": "inline", "when_missing": ["tool.repository-files"], "when_available": "declared"}
+    },
+    {
+      "identity": "handoff",
+      "scope": "shared",
+      "provenance": {"classification": "recorded", "owner": "mattpocock/skills"},
+      "version": {"classification": "unrecorded"},
+      "capabilities": {
+        "required": {"harness": [], "tool": [], "platform": [], "browser": [], "forge": [], "delegation": [], "multiplexer": []},
+        "optional": {"harness": [], "tool": [], "platform": [], "browser": [], "forge": [], "delegation": [], "multiplexer": []}
+      },
+      "fallback": {"mode": "inline", "when_missing": [], "when_available": "declared"}
+    },
+    {
+      "identity": "herdr",
+      "scope": "specialist",
+      "provenance": {"classification": "unrecorded", "reason": "no-authoritative-source-record"},
+      "version": {"classification": "unrecorded"},
+      "capabilities": {
+        "required": {"harness": [], "tool": [], "platform": [], "browser": [], "forge": [], "delegation": [], "multiplexer": ["herdr"]},
+        "optional": {"harness": [], "tool": [], "platform": [], "browser": [], "forge": [], "delegation": [], "multiplexer": []}
+      },
+      "fallback": {"mode": "refuse", "when_missing": [], "when_available": "declared"}
+    },
+    {
+      "identity": "improve-codebase-architecture",
+      "scope": "specialist",
+      "provenance": {"classification": "recorded", "owner": "mattpocock/skills"},
+      "version": {"classification": "unrecorded"},
+      "capabilities": {
+        "required": {"harness": [], "tool": ["repository-files"], "platform": [], "browser": [], "forge": [], "delegation": [], "multiplexer": []},
+        "optional": {"harness": [], "tool": [], "platform": [], "browser": [], "forge": ["issue-tracker"], "delegation": [], "multiplexer": []}
+      },
+      "fallback": {"mode": "refuse", "when_missing": [], "when_available": "declared"}
+    },
+    {
+      "identity": "lavish-transcript",
+      "scope": "specialist",
+      "provenance": {"classification": "unrecorded", "reason": "no-authoritative-source-record"},
+      "version": {"classification": "unrecorded"},
+      "capabilities": {
+        "required": {"harness": ["local-transcript-log"], "tool": ["lavish-renderer"], "platform": [], "browser": [], "forge": [], "delegation": [], "multiplexer": []},
+        "optional": {"harness": [], "tool": [], "platform": [], "browser": ["visual-review"], "forge": [], "delegation": [], "multiplexer": []}
+      },
+      "fallback": {"mode": "refuse", "when_missing": [], "when_available": "declared"}
+    },
+    {
+      "identity": "no-mistakes",
+      "scope": "specialist",
+      "provenance": {"classification": "unrecorded", "reason": "no-authoritative-source-record"},
+      "version": {"classification": "unrecorded"},
+      "capabilities": {
+        "required": {"harness": [], "tool": ["version-control"], "platform": [], "browser": [], "forge": ["code-review"], "delegation": [], "multiplexer": []},
+        "optional": {"harness": [], "tool": [], "platform": [], "browser": [], "forge": [], "delegation": ["background-visible-agents"], "multiplexer": []}
+      },
+      "fallback": {"mode": "refuse", "when_missing": [], "when_available": "declared"}
+    },
+    {
+      "identity": "postmortem-writing",
+      "scope": "shared",
+      "provenance": {"classification": "unrecorded", "reason": "no-authoritative-source-record"},
+      "version": {"classification": "unrecorded"},
+      "capabilities": {
+        "required": {"harness": [], "tool": [], "platform": [], "browser": [], "forge": [], "delegation": [], "multiplexer": []},
+        "optional": {"harness": [], "tool": [], "platform": [], "browser": [], "forge": [], "delegation": [], "multiplexer": []}
+      },
+      "fallback": {"mode": "inline", "when_missing": [], "when_available": "declared"}
+    },
+    {
+      "identity": "research",
+      "scope": "shared",
+      "provenance": {"classification": "unrecorded", "reason": "no-authoritative-source-record"},
+      "version": {"classification": "unrecorded"},
+      "capabilities": {
+        "required": {"harness": [], "tool": [], "platform": [], "browser": [], "forge": [], "delegation": [], "multiplexer": []},
+        "optional": {"harness": [], "tool": ["web-search"], "platform": [], "browser": [], "forge": [], "delegation": ["background-visible-agents"], "multiplexer": []}
+      },
+      "fallback": {"mode": "inline", "when_missing": ["delegation.background-visible-agents"], "when_available": "delegate"}
+    },
+    {
+      "identity": "run-interview-practice",
+      "scope": "shared",
+      "provenance": {"classification": "unrecorded", "reason": "no-authoritative-source-record"},
+      "version": {"classification": "unrecorded"},
+      "capabilities": {
+        "required": {"harness": [], "tool": [], "platform": [], "browser": [], "forge": [], "delegation": [], "multiplexer": []},
+        "optional": {"harness": [], "tool": ["voice-input"], "platform": [], "browser": [], "forge": [], "delegation": [], "multiplexer": []}
+      },
+      "fallback": {"mode": "inline", "when_missing": ["tool.voice-input"], "when_available": "declared"}
+    },
+    {
+      "identity": "setup-matt-pocock-skills",
+      "scope": "specialist",
+      "provenance": {"classification": "recorded", "owner": "mattpocock/skills"},
+      "version": {"classification": "unrecorded"},
+      "capabilities": {
+        "required": {"harness": [], "tool": ["repository-files"], "platform": [], "browser": [], "forge": [], "delegation": [], "multiplexer": []},
+        "optional": {"harness": [], "tool": [], "platform": [], "browser": [], "forge": ["issue-tracker"], "delegation": [], "multiplexer": []}
+      },
+      "fallback": {"mode": "refuse", "when_missing": [], "when_available": "declared"}
+    },
+    {
+      "identity": "spring-boot-engineer",
+      "scope": "specialist",
+      "provenance": {"classification": "unrecorded", "reason": "no-authoritative-source-record"},
+      "version": {"classification": "unrecorded"},
+      "capabilities": {
+        "required": {"harness": [], "tool": ["java-toolchain"], "platform": [], "browser": [], "forge": [], "delegation": [], "multiplexer": []},
+        "optional": {"harness": [], "tool": [], "platform": [], "browser": [], "forge": [], "delegation": [], "multiplexer": []}
+      },
+      "fallback": {"mode": "refuse", "when_missing": [], "when_available": "declared"}
+    },
+    {
+      "identity": "tdd",
+      "scope": "shared",
+      "provenance": {"classification": "recorded", "owner": "mattpocock/skills"},
+      "version": {"classification": "unrecorded"},
+      "capabilities": {
+        "required": {"harness": [], "tool": ["repository-write", "test-runner"], "platform": [], "browser": [], "forge": [], "delegation": [], "multiplexer": []},
+        "optional": {"harness": [], "tool": [], "platform": [], "browser": [], "forge": [], "delegation": [], "multiplexer": []}
+      },
+      "fallback": {"mode": "inline", "when_missing": [], "when_available": "declared"}
+    },
+    {
+      "identity": "terminal-browser",
+      "scope": "specialist",
+      "provenance": {"classification": "unrecorded", "reason": "no-authoritative-source-record"},
+      "version": {"classification": "unrecorded"},
+      "capabilities": {
+        "required": {"harness": [], "tool": [], "platform": [], "browser": ["terminal-browser"], "forge": [], "delegation": [], "multiplexer": []},
+        "optional": {"harness": [], "tool": [], "platform": [], "browser": [], "forge": [], "delegation": [], "multiplexer": []}
+      },
+      "fallback": {"mode": "refuse", "when_missing": [], "when_available": "declared"}
+    },
+    {
+      "identity": "to-issues",
+      "scope": "specialist",
+      "provenance": {"classification": "recorded", "owner": "mattpocock/skills"},
+      "version": {"classification": "unrecorded"},
+      "capabilities": {
+        "required": {"harness": [], "tool": [], "platform": [], "browser": [], "forge": ["issue-tracker"], "delegation": [], "multiplexer": []},
+        "optional": {"harness": [], "tool": ["repository-files"], "platform": [], "browser": [], "forge": [], "delegation": [], "multiplexer": []}
+      },
+      "fallback": {"mode": "refuse", "when_missing": [], "when_available": "declared"}
+    },
+    {
+      "identity": "to-prd",
+      "scope": "specialist",
+      "provenance": {"classification": "recorded", "owner": "mattpocock/skills"},
+      "version": {"classification": "unrecorded"},
+      "capabilities": {
+        "required": {"harness": [], "tool": [], "platform": [], "browser": [], "forge": ["issue-tracker"], "delegation": [], "multiplexer": []},
+        "optional": {"harness": [], "tool": ["repository-files"], "platform": [], "browser": [], "forge": [], "delegation": [], "multiplexer": []}
+      },
+      "fallback": {"mode": "refuse", "when_missing": [], "when_available": "declared"}
+    },
+    {
+      "identity": "ui-ux-pro-max",
+      "scope": "specialist",
+      "provenance": {"classification": "unrecorded", "reason": "no-authoritative-source-record"},
+      "version": {"classification": "unrecorded"},
+      "capabilities": {
+        "required": {"harness": [], "tool": ["local-design-database"], "platform": [], "browser": [], "forge": [], "delegation": [], "multiplexer": []},
+        "optional": {"harness": [], "tool": [], "platform": [], "browser": ["visual-preview"], "forge": [], "delegation": [], "multiplexer": []}
+      },
+      "fallback": {"mode": "refuse", "when_missing": [], "when_available": "declared"}
+    }
+  ],
+  "installations": [
+    {"root": "codex-custom", "skill": "competency-unpacker", "entry_kind": "directory", "content_sha256": "9f1a41bd94d42b123716732e8d498bb2ab5b7e3ac39027030503e8b0ecde9b50", "source_parity": "unverified"},
+    {"root": "codex-custom", "skill": "cover-letter", "entry_kind": "directory", "content_sha256": "b291afe2b2606a85b2d55900acef9c218ec0f8a1ed432da0d2126e5b7e6f0368", "source_parity": "unverified"},
+    {"root": "agents-custom", "skill": "drawio-skill", "entry_kind": "directory", "content_sha256": "d8cf3a961d64b65595069b5b94c0838c35f2baf41088ed55b768ec7fcf7276e6", "source_parity": "unverified"},
+    {"root": "agents-custom", "skill": "find-skills", "entry_kind": "directory", "content_sha256": "8856e7a32102643aff8b184b7c2a5cdab8c44b6f86a8b290883804ec0b862322", "source_parity": "unverified"},
+    {"root": "agents-custom", "skill": "frontend-design", "entry_kind": "directory", "content_sha256": "b7d061f39ff372d7de9ca905ff2d2413e1f0752554e7e47d1076fdc1518882a5", "source_parity": "unverified"},
+    {"root": "codex-custom", "skill": "frontend-design", "entry_kind": "directory", "content_sha256": "b7d061f39ff372d7de9ca905ff2d2413e1f0752554e7e47d1076fdc1518882a5", "source_parity": "unverified"},
+    {"root": "agents-custom", "skill": "greploop", "entry_kind": "directory", "content_sha256": "1bd40d7372b592ef3ad5d342a58be0b4753a3f38f8c46103205f3d4de8f7a92d", "source_parity": "unverified"},
+    {"root": "agents-custom", "skill": "grill-me", "entry_kind": "directory", "content_sha256": "58976ccac88e2d74a59fcf27bf0ae748cd95849a9c96f2d7f157a508bb7bfe1a", "source_parity": "unverified"},
+    {"root": "agents-custom", "skill": "grill-with-docs", "entry_kind": "directory", "content_sha256": "87114f244aaff9bdfeeffcba64ffae99a70978fad6c94737c5e7863400e6714b", "source_parity": "unverified"},
+    {"root": "agents-custom", "skill": "handoff", "entry_kind": "directory", "content_sha256": "2c5f397f56dae57bc916ecb9fc5eb67fc7e4bb243583470d2c09f320f6866efc", "source_parity": "unverified"},
+    {"root": "codex-custom", "skill": "herdr", "entry_kind": "directory", "content_sha256": "620a727c100bc2683e5503a765dfa95c371e7f0f8843769dca81dbdbea6439a9", "source_parity": "unverified"},
+    {"root": "agents-custom", "skill": "improve-codebase-architecture", "entry_kind": "directory", "content_sha256": "37b6826ff42e9467b2a863678995b6fb7be657f60bca432b3553a433ba473330", "source_parity": "unverified"},
+    {"root": "codex-custom", "skill": "lavish-transcript", "entry_kind": "directory", "content_sha256": "f6642d132091072cb7a48eb42e519da350c75872578da96871e4fbe14c2d8ddd", "source_parity": "unverified"},
+    {"root": "agents-custom", "skill": "no-mistakes", "entry_kind": "directory", "content_sha256": "ea3f6f431622f9483ff90fd900a046a57fe666c757f40ef5f7f840f53219c61d", "source_parity": "unverified"},
+    {"root": "codex-custom", "skill": "postmortem-writing", "entry_kind": "directory", "content_sha256": "9021695d6d392788c8cd2bfe5050a54ce125232287102e00babca18acc1e6ea5", "source_parity": "unverified"},
+    {"root": "codex-custom", "skill": "research", "entry_kind": "directory", "content_sha256": "fe89dcc9fc7fc1d0d9c9e1a6a24ee3b36ee5a5522094143c34874233376ba1ad", "source_parity": "unverified"},
+    {"root": "codex-custom", "skill": "run-interview-practice", "entry_kind": "directory", "content_sha256": "702b1591e2e2a700bf23b930f112ce96b36022ef6c612eea7170e091012f743d", "source_parity": "unverified"},
+    {"root": "agents-custom", "skill": "setup-matt-pocock-skills", "entry_kind": "directory", "content_sha256": "25600f005f5e9ee4739306e3dac3da15b2efdb372f05b39523da3b320ac58a89", "source_parity": "unverified"},
+    {"root": "codex-custom", "skill": "spring-boot-engineer", "entry_kind": "directory", "content_sha256": "8a8142c885e136412562a8876283eda97dd6d5fc395439b1a00968e600b52554", "source_parity": "unverified"},
+    {"root": "agents-custom", "skill": "tdd", "entry_kind": "directory", "content_sha256": "dc468d30ad79720717f34a1a7f6e07bfa60a572e525df418997eba9ce46980c9", "source_parity": "unverified"},
+    {"root": "agents-custom", "skill": "terminal-browser", "entry_kind": "symlink", "content_sha256": "604cb2e3fdcb6d4bbf444cc9c553e554c19c6c0630fe8fbb3766392002cc562f", "source_parity": "unverified"},
+    {"root": "codex-custom", "skill": "terminal-browser", "entry_kind": "symlink", "content_sha256": "50cf5815a5b07ea1b226415551f6195a070f45dfbc9eabce9b2a2720a8a9e2fe", "source_parity": "unverified"},
+    {"root": "agents-custom", "skill": "to-issues", "entry_kind": "directory", "content_sha256": "a4b0e6c51e198aad78bf432fdc705fb213268bbc691e17f1ccd708709b960c0e", "source_parity": "unverified"},
+    {"root": "agents-custom", "skill": "to-prd", "entry_kind": "directory", "content_sha256": "a51129031daa2edc162f59e3661b0a19378ca9f2e1f962998740e1c356064751", "source_parity": "unverified"},
+    {"root": "codex-custom", "skill": "ui-ux-pro-max", "entry_kind": "directory", "content_sha256": "df9800345ff3cdcbb5a39b12a71801d4c9f4fd331f5eee6d48b4f77496a7c3f9", "source_parity": "unverified"}
+  ]
+}

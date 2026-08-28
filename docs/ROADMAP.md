@@ -14,7 +14,7 @@ related partial behavior:
 - [#7: Make harness and terminal routing adapter-based](https://github.com/Vinosaamaa/league-of-orchestrator/issues/7) — PR #30 repository-local candidate; installed real-runtime canary remains #23-owned
 - [#8: Support guarded disposable Shotcaller handoff](https://github.com/Vinosaamaa/league-of-orchestrator/issues/8)
 - [#9: Add an advisory project catalog and project-grouped Roster](https://github.com/Vinosaamaa/league-of-orchestrator/issues/9)
-- [#10: Declare skill provenance and runtime capabilities](https://github.com/Vinosaamaa/league-of-orchestrator/issues/10)
+- [#10: Declare skill provenance and runtime capabilities](https://github.com/Vinosaamaa/league-of-orchestrator/issues/10) — repository-local schema/config/CLI candidate with sanitized current-root audit and synthetic capability/parity tests; global install remains unchanged
 - [#11: Generalize guarded teardown across task classes](https://github.com/Vinosaamaa/league-of-orchestrator/issues/11) — PR #30 repository-local candidate with proof-first recoverable teardown
 - [#12: Design a terminal-first Roster UI](https://github.com/Vinosaamaa/league-of-orchestrator/issues/12)
 - [#13: Add history-aware callsign allocation and reuse cooldown](https://github.com/Vinosaamaa/league-of-orchestrator/issues/13)

@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Vinosaamaa/league-of-orchestrator/schema/league-skill-validation.schema.json",
+  "title": "League skill contract validation result",
+  "type": "object",
+  "required": ["schema", "contract_sha256", "summary", "duplicates"],
+  "properties": {
+    "schema": {"const": "league.skill-validation.v1"},
+    "contract_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "summary": {"$ref": "#/$defs/summary"},
+    "duplicates": {"type": "array", "items": {"$ref": "#/$defs/duplicate"}}
+  },
+  "$defs": {
+    "summary": {
+      "type": "object",
+      "required": ["roots", "skills", "copies", "shared", "specialist", "recorded", "unrecorded"],
+      "properties": {
+        "roots": {"type": "integer", "minimum": 1},
+        "skills": {"type": "integer", "minimum": 1},
+        "copies": {"type": "integer", "minimum": 1},
+        "shared": {"type": "integer", "minimum": 0},
+        "specialist": {"type": "integer", "minimum": 0},
+        "recorded": {"type": "integer", "minimum": 0},
+        "unrecorded": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "duplicate": {
+      "type": "object",
+      "required": ["skill", "copies", "source_owner", "install_parity"],
+      "properties": {
+        "skill": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,63}$"},
+        "copies": {"type": "integer", "minimum": 2},
+        "source_owner": {"type": "string", "minLength": 1},
+        "install_parity": {"enum": ["matched", "mismatched"]}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,1049 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Issue #15 · Continuation and rollover policy</title>
+  <style>
+    :root {
+      --canvas: #edf2f7;
+      --paper: #ffffff;
+      --paper-blue: #f4f8fd;
+      --ink: #16243d;
+      --muted: #596a82;
+      --line: #c8d3e1;
+      --line-strong: #91a4bc;
+      --blue: #26547c;
+      --blue-soft: #eaf1fb;
+      --amber: #8b5b0b;
+      --amber-soft: #fff4d6;
+      --jade: #3f7d6d;
+      --jade-soft: #e9f5f1;
+      --violet: #6f5a9b;
+      --violet-soft: #f0ecfa;
+      --danger: #8d3442;
+      --danger-soft: #fbecef;
+      --shadow: 0 18px 45px rgba(22, 36, 61, 0.09);
+      --radius: 18px;
+      --display: "Avenir Next Condensed", "Avenir Next", "Helvetica Neue", sans-serif;
+      --body: "Avenir Next", "Helvetica Neue", Arial, sans-serif;
+      --mono: "SFMono-Regular", "Cascadia Mono", Menlo, monospace;
+    }
+
+    * { box-sizing: border-box; }
+
+    html {
+      scroll-behavior: smooth;
+      background: var(--canvas);
+    }
+
+    body {
+      margin: 0;
+      min-width: 320px;
+      color: var(--ink);
+      background:
+        linear-gradient(rgba(38, 84, 124, 0.035) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(38, 84, 124, 0.035) 1px, transparent 1px),
+        var(--canvas);
+      background-size: 28px 28px;
+      font: 16px/1.55 var(--body);
+      overflow-x: clip;
+    }
+
+    a { color: var(--blue); }
+
+    a:hover { text-decoration-thickness: 2px; }
+
+    a:focus-visible,
+    summary:focus-visible,
+    [tabindex="0"]:focus-visible {
+      outline: 3px solid var(--amber);
+      outline-offset: 4px;
+      border-radius: 4px;
+    }
+
+    .skip-link {
+      display: inline-flex;
+      margin: 8px 16px;
+      padding: 7px 10px;
+      color: #fff;
+      background: var(--ink);
+      border: 1px solid var(--line-strong);
+      border-radius: 8px;
+      font: 700 0.76rem/1.2 var(--mono);
+      text-decoration: none;
+    }
+
+    .page-shell {
+      width: min(1180px, calc(100% - 32px));
+      margin: 0 auto;
+      padding: 24px 0 72px;
+    }
+
+    .masthead {
+      position: relative;
+      isolation: isolate;
+      overflow: hidden;
+      min-height: 470px;
+      padding: clamp(28px, 6vw, 72px);
+      color: #fff;
+      background:
+        radial-gradient(circle at 84% 18%, rgba(255, 244, 214, 0.26), transparent 26%),
+        linear-gradient(132deg, #14233b 0%, #203d5b 58%, #2f665c 100%);
+      border-radius: 28px;
+      box-shadow: var(--shadow);
+    }
+
+    .masthead::after {
+      content: "";
+      position: absolute;
+      z-index: -1;
+      width: 370px;
+      height: 370px;
+      right: -90px;
+      bottom: -120px;
+      border: 52px solid rgba(255, 255, 255, 0.08);
+      border-radius: 50%;
+      box-shadow:
+        0 0 0 42px rgba(255, 255, 255, 0.04),
+        0 0 0 84px rgba(255, 255, 255, 0.025);
+    }
+
+    .eyebrow,
+    .section-kicker {
+      margin: 0 0 12px;
+      font: 700 0.78rem/1.2 var(--mono);
+      letter-spacing: 0.13em;
+      text-transform: uppercase;
+    }
+
+    .eyebrow { color: #cfe9e1; }
+    .section-kicker { color: var(--blue); }
+
+    h1,
+    h2,
+    h3 {
+      margin-top: 0;
+      font-family: var(--display);
+      line-height: 1.04;
+      text-wrap: balance;
+    }
+
+    h1 {
+      max-width: 850px;
+      margin-bottom: 22px;
+      font-size: clamp(3rem, 8vw, 6.6rem);
+      font-weight: 800;
+      letter-spacing: -0.045em;
+    }
+
+    h2 {
+      margin-bottom: 14px;
+      font-size: clamp(2rem, 4.8vw, 3.35rem);
+      letter-spacing: -0.025em;
+    }
+
+    h3 {
+      margin-bottom: 9px;
+      font-size: 1.32rem;
+      letter-spacing: -0.012em;
+    }
+
+    p,
+    li,
+    td,
+    th,
+    dd,
+    figcaption,
+    code,
+    .chip {
+      overflow-wrap: anywhere;
+    }
+
+    .thesis {
+      max-width: 720px;
+      margin: 0;
+      color: #e9f1f8;
+      font-size: clamp(1.1rem, 2.2vw, 1.42rem);
+    }
+
+    .thesis strong { color: #fff4d6; }
+
+    .hero-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 30px;
+    }
+
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      min-height: 34px;
+      padding: 7px 11px;
+      font: 700 0.76rem/1.1 var(--mono);
+      letter-spacing: 0.035em;
+      border: 1px solid currentColor;
+      border-radius: 999px;
+    }
+
+    .masthead .chip {
+      color: #e9f5f1;
+      background: rgba(255, 255, 255, 0.08);
+      border-color: rgba(255, 255, 255, 0.24);
+    }
+
+    .policy-nav {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin: 18px 0 0;
+      padding: 12px;
+      background: rgba(255, 255, 255, 0.9);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      box-shadow: 0 8px 22px rgba(22, 36, 61, 0.05);
+    }
+
+    .policy-nav a {
+      padding: 7px 10px;
+      color: var(--ink);
+      font: 700 0.78rem/1.2 var(--mono);
+      text-decoration: none;
+      border-radius: 8px;
+    }
+
+    .policy-nav a:hover { background: var(--blue-soft); }
+
+    .section {
+      margin-top: 22px;
+      padding: clamp(24px, 4vw, 48px);
+      background: var(--paper);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      box-shadow: 0 8px 24px rgba(22, 36, 61, 0.055);
+    }
+
+    .lede {
+      max-width: 820px;
+      margin-top: 0;
+      color: var(--muted);
+      font-size: 1.08rem;
+    }
+
+    .decision-banner {
+      display: grid;
+      grid-template-columns: minmax(0, 1.45fr) minmax(220px, 0.55fr);
+      gap: 18px;
+      align-items: stretch;
+      margin: 24px 0 30px;
+    }
+
+    .recommendation,
+    .boundary-card {
+      min-width: 0;
+      padding: 22px;
+      border-radius: 14px;
+    }
+
+    .recommendation {
+      background: var(--blue-soft);
+      border-left: 7px solid var(--blue);
+    }
+
+    .recommendation p,
+    .boundary-card p { margin: 7px 0 0; }
+
+    .boundary-card {
+      color: #5f3c06;
+      background: var(--amber-soft);
+      border: 1px solid #e3bf79;
+    }
+
+    .diagram-frame {
+      margin: 26px 0 0;
+      padding: 18px;
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      overflow: hidden;
+    }
+
+    .diagram-frame img {
+      display: block;
+      width: 100%;
+      height: auto;
+    }
+
+    figcaption {
+      margin-top: 12px;
+      color: var(--muted);
+      font-size: 0.9rem;
+    }
+
+    details {
+      margin-top: 14px;
+      padding: 12px 15px;
+      background: var(--paper-blue);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+    }
+
+    summary {
+      cursor: pointer;
+      font-weight: 750;
+    }
+
+    .lifecycle-rail {
+      position: relative;
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 14px;
+      margin-top: 28px;
+    }
+
+    .lifecycle-rail::before {
+      content: "";
+      position: absolute;
+      top: 29px;
+      left: 6%;
+      right: 6%;
+      height: 2px;
+      background: var(--line-strong);
+    }
+
+    .rail-card {
+      position: relative;
+      min-width: 0;
+      padding: 66px 18px 18px;
+      background: var(--paper-blue);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+    }
+
+    .rail-card::before {
+      content: "";
+      position: absolute;
+      z-index: 1;
+      top: 19px;
+      left: 20px;
+      width: 20px;
+      height: 20px;
+      background: var(--paper);
+      border: 6px solid var(--blue);
+      border-radius: 50%;
+    }
+
+    .rail-card:nth-child(2)::before { border-color: var(--violet); }
+    .rail-card:nth-child(3)::before { border-color: var(--jade); }
+    .rail-card:nth-child(4)::before { border-color: var(--amber); }
+
+    .rail-card p { margin-bottom: 0; color: var(--muted); }
+
+    .not-this {
+      display: block;
+      margin-top: 12px;
+      padding-top: 10px;
+      color: var(--danger);
+      font: 700 0.76rem/1.35 var(--mono);
+      border-top: 1px dashed var(--line-strong);
+    }
+
+    .table-wrap {
+      width: 100%;
+      margin-top: 22px;
+      overflow-x: auto;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+    }
+
+    table {
+      width: 100%;
+      min-width: 820px;
+      border-collapse: collapse;
+      background: var(--paper);
+    }
+
+    caption {
+      padding: 14px 16px;
+      color: var(--muted);
+      font-size: 0.9rem;
+      text-align: left;
+      background: var(--paper-blue);
+      border-bottom: 1px solid var(--line);
+    }
+
+    th,
+    td {
+      padding: 14px 15px;
+      text-align: left;
+      vertical-align: top;
+      border-bottom: 1px solid var(--line);
+    }
+
+    th {
+      color: #fff;
+      background: var(--ink);
+      font: 700 0.77rem/1.35 var(--mono);
+      letter-spacing: 0.035em;
+      text-transform: uppercase;
+    }
+
+    tbody tr:last-child td { border-bottom: 0; }
+    tbody tr:nth-child(even) { background: var(--paper-blue); }
+
+    .decision-label {
+      display: inline-block;
+      padding: 5px 8px;
+      font: 800 0.75rem/1.15 var(--mono);
+      border-radius: 6px;
+      white-space: nowrap;
+    }
+
+    .fresh { color: #183f63; background: var(--blue-soft); }
+    .resume { color: #49396e; background: var(--violet-soft); }
+    .rollover { color: #245a4d; background: var(--jade-soft); }
+    .await { color: #694506; background: var(--amber-soft); }
+    .refuse { color: #6f2633; background: var(--danger-soft); }
+
+    .benefit-grid,
+    .role-grid,
+    .contract-grid,
+    .crash-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 14px;
+      margin-top: 22px;
+    }
+
+    .role-grid,
+    .crash-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+
+    .mini-card {
+      min-width: 0;
+      padding: 18px;
+      border: 1px solid var(--line);
+      border-radius: 13px;
+      background: var(--paper-blue);
+    }
+
+    .mini-card p,
+    .mini-card ul { margin-bottom: 0; color: var(--muted); }
+
+    .mini-card ul { padding-left: 19px; }
+
+    .mono-label {
+      display: block;
+      margin-bottom: 8px;
+      color: var(--violet);
+      font: 750 0.77rem/1.2 var(--mono);
+    }
+
+    .signal-list {
+      display: grid;
+      gap: 10px;
+      margin: 24px 0 0;
+    }
+
+    .signal-row {
+      display: grid;
+      grid-template-columns: minmax(150px, 0.65fr) minmax(0, 1.5fr) minmax(170px, 0.7fr);
+      gap: 14px;
+      align-items: start;
+      padding: 15px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: var(--paper-blue);
+    }
+
+    .signal-row > * { min-width: 0; }
+
+    .signal-name { font-weight: 800; }
+    .signal-rule { color: var(--muted); }
+
+    .signal-default {
+      color: var(--blue);
+      font: 700 0.78rem/1.35 var(--mono);
+    }
+
+    .health-strip {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 1px;
+      margin-top: 18px;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: var(--line);
+    }
+
+    .health-cell { min-width: 0; padding: 16px; background: var(--paper); }
+    .health-cell strong { display: block; margin-bottom: 6px; }
+    .health-cell span { color: var(--muted); font-size: 0.92rem; }
+
+    pre {
+      max-width: 100%;
+      margin: 22px 0 0;
+      padding: 18px;
+      color: #eef5fb;
+      background: #17263d;
+      border-radius: 12px;
+      overflow: auto;
+      font: 0.83rem/1.55 var(--mono);
+      tab-size: 2;
+    }
+
+    code { font-family: var(--mono); }
+    :not(pre) > code { color: #49396e; }
+
+    .handoff-ledger {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      gap: 18px;
+      margin-top: 24px;
+    }
+
+    .ledger-column {
+      min-width: 0;
+      padding: 20px;
+      border-radius: 14px;
+    }
+
+    .ledger-column:first-child {
+      background: var(--jade-soft);
+      border: 1px solid #aed3c8;
+    }
+
+    .ledger-column:last-child {
+      background: var(--danger-soft);
+      border: 1px solid #e5b2ba;
+    }
+
+    .ledger-column ul { margin-bottom: 0; padding-left: 20px; }
+
+    .phase-list {
+      counter-reset: phase;
+      display: grid;
+      gap: 12px;
+      margin: 24px 0 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .phase-list li {
+      counter-increment: phase;
+      display: grid;
+      grid-template-columns: 42px minmax(0, 1fr);
+      gap: 12px;
+      align-items: start;
+      padding: 15px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: var(--paper-blue);
+    }
+
+    .phase-list li::before {
+      content: counter(phase);
+      display: grid;
+      place-items: center;
+      width: 34px;
+      height: 34px;
+      color: #fff;
+      background: var(--blue);
+      border-radius: 50%;
+      font: 800 0.83rem/1 var(--mono);
+    }
+
+    .source-note {
+      margin: 24px 0 0;
+      padding: 16px 18px;
+      color: var(--muted);
+      background: var(--paper-blue);
+      border-left: 5px solid var(--line-strong);
+      border-radius: 8px;
+    }
+
+    .footer-note {
+      margin-top: 24px;
+      padding: 18px;
+      color: var(--muted);
+      text-align: center;
+      font-size: 0.9rem;
+    }
+
+    @media (max-width: 920px) {
+      .decision-banner,
+      .lifecycle-rail,
+      .benefit-grid,
+      .contract-grid,
+      .health-strip {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .lifecycle-rail::before { display: none; }
+      .rail-card { padding-top: 58px; }
+
+      .signal-row {
+        grid-template-columns: minmax(140px, 0.55fr) minmax(0, 1.45fr);
+      }
+
+      .signal-default { grid-column: 1 / -1; }
+    }
+
+    @media (max-width: 640px) {
+      .page-shell { width: min(100% - 20px, 1180px); padding-top: 10px; }
+      .masthead { min-height: auto; padding: 28px 22px 38px; border-radius: 18px; }
+      h1 { font-size: clamp(2.7rem, 14vw, 4.5rem); }
+      .section { padding: 24px 18px; }
+      .decision-banner,
+      .lifecycle-rail,
+      .benefit-grid,
+      .role-grid,
+      .contract-grid,
+      .crash-grid,
+      .health-strip,
+      .handoff-ledger,
+      .signal-row {
+        grid-template-columns: minmax(0, 1fr);
+      }
+
+      .signal-default { grid-column: auto; }
+      .policy-nav { position: static; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      html { scroll-behavior: auto; }
+      *, *::before, *::after { transition-duration: 0.01ms !important; }
+    }
+
+    @media (prefers-contrast: more) {
+      :root { --line: #65758a; --line-strong: #33465e; }
+      .section, .mini-card, .rail-card, .diagram-frame { border-width: 2px; }
+    }
+
+    @media print {
+      body { background: #fff; }
+      .page-shell { width: 100%; }
+      .masthead { color: #000; background: #fff; border: 2px solid #000; box-shadow: none; }
+      .masthead .chip, .thesis, .eyebrow { color: #000; }
+      .section { break-inside: avoid; box-shadow: none; }
+      .policy-nav { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to policy</a>
+  <div class="page-shell">
+    <header class="masthead" aria-labelledby="page-title">
+      <p class="eyebrow">League of Orchestrator · Issue #15 · Design only</p>
+      <h1 id="page-title">Fresh by default. Exact when resumed.</h1>
+      <p class="thesis">
+        A follow-up gets a fresh Champion unless continuity has a <strong>concrete benefit</strong>
+        and the exact archived context is healthy. Rollover is a fenced handoff—not cleanup,
+        not callsign reuse, and never an inferred identity.
+      </p>
+      <div class="hero-meta" aria-label="Policy status">
+        <span class="chip">accepted-policy candidate</span>
+        <span class="chip">league.continuation-policy.v1</span>
+        <span class="chip">Champion + Shotcaller core</span>
+        <span class="chip">no runtime implementation</span>
+      </div>
+    </header>
+
+    <nav class="policy-nav" aria-label="Policy sections">
+      <a href="#decision">Decision flow</a>
+      <a href="#lifecycles">Four lifecycles</a>
+      <a href="#matrix">Decision table</a>
+      <a href="#signals">Signals</a>
+      <a href="#handoff">Handoff</a>
+      <a href="#contracts">#8 + #13 contract</a>
+      <a href="#resolved">Questions resolved</a>
+    </nav>
+
+    <main id="main">
+      <section id="decision" class="section" aria-labelledby="decision-title">
+        <p class="section-kicker">Decision first</p>
+        <h2 id="decision-title">One router, four outcomes</h2>
+        <p class="lede">
+          The router records an evidence snapshot and chooses resume, fresh, rollover, or
+          refusal. A soft threshold may instead produce <code>awaiting_authority</code>;
+          it never manufactures permission to launch or switch owners.
+        </p>
+
+        <div class="decision-banner">
+          <article class="recommendation">
+            <h3>Default route</h3>
+            <p><strong>Fresh Champion.</strong> Resume is exceptional and must be cheaper and safer than reloading durable evidence.</p>
+          </article>
+          <article class="boundary-card">
+            <h3>Default rollover authority</h3>
+            <p><strong>Await the Summoner.</strong> Automatic mode is explicit, stored, same-scope opt-in.</p>
+          </article>
+        </div>
+
+        <figure class="diagram-frame">
+          <img
+            src="continuation-rollover-policy.drawio.svg"
+            alt="Decision flow. Conflicted identity or unsafe binding refuses. A follow-up uses a fresh Champion unless a concrete continuity benefit and healthy exact archive justify resume. An active unhealthy thread awaits authority unless automatic same-scope authority and a safe handoff boundary are recorded, in which case it rolls over. Callsign allocation remains independent."
+          >
+          <figcaption>
+            The dashed callsign rule is deliberately outside the routing branches. Editable source:
+            <a href="../docs/design/continuation-rollover-policy.drawio">draw.io</a>.
+          </figcaption>
+          <details>
+            <summary>Text alternative for the flow</summary>
+            <ol>
+              <li>Verify the trigger, role, scope, explicit route, identity evidence, and policy version.</li>
+              <li>If a targeted identity is conflicted or the workspace binding is unsafe, refuse and preserve state.</li>
+              <li>For a follow-up, resume only when a concrete continuity benefit and a healthy exact archive are both proven; otherwise choose a fresh Champion.</li>
+              <li>For an active thread, continue while no hard health boundary or reconciled material drift exists.</li>
+              <li>When rollover is required, await authority by default. With recorded automatic authority and a safe boundary, prepare a replacement, hand off, acknowledge, atomically switch ownership, then drain and clean up.</li>
+              <li>Every new incarnation gets its callsign from issue #13's queue; resume never bypasses it.</li>
+            </ol>
+          </details>
+        </figure>
+      </section>
+
+      <section id="lifecycles" class="section" aria-labelledby="lifecycles-title">
+        <p class="section-kicker">Separation is the safety mechanism</p>
+        <h2 id="lifecycles-title">Four rails that never collapse into one</h2>
+        <p class="lede">
+          Teardown may finish while a provider thread remains durably resumable. A resumable
+          archive preserves no endpoint, worktree, resource lease, or callsign.
+        </p>
+        <div class="lifecycle-rail">
+          <article class="rail-card">
+            <h3>Runtime teardown</h3>
+            <p>Archive exact identity/evidence, close only the proven endpoint, remove only eligible disposable resources, release callsign last.</p>
+            <span class="not-this">Does not select future thread routing.</span>
+          </article>
+          <article class="rail-card">
+            <h3>Callsign queue</h3>
+            <p>Select the first compatible available label from one persistent shuffled queue; activated release appends to the tail.</p>
+            <span class="not-this">Does not imply historical identity.</span>
+          </article>
+          <article class="rail-card">
+            <h3>Thread continuation</h3>
+            <p>Claim one exact durable archive, verify resume capability, and bind a newly proven cwd/worktree.</p>
+            <span class="not-this">Does not preserve old runtime resources.</span>
+          </article>
+          <article class="rail-card">
+            <h3>Context rollover</h3>
+            <p>Evaluate active context health, authority, safe boundary, handoff digest, acknowledgement, and owner fence.</p>
+            <span class="not-this">Does not reclaim a historical callsign.</span>
+          </article>
+        </div>
+      </section>
+
+      <section id="matrix" class="section" aria-labelledby="matrix-title">
+        <p class="section-kicker">Policy matrix</p>
+        <h2 id="matrix-title">The exact outcome is explainable</h2>
+        <p class="lede">
+          Explicit <code>resume</code> or <code>fresh</code> routes are preserved. An explicit target
+          that fails identity or safety gates refuses; it is never silently replaced by a different route.
+        </p>
+        <div class="table-wrap" tabindex="0" aria-label="Scrollable continuation decision table">
+          <table>
+            <caption>Decision gates, authority, and durable effect</caption>
+            <thead>
+              <tr>
+                <th scope="col">Verified situation</th>
+                <th scope="col">Outcome</th>
+                <th scope="col">Authority</th>
+                <th scope="col">Durable effect</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Concrete benefit; exact durable unique archive; declared exact resume and safe rebind; healthy context; reconciled instructions; no claim conflict.</td>
+                <td><span class="decision-label resume">RESUME</span></td>
+                <td>Existing scope covers the follow-up.</td>
+                <td>New incarnation + queue-selected callsign + exact resumed-thread receipt.</td>
+              </tr>
+              <tr>
+                <td>New/loosely related work, no concrete benefit, degraded/unknown context, or durable evidence is cheaper to reload.</td>
+                <td><span class="decision-label fresh">FRESH · DEFAULT</span></td>
+                <td>Ordinary dispatch authority.</td>
+                <td>Existing recoverable assignment lifecycle; immutable archive unchanged.</td>
+              </tr>
+              <tr>
+                <td>Active context crosses a hard configured boundary or reconciled material drift; same scope; safe boundary; stored automatic opt-in.</td>
+                <td><span class="decision-label rollover">AUTO ROLLOVER</span></td>
+                <td>Same role/scope only; no new external authority.</td>
+                <td>Prepare → handoff → acknowledge → atomic owner switch → drain/cleanup.</td>
+              </tr>
+              <tr>
+                <td>Rollover evidence exists but automatic authority is absent, or only a soft threshold crosses.</td>
+                <td><span class="decision-label await">AWAIT AUTHORITY</span></td>
+                <td>Summoner decision required.</td>
+                <td>Record evidence and proposal; do not launch or switch.</td>
+              </tr>
+              <tr>
+                <td>Target identity missing/ambiguous/reused; durability/capability undeclared; binding unsafe; drift unresolved; fence/ack conflict; or no compatible callsign.</td>
+                <td><span class="decision-label refuse">REFUSE</span></td>
+                <td>Manual reconciliation or new request.</td>
+                <td>Bounded refusal; preserve current owner, archive, queue, and external state.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3 style="margin-top: 30px;">Resume needs a concrete benefit</h3>
+        <div class="benefit-grid">
+          <article class="mini-card">
+            <span class="mono-label">same_task_recovery</span>
+            <p>An interrupted or blocked operation has an exact durable recovery fence and next action.</p>
+          </article>
+          <article class="mini-card">
+            <span class="mono-label">same_artifact_revision</span>
+            <p>The follow-up revises or diagnoses the same exact unlanded head, finding set, or receipt.</p>
+          </article>
+          <article class="mini-card">
+            <span class="mono-label">unresolved_decision_chain</span>
+            <p>A bounded acknowledged chain already holds the alternatives and evidence references.</p>
+          </article>
+        </div>
+        <p class="source-note">
+          Same callsign, repository, broad topic, issue family, or familiarity does not qualify.
+          If the handoff already contains everything required, fresh wins.
+        </p>
+      </section>
+
+      <section id="signals" class="section" aria-labelledby="signals-title">
+        <p class="section-kicker">Trustworthy signals</p>
+        <h2 id="signals-title">Normalize facts; never guess from transcript size</h2>
+        <p class="lede">
+          Adapters declare which signals they produce, their units, durability, and observation time.
+          Missing means unavailable—not zero. Every threshold is versioned configuration data.
+        </p>
+
+        <div class="signal-list">
+          <div class="signal-row">
+            <div class="signal-name">Thread identity</div>
+            <div class="signal-rule">One unique namespaced opaque identity; adapter-declared durability. Duplicate or reused identity is a conflict.</div>
+            <div class="signal-default">mandatory · refuse on conflict</div>
+          </div>
+          <div class="signal-row">
+            <div class="signal-name">New binding</div>
+            <div class="signal-rule">Exact repository/scope, branch/head when applicable, non-conflicting cwd/worktree, and declared bind support.</div>
+            <div class="signal-default">mandatory · refuse if unsafe</div>
+          </div>
+          <div class="signal-row">
+            <div class="signal-name">Context remaining</div>
+            <div class="signal-rule">Only an adapter-declared normalized remaining ratio. Never infer it from serialized transcript bytes.</div>
+            <div class="signal-default">soft 0.30 · hard 0.15</div>
+          </div>
+          <div class="signal-row">
+            <div class="signal-name">Compactions</div>
+            <div class="signal-rule">Record only when the adapter declares semantics and restart durability.</div>
+            <div class="signal-default">thresholds null by default</div>
+          </div>
+          <div class="signal-row">
+            <div class="signal-name">Transcript/token budget</div>
+            <div class="signal-rule">Use only declared budget, units, measurement point, and comparability. Raw cross-provider counts are rejected.</div>
+            <div class="signal-default">disabled until calibrated</div>
+          </div>
+          <div class="signal-row">
+            <div class="signal-name">Elapsed age</div>
+            <div class="signal-rule">Compute from canonical timestamps, not process uptime. Age alone cannot auto-roll.</div>
+            <div class="signal-default">soft 14 days · no hard</div>
+          </div>
+          <div class="signal-row">
+            <div class="signal-name">Completed tasks</div>
+            <div class="signal-rule">Count acknowledged completed scopes in the same thread lineage. Count alone cannot auto-roll.</div>
+            <div class="signal-default">soft 2 · no hard</div>
+          </div>
+          <div class="signal-row">
+            <div class="signal-name">Instruction drift</div>
+            <div class="signal-rule">Compare stored/current governing digests; classify none, non-material, material, or unknown.</div>
+            <div class="signal-default">material/unknown blocks resume</div>
+          </div>
+        </div>
+
+        <div class="health-strip" aria-label="Derived context health states">
+          <div class="health-cell"><strong>Healthy</strong><span>Mandatory gates pass; no available threshold crossed.</span></div>
+          <div class="health-cell"><strong>Degraded</strong><span>Mandatory gates pass; one or more soft thresholds crossed.</span></div>
+          <div class="health-cell"><strong>Unhealthy</strong><span>Declared hard boundary or reconciled material drift.</span></div>
+          <div class="health-cell"><strong>Conflicted</strong><span>Identity, lease, fence, or acknowledgement contradiction.</span></div>
+        </div>
+
+        <pre aria-label="Initial continuation policy configuration"><code>{
+  "schema": "league.continuation-policy.v1",
+  "follow_up_default": "fresh",
+  "rollover_authority": "awaiting_authority",
+  "thresholds": {
+    "context_remaining_ratio": {"soft": 0.30, "hard": 0.15, "source": "adapter_declared"},
+    "compaction_count": {"soft": null, "hard": null, "source": "adapter_declared"},
+    "transcript_budget_remaining_ratio": {"soft": null, "hard": null, "source": "adapter_declared"},
+    "elapsed_age_days": {"soft": 14, "hard": null, "source": "canonical"},
+    "completed_task_count": {"soft": 2, "hard": null, "source": "canonical"}
+  }
+}</code></pre>
+      </section>
+
+      <section id="handoff" class="section" aria-labelledby="handoff-title">
+        <p class="section-kicker">Bounded handoff + fenced recovery</p>
+        <h2 id="handoff-title">A digest is acknowledged before authority moves</h2>
+        <p class="lede">
+          The old incarnation stays authoritative through replacement launch and acknowledgement.
+          The one owner switch is the commit point; cleanup follows it and remains independently recoverable.
+        </p>
+
+        <div class="role-grid">
+          <article class="mini-card">
+            <span class="mono-label">Champion</span>
+            <h3>One task pointer changes</h3>
+            <p>The same task/scope remains authorized. A new incarnation receives the handoff; no new task is invented.</p>
+          </article>
+          <article class="mini-card">
+            <span class="mono-label">Shotcaller</span>
+            <h3>One stable Squad pointer changes</h3>
+            <p>Active Champions retain their exact task, thread, worktree, history, and capability bindings. #8 adds guarded Shotcaller drain/cleanup without making Shotcallers eligible for task teardown.</p>
+          </article>
+        </div>
+
+        <div class="handoff-ledger">
+          <article class="ledger-column">
+            <h3>Handoff includes</h3>
+            <ul>
+              <li>Stable scope/Squad/task/request and old/new incarnation references.</li>
+              <li>Authority, non-goals, policy/config digest, and instruction-drift result.</li>
+              <li>Current state, unresolved work, claims, blockers, next actions, delivery and cleanup obligations.</li>
+              <li>Applicable repository/head and owner-source evidence references with safe new binding proof.</li>
+              <li>Shotcaller active-Champion map, unchanged.</li>
+              <li>Health inputs, decision reason, callsign reservation, rollback point, and expiry.</li>
+            </ul>
+          </article>
+          <article class="ledger-column">
+            <h3>Handoff excludes</h3>
+            <ul>
+              <li>Full transcripts or raw context dumps.</li>
+              <li>Secrets, credentials, private endpoints, or browser state.</li>
+              <li>Local absolute paths or adapter-private locators in public events.</li>
+              <li>Arbitrary generated artifacts or unbounded payloads.</li>
+              <li>Any implied merge, deploy, install, cutover, teardown, or new-task authority.</li>
+            </ul>
+          </article>
+        </div>
+
+        <ol class="phase-list">
+          <li><span><strong>Decide.</strong> Persist evidence, reason codes, policy digest, and automatic/awaiting authority mode.</span></li>
+          <li><span><strong>Prepare.</strong> Reserve through #13 and create only the replacement's exact runtime/workspace resources. Old owner remains active.</span></li>
+          <li><span><strong>Acknowledge.</strong> Replacement proves its identity/binding and acknowledges the exact handoff digest, scope, non-goals, unresolved work, and preserved Champion map.</span></li>
+          <li><span><strong>Commit.</strong> Compare owner version + fence; atomically switch task/Squad owner, append one <code>owner_changed</code>, and enqueue recipient effects.</span></li>
+          <li><span><strong>Drain.</strong> Predecessor refuses new intake; Champion task cleanup or #8's separately guarded Shotcaller cleanup reuses proof-first actions, receipts, and fences, then releases callsign last.</span></li>
+        </ol>
+
+        <div class="crash-grid">
+          <article class="mini-card">
+            <span class="mono-label">Crash before commit</span>
+            <p>Old owner remains canonical. Retry the same fenced commit or abort exact replacement resources. Restore an unactivated callsign reservation to its recorded queue position.</p>
+          </article>
+          <article class="mini-card">
+            <span class="mono-label">Crash after commit</span>
+            <p>Never roll ownership back. Recovery rolls forward predecessor drain and cleanup idempotently. At no point may both incarnations accept intake.</p>
+          </article>
+        </div>
+      </section>
+
+      <section id="contracts" class="section" aria-labelledby="contracts-title">
+        <p class="section-kicker">Future implementation boundary</p>
+        <h2 id="contracts-title">#8 owns handoff; #13 owns queue order</h2>
+        <p class="lede">
+          Both extend the current <code>league.command.v1</code> envelope, expected-version/fence
+          rules, event/outbox atomicity, recoverable assignment, opaque identity, proof-first
+          cleanup, and issue-#23 acceptance boundary. Neither creates a parallel lifecycle.
+        </p>
+
+        <div class="contract-grid">
+          <article class="mini-card">
+            <span class="mono-label">#8 · commands</span>
+            <h3>Continuation + rollover</h3>
+            <p><code>continuation decide|status</code><br><code>rollover prepare|acknowledge|commit|abort|status</code></p>
+          </article>
+          <article class="mini-card">
+            <span class="mono-label">#13 · commands</span>
+            <h3>Persistent queue</h3>
+            <p><code>callsign allocate|status</code><br>existing <code>callsign release</code> becomes release-to-tail for activated assignments.</p>
+          </article>
+          <article class="mini-card">
+            <span class="mono-label">stable events</span>
+            <h3>Bounded + public-safe</h3>
+            <p><code>continuation_decided</code>, <code>thread_resumed</code>, <code>rollover_prepared</code>, <code>rollover_acknowledged</code>, one <code>owner_changed</code>, <code>rollover_aborted</code>, and callsign lifecycle events.</p>
+          </article>
+        </div>
+
+        <div class="table-wrap" tabindex="0" aria-label="Scrollable minimal durable data table">
+          <table>
+            <caption>Minimal data additions; existing owner/runtime/event/outbox/cleanup records stay canonical</caption>
+            <thead>
+              <tr><th scope="col">Record</th><th scope="col">Owns</th><th scope="col">Does not own</th></tr>
+            </thead>
+            <tbody>
+              <tr><td><code>thread_archives</code></td><td>One unique opaque provider identity, durability/capabilities, instruction digests, health snapshot, and evidence references. Incarnation bindings reference it and retain unique endpoints/generations.</td><td>Duplicate thread identity, live endpoint, or callsign lease.</td></tr>
+              <tr><td><code>continuation_decisions</code></td><td>Trigger, explicit route, benefit, signals, policy digest, outcome, reasons, authority.</td><td>Runtime or owner mutation.</td></tr>
+              <tr><td><code>rollover_operations</code></td><td>Old/new incarnation, role-neutral scope, fence, handoff digest, acknowledgement, commit/rollback receipts.</td><td>Request/assignment/delivery duplicate state.</td></tr>
+              <tr><td><code>callsign_queue</code> + <code>callsign_assignments</code></td><td>Stable shuffled rank and immutable assignment history.</td><td>Continuation preference.</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3 style="margin-top: 30px;">Issue #13 supersedes the obsolete issue-#15 candidate</h3>
+        <div class="role-grid">
+          <article class="mini-card">
+            <span class="mono-label">removed</span>
+            <p>Never-used generations, quarantine queue, hard cooldown, and least-recently-used fallback.</p>
+          </article>
+          <article class="mini-card">
+            <span class="mono-label">accepted</span>
+            <p>One persisted shuffled queue; release appends to tail; recency ranks rather than bans; a recent sole compatible candidate remains allocatable.</p>
+          </article>
+        </div>
+        <p class="source-note">
+          A resumed thread receives the historical callsign only if the normal #13 allocator selects it.
+          A rebound name is never stolen or aliased; immutable incarnation and thread references preserve history.
+        </p>
+        <p class="source-note">
+          Current-state honesty: the generic runtime has a resume method, but Codex does not declare that capability,
+          Herdr/tmux drivers are contract-only, real runtimes remain unverified, and the current task cleanup planner
+          refuses Shotcallers. #8 must preserve those boundaries while adding one unique thread-lineage identity and a
+          Squad-level <code>owner_changed</code> aggregate; it must not disguise the change as an unrelated task/agent event.
+        </p>
+      </section>
+
+      <section id="resolved" class="section" aria-labelledby="resolved-title">
+        <p class="section-kicker">No open design questions</p>
+        <h2 id="resolved-title">Issue #15's questions are resolved</h2>
+        <div class="table-wrap" tabindex="0" aria-label="Scrollable resolved questions table">
+          <table>
+            <caption>Explicit issue questions and accepted candidate answers</caption>
+            <thead>
+              <tr><th scope="col">Question</th><th scope="col">Resolution</th></tr>
+            </thead>
+            <tbody>
+              <tr><td>When is a follow-up related enough?</td><td>Only with one of three recorded concrete benefits; labels and broad similarity do not qualify.</td></tr>
+              <tr><td>Does fresh remain the default?</td><td>Yes. Resume additionally requires exact durable identity, safe binding, healthy context, and reconciled instructions.</td></tr>
+              <tr><td>Which health signals are reliable?</td><td>Canonical age/task counts plus declared normalized adapter signals. Raw transcript guesses are excluded.</td></tr>
+              <tr><td>Does a threshold auto-create a replacement?</td><td>No by default. Await authority; automatic rollover requires explicit stored same-scope opt-in and a safe boundary.</td></tr>
+              <tr><td>What if the old callsign was reused?</td><td>Allocate normally through #13. Never steal, alias, or rewrite historical identity.</td></tr>
+              <tr><td>How do roles differ?</td><td>The contract is identical; only the atomic owner target differs: one task or one stable Squad pointer.</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <p class="source-note">
+          Grounded in the merged repository-local
+          <a href="../docs/REQUEST_LIFECYCLE.md">request</a>,
+          <a href="../docs/runtime-lifecycle.md">runtime/cleanup/routing</a>, and
+          <a href="../docs/ACCEPTANCE.md">acceptance</a> contracts. This artifact claims design completeness only—not implementation, installation, cutover, live support, or smoke.
+        </p>
+      </section>
+    </main>
+
+    <footer class="footer-note">
+      Issue #15 accepted-policy candidate · public-safe synthetic field names only · no private paths or runtime identifiers
+    </footer>
+  </div>
+</body>
+</html>

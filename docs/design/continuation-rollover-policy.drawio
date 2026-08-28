@@ -1,0 +1,129 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mxfile host="drawio" version="26.0.0">
+  <diagram name="Decision flow">
+    <mxGraphModel dx="1900" dy="1700" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1900" pageHeight="1700" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="2" value="Follow-up or active-thread health trigger" style="ellipse;whiteSpace=wrap;html=1;fillColor=#e9f5f1;strokeColor=#3f7d6d;strokeWidth=2;fontColor=#16243d;fontFamily=Avenir Next;fontSize=18;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="750" y="40" width="400" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="3" value="Verify role, authorized scope, requested route, exact identity evidence, and policy version" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#eaf1fb;strokeColor=#26547c;strokeWidth=2;fontColor=#16243d;fontFamily=Avenir Next;fontSize=17;" vertex="1" parent="1">
+          <mxGeometry x="690" y="180" width="520" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="4" value="Targeted identity conflicted&#xa;or workspace binding unsafe?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#fff4d6;strokeColor=#b87912;strokeWidth=2;fontColor=#16243d;fontFamily=Avenir Next;fontSize=17;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="760" y="350" width="380" height="180" as="geometry" />
+        </mxCell>
+        <mxCell id="5" value="REFUSE&#xa;Preserve owner, archive, queue, and external state. Never guess." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fbecef;strokeColor=#9b3c4b;strokeWidth=2;fontColor=#6f2633;fontFamily=Avenir Next;fontSize=17;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="80" y="380" width="450" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="6" value="Is this an active&#xa;thread health decision?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#fff4d6;strokeColor=#b87912;strokeWidth=2;fontColor=#16243d;fontFamily=Avenir Next;fontSize=17;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="760" y="620" width="380" height="170" as="geometry" />
+        </mxCell>
+        <mxCell id="7" value="Concrete continuity benefit&#xa;and healthy exact archive?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#fff4d6;strokeColor=#b87912;strokeWidth=2;fontColor=#16243d;fontFamily=Avenir Next;fontSize=17;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="260" y="900" width="420" height="190" as="geometry" />
+        </mxCell>
+        <mxCell id="8" value="FRESH CHAMPION — DEFAULT&#xa;Reload durable evidence into a new incarnation." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#eaf1fb;strokeColor=#26547c;strokeWidth=2;fontColor=#16243d;fontFamily=Avenir Next;fontSize=17;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="50" y="1240" width="430" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="9" value="RESUME EXACT ARCHIVED THREAD&#xa;New incarnation, new verified binding, exact session receipt." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f0ecfa;strokeColor=#6f5a9b;strokeWidth=2;fontColor=#3d3159;fontFamily=Avenir Next;fontSize=17;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="550" y="1240" width="470" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="10" value="Hard declared health boundary&#xa;or reconciled material drift?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#fff4d6;strokeColor=#b87912;strokeWidth=2;fontColor=#16243d;fontFamily=Avenir Next;fontSize=17;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="1210" y="900" width="420" height="190" as="geometry" />
+        </mxCell>
+        <mxCell id="11" value="CONTINUE CURRENT THREAD&#xa;No rollover decision; observe configured signals." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f4f8fd;strokeColor=#91a4bc;strokeWidth=2;fontColor=#16243d;fontFamily=Avenir Next;fontSize=17;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="1060" y="1240" width="420" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="12" value="Automatic authority stored&#xa;and safe handoff boundary?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#fff4d6;strokeColor=#b87912;strokeWidth=2;fontColor=#16243d;fontFamily=Avenir Next;fontSize=17;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="1500" y="1160" width="360" height="180" as="geometry" />
+        </mxCell>
+        <mxCell id="13" value="AWAIT AUTHORITY&#xa;Record evidence; do not launch or switch." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff4d6;strokeColor=#b87912;strokeWidth=2;fontColor=#6b470c;fontFamily=Avenir Next;fontSize=17;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="1210" y="1450" width="390" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="14" value="AUTOMATIC ROLLOVER&#xa;Prepare → handoff digest → acknowledge → atomic owner change → drain + cleanup" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e9f5f1;strokeColor=#3f7d6d;strokeWidth=2;fontColor=#214f43;fontFamily=Avenir Next;fontSize=17;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="1640" y="1450" width="240" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="15" value="ORTHOGONAL CALLSIGN RULE&#xa;Every new incarnation allocates through #13's persistent shuffled queue. Resume never bypasses it; exact release appends to the tail." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f0ecfa;strokeColor=#6f5a9b;strokeWidth=2;dashed=1;fontColor=#3d3159;fontFamily=Avenir Next;fontSize=16;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="500" y="1500" width="650" height="100" as="geometry" />
+        </mxCell>
+
+        <mxCell id="20" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#91a4bc;strokeWidth=2;endArrow=block;endFill=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="2" target="3">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="21" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#91a4bc;strokeWidth=2;endArrow=block;endFill=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="3" target="4">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="22" value="Yes" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#9b3c4b;strokeWidth=2;endArrow=block;endFill=1;fontFamily=Avenir Next;fontSize=15;fontStyle=1;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="4" target="5">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="23" value="No" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#3f7d6d;strokeWidth=2;endArrow=block;endFill=1;fontFamily=Avenir Next;fontSize=15;fontStyle=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="4" target="6">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="24" value="No — follow-up" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#26547c;strokeWidth=2;endArrow=block;endFill=1;fontFamily=Avenir Next;fontSize=15;fontStyle=1;exitX=0.25;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="6" target="7">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="470" y="840" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="25" value="Yes — active" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#26547c;strokeWidth=2;endArrow=block;endFill=1;fontFamily=Avenir Next;fontSize=15;fontStyle=1;exitX=0.75;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="6" target="10">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1420" y="840" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="26" value="No" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#26547c;strokeWidth=2;endArrow=block;endFill=1;fontFamily=Avenir Next;fontSize=15;fontStyle=1;exitX=0.25;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="7" target="8">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="265" y="1160" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="27" value="Yes" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#6f5a9b;strokeWidth=2;endArrow=block;endFill=1;fontFamily=Avenir Next;fontSize=15;fontStyle=1;exitX=0.75;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="7" target="9">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="785" y="1160" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="28" value="No" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#91a4bc;strokeWidth=2;endArrow=block;endFill=1;fontFamily=Avenir Next;fontSize=15;fontStyle=1;exitX=0.25;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="10" target="11">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1270" y="1160" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="29" value="Yes" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#b87912;strokeWidth=2;endArrow=block;endFill=1;fontFamily=Avenir Next;fontSize=15;fontStyle=1;exitX=0.75;exitY=1;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="10" target="12">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1680" y="1100" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="30" value="No" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#b87912;strokeWidth=2;endArrow=block;endFill=1;fontFamily=Avenir Next;fontSize=15;fontStyle=1;exitX=0.25;exitY=1;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="12" target="13">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1400" y="1400" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="31" value="Yes" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#3f7d6d;strokeWidth=2;endArrow=block;endFill=1;fontFamily=Avenir Next;fontSize=15;fontStyle=1;exitX=0.75;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="12" target="14">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="32" value="queue-selected label" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;dashed=1;strokeColor=#6f5a9b;strokeWidth=2;endArrow=open;endFill=0;fontFamily=Avenir Next;fontSize=14;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.25;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="8" target="15">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="265" y="1450" />
+              <mxPoint x="660" y="1450" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="33" value="queue-selected label" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;dashed=1;strokeColor=#6f5a9b;strokeWidth=2;endArrow=open;endFill=0;fontFamily=Avenir Next;fontSize=14;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="9" target="15">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

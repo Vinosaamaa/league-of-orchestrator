@@ -57,7 +57,14 @@ from .sqlite_watcher_ops import register_watcher as register_watcher_operation
 from .sqlite_watcher_ops import set_allow_stop_once as set_allow_stop_once_operation
 from .sqlite_watcher_ops import stop_decision as stop_decision_operation
 from .storage import ConnectionPolicy, FaultInjector, ImportPlan, StorageRefusal
-from .storage_request import AnswerRequestCommand, RequestResultCommand
+from .storage_assignment import PrepareAssignmentCommand
+from .storage_outbox import OutboxDispatchIdentity
+from .storage_request import (
+    AnswerRequestCommand,
+    DispatchRequestCommand,
+    RequestResultCommand,
+)
+from .storage_watcher import RuntimeRegistrationCommand
 from .storage_types import LIFECYCLE_STATES
 
 
@@ -67,6 +74,7 @@ DATABASE_NAME = "league.sqlite3"
 DEFAULT_BUSY_TIMEOUT_MS = 500
 MAX_BUSY_TIMEOUT_MS = 10_000
 MAX_EXPORT_RECORDS = 10_000
+MAX_EXPORT_PAYLOAD_BYTES = 16 * 1024 * 1024
 
 @dataclass(frozen=True)
 class Migration:
@@ -1415,32 +1423,8 @@ class SQLiteStorage(SQLiteTransactionCore):
             self, request_id, runtime_instance_id, claim_token, at
         )
 
-    def dispatch_request(
-        self,
-        request_id: str,
-        claim_token: str,
-        dispatch_id: str,
-        work_kind: str,
-        requested_mode: Optional[str],
-        hidden_supported: bool,
-        requested_model: Optional[str],
-        requested_effort: Optional[str],
-        explicit_route: Optional[str],
-        at: str,
-    ) -> dict[str, Any]:
-        return dispatch_request_operation(
-            self,
-            request_id,
-            claim_token,
-            dispatch_id,
-            work_kind,
-            requested_mode,
-            hidden_supported,
-            requested_model,
-            requested_effort,
-            explicit_route,
-            at,
-        )
+    def dispatch_request(self, command: DispatchRequestCommand) -> dict[str, Any]:
+        return dispatch_request_operation(self, command)
 
     def route_request(
         self,
@@ -1504,38 +1488,8 @@ class SQLiteStorage(SQLiteTransactionCore):
             self, owner_agent_id, limit=limit, before_action=before_action
         )
 
-    def prepare_assignment(
-        self,
-        assignment_id: str,
-        request_id: str,
-        claim_token: str,
-        task_id: str,
-        task_summary: str,
-        coordinator_agent_id: str,
-        champion_agent_id: str,
-        callsign: str,
-        repository: str,
-        issue: int,
-        branch: str,
-        worktree: str,
-        at: str,
-    ) -> dict[str, Any]:
-        return prepare_assignment_operation(
-            self,
-            assignment_id,
-            request_id,
-            claim_token,
-            task_id,
-            task_summary,
-            coordinator_agent_id,
-            champion_agent_id,
-            callsign,
-            repository,
-            issue,
-            branch,
-            worktree,
-            at,
-        )
+    def prepare_assignment(self, command: PrepareAssignmentCommand) -> dict[str, Any]:
+        return prepare_assignment_operation(self, command)
 
     def mark_assignment_launching(
         self, assignment_id: str, expected_version: int, at: str
@@ -1611,33 +1565,16 @@ class SQLiteStorage(SQLiteTransactionCore):
 
     def claim_outbox(
         self,
-        outbox_id: str,
-        event_id: str,
-        recipient_agent_id: str,
-        dispatcher_id: str,
-        attempt_id: str,
+        identity: OutboxDispatchIdentity,
         lease_expires_at: str,
         at: str,
     ) -> dict[str, Any]:
-        return claim_outbox_operation(
-            self,
-            outbox_id,
-            event_id,
-            recipient_agent_id,
-            dispatcher_id,
-            attempt_id,
-            lease_expires_at,
-            at,
-        )
+        return claim_outbox_operation(self, identity, lease_expires_at, at)
 
     def acknowledge_outbox(
         self,
-        outbox_id: str,
-        event_id: str,
-        recipient_agent_id: str,
-        dispatcher_id: str,
+        identity: OutboxDispatchIdentity,
         fence: int,
-        attempt_id: str,
         adapter_kind: str,
         effect_kind: str,
         effect_id: str,
@@ -1645,12 +1582,8 @@ class SQLiteStorage(SQLiteTransactionCore):
     ) -> dict[str, Any]:
         return acknowledge_outbox_operation(
             self,
-            outbox_id,
-            event_id,
-            recipient_agent_id,
-            dispatcher_id,
+            identity,
             fence,
-            attempt_id,
             adapter_kind,
             effect_kind,
             effect_id,
@@ -1659,12 +1592,8 @@ class SQLiteStorage(SQLiteTransactionCore):
 
     def fail_outbox(
         self,
-        outbox_id: str,
-        event_id: str,
-        recipient_agent_id: str,
-        dispatcher_id: str,
+        identity: OutboxDispatchIdentity,
         fence: int,
-        attempt_id: str,
         adapter_kind: str,
         reason: str,
         retry_at: str,
@@ -1672,12 +1601,8 @@ class SQLiteStorage(SQLiteTransactionCore):
     ) -> dict[str, Any]:
         return fail_outbox_operation(
             self,
-            outbox_id,
-            event_id,
-            recipient_agent_id,
-            dispatcher_id,
+            identity,
             fence,
-            attempt_id,
             adapter_kind,
             reason,
             retry_at,
@@ -1712,32 +1637,8 @@ class SQLiteStorage(SQLiteTransactionCore):
             self, outbox_id, event_id, recipient_agent_id
         )
 
-    def register_runtime(
-        self,
-        runtime_instance_id: str,
-        actor_agent_id: str,
-        harness_kind: str,
-        backend_kind: str,
-        session_ref: str,
-        endpoint: str,
-        runtime_generation: str,
-        status: str,
-        verified: bool,
-        at: str,
-    ) -> dict[str, Any]:
-        return register_runtime_operation(
-            self,
-            runtime_instance_id,
-            actor_agent_id,
-            harness_kind,
-            backend_kind,
-            session_ref,
-            endpoint,
-            runtime_generation,
-            status,
-            verified,
-            at,
-        )
+    def register_runtime(self, command: RuntimeRegistrationCommand) -> dict[str, Any]:
+        return register_runtime_operation(self, command)
 
     def register_watcher(
         self,
@@ -1821,6 +1722,7 @@ class SQLiteStorage(SQLiteTransactionCore):
             purpose=purpose,
             max_records=max_records,
             maximum_records=MAX_EXPORT_RECORDS,
+            maximum_payload_bytes=MAX_EXPORT_PAYLOAD_BYTES,
             current_schema_version=CURRENT_SCHEMA_VERSION,
             export_tables=_EXPORT_TABLES,
             export_order=_EXPORT_ORDER,

@@ -2,28 +2,27 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Optional, Protocol
+
+
+@dataclass(frozen=True)
+class OutboxDispatchIdentity:
+    outbox_id: str
+    event_id: str
+    recipient_agent_id: str
+    dispatcher_id: str
+    attempt_id: str
 
 
 class OutboxStorage(Protocol):
     def claim_outbox(
-        self,
-        outbox_id: str,
-        event_id: str,
-        recipient_agent_id: str,
-        dispatcher_id: str,
-        attempt_id: str,
-        lease_expires_at: str,
-        at: str,
+        self, identity: OutboxDispatchIdentity, lease_expires_at: str, at: str
     ) -> dict[str, Any]: ...
     def acknowledge_outbox(
         self,
-        outbox_id: str,
-        event_id: str,
-        recipient_agent_id: str,
-        dispatcher_id: str,
+        identity: OutboxDispatchIdentity,
         fence: int,
-        attempt_id: str,
         adapter_kind: str,
         effect_kind: str,
         effect_id: str,
@@ -32,12 +31,8 @@ class OutboxStorage(Protocol):
 
     def fail_outbox(
         self,
-        outbox_id: str,
-        event_id: str,
-        recipient_agent_id: str,
-        dispatcher_id: str,
+        identity: OutboxDispatchIdentity,
         fence: int,
-        attempt_id: str,
         adapter_kind: str,
         reason: str,
         retry_at: str,

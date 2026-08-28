@@ -2,23 +2,26 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Protocol
 
 
+@dataclass(frozen=True)
+class RuntimeRegistrationCommand:
+    runtime_instance_id: str
+    actor_agent_id: str
+    harness_kind: str
+    backend_kind: str
+    session_ref: str
+    endpoint: str
+    runtime_generation: str
+    status: str
+    verified: bool
+    at: str
+
+
 class WatcherStorage(Protocol):
-    def register_runtime(
-        self,
-        runtime_instance_id: str,
-        actor_agent_id: str,
-        harness_kind: str,
-        backend_kind: str,
-        session_ref: str,
-        endpoint: str,
-        runtime_generation: str,
-        status: str,
-        verified: bool,
-        at: str,
-    ) -> dict[str, Any]: ...
+    def register_runtime(self, command: RuntimeRegistrationCommand) -> dict[str, Any]: ...
     def register_watcher(
         self,
         scope_id: str,

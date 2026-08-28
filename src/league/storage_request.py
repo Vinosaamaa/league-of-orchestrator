@@ -6,6 +6,24 @@ from dataclasses import dataclass
 from typing import Any, Optional, Protocol
 
 
+MAX_TRIAGE_JSON_BYTES = 65_536
+MAX_TASK_RESULT_SOURCES = 128
+
+
+@dataclass(frozen=True)
+class DispatchRequestCommand:
+    request_id: str
+    claim_token: str
+    dispatch_id: str
+    work_kind: str
+    requested_mode: Optional[str]
+    hidden_supported: bool
+    requested_model: Optional[str]
+    requested_effort: Optional[str]
+    explicit_route: Optional[str]
+    at: str
+
+
 @dataclass(frozen=True)
 class RequestResultCommand:
     request_id: str
@@ -65,19 +83,7 @@ class RequestStorage(Protocol):
         self, request_id: str, runtime_instance_id: str, claim_token: str, at: str
     ) -> dict[str, Any]: ...
 
-    def dispatch_request(
-        self,
-        request_id: str,
-        claim_token: str,
-        dispatch_id: str,
-        work_kind: str,
-        requested_mode: Optional[str],
-        hidden_supported: bool,
-        requested_model: Optional[str],
-        requested_effort: Optional[str],
-        explicit_route: Optional[str],
-        at: str,
-    ) -> dict[str, Any]: ...
+    def dispatch_request(self, command: DispatchRequestCommand) -> dict[str, Any]: ...
 
     def route_request(
         self,

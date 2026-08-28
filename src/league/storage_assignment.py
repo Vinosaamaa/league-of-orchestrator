@@ -2,26 +2,29 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Optional, Protocol
 
 
+@dataclass(frozen=True)
+class PrepareAssignmentCommand:
+    assignment_id: str
+    request_id: str
+    claim_token: str
+    task_id: str
+    task_summary: str
+    coordinator_agent_id: str
+    champion_agent_id: str
+    callsign: str
+    repository: str
+    issue: int
+    branch: str
+    worktree: str
+    at: str
+
+
 class AssignmentStorage(Protocol):
-    def prepare_assignment(
-        self,
-        assignment_id: str,
-        request_id: str,
-        claim_token: str,
-        task_id: str,
-        task_summary: str,
-        coordinator_agent_id: str,
-        champion_agent_id: str,
-        callsign: str,
-        repository: str,
-        issue: int,
-        branch: str,
-        worktree: str,
-        at: str,
-    ) -> dict[str, Any]: ...
+    def prepare_assignment(self, command: PrepareAssignmentCommand) -> dict[str, Any]: ...
     def mark_assignment_launching(
         self, assignment_id: str, expected_version: int, at: str
     ) -> dict[str, Any]: ...

@@ -6,22 +6,24 @@ import sqlite3
 from typing import Any, Optional
 
 from .sqlite_request_ops import _time
+from .storage_watcher import RuntimeRegistrationCommand
 from .storage_types import StorageRefusal
 
 
 def register_runtime(
     store: Any,
-    runtime_instance_id: str,
-    actor_agent_id: str,
-    harness_kind: str,
-    backend_kind: str,
-    session_ref: str,
-    endpoint: str,
-    runtime_generation: str,
-    status: str,
-    verified: bool,
-    at: str,
+    command: RuntimeRegistrationCommand,
 ) -> dict[str, Any]:
+    runtime_instance_id = command.runtime_instance_id
+    actor_agent_id = command.actor_agent_id
+    harness_kind = command.harness_kind
+    backend_kind = command.backend_kind
+    session_ref = command.session_ref
+    endpoint = command.endpoint
+    runtime_generation = command.runtime_generation
+    status = command.status
+    verified = command.verified
+    at = command.at
     _time(at, "runtime observation time")
     if status not in {"active", "idle", "closed", "failed"} or not all(
         (runtime_instance_id, actor_agent_id, harness_kind, backend_kind, session_ref, endpoint, runtime_generation)

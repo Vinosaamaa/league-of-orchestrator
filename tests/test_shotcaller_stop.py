@@ -16,7 +16,9 @@ from request_lifecycle_fixture import (  # noqa: E402
     LUX_ID,
     capture_p100,
     create_context,
+    dispatch_request,
 )
+from league.storage import PrepareAssignmentCommand  # noqa: E402
 from storage_fixture import CHAMPION_ID, REPOSITORY, SHOTCALLER_ID  # noqa: E402
 
 
@@ -36,32 +38,31 @@ def register_watcher(store, clock, scope="Garen-lifecycle", *, block=True, fence
 
 def add_combined_obligations(store, clock) -> None:
     store.claim_request("R3", GAREN_RUNTIME, "claim-r3", clock.after(300), clock.now())
-    store.dispatch_request(
+    dispatch_request(
+        store,
+        clock,
         "R3",
         "claim-r3",
         "dispatch-r3",
         "repository-write",
         "champion",
-        False,
-        None,
-        None,
-        None,
-        clock.now(),
     )
     store.prepare_assignment(
-        "assignment:pending",
-        "R3",
-        "claim-r3",
-        "task:pending",
-        "Pending synthetic Champion",
-        SHOTCALLER_ID,
-        LUX_ID,
-        "Lux",
-        REPOSITORY,
-        17,
-        "agent/synthetic/pending",
-        "/synthetic/worktrees/pending",
-        clock.now(),
+        PrepareAssignmentCommand(
+            assignment_id="assignment:pending",
+            request_id="R3",
+            claim_token="claim-r3",
+            task_id="task:pending",
+            task_summary="Pending synthetic Champion",
+            coordinator_agent_id=SHOTCALLER_ID,
+            champion_agent_id=LUX_ID,
+            callsign="Lux",
+            repository=REPOSITORY,
+            issue=17,
+            branch="agent/synthetic/pending",
+            worktree="/synthetic/worktrees/pending",
+            at=clock.now(),
+        )
     )
     with store._transaction():
         store.connection.execute(

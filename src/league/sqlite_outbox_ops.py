@@ -6,6 +6,7 @@ import sqlite3
 from typing import Any, Optional
 
 from .sqlite_request_ops import _time
+from .storage_outbox import OutboxDispatchIdentity
 from .storage_types import StorageRefusal
 
 
@@ -21,14 +22,15 @@ def _reconcile_delivered(store: Any, outbox_id: str, received_at: str) -> None:
 
 def claim_outbox(
     store: Any,
-    outbox_id: str,
-    event_id: str,
-    recipient_agent_id: str,
-    dispatcher_id: str,
-    attempt_id: str,
+    identity: OutboxDispatchIdentity,
     lease_expires_at: str,
     at: str,
 ) -> dict[str, Any]:
+    outbox_id = identity.outbox_id
+    event_id = identity.event_id
+    recipient_agent_id = identity.recipient_agent_id
+    dispatcher_id = identity.dispatcher_id
+    attempt_id = identity.attempt_id
     now = _time(at, "dispatch claim time")
     if _time(lease_expires_at, "dispatch lease expiry") <= now:
         raise StorageRefusal("invalid_delivery", "dispatch lease expiry must be in the future")
@@ -119,17 +121,18 @@ def claim_outbox(
 
 def acknowledge_outbox(
     store: Any,
-    outbox_id: str,
-    event_id: str,
-    recipient_agent_id: str,
-    dispatcher_id: str,
+    identity: OutboxDispatchIdentity,
     fence: int,
-    attempt_id: str,
     adapter_kind: str,
     effect_kind: str,
     effect_id: str,
     at: str,
 ) -> dict[str, Any]:
+    outbox_id = identity.outbox_id
+    event_id = identity.event_id
+    recipient_agent_id = identity.recipient_agent_id
+    dispatcher_id = identity.dispatcher_id
+    attempt_id = identity.attempt_id
     _time(at, "recipient acknowledgement time")
     if fence < 1 or not all((adapter_kind, effect_kind, effect_id)):
         raise StorageRefusal("invalid_delivery", "acknowledgement receipt is incomplete")
@@ -224,17 +227,18 @@ def acknowledge_outbox(
 
 def fail_outbox(
     store: Any,
-    outbox_id: str,
-    event_id: str,
-    recipient_agent_id: str,
-    dispatcher_id: str,
+    identity: OutboxDispatchIdentity,
     fence: int,
-    attempt_id: str,
     adapter_kind: str,
     reason: str,
     retry_at: str,
     at: str,
 ) -> dict[str, Any]:
+    outbox_id = identity.outbox_id
+    event_id = identity.event_id
+    recipient_agent_id = identity.recipient_agent_id
+    dispatcher_id = identity.dispatcher_id
+    attempt_id = identity.attempt_id
     now = _time(at, "delivery failure time")
     if _time(retry_at, "delivery retry time") < now or not reason:
         raise StorageRefusal("invalid_delivery", "delivery failure requires a bounded retry time and reason")

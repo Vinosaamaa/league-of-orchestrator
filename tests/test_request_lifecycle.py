@@ -33,6 +33,7 @@ from request_lifecycle_fixture import (  # noqa: E402
     SONA_ID,
     capture_p100,
     create_context,
+    dispatch_request,
 )
 from storage_fixture import REPOSITORY, SHOTCALLER_ID  # noqa: E402
 
@@ -106,9 +107,8 @@ def deliver(store: SQLiteStorage, clock, ids: FakeIds, transition: dict, recipie
     return result
 
 
-def test_p100(root: Path) -> None:
-    state, store, clock = create_context(root, "p100")
-    ids = FakeIds()
+def test_p100_direct_r1_and_prompt_idempotency(root: Path) -> None:
+    _, store, clock = create_context(root, "p100-direct")
     captured = capture_p100(store, clock)
     assert captured["prompt"]["idempotent"] is False
     assert captured["triage"]["item_count"] == 3
@@ -128,17 +128,8 @@ def test_p100(root: Path) -> None:
     assert store.connection.execute(
         "SELECT event_type FROM events WHERE event_id='request:R1:claim:1'"
     ).fetchone()[0] == "request_claimed"
-    dispatch_r1 = store.dispatch_request(
-        "R1",
-        "claim-r1",
-        "dispatch-r1",
-        "question",
-        "direct",
-        False,
-        None,
-        None,
-        None,
-        clock.now(),
+    dispatch_r1 = dispatch_request(
+        store, clock, "R1", "claim-r1", "dispatch-r1", "question", "direct"
     )
     assert dispatch_r1["execution_mode"] == "direct"
     answer_r1 = store.answer_request(
@@ -177,7 +168,13 @@ def test_p100(root: Path) -> None:
             clock.now(),
         )
     )["idempotent"]
+    store.close()
 
+
+def test_p100_routed_r2_aggregation_and_owner_return(root: Path) -> None:
+    _, store, clock = create_context(root, "p100-routed")
+    ids = FakeIds()
+    capture_p100(store, clock)
     store.claim_request("R2", GAREN_RUNTIME, "claim-r2-garen", clock.after(120), clock.now())
     routed = store.route_request(
         "R2",
@@ -202,17 +199,17 @@ def test_p100(root: Path) -> None:
         "R2", JARVAN_RUNTIME, "claim-r2-jarvan", clock.after(300), clock.now()
     )
     assert accepted["accepted"] and accepted["state"] == "accepted"
-    dispatch_r2 = store.dispatch_request(
+    dispatch_r2 = dispatch_request(
+        store,
+        clock,
         "R2",
         "claim-r2-jarvan",
         "dispatch-r2",
         "long-running",
         "champion",
-        False,
-        "synthetic-model",
-        "high",
-        "Jarvan",
-        clock.now(),
+        requested_model="synthetic-model",
+        requested_effort="high",
+        explicit_route="Jarvan",
     )
     assert dispatch_r2["request_version"] == 4
     first = assign(
@@ -341,19 +338,19 @@ def test_p100(root: Path) -> None:
         )
     )
     assert answer_r2["state"] == "answered"
+    assert store.connection.execute(
+        "SELECT owner_agent_id FROM requests WHERE request_id='R2'"
+    ).fetchone()[0] == SHOTCALLER_ID
+    store.close()
 
+
+def test_p100_local_r3_completion_requires_explicit_answer(root: Path) -> None:
+    state, store, clock = create_context(root, "p100-local")
+    ids = FakeIds()
+    capture_p100(store, clock)
     store.claim_request("R3", GAREN_RUNTIME, "claim-r3", clock.after(300), clock.now())
-    store.dispatch_request(
-        "R3",
-        "claim-r3",
-        "dispatch-r3",
-        "repository-write",
-        "champion",
-        False,
-        None,
-        None,
-        None,
-        clock.now(),
+    dispatch_request(
+        store, clock, "R3", "claim-r3", "dispatch-r3", "repository-write", "champion"
     )
     local = assign(
         store,
@@ -403,23 +400,21 @@ def test_p100(root: Path) -> None:
         )
     )
 
-    unresolved = store.unresolved_requests(SHOTCALLER_ID, before_action="reply")
-    assert unresolved["safe_to_finish"] and unresolved["unresolved_count"] == 0
     assert store.connection.execute(
-        "SELECT state FROM requests WHERE request_id='R2'"
+        "SELECT state FROM requests WHERE request_id='R3'"
     ).fetchone()[0] == "answered"
     assert store.connection.execute(
         "SELECT COUNT(*) FROM prompt_payloads WHERE prompt_id='P100'"
     ).fetchone()[0] == 1
     store.close()
     with SQLiteStorage(state) as reopened:
-        assert reopened.unresolved_requests(SHOTCALLER_ID, before_action="handoff")[
-            "safe_to_finish"
-        ]
+        assert reopened.connection.execute(
+            "SELECT state FROM requests WHERE request_id='R3'"
+        ).fetchone()[0] == "answered"
 
 
-def test_restart_followup_new_prompt_and_cancellation(root: Path) -> None:
-    state, store, clock = create_context(root, "restart")
+def test_cancellation_block_and_defer_transitions(root: Path) -> None:
+    _, store, clock = create_context(root, "request-state-transitions")
     capture_p100(store, clock)
     store.claim_request("R1", GAREN_RUNTIME, "cancel-r1", clock.after(90), clock.now())
     cancelled = store.set_request_state(
@@ -454,6 +449,15 @@ def test_restart_followup_new_prompt_and_cancellation(root: Path) -> None:
     )
     assert deferred["state"] == "deferred"
     store.release_request_claim("R2", GAREN_RUNTIME, "claim-r2", clock.now())
+    assert {item["request_id"] for item in store.unresolved_requests(
+        SHOTCALLER_ID, before_action="wait"
+    )["requests"]} == {"R2", "R3"}
+    store.close()
+
+
+def test_followup_and_duplicate_wording_account_for_sources(root: Path) -> None:
+    _, store, clock = create_context(root, "followup-and-wording")
+    capture_p100(store, clock)
     store.intake_prompt(
         "P101",
         SHOTCALLER_ID,
@@ -501,7 +505,16 @@ def test_restart_followup_new_prompt_and_cancellation(root: Path) -> None:
         clock.now(),
     )
     before = store.unresolved_requests(SHOTCALLER_ID, before_action="wait")
-    assert {item["request_id"] for item in before["requests"]} == {"R2", "R3", "R4"}
+    assert {item["request_id"] for item in before["requests"]} == {"R1", "R2", "R3", "R4"}
+    assert store.connection.execute(
+        "SELECT COUNT(*) FROM request_sources WHERE request_id='R2'"
+    ).fetchone()[0] == 2
+    store.close()
+
+
+def test_compaction_restart_preserves_request_index(root: Path) -> None:
+    state, store, clock = create_context(root, "compaction-restart")
+    capture_p100(store, clock)
     with store._transaction():
         store.connection.execute(
             "UPDATE prompt_payloads SET body=NULL,pruned_at=? WHERE prompt_id='P100'",
@@ -513,7 +526,7 @@ def test_restart_followup_new_prompt_and_cancellation(root: Path) -> None:
         assert after["unresolved_count"] == 3
         assert restarted.connection.execute(
             "SELECT COUNT(*) FROM request_sources WHERE request_id='R2'"
-        ).fetchone()[0] == 2
+        ).fetchone()[0] == 1
         assert restarted.connection.execute(
             "SELECT body,body_hash,pruned_at FROM prompt_payloads WHERE prompt_id='P100'"
         ).fetchone()[0] is None
@@ -522,8 +535,12 @@ def test_restart_followup_new_prompt_and_cancellation(root: Path) -> None:
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="league-request-lifecycle-") as temporary:
         root = Path(temporary)
-        test_p100(root)
-        test_restart_followup_new_prompt_and_cancellation(root)
+        test_p100_direct_r1_and_prompt_idempotency(root)
+        test_p100_routed_r2_aggregation_and_owner_return(root)
+        test_p100_local_r3_completion_requires_explicit_answer(root)
+        test_cancellation_block_and_defer_transitions(root)
+        test_followup_and_duplicate_wording_account_for_sources(root)
+        test_compaction_restart_preserves_request_index(root)
     print("PASS: P100 direct R1, routed R2, local Champion R3, prompt-once, compaction/restart, follow-up, and cancellation")
 
 

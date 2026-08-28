@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import tempfile
+from dataclasses import replace
 from pathlib import Path
 import sys
 
@@ -17,13 +18,14 @@ from league.request_services import (  # noqa: E402
     DispatchService,
     LaunchAdapterError,
 )
-from league.storage import StorageRefusal  # noqa: E402
+from league.storage import PrepareAssignmentCommand, StorageRefusal  # noqa: E402
 from lifecycle_fakes import FakeIds, FakeLaunchAdapter  # noqa: E402
 from request_lifecycle_fixture import (  # noqa: E402
     GAREN_RUNTIME,
     LUX_ID,
     capture_p100,
     create_context,
+    dispatch_request,
 )
 from storage_fixture import REPOSITORY, SHOTCALLER_ID  # noqa: E402
 
@@ -65,17 +67,17 @@ def test_empty_repository_refuses_direct_before_first_write(root: Path) -> None:
     else:
         raise AssertionError("unsafe direct dispatch was accepted")
     assert not first_write.exists()
-    decision = store.dispatch_request(
+    decision = dispatch_request(
+        store,
+        clock,
         "R3",
         "claim-r3",
         "dispatch-r3",
         "repository-initialize",
         "champion",
-        False,
-        "user-model",
-        "user-effort",
-        "Taliyah",
-        clock.now(),
+        requested_model="user-model",
+        requested_effort="user-effort",
+        explicit_route="Taliyah",
     )
     assert decision["execution_mode"] == "champion"
     row = store.connection.execute(
@@ -84,17 +86,15 @@ def test_empty_repository_refuses_direct_before_first_write(root: Path) -> None:
     assert tuple(row[:3]) == ("user-model", "user-effort", "Taliyah")
     assert "visible Champion" in row["reason"]
     store.claim_request("R2", GAREN_RUNTIME, "claim-r2", clock.after(120), clock.now())
-    hidden = store.dispatch_request(
+    hidden = dispatch_request(
+        store,
+        clock,
         "R2",
         "claim-r2",
         "dispatch-r2-hidden",
         "read-only",
         "hidden",
-        True,
-        None,
-        None,
-        None,
-        clock.now(),
+        hidden_supported=True,
     )
     assert hidden["execution_mode"] == "hidden"
     store.close()
@@ -104,17 +104,8 @@ def champion_context(root: Path, name: str, work_kind: str = "repository-write")
     _, store, clock = create_context(root, name)
     capture_p100(store, clock)
     store.claim_request("R3", GAREN_RUNTIME, "claim-r3", clock.after(120), clock.now())
-    store.dispatch_request(
-        "R3",
-        "claim-r3",
-        "dispatch-r3",
-        work_kind,
-        "champion",
-        False,
-        None,
-        None,
-        None,
-        clock.now(),
+    dispatch_request(
+        store, clock, "R3", "claim-r3", "dispatch-r3", work_kind, "champion"
     )
     return store, clock
 
@@ -175,7 +166,7 @@ def test_exact_receipt_activation_and_atomic_rollback(root: Path) -> None:
     store.close()
 
 
-def test_receipt_mismatch_remains_launching(root: Path) -> None:
+def test_receipt_mismatch_creates_cleanup_pending(root: Path) -> None:
     store, clock = champion_context(root, "mismatch-receipt")
     class MismatchAdapter(FakeLaunchAdapter):
         def launch(self, assignment_spec):
@@ -183,17 +174,17 @@ def test_receipt_mismatch_remains_launching(root: Path) -> None:
             receipt["worktree"] = "/synthetic/wrong-worktree"
             return receipt
 
-    try:
-        AssignmentService(store, MismatchAdapter(), clock, FakeIds()).assign(
-            spec("claim-r3", suffix="mismatch")
-        )
-    except StorageRefusal as exc:
-        assert exc.code == "receipt_mismatch"
-    else:
-        raise AssertionError("mismatched Champion receipt was accepted")
+    outcome = AssignmentService(store, MismatchAdapter(), clock, FakeIds()).assign(
+        spec("claim-r3", suffix="mismatch")
+    )
+    assert outcome["state"] == "cleanup_pending"
+    assignment = store.connection.execute(
+        "SELECT state,failure_class FROM task_assignments WHERE task_assignment_id='assignment:mismatch'"
+    ).fetchone()
+    assert tuple(assignment) == ("cleanup_pending", "launch_receipt_mismatch")
     assert store.connection.execute(
-        "SELECT state FROM task_assignments WHERE task_assignment_id='assignment:mismatch'"
-    ).fetchone()[0] == "launching"
+        "SELECT cleanup_state FROM cleanup_obligations WHERE task_id='task:mismatch'"
+    ).fetchone()[0] == "pending"
     store.close()
 
 
@@ -217,14 +208,129 @@ def test_partial_launch_preserves_cleanup_pending(root: Path) -> None:
     store.close()
 
 
+def test_unwrapped_adapter_failure_cannot_strand_launching(root: Path) -> None:
+    store, clock = champion_context(root, "adapter-operational-failure")
+
+    class OperationalFailureAdapter(FakeLaunchAdapter):
+        def launch(self, assignment_spec):
+            raise RuntimeError("synthetic adapter failure")
+
+    outcome = AssignmentService(
+        store, OperationalFailureAdapter(), clock, FakeIds()
+    ).assign(spec("claim-r3", suffix="operational"))
+    assert outcome["state"] == "cleanup_pending"
+    assignment = store.connection.execute(
+        "SELECT state,failure_class FROM task_assignments WHERE task_assignment_id='assignment:operational'"
+    ).fetchone()
+    assert tuple(assignment) == ("cleanup_pending", "launch_adapter_runtimeerror")
+    store.close()
+
+
+def test_assignment_retry_compares_complete_launch_identity(root: Path) -> None:
+    store, clock = champion_context(root, "assignment-retry-identity")
+    base = spec("claim-r3", suffix="identity")
+    command = PrepareAssignmentCommand(**vars(base), at=clock.now())
+    created = store.prepare_assignment(command)
+    assert created["state"] == "pending" and not created["idempotent"]
+    assert store.prepare_assignment(command)["idempotent"]
+    changes = (
+        {"task_summary": "Different task summary"},
+        {"repository": "synthetic://different-repository"},
+        {"issue": 999},
+        {"branch": "agent/synthetic/different-branch"},
+        {"worktree": "/synthetic/worktrees/different-worktree"},
+    )
+    for change in changes:
+        try:
+            store.prepare_assignment(replace(command, **change))
+        except StorageRefusal as exc:
+            assert exc.code == "assignment_conflict"
+        else:
+            raise AssertionError(f"assignment retry accepted changed identity: {change}")
+    store.close()
+
+
+def test_task_transition_matrix_refuses_illegal_and_terminal_progression(root: Path) -> None:
+    store, clock = champion_context(root, "task-transition-matrix")
+    active = AssignmentService(store, FakeLaunchAdapter(), clock, FakeIds()).assign(
+        spec("claim-r3", suffix="matrix")
+    )
+    try:
+        store.transition_task(
+            active["task_id"],
+            active["runtime_instance_id"],
+            3,
+            "active",
+            "Illegal reverse transition",
+            "No action",
+            None,
+            "transition:matrix:illegal",
+            "transition-key:matrix:illegal",
+            "event:matrix:illegal",
+            "outbox:matrix:illegal",
+            SHOTCALLER_ID,
+            clock.now(),
+        )
+    except StorageRefusal as exc:
+        assert exc.code == "invalid_task_transition"
+    else:
+        raise AssertionError("illegal task transition was accepted")
+    completed = store.transition_task(
+        active["task_id"],
+        active["runtime_instance_id"],
+        3,
+        "completed",
+        "Synthetic terminal result",
+        "Coordinator synthesizes the result",
+        None,
+        "transition:matrix:completed",
+        "transition-key:matrix:completed",
+        "event:matrix:completed",
+        "outbox:matrix:completed",
+        SHOTCALLER_ID,
+        clock.now(),
+    )
+    assert completed["version"] == 4
+    try:
+        store.transition_task(
+            active["task_id"],
+            active["runtime_instance_id"],
+            4,
+            "working",
+            "Contradictory post-terminal work",
+            "No action",
+            None,
+            "transition:matrix:post-terminal",
+            "transition-key:matrix:post-terminal",
+            "event:matrix:post-terminal",
+            "outbox:matrix:post-terminal",
+            SHOTCALLER_ID,
+            clock.now(),
+        )
+    except StorageRefusal as exc:
+        assert exc.code == "task_terminal"
+    else:
+        raise AssertionError("terminal task accepted another transition")
+    assert store.connection.execute(
+        "SELECT COUNT(*) FROM task_transitions WHERE task_id=?", (active["task_id"],)
+    ).fetchone()[0] == 1
+    assert store.connection.execute(
+        "SELECT COUNT(*) FROM events WHERE event_id IN ('event:matrix:illegal','event:matrix:post-terminal')"
+    ).fetchone()[0] == 0
+    store.close()
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="league-assignment-dispatch-") as temporary:
         root = Path(temporary)
         test_empty_repository_refuses_direct_before_first_write(root)
         test_exact_receipt_activation_and_atomic_rollback(root)
-        test_receipt_mismatch_remains_launching(root)
+        test_receipt_mismatch_creates_cleanup_pending(root)
         test_partial_launch_preserves_cleanup_pending(root)
-    print("PASS: explicit dispatch before writes, preserved routing, verified assignment receipt, and cleanup-pending recovery")
+        test_unwrapped_adapter_failure_cannot_strand_launching(root)
+        test_assignment_retry_compares_complete_launch_identity(root)
+        test_task_transition_matrix_refuses_illegal_and_terminal_progression(root)
+    print("PASS: explicit dispatch, exact assignment identity, verified receipt, and all launch failures recover through cleanup-pending")
 
 
 if __name__ == "__main__":

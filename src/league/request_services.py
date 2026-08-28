@@ -5,7 +5,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable, Optional, Protocol
 
-from .storage import Storage, StorageRefusal
+from .storage import (
+    DispatchRequestCommand,
+    OutboxDispatchIdentity,
+    PrepareAssignmentCommand,
+    Storage,
+    StorageRefusal,
+)
 
 
 class Clock(Protocol):
@@ -69,19 +75,21 @@ class AssignmentService:
 
     def assign(self, spec: AssignmentSpec) -> dict[str, Any]:
         prepared = self.store.prepare_assignment(
-            spec.assignment_id,
-            spec.request_id,
-            spec.claim_token,
-            spec.task_id,
-            spec.task_summary,
-            spec.coordinator_agent_id,
-            spec.champion_agent_id,
-            spec.callsign,
-            spec.repository,
-            spec.issue,
-            spec.branch,
-            spec.worktree,
-            self.clock.now(),
+            PrepareAssignmentCommand(
+                assignment_id=spec.assignment_id,
+                request_id=spec.request_id,
+                claim_token=spec.claim_token,
+                task_id=spec.task_id,
+                task_summary=spec.task_summary,
+                coordinator_agent_id=spec.coordinator_agent_id,
+                champion_agent_id=spec.champion_agent_id,
+                callsign=spec.callsign,
+                repository=spec.repository,
+                issue=spec.issue,
+                branch=spec.branch,
+                worktree=spec.worktree,
+                at=self.clock.now(),
+            )
         )
         if prepared["state"] == "active":
             return prepared
@@ -106,14 +114,35 @@ class AssignmentService:
                 exc.cleanup_proven,
                 self.clock.now(),
             )
-        return self.store.activate_assignment(
-            spec.assignment_id,
-            launching["version"],
-            receipt,
-            self.ids.new("event"),
-            self.ids.new("outbox"),
-            self.clock.now(),
-        )
+        except Exception as exc:
+            return self.store.block_assignment(
+                spec.assignment_id,
+                launching["version"],
+                f"launch_adapter_{type(exc).__name__.lower()}",
+                True,
+                False,
+                self.clock.now(),
+            )
+        try:
+            return self.store.activate_assignment(
+                spec.assignment_id,
+                launching["version"],
+                receipt,
+                self.ids.new("event"),
+                self.ids.new("outbox"),
+                self.clock.now(),
+            )
+        except StorageRefusal as exc:
+            if exc.code not in {"receipt_unverified", "receipt_mismatch", "runtime_conflict"}:
+                raise
+            return self.store.block_assignment(
+                spec.assignment_id,
+                launching["version"],
+                f"launch_{exc.code}",
+                True,
+                False,
+                self.clock.now(),
+            )
 
 
 @dataclass(frozen=True)
@@ -161,12 +190,15 @@ class DeliveryService:
     ) -> dict[str, Any]:
         at = self.clock.now()
         attempt_id = self.ids.new("attempt")
+        identity = OutboxDispatchIdentity(
+            outbox_id=outbox_id,
+            event_id=event_id,
+            recipient_agent_id=recipient_agent_id,
+            dispatcher_id=self.dispatcher_id,
+            attempt_id=attempt_id,
+        )
         claim = self.store.claim_outbox(
-            outbox_id,
-            event_id,
-            recipient_agent_id,
-            self.dispatcher_id,
-            attempt_id,
+            identity,
             self.clock.after(30),
             at,
         )
@@ -175,12 +207,8 @@ class DeliveryService:
         target = self.store.delivery_target(recipient_agent_id, at)
         if target is None:
             self.store.fail_outbox(
-                outbox_id,
-                event_id,
-                recipient_agent_id,
-                self.dispatcher_id,
+                identity,
                 claim["fence"],
-                attempt_id,
                 "none",
                 "receiver_unavailable",
                 self.clock.after(30),
@@ -192,12 +220,8 @@ class DeliveryService:
             receipt = self.adapter.send(target["channel"], target, envelope)
         except DeliveryUnavailable:
             self.store.fail_outbox(
-                outbox_id,
-                event_id,
-                recipient_agent_id,
-                self.dispatcher_id,
+                identity,
                 claim["fence"],
-                attempt_id,
                 target["channel"],
                 "receiver_unavailable",
                 self.clock.after(30),
@@ -211,12 +235,8 @@ class DeliveryService:
         )
         if not exact:
             self.store.fail_outbox(
-                outbox_id,
-                event_id,
-                recipient_agent_id,
-                self.dispatcher_id,
+                identity,
                 claim["fence"],
-                attempt_id,
                 target["channel"],
                 "recipient_receipt_mismatch",
                 self.clock.after(30),
@@ -226,12 +246,8 @@ class DeliveryService:
                 "receipt_mismatch", "delivery receipt did not name the exact source event and recipient"
             )
         return self.store.acknowledge_outbox(
-            outbox_id,
-            event_id,
-            recipient_agent_id,
-            self.dispatcher_id,
+            identity,
             claim["fence"],
-            attempt_id,
             target["channel"],
             receipt.effect_kind,
             receipt.effect_id,
@@ -308,16 +324,18 @@ class DispatchService:
         requested_mode: Optional[str] = "direct",
     ) -> Any:
         decision = self.store.dispatch_request(
-            request_id,
-            claim_token,
-            self.ids.new("dispatch"),
-            work_kind,
-            requested_mode,
-            False,
-            None,
-            None,
-            None,
-            self.clock.now(),
+            DispatchRequestCommand(
+                request_id=request_id,
+                claim_token=claim_token,
+                dispatch_id=self.ids.new("dispatch"),
+                work_kind=work_kind,
+                requested_mode=requested_mode,
+                hidden_supported=False,
+                requested_model=None,
+                requested_effort=None,
+                explicit_route=None,
+                at=self.clock.now(),
+            )
         )
         if decision["execution_mode"] != "direct":
             raise StorageRefusal("direct_refused", "substantive direct action requires direct dispatch")

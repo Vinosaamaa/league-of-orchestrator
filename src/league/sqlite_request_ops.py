@@ -9,7 +9,12 @@ import sqlite3
 from datetime import datetime
 from typing import Any, Optional
 
-from .storage_request import AnswerRequestCommand, RequestResultCommand
+from .storage_request import (
+    MAX_TASK_RESULT_SOURCES,
+    AnswerRequestCommand,
+    DispatchRequestCommand,
+    RequestResultCommand,
+)
 from .storage_types import StorageRefusal
 
 
@@ -185,12 +190,25 @@ def intake_prompt(
                     "triage_state": existing["triage_state"],
                     "idempotent": True,
                 }
-            actor = store.connection.execute(
-                "SELECT 1 FROM agent_instances WHERE agent_id=? AND retired_at IS NULL",
-                (intake_actor_id,),
+            runtime = store.connection.execute(
+                """
+                SELECT r.actor_agent_id,r.status,r.verified
+                  FROM runtime_instances r
+                  JOIN agent_instances a ON a.agent_id=r.actor_agent_id
+                 WHERE r.runtime_instance_id=? AND a.retired_at IS NULL
+                """,
+                (runtime_instance_id,),
             ).fetchone()
-            if actor is None:
-                raise StorageRefusal("actor_unknown", "prompt intake actor is not active")
+            if (
+                runtime is None
+                or runtime["actor_agent_id"] != intake_actor_id
+                or runtime["status"] not in {"active", "idle"}
+                or not runtime["verified"]
+            ):
+                raise StorageRefusal(
+                    "runtime_unverified",
+                    "prompt intake runtime is not the actor's verified live endpoint",
+                )
             store.connection.execute(
                 """
                 INSERT INTO prompts
@@ -219,13 +237,7 @@ def intake_prompt(
     return {"prompt_id": prompt_id, "triage_state": "untriaged", "idempotent": False}
 
 
-def triage_prompt(
-    store: Any,
-    prompt_id: str,
-    items: list[dict[str, Any]],
-    at: str,
-) -> dict[str, Any]:
-    _time(at, "triage time")
+def _normalize_triage_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     if not 1 <= len(items) <= MAX_PROMPT_ITEMS:
         raise StorageRefusal("invalid_triage", "triage requires one to 32 prompt items")
     normalized: list[dict[str, Any]] = []
@@ -260,8 +272,83 @@ def triage_prompt(
         elif item["next_attention_at"] is not None:
             raise StorageRefusal("invalid_triage", "only deferred prompt items accept next attention time")
         normalized.append(item)
+    return normalized
+
+
+def _triage_counts() -> dict[str, int]:
+    return {name: 0 for name in sorted(PROMPT_ITEM_DISPOSITIONS)}
+
+
+def _persist_triage_item(
+    store: Any,
+    *,
+    prompt_id: str,
+    intake_actor_id: str,
+    item: dict[str, Any],
+    at: str,
+) -> None:
+    disposition = item["disposition"]
+    request_id = item["request_id"]
+    if disposition in {"new_request", "deferred"}:
+        request_state = "deferred" if disposition == "deferred" else "open"
+        next_attention_at = item["next_attention_at"] if disposition == "deferred" else None
+        store.connection.execute(
+            """
+            INSERT INTO requests
+              (request_id,summary,requester_agent_id,owner_agent_id,return_to_agent_id,
+               execution_mode,state,latest_result_id,last_route_event_id,resolution_summary,
+               next_attention_at,version,created_at,updated_at)
+            VALUES(?,?,?, ?,NULL,NULL,?,NULL,NULL,NULL,?,1,?,?)
+            """,
+            (
+                request_id,
+                item["summary"],
+                intake_actor_id,
+                intake_actor_id,
+                request_state,
+                next_attention_at,
+                at,
+                at,
+            ),
+        )
+    elif disposition in {"follow_up", "duplicate"}:
+        _request_row(store, str(request_id))
+    store.connection.execute(
+        """
+        INSERT INTO prompt_items(prompt_item_id,prompt_id,ordinal,summary,disposition)
+        VALUES(?,?,?,?,?)
+        """,
+        (
+            item["prompt_item_id"],
+            prompt_id,
+            item["ordinal"],
+            item["summary"],
+            disposition,
+        ),
+    )
+    if request_id is not None:
+        source_role = {
+            "new_request": "origin",
+            "deferred": "origin",
+            "follow_up": "follow_up",
+            "duplicate": "duplicate",
+        }[disposition]
+        store.connection.execute(
+            "INSERT INTO request_sources(request_id,prompt_item_id,source_role) VALUES(?,?,?)",
+            (request_id, item["prompt_item_id"], source_role),
+        )
+
+
+def triage_prompt(
+    store: Any,
+    prompt_id: str,
+    items: list[dict[str, Any]],
+    at: str,
+) -> dict[str, Any]:
+    _time(at, "triage time")
+    normalized = _normalize_triage_items(items)
     triage_digest = _digest(_json(normalized))
-    counts = {name: 0 for name in sorted(PROMPT_ITEM_DISPOSITIONS)}
+    counts = _triage_counts()
     try:
         with store._transaction():
             prompt = store.connection.execute(
@@ -292,65 +379,14 @@ def triage_prompt(
                     "idempotent": True,
                 }
             for item in normalized:
-                disposition = item["disposition"]
-                counts[disposition] += 1
-                request_id = item["request_id"]
-                if disposition == "new_request":
-                    store.connection.execute(
-                        """
-                        INSERT INTO requests
-                          (request_id,summary,requester_agent_id,owner_agent_id,return_to_agent_id,
-                           execution_mode,state,latest_result_id,last_route_event_id,resolution_summary,
-                           next_attention_at,version,created_at,updated_at)
-                        VALUES(?,?,?, ?,NULL,NULL,'open',NULL,NULL,NULL,NULL,1,?,?)
-                        """,
-                        (request_id, item["summary"], prompt["intake_actor_id"], prompt["intake_actor_id"], at, at),
-                    )
-                elif disposition == "deferred":
-                    store.connection.execute(
-                        """
-                        INSERT INTO requests
-                          (request_id,summary,requester_agent_id,owner_agent_id,return_to_agent_id,
-                           execution_mode,state,latest_result_id,last_route_event_id,resolution_summary,
-                           next_attention_at,version,created_at,updated_at)
-                        VALUES(?,?,?, ?,NULL,NULL,'deferred',NULL,NULL,NULL,?,1,?,?)
-                        """,
-                        (
-                            request_id,
-                            item["summary"],
-                            prompt["intake_actor_id"],
-                            prompt["intake_actor_id"],
-                            item["next_attention_at"],
-                            at,
-                            at,
-                        ),
-                    )
-                elif disposition in {"follow_up", "duplicate"}:
-                    _request_row(store, str(request_id))
-                store.connection.execute(
-                    """
-                    INSERT INTO prompt_items(prompt_item_id,prompt_id,ordinal,summary,disposition)
-                    VALUES(?,?,?,?,?)
-                    """,
-                    (
-                        item["prompt_item_id"],
-                        prompt_id,
-                        item["ordinal"],
-                        item["summary"],
-                        disposition,
-                    ),
+                counts[item["disposition"]] += 1
+                _persist_triage_item(
+                    store,
+                    prompt_id=prompt_id,
+                    intake_actor_id=prompt["intake_actor_id"],
+                    item=item,
+                    at=at,
                 )
-                if request_id is not None:
-                    source_role = {
-                        "new_request": "origin",
-                        "deferred": "origin",
-                        "follow_up": "follow_up",
-                        "duplicate": "duplicate",
-                    }[disposition]
-                    store.connection.execute(
-                        "INSERT INTO request_sources(request_id,prompt_item_id,source_role) VALUES(?,?,?)",
-                        (request_id, item["prompt_item_id"], source_role),
-                    )
             store.connection.execute(
                 "UPDATE prompts SET triage_state='complete',triage_digest=? WHERE prompt_id=?",
                 (triage_digest, prompt_id),
@@ -390,7 +426,11 @@ def claim_request(
                 "SELECT actor_agent_id,status,verified FROM runtime_instances WHERE runtime_instance_id=?",
                 (runtime_instance_id,),
             ).fetchone()
-            if runtime is None or runtime["status"] == "closed" or not runtime["verified"]:
+            if (
+                runtime is None
+                or runtime["status"] not in {"active", "idle"}
+                or not runtime["verified"]
+            ):
                 raise StorageRefusal("runtime_unverified", "request claim runtime is not verified and active")
             if runtime["actor_agent_id"] != request["owner_agent_id"]:
                 raise StorageRefusal("owner_mismatch", "request claim runtime does not belong to the owner")
@@ -565,17 +605,18 @@ def classify_dispatch(
 
 def dispatch_request(
     store: Any,
-    request_id: str,
-    claim_token: str,
-    dispatch_id: str,
-    work_kind: str,
-    requested_mode: Optional[str],
-    hidden_supported: bool,
-    requested_model: Optional[str],
-    requested_effort: Optional[str],
-    explicit_route: Optional[str],
-    at: str,
+    command: DispatchRequestCommand,
 ) -> dict[str, Any]:
+    request_id = command.request_id
+    claim_token = command.claim_token
+    dispatch_id = command.dispatch_id
+    work_kind = command.work_kind
+    requested_mode = command.requested_mode
+    hidden_supported = command.hidden_supported
+    requested_model = command.requested_model
+    requested_effort = command.requested_effort
+    explicit_route = command.explicit_route
+    at = command.at
     _time(at, "dispatch time")
     mode, reason = classify_dispatch(
         work_kind=work_kind,
@@ -586,14 +627,26 @@ def dispatch_request(
         with store._transaction():
             request = _request_row(store, request_id)
             _active_claim(store, request_id, token=claim_token, at=at)
-            if request["state"] not in {"open", "accepted", "blocked", "deferred"}:
-                raise StorageRefusal("dispatch_conflict", "request state does not permit classification")
             existing = store.connection.execute(
                 "SELECT * FROM request_dispatches WHERE request_id=? AND request_version=?",
                 (request_id, int(request["version"])),
             ).fetchone()
             if existing is not None:
-                if existing["execution_mode"] != mode or existing["work_kind"] != work_kind:
+                exact = (
+                    existing["dispatch_id"] == dispatch_id
+                    and existing["execution_mode"] == mode
+                    and existing["work_kind"] == work_kind
+                    and existing["requested_mode"] == requested_mode
+                    and bool(existing["input_json"] == _json({
+                        "work_kind": work_kind,
+                        "requested_mode": requested_mode,
+                        "hidden_supported": hidden_supported,
+                    }))
+                    and existing["requested_model"] == requested_model
+                    and existing["requested_effort"] == requested_effort
+                    and existing["explicit_route"] == explicit_route
+                )
+                if not exact:
                     raise StorageRefusal("dispatch_conflict", "request version already has a different dispatch")
                 return {
                     "request_id": request_id,
@@ -602,6 +655,8 @@ def dispatch_request(
                     "request_version": int(request["version"]),
                     "idempotent": True,
                 }
+            if request["state"] not in {"open", "accepted", "blocked", "deferred"}:
+                raise StorageRefusal("dispatch_conflict", "request state does not permit classification")
             next_version = int(request["version"]) + 1
             input_value = {
                 "work_kind": work_kind,
@@ -836,6 +891,11 @@ def record_request_result(store: Any, command: RequestResultCommand) -> dict[str
     _time(at, "result time")
     if not all((result_id, idempotency_key, outcome, summary)):
         raise StorageRefusal("invalid_result", "request result fields are required")
+    if len(command.task_ids) > MAX_TASK_RESULT_SOURCES:
+        raise StorageRefusal(
+            "invalid_result",
+            f"request result cites more than {MAX_TASK_RESULT_SOURCES} tasks",
+        )
     sources = tuple(dict.fromkeys(command.task_ids))
     try:
         with store._transaction():
@@ -860,12 +920,24 @@ def record_request_result(store: Any, command: RequestResultCommand) -> dict[str
             _active_claim(store, request_id, token=claim_token, at=at)
             if int(request["version"]) != expected_version:
                 raise StorageRefusal("version_conflict", "request result expected-version failed")
+            cited_tasks: dict[str, sqlite3.Row] = {}
+            if sources:
+                placeholders = ",".join("?" for _ in sources)
+                cited_tasks = {
+                    str(row["task_id"]): row
+                    for row in store.connection.execute(
+                        f"SELECT task_id,state,result_summary FROM tasks "
+                        f"WHERE request_id=? AND task_id IN ({placeholders})",
+                        (request_id, *sources),
+                    )
+                }
             for task_id in sources:
-                task = store.connection.execute(
-                    "SELECT state,result_summary FROM tasks WHERE task_id=? AND request_id=?",
-                    (task_id, request_id),
-                ).fetchone()
-                if task is None or task["state"] not in {"completed", "ready_to_land"} or not task["result_summary"]:
+                task = cited_tasks.get(task_id)
+                if (
+                    task is None
+                    or task["state"] not in {"completed", "complete", "ready_to_land"}
+                    or not task["result_summary"]
+                ):
                     raise StorageRefusal("task_result_missing", "every cited task requires a settled result")
             store.connection.execute(
                 """

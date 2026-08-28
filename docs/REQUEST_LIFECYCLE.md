@@ -25,6 +25,9 @@ teardown; issue #23 owns those gates.
   database effect exactly once.
 - Request claims, outbox dispatch leases, and watcher registration leases have
   independent holders, fences, expiry, and recovery.
+- Inspection and rollback exports cap prompt payload bodies at 16 MiB in
+  addition to the record-count bound, refusing before payload rows are
+  materialized when either budget is exceeded.
 
 ## Command map
 

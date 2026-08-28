@@ -19,7 +19,11 @@ from league.request_services import (  # noqa: E402
     DeliveryUnavailable,
 )
 from league.sqlite_store import SQLiteStorage  # noqa: E402
-from league.storage import StorageRefusal  # noqa: E402
+from league.storage import (  # noqa: E402
+    OutboxDispatchIdentity,
+    RuntimeRegistrationCommand,
+    StorageRefusal,
+)
 from lifecycle_fakes import FakeDeliveryAdapter, FakeIds, FakeLaunchAdapter  # noqa: E402
 from request_lifecycle_fixture import (  # noqa: E402
     GAREN_RUNTIME,
@@ -28,11 +32,13 @@ from request_lifecycle_fixture import (  # noqa: E402
     LUX_ID,
     capture_p100,
     create_context,
+    dispatch_request,
+    SyntheticLifecycleSeeder,
 )
 from storage_fixture import CHAMPION_ID, REPOSITORY, SHOTCALLER_ID  # noqa: E402
 
 
-def route_r2(store, clock):
+def route_request_r2(store, clock):
     store.claim_request("R2", GAREN_RUNTIME, "route-r2", clock.after(120), clock.now())
     return store.route_request(
         "R2",
@@ -45,43 +51,12 @@ def route_r2(store, clock):
     )
 
 
-def add_older_pending(store, clock) -> None:
-    with store._transaction():
-        store.connection.execute(
-            """
-            INSERT INTO events
-              (event_id,agent_id,task_id,entity_version,event_type,status,update_text,occurred_at,
-               detail_json,request_id,aggregate_kind,aggregate_id)
-            VALUES('event:aatrox:older',?,NULL,99,'agent_transition','completed',
-                   'Older unrelated completion',?,'{}',NULL,'agent',?)
-            """,
-            (CHAMPION_ID, clock.now(), CHAMPION_ID),
-        )
-        store.connection.execute(
-            """
-            INSERT INTO delivery_outbox
-              (outbox_id,event_id,recipient_agent_id,state,available_at,attempt_count)
-            VALUES('outbox:aatrox:older','event:aatrox:older',?,'pending',?,0)
-            """,
-            (SHOTCALLER_ID, clock.now()),
-        )
-
-
 def test_heimerdinger_source_binding_and_fair_drain(root: Path) -> None:
     _, store, clock = create_context(root, "heimerdinger")
     capture_p100(store, clock)
     store.claim_request("R3", GAREN_RUNTIME, "claim-r3", clock.after(120), clock.now())
-    store.dispatch_request(
-        "R3",
-        "claim-r3",
-        "dispatch-r3",
-        "repository-write",
-        "champion",
-        False,
-        None,
-        None,
-        None,
-        clock.now(),
+    dispatch_request(
+        store, clock, "R3", "claim-r3", "dispatch-r3", "repository-write", "champion"
     )
     ids = FakeIds()
     active = AssignmentService(store, FakeLaunchAdapter(), clock, ids).assign(
@@ -107,7 +82,13 @@ def test_heimerdinger_source_binding_and_fair_drain(root: Path) -> None:
         ids,
         dispatcher_id="dispatcher:assignment",
     ).dispatch_source(active["outbox_id"], active["event_id"], LUX_ID)
-    add_older_pending(store, clock)
+    SyntheticLifecycleSeeder(store, clock).add_pending_delivery(
+        event_id="event:aatrox:older",
+        outbox_id="outbox:aatrox:older",
+        recipient_agent_id=SHOTCALLER_ID,
+        source_agent_id=CHAMPION_ID,
+        update="Older unrelated completion",
+    )
     source = store.transition_task(
         active["task_id"],
         active["runtime_instance_id"],
@@ -148,12 +129,14 @@ def test_heimerdinger_source_binding_and_fair_drain(root: Path) -> None:
     ).fetchone()
     assert receipt["event_id"] == source["event_id"] and receipt["recipient_agent_id"] == SHOTCALLER_ID
     duplicate = store.acknowledge_outbox(
-        source["outbox_id"],
-        source["event_id"],
-        SHOTCALLER_ID,
-        "dispatcher:one",
+        OutboxDispatchIdentity(
+            source["outbox_id"],
+            source["event_id"],
+            SHOTCALLER_ID,
+            "dispatcher:one",
+            "attempt-fake-1",
+        ),
         1,
-        "attempt-fake-1",
         "direct",
         "inbox_event",
         receipt["effect_id"],
@@ -170,7 +153,7 @@ def test_heimerdinger_source_binding_and_fair_drain(root: Path) -> None:
 def test_mismatched_receipt_stays_pending(root: Path) -> None:
     _, store, clock = create_context(root, "mismatch")
     capture_p100(store, clock)
-    source = route_r2(store, clock)
+    source = route_request_r2(store, clock)
     service = DeliveryService(
         store,
         FakeDeliveryAdapter(mismatch_event_id="event:wrong"),
@@ -196,18 +179,20 @@ def test_mismatched_receipt_stays_pending(root: Path) -> None:
 def test_closed_endpoint_durability_reconnect_and_watcher_ownership(root: Path) -> None:
     _, store, clock = create_context(root, "closed-reconnect")
     capture_p100(store, clock)
-    source = route_r2(store, clock)
+    source = route_request_r2(store, clock)
     store.register_runtime(
-        JARVAN_RUNTIME,
-        JARVAN_ID,
-        "codex-thread",
-        "herdr",
-        f"session:{JARVAN_RUNTIME}",
-        "synthetic:jarvan",
-        "generation:jarvan",
-        "closed",
-        True,
-        clock.now(),
+        RuntimeRegistrationCommand(
+            JARVAN_RUNTIME,
+            JARVAN_ID,
+            "codex-thread",
+            "herdr",
+            f"session:{JARVAN_RUNTIME}",
+            "synthetic:jarvan",
+            "generation:jarvan",
+            "closed",
+            True,
+            clock.now(),
+        )
     )
     ids = FakeIds()
     service = DeliveryService(
@@ -224,16 +209,18 @@ def test_closed_endpoint_durability_reconnect_and_watcher_ownership(root: Path) 
     ).fetchone()[0] == "pending"
     clock.advance(31)
     store.register_runtime(
-        JARVAN_RUNTIME,
-        JARVAN_ID,
-        "codex-thread",
-        "herdr",
-        f"session:{JARVAN_RUNTIME}",
-        "synthetic:jarvan",
-        "generation:jarvan",
-        "idle",
-        True,
-        clock.now(),
+        RuntimeRegistrationCommand(
+            JARVAN_RUNTIME,
+            JARVAN_ID,
+            "codex-thread",
+            "herdr",
+            f"session:{JARVAN_RUNTIME}",
+            "synthetic:jarvan",
+            "generation:jarvan",
+            "idle",
+            True,
+            clock.now(),
+        )
     )
     watcher_expiry = clock.after(120)
     store.register_watcher(
@@ -268,7 +255,7 @@ def test_closed_endpoint_durability_reconnect_and_watcher_ownership(root: Path) 
 def test_direct_fallback_only_without_active_watcher(root: Path) -> None:
     _, store, clock = create_context(root, "direct-fallback")
     capture_p100(store, clock)
-    source = route_r2(store, clock)
+    source = route_request_r2(store, clock)
     adapter = FakeDeliveryAdapter()
     DeliveryService(
         store, adapter, clock, FakeIds(), dispatcher_id="dispatcher:direct"
@@ -281,17 +268,8 @@ def test_concurrent_source_transitions_commit_once(root: Path) -> None:
     state, setup, clock = create_context(root, "concurrent-transition")
     capture_p100(setup, clock)
     setup.claim_request("R3", GAREN_RUNTIME, "claim-r3", clock.after(120), clock.now())
-    setup.dispatch_request(
-        "R3",
-        "claim-r3",
-        "dispatch-r3",
-        "repository-write",
-        "champion",
-        False,
-        None,
-        None,
-        None,
-        clock.now(),
+    dispatch_request(
+        setup, clock, "R3", "claim-r3", "dispatch-r3", "repository-write", "champion"
     )
     active = AssignmentService(setup, FakeLaunchAdapter(), clock, FakeIds()).assign(
         AssignmentSpec(

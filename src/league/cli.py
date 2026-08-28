@@ -13,11 +13,28 @@ from typing import Any, BinaryIO, Callable, Optional
 from . import MAX_ACCEPTANCE_SENTINEL_PATHS, __version__
 from .importer import build_import_plan
 from .sqlite_store import DEFAULT_BUSY_TIMEOUT_MS, MAX_EXPORT_RECORDS, SQLiteStorage
-from .storage import Storage, StorageRefusal
-from .storage_request import AnswerRequestCommand, RequestResultCommand
+from .storage import (
+    DispatchRequestCommand,
+    OutboxDispatchIdentity,
+    PrepareAssignmentCommand,
+    RuntimeRegistrationCommand,
+    Storage,
+    StorageRefusal,
+)
+from .storage_request import (
+    MAX_TRIAGE_JSON_BYTES,
+    AnswerRequestCommand,
+    RequestResultCommand,
+)
 
 
 COMMAND_SCHEMA = "league.command.v1"
+REQUEST_STATE_COMMANDS = {
+    "awaiting-user": "awaiting_user",
+    "block": "blocked",
+    "defer": "deferred",
+    "cancel": "cancelled",
+}
 CommandResult = tuple[Any, Optional[bytes]]
 CommandHandler = Callable[[Storage, argparse.Namespace], CommandResult]
 
@@ -274,7 +291,7 @@ def _add_request_commands(groups: argparse._SubParsersAction) -> None:
     )
     for name in ("request-id", "runtime-instance-id", "claim-token", "leased-until", "at"):
         accept.add_argument(f"--{name}", required=True)
-    for state in ("awaiting-user", "block", "defer", "cancel"):
+    for state in REQUEST_STATE_COMMANDS:
         command = commands.add_parser(state, help=f"Record an explicit {state} request transition.")
         for name in ("request-id", "claim-token", "summary", "event-id", "at"):
             command.add_argument(f"--{name}", required=True)
@@ -625,6 +642,10 @@ def _decode_json(value: str, label: str) -> Any:
 
 
 def _request_triage(store: Storage, args: argparse.Namespace) -> CommandResult:
+    if len(args.items_json.encode("utf-8")) > MAX_TRIAGE_JSON_BYTES:
+        raise StorageRefusal(
+            "invalid_json", "triage items exceed the bounded encoded size"
+        )
     items = _decode_json(args.items_json, "triage items")
     if not isinstance(items, list):
         raise StorageRefusal("invalid_json", "triage items must be a JSON array")
@@ -649,16 +670,18 @@ def _request_release(store: Storage, args: argparse.Namespace) -> CommandResult:
 
 def _request_dispatch(store: Storage, args: argparse.Namespace) -> CommandResult:
     return store.dispatch_request(
-        args.request_id,
-        args.claim_token,
-        args.dispatch_id,
-        args.work_kind,
-        args.requested_mode,
-        args.hidden_supported,
-        args.requested_model,
-        args.requested_effort,
-        args.explicit_route,
-        args.at,
+        DispatchRequestCommand(
+            request_id=args.request_id,
+            claim_token=args.claim_token,
+            dispatch_id=args.dispatch_id,
+            work_kind=args.work_kind,
+            requested_mode=args.requested_mode,
+            hidden_supported=args.hidden_supported,
+            requested_model=args.requested_model,
+            requested_effort=args.requested_effort,
+            explicit_route=args.explicit_route,
+            at=args.at,
+        )
     ), None
 
 
@@ -675,12 +698,7 @@ def _request_route(store: Storage, args: argparse.Namespace) -> CommandResult:
 
 
 def _request_state(store: Storage, args: argparse.Namespace) -> CommandResult:
-    state = {
-        "awaiting-user": "awaiting_user",
-        "block": "blocked",
-        "defer": "deferred",
-        "cancel": "cancelled",
-    }[args.action]
+    state = REQUEST_STATE_COMMANDS[args.action]
     return store.set_request_state(
         args.request_id,
         args.claim_token,
@@ -739,19 +757,21 @@ def _request_unresolved(store: Storage, args: argparse.Namespace) -> CommandResu
 
 def _assign_prepare(store: Storage, args: argparse.Namespace) -> CommandResult:
     return store.prepare_assignment(
-        args.assignment_id,
-        args.request_id,
-        args.claim_token,
-        args.task_id,
-        args.task_summary,
-        args.coordinator_agent_id,
-        args.champion_agent_id,
-        args.callsign,
-        args.repository,
-        args.issue,
-        args.branch,
-        args.worktree,
-        args.at,
+        PrepareAssignmentCommand(
+            assignment_id=args.assignment_id,
+            request_id=args.request_id,
+            claim_token=args.claim_token,
+            task_id=args.task_id,
+            task_summary=args.task_summary,
+            coordinator_agent_id=args.coordinator_agent_id,
+            champion_agent_id=args.champion_agent_id,
+            callsign=args.callsign,
+            repository=args.repository,
+            issue=args.issue,
+            branch=args.branch,
+            worktree=args.worktree,
+            at=args.at,
+        )
     ), None
 
 
@@ -788,11 +808,13 @@ def _assign_block(store: Storage, args: argparse.Namespace) -> CommandResult:
 
 def _delivery_claim_outbox(store: Storage, args: argparse.Namespace) -> CommandResult:
     return store.claim_outbox(
-        args.outbox_id,
-        args.event_id,
-        args.recipient_agent_id,
-        args.dispatcher_id,
-        args.attempt_id,
+        OutboxDispatchIdentity(
+            outbox_id=args.outbox_id,
+            event_id=args.event_id,
+            recipient_agent_id=args.recipient_agent_id,
+            dispatcher_id=args.dispatcher_id,
+            attempt_id=args.attempt_id,
+        ),
         args.lease_expires_at,
         args.at,
     ), None
@@ -800,12 +822,14 @@ def _delivery_claim_outbox(store: Storage, args: argparse.Namespace) -> CommandR
 
 def _delivery_ack_outbox(store: Storage, args: argparse.Namespace) -> CommandResult:
     return store.acknowledge_outbox(
-        args.outbox_id,
-        args.event_id,
-        args.recipient_agent_id,
-        args.dispatcher_id,
+        OutboxDispatchIdentity(
+            outbox_id=args.outbox_id,
+            event_id=args.event_id,
+            recipient_agent_id=args.recipient_agent_id,
+            dispatcher_id=args.dispatcher_id,
+            attempt_id=args.attempt_id,
+        ),
         args.fence,
-        args.attempt_id,
         args.adapter_kind,
         args.effect_kind,
         args.effect_id,
@@ -815,12 +839,14 @@ def _delivery_ack_outbox(store: Storage, args: argparse.Namespace) -> CommandRes
 
 def _delivery_fail_outbox(store: Storage, args: argparse.Namespace) -> CommandResult:
     return store.fail_outbox(
-        args.outbox_id,
-        args.event_id,
-        args.recipient_agent_id,
-        args.dispatcher_id,
+        OutboxDispatchIdentity(
+            outbox_id=args.outbox_id,
+            event_id=args.event_id,
+            recipient_agent_id=args.recipient_agent_id,
+            dispatcher_id=args.dispatcher_id,
+            attempt_id=args.attempt_id,
+        ),
         args.fence,
-        args.attempt_id,
         args.adapter_kind,
         args.reason,
         args.retry_at,
@@ -838,16 +864,18 @@ def _delivery_backlog(store: Storage, args: argparse.Namespace) -> CommandResult
 
 def _hook_register_runtime(store: Storage, args: argparse.Namespace) -> CommandResult:
     return store.register_runtime(
-        args.runtime_instance_id,
-        args.actor_agent_id,
-        args.harness_kind,
-        args.backend_kind,
-        args.session_ref,
-        args.endpoint,
-        args.runtime_generation,
-        args.status,
-        args.verified,
-        args.at,
+        RuntimeRegistrationCommand(
+            runtime_instance_id=args.runtime_instance_id,
+            actor_agent_id=args.actor_agent_id,
+            harness_kind=args.harness_kind,
+            backend_kind=args.backend_kind,
+            session_ref=args.session_ref,
+            endpoint=args.endpoint,
+            runtime_generation=args.runtime_generation,
+            status=args.status,
+            verified=args.verified,
+            at=args.at,
+        )
     ), None
 
 

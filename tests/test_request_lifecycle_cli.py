@@ -14,7 +14,14 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / "src"), str(ROOT / "tests")]
 
 from league import cli  # noqa: E402
-from request_lifecycle_fixture import GAREN_RUNTIME, create_context  # noqa: E402
+from league.sqlite_store import MAX_EXPORT_PAYLOAD_BYTES  # noqa: E402
+from league.storage import StorageRefusal  # noqa: E402
+from league.storage_request import MAX_TRIAGE_JSON_BYTES  # noqa: E402
+from request_lifecycle_fixture import (  # noqa: E402
+    GAREN_RUNTIME,
+    SyntheticLifecycleSeeder,
+    create_context,
+)
 from storage_fixture import SHOTCALLER_ID  # noqa: E402
 from storage_test_support import invoke_cli  # noqa: E402
 
@@ -37,6 +44,7 @@ def test_help_inventory_and_schemas() -> None:
         "request.dispatch",
         "request.route",
         "request.accept",
+        "request.awaiting-user",
         "request.block",
         "request.defer",
         "request.cancel",
@@ -53,6 +61,9 @@ def test_help_inventory_and_schemas() -> None:
         "hook.stop",
     }
     assert required <= set(inventory["commands"])
+    assert {f"request.{name}" for name in cli.REQUEST_STATE_COMMANDS} <= set(
+        inventory["commands"]
+    )
     assert inventory["lease_kinds"] == [
         "request_claim",
         "outbox_dispatch",
@@ -207,12 +218,68 @@ def test_stop_command(root: Path) -> None:
     assert stop["status"] == "blocked_once" and stop["decision"] == "block"
 
 
+def test_triage_refuses_oversized_json_before_decode(root: Path) -> None:
+    state, store, clock = create_context(root, "cli-triage-bound")
+    store.intake_prompt(
+        "prompt-cli-bound",
+        SHOTCALLER_ID,
+        GAREN_RUNTIME,
+        "codex",
+        "session:cli-bound",
+        "source:cli-bound",
+        "Synthetic bounded triage prompt",
+        clock.now(),
+    )
+    store.close()
+    payload = invoke_cli(
+        state,
+        "request",
+        "triage",
+        "--prompt-id",
+        "prompt-cli-bound",
+        "--items-json",
+        "[" + (" " * MAX_TRIAGE_JSON_BYTES) + "not-json",
+        "--at",
+        clock.now(),
+        expected=2,
+    )
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "invalid_json"
+    assert "bounded encoded size" in payload["error"]["message"]
+
+
+def test_export_refuses_prompt_payloads_over_byte_budget(root: Path) -> None:
+    _, store, clock = create_context(root, "export-payload-bound")
+    store.intake_prompt(
+        "prompt-export-bound",
+        SHOTCALLER_ID,
+        GAREN_RUNTIME,
+        "codex",
+        "session:export-bound",
+        "source:export-bound",
+        "Synthetic export payload",
+        clock.now(),
+    )
+    SyntheticLifecycleSeeder(store, clock).set_prompt_payload_body(
+        "prompt-export-bound", "x" * (MAX_EXPORT_PAYLOAD_BYTES + 1)
+    )
+    try:
+        store.export_bytes(format_name="json", purpose="rollback", max_records=10_000)
+    except StorageRefusal as exc:
+        assert exc.code == "export_payload_too_large"
+    else:
+        raise AssertionError("rollback export materialized an oversized prompt payload")
+    store.close()
+
+
 def main() -> None:
     test_help_inventory_and_schemas()
     with tempfile.TemporaryDirectory(prefix="league-request-cli-") as temporary:
         root = Path(temporary)
         test_request_commands(root)
         test_stop_command(root)
+        test_triage_refuses_oversized_json_before_decode(root)
+        test_export_refuses_prompt_payloads_over_byte_budget(root)
     print("PASS: machine-readable help/schemas and request/Stop CLI facade")
 
 

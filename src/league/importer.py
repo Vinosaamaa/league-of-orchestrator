@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .sqlite_store import _IMPORT_COLUMNS
+from .sqlite_project_ops import canonical_repository
 from .storage import ImportPlan, StorageRefusal
 from .storage_types import LIFECYCLE_STATES
 
@@ -322,19 +323,26 @@ class ImportPlanner:
         return entries
 
     def _ensure_project(self, repository: str, at: str) -> str:
-        known = self.project_by_repository.get(repository)
+        repository_value, repository_key = canonical_repository(repository)
+        known = self.project_by_repository.get(repository_key)
         if known:
             return known
-        project_id = f"project:{hashlib.sha256(repository.encode('utf-8')).hexdigest()[:24]}"
+        project_id = f"project:{hashlib.sha256(repository_key.encode('utf-8')).hexdigest()[:24]}"
         row = {
             "project_id": project_id,
-            "repository": repository,
+            "repository": repository_value,
             "state": "active",
             "version": 1,
             "updated_at": at,
+            "summary": "Imported project",
+            "root_path": None,
+            "repository_key": repository_key,
+            "root_key": None,
+            "code": None,
+            "code_key": None,
         }
         self.projects[project_id] = row
-        self.project_by_repository[repository] = project_id
+        self.project_by_repository[repository_key] = project_id
         return project_id
 
     def _ensure_task(

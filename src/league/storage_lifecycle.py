@@ -36,8 +36,6 @@ class LifecycleStorage(Protocol):
         self, callsign: str, agent_id: str, expected_version: int, at: str
     ) -> dict[str, Any]: ...
 
-    def resolve_project(self, repository: str) -> Optional[dict[str, Any]]: ...
-
     def transfer_task_owner(
         self,
         task_id: str,

@@ -1,0 +1,447 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Project Ledger · League issues 9 and 12</title>
+  <style>
+    :root {
+      --canvas: #edf2f7;
+      --paper: #ffffff;
+      --paper-blue: #f4f8fd;
+      --ink: #16243d;
+      --muted: #596a82;
+      --line: #c8d3e1;
+      --line-strong: #91a4bc;
+      --blue: #26547c;
+      --blue-soft: #eaf1fb;
+      --amber: #b87912;
+      --amber-soft: #fff4d6;
+      --jade: #3f7d6d;
+      --jade-soft: #e9f5f1;
+      --violet: #6f5a9b;
+      --violet-soft: #f0ecfa;
+      --danger: #9b3c4b;
+      --danger-soft: #fbecef;
+      --terminal: #111b2e;
+      --terminal-line: #31425e;
+      --terminal-text: #eef5ff;
+      --terminal-muted: #a7b7cc;
+      --shadow: 0 18px 45px rgba(22, 36, 61, 0.09);
+      --radius: 18px;
+      --display: "Avenir Next Condensed", "Avenir Next", "Helvetica Neue", sans-serif;
+      --body: "Avenir Next", "Helvetica Neue", Arial, sans-serif;
+      --mono: "SFMono-Regular", "Cascadia Mono", Menlo, monospace;
+    }
+
+    * { box-sizing: border-box; min-width: 0; }
+    html { scroll-behavior: smooth; overflow-x: clip; }
+    body {
+      margin: 0;
+      overflow-x: clip;
+      color: var(--ink);
+      background:
+        linear-gradient(rgba(38, 84, 124, 0.035) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(38, 84, 124, 0.035) 1px, transparent 1px),
+        var(--canvas);
+      background-size: 24px 24px;
+      font-family: var(--body);
+      line-height: 1.55;
+    }
+    a { color: var(--blue); text-underline-offset: 0.18em; }
+    :focus-visible { outline: 3px solid var(--amber); outline-offset: 3px; }
+    h1, h2, h3, p, td, th { overflow-wrap: anywhere; }
+    code, .mono { font-family: var(--mono); font-size: 0.9em; }
+
+    .skip-link {
+      position: relative;
+      display: block;
+      width: max-content;
+      margin: 12px 12px -18px;
+      padding: 10px 14px;
+      border-radius: 10px;
+      color: var(--paper);
+      background: var(--ink);
+      font: 700 0.72rem/1 var(--mono);
+      text-decoration: none;
+    }
+    .page-shell, .local-nav-inner {
+      width: min(1460px, calc(100% - 32px));
+      margin: 0 auto;
+    }
+
+    .masthead { padding: 46px 0 28px; }
+    .masthead-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.45fr) minmax(290px, 0.55fr);
+      gap: 28px;
+      align-items: end;
+    }
+    .eyebrow, .section-kicker, .micro-label {
+      margin: 0 0 9px;
+      color: var(--blue);
+      font: 700 0.76rem/1.2 var(--mono);
+      letter-spacing: 0.11em;
+      text-transform: uppercase;
+    }
+    h1 {
+      max-width: 1000px;
+      margin: 0;
+      font: 800 clamp(2.7rem, 7vw, 6.6rem)/0.89 var(--display);
+      letter-spacing: -0.045em;
+    }
+    h1 span { display: block; color: var(--blue); }
+    .lede {
+      max-width: 790px;
+      margin: 22px 0 0;
+      color: var(--muted);
+      font-size: clamp(1.02rem, 1.8vw, 1.3rem);
+    }
+    .decision-card {
+      padding: 20px;
+      border: 1px solid var(--line-strong);
+      border-radius: var(--radius);
+      background: rgba(255, 255, 255, 0.88);
+      box-shadow: var(--shadow);
+    }
+    .decision-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 14px;
+      padding: 7px 10px;
+      border-radius: 999px;
+      color: var(--jade);
+      background: var(--jade-soft);
+      font: 800 0.72rem/1 var(--mono);
+      text-transform: uppercase;
+    }
+    .decision-chip::before { width: 8px; height: 8px; border-radius: 50%; background: var(--jade); content: ""; }
+    .decision-card strong { display: block; font: 800 1.45rem/1.05 var(--display); }
+    .decision-card p { margin: 8px 0 0; color: var(--muted); }
+
+    .local-nav {
+      position: sticky;
+      z-index: 20;
+      top: 0;
+      border-block: 1px solid rgba(145, 164, 188, 0.75);
+      background: rgba(237, 242, 247, 0.94);
+      backdrop-filter: blur(14px);
+    }
+    .local-nav-inner {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      padding: 9px 0;
+    }
+    .local-nav a {
+      padding: 8px 11px;
+      border-radius: 9px;
+      color: var(--muted);
+      font: 700 0.75rem/1 var(--mono);
+      text-decoration: none;
+    }
+    .local-nav a:hover, .local-nav a:focus-visible { color: var(--ink); background: var(--paper); }
+    main { padding-bottom: 80px; }
+    .section {
+      margin: 28px 0;
+      padding: clamp(24px, 4vw, 50px);
+      border: 1px solid var(--line);
+      border-radius: calc(var(--radius) + 5px);
+      background: rgba(255, 255, 255, 0.95);
+      box-shadow: var(--shadow);
+    }
+    .section-header {
+      display: grid;
+      grid-template-columns: minmax(0, 0.72fr) minmax(0, 1.28fr);
+      gap: 26px;
+      align-items: start;
+      margin-bottom: 30px;
+    }
+    h2 { margin: 0; font: 800 clamp(2rem, 4vw, 3.7rem)/0.97 var(--display); letter-spacing: -0.035em; }
+    h3 { margin: 0 0 10px; font: 800 1.45rem/1.05 var(--display); }
+    .section-header > p { max-width: 780px; margin: 4px 0 0; color: var(--muted); font-size: 1.03rem; }
+
+    .principles { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+    .principle { padding: 18px; border: 1px solid var(--line); border-radius: 14px; background: var(--paper-blue); }
+    .principle strong { display: block; margin-bottom: 5px; font: 800 1.1rem/1.1 var(--display); }
+    .principle p { margin: 0; color: var(--muted); }
+
+    .terminal {
+      overflow: hidden;
+      border: 1px solid #0c1422;
+      border-radius: 16px;
+      color: var(--terminal-text);
+      background: var(--terminal);
+      box-shadow: 0 22px 48px rgba(17, 27, 46, 0.2);
+    }
+    .terminal-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 15px;
+      padding: 11px 15px;
+      border-bottom: 1px solid var(--terminal-line);
+      color: var(--terminal-muted);
+      font: 700 0.7rem/1.2 var(--mono);
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    .terminal-lights { display: flex; gap: 7px; }
+    .terminal-lights i { display: block; width: 8px; height: 8px; border-radius: 50%; background: var(--terminal-line); }
+    .terminal-screen { padding: clamp(16px, 3vw, 28px); font: 600 clamp(0.69rem, 1.4vw, 0.92rem)/1.65 var(--mono); }
+    .terminal-line { display: grid; grid-template-columns: 2.4ch minmax(0, 1fr); gap: 8px; }
+    .terminal-line + .terminal-line { margin-top: 3px; }
+    .terminal-line.header { display: block; padding-bottom: 10px; margin-bottom: 10px; border-bottom: 1px solid var(--terminal-line); color: var(--terminal-muted); }
+    .terminal-line.project { margin-top: 13px; color: #b9d9ff; }
+    .terminal-line.detail { margin-top: 12px; padding-top: 11px; border-top: 1px solid var(--terminal-line); color: var(--terminal-muted); }
+    .sigil { color: var(--terminal-muted); font-weight: 900; }
+    .sigil.blocked { color: #ffb0bb; }
+    .sigil.ready { color: #9ce1ca; }
+    .sigil.active { color: #b9d9ff; }
+    .task { color: var(--terminal-text); }
+    .terminal .dim { color: var(--terminal-muted); }
+
+    .options { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+    .option { position: relative; padding: 21px; border: 1px solid var(--line); border-radius: 16px; background: var(--paper); }
+    .option.recommended { border: 2px solid var(--blue); background: var(--blue-soft); }
+    .option-badge { display: inline-block; margin-bottom: 15px; padding: 5px 8px; border-radius: 7px; color: var(--blue); background: var(--paper); font: 800 0.68rem/1 var(--mono); text-transform: uppercase; }
+    .option ul { padding-left: 1.15rem; margin: 13px 0 0; color: var(--muted); }
+    .option li + li { margin-top: 5px; }
+    .cost { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); color: var(--danger); font-size: 0.92rem; }
+
+    .table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 14px; }
+    table { width: 100%; border-collapse: collapse; background: var(--paper); }
+    caption { padding: 14px 16px; color: var(--muted); text-align: left; font-size: 0.9rem; }
+    th, td { padding: 13px 15px; border-top: 1px solid var(--line); text-align: left; vertical-align: top; }
+    th { color: var(--blue); background: var(--paper-blue); font: 800 0.72rem/1.25 var(--mono); letter-spacing: 0.06em; text-transform: uppercase; }
+    td { font-size: 0.94rem; }
+    td:first-child { font-weight: 750; }
+
+    .states { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 13px; }
+    details.state { border: 1px solid var(--line); border-radius: 13px; background: var(--paper); }
+    details.state[open] { box-shadow: 0 8px 20px rgba(22, 36, 61, 0.07); }
+    details.state summary { cursor: pointer; padding: 15px 17px; font: 800 0.85rem/1.35 var(--mono); list-style-position: inside; }
+    details.state p { margin: 0; padding: 0 17px 16px; color: var(--muted); }
+    .blocked-state summary { color: var(--danger); }
+    .ready-state summary { color: var(--jade); }
+    .stale-state summary { color: var(--amber); }
+
+    .contract-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+    .contract-card { padding: 20px; border: 1px solid var(--line); border-radius: 15px; background: var(--paper-blue); }
+    .contract-card ul { margin: 12px 0 0; padding-left: 1.2rem; }
+    .contract-card li + li { margin-top: 7px; }
+    .slice {
+      display: grid;
+      grid-template-columns: minmax(0, 0.65fr) minmax(0, 1.35fr);
+      gap: 22px;
+      padding: 24px;
+      border-left: 6px solid var(--jade);
+      border-radius: 8px 16px 16px 8px;
+      background: var(--jade-soft);
+    }
+    .slice p { margin: 0; color: var(--muted); }
+    .slice ol { margin: 0; padding-left: 1.2rem; }
+    .slice li + li { margin-top: 7px; }
+    .boundary {
+      margin-top: 20px;
+      padding: 16px 18px;
+      border: 1px solid #e9c2c9;
+      border-radius: 13px;
+      color: #732d39;
+      background: var(--danger-soft);
+    }
+    footer { padding: 4px 0 45px; color: var(--muted); font-size: 0.9rem; }
+
+    @media (max-width: 900px) {
+      .masthead-grid, .section-header, .slice { grid-template-columns: 1fr; }
+      .principles, .options { grid-template-columns: 1fr; }
+      .contract-grid, .states { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 560px) {
+      .page-shell, .local-nav-inner { width: min(100% - 20px, 1460px); }
+      .masthead { padding-top: 28px; }
+      .section { padding: 21px 16px; border-radius: 17px; }
+      .terminal-screen { padding: 14px 11px; }
+      .terminal-line { grid-template-columns: 2ch minmax(0, 1fr); gap: 5px; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      html { scroll-behavior: auto; }
+    }
+    @media print {
+      body { background: white; }
+      .local-nav { display: none; }
+      .section, .decision-card { box-shadow: none; }
+    }
+  </style>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to design decision</a>
+
+  <header class="masthead page-shell">
+    <div class="masthead-grid">
+      <div>
+        <p class="eyebrow">League of Orchestrator · issues 9 + 12</p>
+        <h1>See the League. <span>Do not command it.</span></h1>
+        <p class="lede">A small advisory project catalog and one bounded project-grouped Roster snapshot, followed by a terminal design that remains rigorously read-only.</p>
+      </div>
+      <aside class="decision-card" aria-label="Design decision">
+        <span class="decision-chip">Selected direction</span>
+        <strong>Project Ledger</strong>
+        <p>One vertical terminal hierarchy from project to exact evidence. The controller and every mutation key remain out of scope.</p>
+      </aside>
+    </div>
+  </header>
+
+  <nav class="local-nav" aria-label="Artifact sections">
+    <div class="local-nav-inner">
+      <a href="#contract">Contract</a>
+      <a href="#prototype">Prototype</a>
+      <a href="#options">Options</a>
+      <a href="#fields">Field audit</a>
+      <a href="#states">States</a>
+      <a href="#behavior">Behavior</a>
+      <a href="#slice">Later slice</a>
+    </div>
+  </nav>
+
+  <main id="main" class="page-shell">
+    <section id="contract" class="section">
+      <div class="section-header">
+        <div>
+          <p class="section-kicker">01 · authority</p>
+          <h2>A lens, never a second store</h2>
+        </div>
+        <p>The catalog recognizes projects and names suggested Squads. The Roster snapshot groups canonical facts inside one bounded read transaction. Neither surface can assign, route, rewrite history, copy instructions, or infer success.</p>
+      </div>
+      <div class="principles">
+        <article class="principle"><strong>Explicit wins</strong><p>A user’s route is displayed separately. Suggestions never override or replace it.</p></article>
+        <article class="principle"><strong>Unavailable stays named</strong><p>A retired Squad remains visible with a reason. Work is not silently rebound.</p></article>
+        <article class="principle"><strong>Evidence stays exact</strong><p>Every claim links to table, key, version, and the latest event or transition when present.</p></article>
+      </div>
+    </section>
+
+    <section id="prototype" class="section">
+      <div class="section-header">
+        <div>
+          <p class="section-kicker">02 · selected layout</p>
+          <h2>The Project Ledger</h2>
+        </div>
+        <p>The signature project rail keeps hierarchy visible without relying on wide columns. Status always has a symbol and a full word; the selected row opens a read-only evidence pane.</p>
+      </div>
+      <div class="terminal" role="img" aria-label="Synthetic terminal mockup of the selected Project Ledger layout showing blocked, ready, active, and stale work">
+        <div class="terminal-bar"><span>league roster · synthetic snapshot</span><span class="terminal-lights" aria-hidden="true"><i></i><i></i><i></i></span></div>
+        <div class="terminal-screen">
+          <div class="terminal-line header">LEAGUE · 12:00:00Z &nbsp; ! 2 NEED ACTION &nbsp; &gt; 4 UNDERWAY &nbsp; R 1 READY &nbsp; ~ 1 STALE</div>
+          <div class="terminal-line project"><span class="sigil">v</span><span>PROJECT ALPHA <span class="dim">[ALPHA] · suggested SQUAD NORTH, SQUAD WEST</span></span></div>
+          <div class="terminal-line"><span class="sigil blocked">!</span><span>BLOCKED &nbsp; SQUAD NORTH &gt; CHAMPION A &nbsp; <span class="task">task:compile-contract</span> &nbsp; <span class="dim">08m</span></span></div>
+          <div class="terminal-line"><span></span><span class="dim">blocker: waiting for synthetic fixture · next: verify bounded fixture</span></div>
+          <div class="terminal-line"><span class="sigil ready">R</span><span>READY &nbsp;&nbsp;&nbsp; SQUAD WEST &gt; CHAMPION B &nbsp; <span class="task">task:review-candidate</span> &nbsp; <span class="dim">03m</span></span></div>
+          <div class="terminal-line project"><span class="sigil">v</span><span>PROJECT BETA <span class="dim">[BETA] · suggested SQUAD NORTH</span></span></div>
+          <div class="terminal-line"><span class="sigil active">&gt;</span><span>ACTIVE &nbsp;&nbsp; SQUAD NORTH &gt; CHAMPION C &nbsp; <span class="task">task:write-tests</span> &nbsp; <span class="dim">01m</span></span></div>
+          <div class="terminal-line"><span class="sigil">~</span><span>STALE &nbsp;&nbsp;&nbsp; SQUAD NORTH &gt; CHAMPION D &nbsp; <span class="task">task:verify-contract</span> &nbsp; <span class="dim">2h</span></span></div>
+          <div class="terminal-line detail"><span aria-hidden="true">·</span><span>DETAIL · task:compile-contract · version 4<br>Evidence · tasks/task:compile-contract@4 · events/event:synthetic-42</span></div>
+        </div>
+      </div>
+    </section>
+
+    <section id="options" class="section">
+      <div class="section-header">
+        <div><p class="section-kicker">03 · comparison</p><h2>Three low-cost shapes</h2></div>
+        <p>All three can be rendered from the same snapshot. The decision turns on project hierarchy, narrow-terminal behavior, and evidence drill-down—not visual novelty.</p>
+      </div>
+      <div class="options">
+        <article class="option recommended">
+          <span class="option-badge">Recommended · A</span>
+          <h3>Project Ledger</h3>
+          <ul><li>Single semantic reading order</li><li>Project context survives 80 columns</li><li>Natural selected-row evidence pane</li></ul>
+          <p class="cost"><strong>Cost:</strong> cross-project status comparison needs filter or search.</p>
+        </article>
+        <article class="option">
+          <span class="option-badge">Alternative · B</span>
+          <h3>Status Columns</h3>
+          <ul><li>Fast blocked-versus-ready comparison</li><li>Familiar wide-screen scan</li><li>Project names repeat in every lane</li></ul>
+          <p class="cost"><strong>Cost:</strong> horizontal movement and narrow terminals fight the hierarchy.</p>
+        </article>
+        <article class="option">
+          <span class="option-badge">Fallback · C</span>
+          <h3>Plain Report</h3>
+          <ul><li>Best for pipes and print</li><li>No focus model</li><li>Smallest renderer</li></ul>
+          <p class="cost"><strong>Cost:</strong> weak frequent scanning and no persistent detail context.</p>
+        </article>
+      </div>
+    </section>
+
+    <section id="fields" class="section">
+      <div class="section-header">
+        <div><p class="section-kicker">04 · source audit</p><h2>Only reliable fields cross the boundary</h2></div>
+        <p>Persisted canonical observations may be shown. Capability, liveness, delivery, task completion, request answer, and landing remain separate claims.</p>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <caption>Minimum reliable data available to the read-only design</caption>
+          <thead><tr><th scope="col">Source</th><th scope="col">Use now</th><th scope="col">Never infer</th></tr></thead>
+          <tbody>
+            <tr><td>Project catalog</td><td>ID, label, state, version, ordered suggested Squads; exact roots/remotes only in local visibility</td><td>Suggestion as ownership or routing authority</td></tr>
+            <tr><td>Squads + agents</td><td>Squad state; callsign, role, status, update time, update, blocker, next action</td><td>Live-looking process as task success</td></tr>
+            <tr><td>Tasks + requests</td><td>Project, owner, state, version, request relation, unresolved state</td><td>Completed task as answered request</td></tr>
+            <tr><td>Events + transitions</td><td>Recent material state, blocker, next action, exact evidence identity</td><td>Transport attempt as recipient acknowledgement</td></tr>
+            <tr><td>Watcher + runtime</td><td>Future detail: persisted verified observation and age</td><td>Capability as liveness; silence as health</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="states" class="section">
+      <div class="section-header">
+        <div><p class="section-kicker">05 · state specimens</p><h2>Words carry the state</h2></div>
+        <p>Open any specimen to see the required explanation. Symbols remain redundant cues, so no meaning depends on color alone.</p>
+      </div>
+      <div class="states">
+        <details class="state"><summary>- EMPTY · No current Roster entries</summary><p>Show snapshot time and filters. Do not invite a write action.</p></details>
+        <details class="state"><summary>&gt; ACTIVE · CHAMPION A · task:write-tests · 01m</summary><p>Show project and Squad ancestry, then the exact task evidence.</p></details>
+        <details class="state blocked-state" open><summary>! BLOCKED · CHAMPION A · task:compile-contract · 08m</summary><p>Show blocker and next action, or the literal “not recorded.”</p></details>
+        <details class="state ready-state" open><summary>R READY · CHAMPION B · task:review-candidate · 03m</summary><p>Spell out ready_to_land in details. Never imply merged, deployed, installed, or released.</p></details>
+        <details class="state stale-state"><summary>~ STALE · CHAMPION C · task:verify-contract · 2h</summary><p>Show the threshold and last canonical update. Never infer a dead runtime.</p></details>
+        <details class="state"><summary>X UNAVAILABLE · SQUAD WEST · Shotcaller unavailable</summary><p>Preserve the named suggestion. Never substitute another Squad.</p></details>
+        <details class="state"><summary>+ 198 MORE · snapshot truncated at 200 items</summary><p>Name the exact bound. Do not silently fetch or merge another snapshot.</p></details>
+        <details class="state blocked-state"><summary>! SNAPSHOT FAILED · storage_busy · retryable</summary><p>Keep error code and retryability visible. Never render failure as an empty Roster.</p></details>
+      </div>
+    </section>
+
+    <section id="behavior" class="section">
+      <div class="section-header">
+        <div><p class="section-kicker">06 · interaction contract</p><h2>Navigation without command authority</h2></div>
+        <p>The future process reads at startup and on explicit refresh. Focus is restored by exact entity ID after a schema-complete replacement snapshot.</p>
+      </div>
+      <div class="contract-grid">
+        <article class="contract-card"><h3>Move and inspect</h3><ul><li><span class="mono">j/k</span> or arrows move rows</li><li><span class="mono">h/l</span> collapse or expand</li><li><span class="mono">Enter</span> opens read-only detail</li><li><span class="mono">/</span>, <span class="mono">N/n</span>, <span class="mono">r</span>, <span class="mono">?</span>, and <span class="mono">q</span> map to focusable Filter, Previous, Next, Refresh, Help, and Exit controls activated with <span class="mono">Enter</span></li></ul></article>
+        <article class="contract-card"><h3>Refresh and fail honestly</h3><ul><li><span class="mono">r</span> requests exactly one new snapshot</li><li>No automatic polling in the first slice</li><li>Malformed or partial responses never render</li><li>Old in-memory view is marked stale after failure</li><li>Runtime unavailable remains unknown, not failed</li></ul></article>
+        <article class="contract-card"><h3>Accessible by construction</h3><ul><li>Status symbol plus full word</li><li><span class="mono">NO_COLOR</span> and ASCII fallbacks</li><li>One top-to-bottom reading order</li><li>Reserved line announces refresh and focus changes</li><li><span class="mono">TERM=dumb</span> emits the plain report</li></ul></article>
+        <article class="contract-card"><h3>Truncate deliberately</h3><ul><li>Below 80 columns, hide aliases then repeated Squad then age</li><li>Never hide status, selected callsign, task ID, blocker marker, or bound</li><li>Wrap full values in details</li><li>No horizontal scrolling</li><li>No durable UI cache</li></ul></article>
+      </div>
+      <div class="boundary"><strong>No action keys:</strong> assign, route, send, merge, deploy, stop, teardown, and retry-work are categorically outside this design.</div>
+    </section>
+
+    <section id="slice" class="section">
+      <div class="section-header">
+        <div><p class="section-kicker">07 · implementation boundary</p><h2>The smallest later slice</h2></div>
+        <p>A separate issue may implement the selected layout only after acceptance. It consumes the stable snapshot; it does not extend canonical state.</p>
+      </div>
+      <div class="slice">
+        <div><h3>Read-only renderer</h3><p>One process, one stable snapshot facade, one vertical hierarchy.</p></div>
+        <ol>
+          <li>Read one local-only <span class="mono">league.roster-snapshot.v1</span> value without logging or exporting private fields.</li>
+          <li>Validate the response completely before replacing the view.</li>
+          <li>Render Project Ledger navigation, details, help, and manual refresh.</li>
+          <li>Cover empty, active, blocked, ready, stale, unavailable, large, and failure states with synthetic golden tests.</li>
+          <li>Exclude adapters, root/repository display, polling, pagination, persistence, actions, and controller behavior.</li>
+        </ol>
+      </div>
+    </section>
+  </main>
+
+  <footer class="page-shell">Synthetic design artifact · no private paths, repositories, sessions, or live Roster data · visual source: the repository’s issue-21 review system.</footer>
+</body>
+</html>

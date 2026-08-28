@@ -144,3 +144,21 @@ parity remain unrecorded/unverified where no authoritative versioned source
 bytes were proved. Per-copy hashes use League's documented deterministic tree
 hash, while duplicate parity compares those declared copy hashes. No installed
 skill, global config, hook, adapter, or runtime was modified.
+
+## Project catalog and terminal Roster design provenance
+
+The issue-#9 advisory catalog, project-grouped snapshot, stable project/Roster
+commands and schemas, synthetic tests, issue-#12 Markdown design, and matching
+HTML review artifact are original League implementation. They extend only the
+canonical repository-local storage facade. They do not modify the filesystem
+watcher, install files, read live Roster records, call live runtime adapters,
+change task/request ownership, copy project instructions, or implement an
+interactive TUI/controller.
+
+Migration v5 is contiguous and named
+`advisory-project-catalog-and-roster-indexes`, checksum
+`5477db9879d6a4a9a29bb8188b398bd6db9a7a786e40e86ab819a0a938790faf`.
+It adds project fields, aliases, ordered suggested Squads, and bounded Roster
+lookup indexes without rewriting migrations 1 through 4. Exact repository and
+root data is local-only; outbound catalog/Roster reads and inspection exports
+redact it. All tests use isolated synthetic state roots and fake identities.

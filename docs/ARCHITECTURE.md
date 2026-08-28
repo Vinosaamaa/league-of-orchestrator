@@ -12,10 +12,11 @@
 - **Lead**: an optional relay destination, never a superior authority or
   scheduler.
 
-Disposable Shotcaller handoff and project aliases remain planned work. The
+Disposable Shotcaller handoff remains planned work. The
 storage layer now implements the canonical prompt/request lifecycle, exact
-owner return, adapter-neutral runtime binding, and recoverable teardown; it
-does not implement autonomous planning or runtime handoff.
+owner return, adapter-neutral runtime binding, recoverable teardown, advisory
+project catalog, and bounded project-grouped Roster; it does not implement
+autonomous planning, runtime handoff, or an interactive Roster controller.
 
 ## Current modules
 
@@ -31,12 +32,12 @@ The repository keeps the proven runtime and new storage boundary separate:
 - `tests/` exercises the imported behavior with temporary synthetic fixtures.
 - `src/league/storage.py` composes the only domain-facing persistence interface
   from cohesive administrative, lifecycle, request, assignment, outbox,
-  watcher, delivery, and transfer protocols;
+  watcher, delivery, transfer, project, and Roster protocols;
   `storage_types.py` owns the stable refusal and typed import-plan contract.
 - `src/league/sqlite_store.py` is the sole SQLite implementation and facade.
   `sqlite_core.py` owns the shared transaction mechanics; focused
   `sqlite_*_ops.py` modules own lifecycle, request, assignment, delivery,
-  watcher, import, and export SQL,
+  watcher, catalog, Roster, import, and export SQL,
   while the facade owns connection policy, migrations, integrity, and backup.
 - `src/league/importer.py` strictly decodes the explicit issue-#18 manifest and
   produces an in-memory plan; it never opens a database or writes legacy files.
@@ -129,6 +130,13 @@ The repository-local SQLite path is separately testable:
 13. Skill roots remain external file-owned inputs. The repository stores only
     public labels, identity/provenance/version/capability declarations, content
     hashes, and sanitized parity receipts; it stores no root path or skill body.
+14. Project aliases, codes, exact roots/repositories, and ordered suggested
+    Squads are versioned catalog facts. Suggestion changes never mutate tasks,
+    assignments, requests, events, or instructions; explicit routing stays
+    separate and authoritative.
+15. `league.roster-snapshot.v1` groups current work from one bounded read
+    transaction. It is non-canonical, has explicit limits/truncation, and links
+    every item to exact canonical keys without persisting a report cache.
 
 `src/agent_watcher.py` does not import `league`. The filesystem baseline is the
 only live writer until issue #23 switches every consumer at one authorized

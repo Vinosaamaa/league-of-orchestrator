@@ -7,6 +7,7 @@ from .storage_assignment import AssignmentStorage, PrepareAssignmentCommand
 from .storage_delivery import DeliveryStorage
 from .storage_lifecycle import LifecycleStorage
 from .storage_outbox import OutboxDispatchIdentity, OutboxStorage
+from .storage_project import ProjectStorage
 from .storage_request import (
     AnswerRequestCommand,
     DispatchRequestCommand,
@@ -14,6 +15,7 @@ from .storage_request import (
     RequestStorage,
 )
 from .storage_runtime import RuntimeLifecycleStorage
+from .storage_roster import RosterStorage
 from .storage_transfer import TransferStorage
 from .storage_watcher import RuntimeRegistrationCommand, WatcherStorage
 from .storage_types import (
@@ -35,6 +37,8 @@ class Storage(
     OutboxStorage,
     WatcherStorage,
     RuntimeLifecycleStorage,
+    ProjectStorage,
+    RosterStorage,
 ):
     """The only domain-facing persistence interface.
 

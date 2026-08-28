@@ -382,7 +382,7 @@
     },
     "cutoverCase": {
       "type": "object",
-      "required": ["fault_stage", "terminal_state", "final_generation", "history", "max_active_writers", "lock_exclusive", "coherent", "journal_state", "startup_reconciled"],
+      "required": ["fault_stage", "terminal_state", "final_generation", "history", "max_active_writers", "lock_exclusive", "coherent", "journal_state", "startup_reconciled", "process_restart_simulated", "crash_signal", "recovery_exit"],
       "properties": {
         "fault_stage": {"oneOf": [{"$ref": "#/$defs/faultStage"}, {"type": "null"}]},
         "terminal_state": {"enum": ["completed", "blocked"]},
@@ -392,7 +392,10 @@
         "lock_exclusive": {"const": true},
         "coherent": {"const": true},
         "journal_state": {"enum": ["completed", "reconciled"]},
-        "startup_reconciled": {"type": "boolean"}
+        "startup_reconciled": {"type": "boolean"},
+        "process_restart_simulated": {"type": "boolean"},
+        "crash_signal": {"oneOf": [{"const": "SIGKILL"}, {"type": "null"}]},
+        "recovery_exit": {"oneOf": [{"const": 0}, {"type": "null"}]}
       },
       "additionalProperties": false
     },

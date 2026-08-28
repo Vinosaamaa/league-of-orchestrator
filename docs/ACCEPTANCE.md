@@ -42,16 +42,18 @@ supplied state root. It leaves an owner-only
   deployment, and hook adapters;
 - byte, parsed-config, and synthetic-process sentinel parity;
 - transactional schema migration, strict dry-run import, isolated apply, and
-  exact fixture-row parity;
+  exact fixture-row parity, with source/report/parity digests pinned to a fixed
+  synthetic runtime root so receipts are independent of the temporary root;
 - source/release/staged byte and version parity, launcher/help/JSON-Schema
   checks, a staged-runtime schema migration and integrity check, synthetic hook
   fixtures, permissions, path-leak refusal, and tested pointer rollback beneath
   a task-owned prefix;
 - one sandbox-only generation-bound writer pointer and exclusive cutover lock;
-- every pointer-switch fault stage, a durable recovery journal reconciled after
-  a simulated process restart under the exclusive lock, resumable operation
-  histories, coherent old/new recovery, and the invariant that no scenario
-  activates two writers;
+- every pointer-switch fault stage, with a real child process stopped by
+  `SIGKILL` and a separate recovery process reconstructing state only from the
+  durable journal under the exclusive lock, resumable operation histories,
+  coherent old/new recovery, and the invariant that no scenario activates two
+  writers;
 - exact fake canary registration and identity-bound cleanup.
 
 The request, assignment, watcher, Stop, and teardown assertions remain

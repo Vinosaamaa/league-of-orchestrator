@@ -13,6 +13,7 @@ import importlib.util
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -46,6 +47,7 @@ PENDING_SLICES = (
     ("teardown", 11),
 )
 UNVERIFIED_RUNTIMES = ("codex", "cursor", "pi", "herdr", "tmux")
+FIXTURE_RUNTIME_ROOT = Path("/synthetic/league-acceptance-runtime")
 
 
 def _stable_bytes(value: Any) -> bytes:
@@ -276,7 +278,9 @@ def _migration_shadow(home: Path, source_root: Path) -> dict[str, Any]:
     state_root = home / "state"
     legacy_root.mkdir(mode=0o700)
     state_root.mkdir(mode=0o700)
-    fixture = fixture_module.write_complete_fixture(legacy_root)
+    fixture = fixture_module.write_complete_fixture(
+        legacy_root, runtime_root=FIXTURE_RUNTIME_ROOT
+    )
     legacy_before = _tree_snapshot(legacy_root)["digest"]
     with SQLiteStorage.for_migration(state_root, request_wal=False) as store:
         migration = store.migrate()
@@ -613,19 +617,25 @@ def _operation_write(
     _write_json(path, receipt)
 
 
-class _InjectedCutoverCrash(RuntimeError):
-    pass
+CUTOVER_CHILD_ERROR_EXIT = 87
+CUTOVER_RECOVERY_ERROR_EXIT = 88
 
 
 def _set_sandbox_writers(
     path: Path,
     values: list[dict[str, str]],
-    history: list[list[str]],
+    history_path: Path,
 ) -> None:
     if len(values) > 1:
         raise StorageRefusal("dual_writer", "two canonical writers are forbidden")
     _write_json(path, {"active": values})
+    history = (
+        json.loads(history_path.read_text(encoding="utf-8"))["snapshots"]
+        if history_path.exists()
+        else []
+    )
     history.append([item["generation"] for item in values])
+    _write_json(history_path, {"snapshots": history})
 
 
 def _coherent_sandbox_writer(pointer_path: Path, writers_path: Path) -> dict[str, Any]:
@@ -657,34 +667,119 @@ def _write_cutover_journal(
     _write_json(path, value)
 
 
-def _inject_cutover_crash(fault_stage: Optional[str], stage: str) -> None:
+def _hard_crash_cutover_process(fault_stage: Optional[str], stage: str) -> None:
     if fault_stage == stage:
-        raise _InjectedCutoverCrash(stage)
+        os.kill(os.getpid(), signal.SIGKILL)
+        os._exit(CUTOVER_CHILD_ERROR_EXIT)
 
 
-def _reconcile_cutover_startup(
+def _execute_cutover_switch(
     root: Path,
     context: DeterministicContext,
     old: dict[str, str],
     new: dict[str, str],
-    writer_history: list[list[str]],
-    operation: dict[str, Any],
+    fault_stage: Optional[str],
+) -> None:
+    lock_path = root / "cutover.lock"
+    pointer_path = root / "writer-pointer.json"
+    writers_path = root / "writers.json"
+    writer_history_path = root / "writer-history.json"
+    journal_path = root / "cutover-journal.json"
+    operation_path = root / "operation.json"
+    receipt = json.loads(operation_path.read_text(encoding="utf-8"))
+    with lock_path.open("a+b") as lock_handle:
+        fcntl.flock(lock_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        second = lock_path.open("a+b")
+        try:
+            try:
+                fcntl.flock(second, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                lock_exclusive = True
+            else:
+                lock_exclusive = False
+                fcntl.flock(second, fcntl.LOCK_UN)
+        finally:
+            second.close()
+        if not lock_exclusive:
+            raise StorageRefusal(
+                "cutover_lock_failed", "exclusive cutover lock was not exclusive"
+            )
+        _operation_write(
+            operation_path, receipt, "executing", context, stage="lock_acquired"
+        )
+        _write_cutover_journal(
+            journal_path, old, new, "lock_acquired", "executing"
+        )
+        _hard_crash_cutover_process(fault_stage, "lock_acquired")
+        _write_json(root / "pointer-backup.json", old)
+        _write_cutover_journal(
+            journal_path, old, new, "backup_recorded", "executing"
+        )
+        _hard_crash_cutover_process(fault_stage, "backup_recorded")
+        _set_sandbox_writers(writers_path, [], writer_history_path)
+        _write_cutover_journal(
+            journal_path, old, new, "old_writer_quiesced", "executing"
+        )
+        _hard_crash_cutover_process(fault_stage, "old_writer_quiesced")
+        _write_json(root / "pointer.next.json", new)
+        _write_cutover_journal(
+            journal_path, old, new, "pointer_prepared", "executing"
+        )
+        _hard_crash_cutover_process(fault_stage, "pointer_prepared")
+        os.replace(root / "pointer.next.json", pointer_path)
+        _write_cutover_journal(
+            journal_path, old, new, "pointer_switched", "executing"
+        )
+        _hard_crash_cutover_process(fault_stage, "pointer_switched")
+        _set_sandbox_writers(writers_path, [new], writer_history_path)
+        _write_cutover_journal(
+            journal_path, old, new, "new_writer_activated", "executing"
+        )
+        _hard_crash_cutover_process(fault_stage, "new_writer_activated")
+        _coherent_sandbox_writer(pointer_path, writers_path)
+        _write_cutover_journal(
+            journal_path, old, new, "generation_verified", "executing"
+        )
+        _hard_crash_cutover_process(fault_stage, "generation_verified")
+        _operation_write(operation_path, receipt, "completed", context, outcome="new")
+        _write_cutover_journal(
+            journal_path,
+            old,
+            new,
+            "generation_verified",
+            "completed",
+            selected_generation=new["generation"],
+        )
+
+
+def _reconcile_cutover_startup(
+    root: Path,
     *,
     resume: bool,
 ) -> dict[str, Any]:
     lock_path = root / "cutover.lock"
     pointer_path = root / "writer-pointer.json"
     writers_path = root / "writers.json"
+    writer_history_path = root / "writer-history.json"
     journal_path = root / "cutover-journal.json"
     operation_path = root / "operation.json"
+    operation = json.loads(operation_path.read_text(encoding="utf-8"))
+    context = DeterministicContext()
     with lock_path.open("a+b") as lock_handle:
         fcntl.flock(lock_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
         journal = json.loads(journal_path.read_text(encoding="utf-8"))
+        old = journal.get("old")
+        new = journal.get("new")
         if (
             journal.get("schema") != "league.cutover-journal.v1"
             or journal.get("state") != "executing"
-            or journal.get("old") != old
-            or journal.get("new") != new
+            or not isinstance(old, dict)
+            or not isinstance(new, dict)
+            or set(old) != {"schema", "generation", "writer", "version"}
+            or set(new) != {"schema", "generation", "writer", "version"}
+            or old.get("schema") != "league.writer-pointer.v1"
+            or new.get("schema") != "league.writer-pointer.v1"
+            or old.get("generation") == new.get("generation")
             or journal.get("stage") != operation["fault_stage"]
         ):
             raise StorageRefusal(
@@ -695,7 +790,7 @@ def _reconcile_cutover_startup(
             raise StorageRefusal(
                 "cutover_recovery_failed", "cutover pointer is not a journal generation"
             )
-        _set_sandbox_writers(writers_path, [selected], writer_history)
+        _set_sandbox_writers(writers_path, [selected], writer_history_path)
         _coherent_sandbox_writer(pointer_path, writers_path)
         _write_cutover_journal(
             journal_path,
@@ -732,9 +827,9 @@ def _cutover_case(
     resume: bool,
 ) -> dict[str, Any]:
     root.mkdir(parents=True, mode=0o700)
-    lock_path = root / "cutover.lock"
     pointer_path = root / "writer-pointer.json"
     writers_path = root / "writers.json"
+    writer_history_path = root / "writer-history.json"
     operation_path = root / "operation.json"
     journal_path = root / "cutover-journal.json"
     old = {
@@ -750,8 +845,7 @@ def _cutover_case(
         "version": __version__,
     }
     _write_json(pointer_path, old)
-    writer_history: list[list[str]] = []
-    _set_sandbox_writers(writers_path, [old], writer_history)
+    _set_sandbox_writers(writers_path, [old], writer_history_path)
     receipt = {
         "schema": "league.cutover-operation.v1",
         "operation_id": context.identifier("cutover-operation"),
@@ -759,85 +853,48 @@ def _cutover_case(
         "history": [],
     }
     _operation_write(operation_path, receipt, "planned", context)
-    try:
-        with lock_path.open("a+b") as lock_handle:
-            fcntl.flock(lock_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            second = lock_path.open("a+b")
-            try:
-                try:
-                    fcntl.flock(second, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                except BlockingIOError:
-                    lock_exclusive = True
-                else:
-                    lock_exclusive = False
-                    fcntl.flock(second, fcntl.LOCK_UN)
-            finally:
-                second.close()
-            if not lock_exclusive:
-                raise StorageRefusal(
-                    "cutover_lock_failed", "exclusive cutover lock was not exclusive"
-                )
-            _operation_write(
-                operation_path, receipt, "executing", context, stage="lock_acquired"
-            )
-            _write_cutover_journal(
-                journal_path, old, new, "lock_acquired", "executing"
-            )
-            _inject_cutover_crash(fault_stage, "lock_acquired")
-            _write_json(root / "pointer-backup.json", old)
-            _write_cutover_journal(
-                journal_path, old, new, "backup_recorded", "executing"
-            )
-            _inject_cutover_crash(fault_stage, "backup_recorded")
-            _set_sandbox_writers(writers_path, [], writer_history)
-            _write_cutover_journal(
-                journal_path, old, new, "old_writer_quiesced", "executing"
-            )
-            _inject_cutover_crash(fault_stage, "old_writer_quiesced")
-            _write_json(root / "pointer.next.json", new)
-            _write_cutover_journal(
-                journal_path, old, new, "pointer_prepared", "executing"
-            )
-            _inject_cutover_crash(fault_stage, "pointer_prepared")
-            os.replace(root / "pointer.next.json", pointer_path)
-            _write_cutover_journal(
-                journal_path, old, new, "pointer_switched", "executing"
-            )
-            _inject_cutover_crash(fault_stage, "pointer_switched")
-            _set_sandbox_writers(writers_path, [new], writer_history)
-            _write_cutover_journal(
-                journal_path, old, new, "new_writer_activated", "executing"
-            )
-            _inject_cutover_crash(fault_stage, "new_writer_activated")
-            _coherent_sandbox_writer(pointer_path, writers_path)
-            _write_cutover_journal(
-                journal_path, old, new, "generation_verified", "executing"
-            )
-            _inject_cutover_crash(fault_stage, "generation_verified")
-            _operation_write(operation_path, receipt, "completed", context, outcome="new")
-            _write_cutover_journal(
-                journal_path,
-                old,
-                new,
-                "generation_verified",
-                "completed",
-                selected_generation=new["generation"],
-            )
-    except _InjectedCutoverCrash:
-        final = _reconcile_cutover_startup(
-            root,
-            context,
-            old,
-            new,
-            writer_history,
-            receipt,
-            resume=resume,
-        )
-        startup_reconciled = True
-    else:
-        final = _coherent_sandbox_writer(pointer_path, writers_path)
+    if fault_stage is None:
+        _execute_cutover_switch(root, context, old, new, None)
+        crash_signal = None
+        recovery_exit = None
         startup_reconciled = False
+        process_restart_simulated = False
+    else:
+        crash_pid = os.fork()
+        if crash_pid == 0:
+            try:
+                _execute_cutover_switch(root, context, old, new, fault_stage)
+            except BaseException:
+                os._exit(CUTOVER_CHILD_ERROR_EXIT)
+            os._exit(CUTOVER_CHILD_ERROR_EXIT)
+        _, crash_status = os.waitpid(crash_pid, 0)
+        crash_exit = os.waitstatus_to_exitcode(crash_status)
+        if crash_exit != -signal.SIGKILL:
+            raise StorageRefusal(
+                "cutover_crash_failed", "cutover child did not stop at the fault stage"
+            )
+        recovery_pid = os.fork()
+        if recovery_pid == 0:
+            try:
+                _reconcile_cutover_startup(root, resume=resume)
+            except BaseException:
+                os._exit(CUTOVER_RECOVERY_ERROR_EXIT)
+            os._exit(0)
+        _, recovery_status = os.waitpid(recovery_pid, 0)
+        recovery_exit = os.waitstatus_to_exitcode(recovery_status)
+        if recovery_exit != 0:
+            raise StorageRefusal(
+                "cutover_recovery_failed", "restart reconciliation process failed"
+            )
+        crash_signal = "SIGKILL"
+        startup_reconciled = True
+        process_restart_simulated = True
+    final = _coherent_sandbox_writer(pointer_path, writers_path)
+    receipt = json.loads(operation_path.read_text(encoding="utf-8"))
     journal = json.loads(journal_path.read_text(encoding="utf-8"))
+    writer_history = json.loads(writer_history_path.read_text(encoding="utf-8"))[
+        "snapshots"
+    ]
     return {
         "fault_stage": fault_stage,
         "terminal_state": receipt["state"],
@@ -848,6 +905,9 @@ def _cutover_case(
         "coherent": True,
         "journal_state": journal["state"],
         "startup_reconciled": startup_reconciled,
+        "process_restart_simulated": process_restart_simulated,
+        "crash_signal": crash_signal,
+        "recovery_exit": recovery_exit,
     }
 
 

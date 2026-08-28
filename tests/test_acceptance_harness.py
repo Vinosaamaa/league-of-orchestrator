@@ -13,6 +13,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 LEAGUE = ROOT / "bin/league"
+EXPECTED_MIGRATION_REPORT = "c8cc576681b4cbb011d364852adf76e6e193c978f106537a35797864c8304d53"
+EXPECTED_MIGRATION_SOURCE = "806faab68ed085731b9ec5b45cc1fc6fec622b461a25eb3063ce2406eacbd450"
+EXPECTED_MIGRATION_PARITY = "04509cad63147300de937b0acbacb05dc3f9cc08baf3b028b456e9da0c2d7f95"
 sys.path.insert(0, str(ROOT / "src"))
 
 from league import MAX_ACCEPTANCE_SENTINEL_PATHS  # noqa: E402
@@ -99,8 +102,11 @@ def assert_sentinel_and_migration_receipts(result: dict[str, object]) -> None:
     assert result["sentinels"]["unchanged"] is True
     shadow = result["migration_shadow"]
     assert shadow["dry_run"]["eligible"] is True
+    assert shadow["dry_run"]["report_digest"] == EXPECTED_MIGRATION_REPORT
+    assert shadow["dry_run"]["source_digest"] == EXPECTED_MIGRATION_SOURCE
     assert shadow["apply"]["applied"] is True
     assert shadow["exact_parity"] is True and shadow["legacy_unchanged"] is True
+    assert shadow["parity_sha256"] == EXPECTED_MIGRATION_PARITY
 
 
 def assert_staged_install_receipt(result: dict[str, object]) -> None:
@@ -167,8 +173,15 @@ def assert_cutover_receipt(result: dict[str, object]) -> None:
     assert any(case["terminal_state"] == "blocked" for case in matrix["cases"])
     assert matrix["cases"][0]["journal_state"] == "completed"
     assert matrix["cases"][0]["startup_reconciled"] is False
+    assert matrix["cases"][0]["process_restart_simulated"] is False
+    assert matrix["cases"][0]["crash_signal"] is None
+    assert matrix["cases"][0]["recovery_exit"] is None
     assert all(
-        case["journal_state"] == "reconciled" and case["startup_reconciled"]
+        case["journal_state"] == "reconciled"
+        and case["startup_reconciled"]
+        and case["process_restart_simulated"]
+        and case["crash_signal"] == "SIGKILL"
+        and case["recovery_exit"] == 0
         for case in matrix["cases"][1:]
     )
     for case in matrix["cases"]:

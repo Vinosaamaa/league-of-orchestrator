@@ -14,7 +14,12 @@ STORAGE_TESTS := \
 	tests/test_sqlite_storage_commands.py \
 	tests/test_sqlite_storage_concurrency.py
 
-.PHONY: test test-baseline test-storage test-all
+RUNTIME_LIFECYCLE_TESTS := \
+	tests/test_runtime_adapters.py \
+	tests/test_cleanup_lifecycle.py \
+	tests/test_model_routing.py
+
+.PHONY: test test-baseline test-storage test-runtime-lifecycle test-affected test-all
 test:
 	@$(MAKE) --no-print-directory test-baseline
 
@@ -28,4 +33,11 @@ test-storage:
 		PYTHONDONTWRITEBYTECODE=1 $(PYTHON) $$test; \
 	done
 
-test-all: test-baseline test-storage
+test-runtime-lifecycle:
+	@set -eu; for test in $(RUNTIME_LIFECYCLE_TESTS); do \
+		PYTHONDONTWRITEBYTECODE=1 $(PYTHON) $$test; \
+	done
+
+test-affected: test-storage test-runtime-lifecycle
+
+test-all: test-baseline test-storage test-runtime-lifecycle

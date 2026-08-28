@@ -54,7 +54,12 @@ def main() -> None:
     assert status["worktree"].startswith("/example/")
 
     routing = load_json(ROOT / "config" / "agent-routing.example.json")
-    assert routing["schema"] == 1 and routing["tiers"]
+    assert routing["schema"] == 2 and routing["tiers"]
+    assert routing["policy"] == {
+        "quality_baseline": "WORKER_STRONG",
+        "safe_boundary_escalations": 1,
+    }
+    assert routing["evaluations"]["WORKER_FAST"]["approved"] is False
     for tier in routing["tiers"].values():
         assert set(tier) == {"model", "effort"}
         assert all(isinstance(value, str) and value for value in tier.values())

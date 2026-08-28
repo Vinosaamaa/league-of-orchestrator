@@ -11,6 +11,9 @@ from pathlib import Path
 from typing import Any, BinaryIO, Callable, Optional
 
 from .importer import build_import_plan
+from .adapters import builtin_contract_registry
+from .cleanup import CleanupPlanner
+from .routing import ModelRouter, load_routing_config
 from .sqlite_store import DEFAULT_BUSY_TIMEOUT_MS, MAX_EXPORT_RECORDS, SQLiteStorage
 from .storage import Storage, StorageRefusal
 
@@ -121,6 +124,77 @@ def _add_task_commands(groups: argparse._SubParsersAction) -> None:
     transfer.add_argument("--at", required=True)
 
 
+def _add_runtime_commands(groups: argparse._SubParsersAction) -> None:
+    runtime = groups.add_parser("runtime", help="Inspect registered harness/backend capabilities.")
+    commands = runtime.add_subparsers(dest="action", required=True)
+    commands.add_parser("matrix", help="Report supported, unsupported, and unverified adapter operations.")
+
+
+def _add_routing_commands(groups: argparse._SubParsersAction) -> None:
+    routing = groups.add_parser("routing", help="Choose and measure evidence-based model/effort routes.")
+    commands = routing.add_subparsers(dest="action", required=True)
+    choose = commands.add_parser("choose", help="Record one semantic route without assigning work.")
+    choose.add_argument("--config", type=Path, required=True)
+    choose.add_argument("--decision-id", required=True)
+    choose.add_argument("--subject-kind", required=True)
+    choose.add_argument("--subject-id", required=True)
+    choose.add_argument("--role", required=True)
+    choose.add_argument(
+        "--profile",
+        choices=("coordination", "bounded", "ambiguous", "high-impact", "weak-verification"),
+        required=True,
+    )
+    choose.add_argument("--model")
+    choose.add_argument("--effort")
+    choose.add_argument("--at", required=True)
+    escalate = commands.add_parser("escalate", help="Record at most one evidence-triggered stronger retry.")
+    escalate.add_argument("--config", type=Path, required=True)
+    escalate.add_argument("--decision-id", required=True)
+    escalate.add_argument("--prior-decision-id", required=True)
+    escalate.add_argument(
+        "--failure-class",
+        choices=(
+            "schema_failure",
+            "tool_failure",
+            "missing_evidence",
+            "ambiguity",
+            "conflicting_results",
+            "failed_acceptance",
+            "high_impact_boundary",
+        ),
+        required=True,
+    )
+    escalate.add_argument("--at", required=True)
+    outcome = commands.add_parser("outcome", help="Record role-level success, correction, latency, and cost evidence.")
+    outcome.add_argument("--config", type=Path, required=True)
+    outcome.add_argument("--outcome-id", required=True)
+    outcome.add_argument("--decision-id", required=True)
+    outcome.add_argument("--success", choices=("true", "false"), required=True)
+    outcome.add_argument("--corrections", type=int, required=True)
+    outcome.add_argument("--latency-ms", type=int, required=True)
+    outcome.add_argument("--cost-microunits", type=int, required=True)
+    outcome.add_argument("--at", required=True)
+
+
+def _add_resource_commands(groups: argparse._SubParsersAction) -> None:
+    resource = groups.add_parser("resource", help="Register exact typed task resources.")
+    commands = resource.add_subparsers(dest="action", required=True)
+    register = commands.add_parser("register", help="Register one task resource from a strict JSON object.")
+    register.add_argument("--spec", type=Path, required=True)
+    register.add_argument("--at", required=True)
+
+
+def _add_cleanup_commands(groups: argparse._SubParsersAction) -> None:
+    cleanup = groups.add_parser("cleanup", help="Plan and inspect proof-gated recoverable cleanup.")
+    commands = cleanup.add_subparsers(dest="action", required=True)
+    plan = commands.add_parser("plan", help="Validate all policy proof and claim one cleanup revision.")
+    plan.add_argument("--manifest", type=Path, required=True)
+    plan.add_argument("--operation-id", required=True)
+    plan.add_argument("--at", required=True)
+    status = commands.add_parser("status", help="Read one cleanup operation and ordered action state.")
+    status.add_argument("--operation-id", required=True)
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="league",
@@ -151,6 +225,10 @@ def _parser() -> argparse.ArgumentParser:
         _add_delivery_commands,
         _add_project_commands,
         _add_task_commands,
+        _add_runtime_commands,
+        _add_routing_commands,
+        _add_resource_commands,
+        _add_cleanup_commands,
     ):
         builder(groups)
     return parser
@@ -281,6 +359,73 @@ def _task_transfer(store: Storage, args: argparse.Namespace) -> CommandResult:
     ), None
 
 
+def _read_json_object(path: Path) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise StorageRefusal("input_invalid", "JSON input could not be read") from exc
+    if not isinstance(value, dict):
+        raise StorageRefusal("input_invalid", "JSON input must be an object")
+    return value
+
+
+def _runtime_matrix(_: Storage, __: argparse.Namespace) -> CommandResult:
+    return builtin_contract_registry().capability_matrix(), None
+
+
+def _router(store: Storage, args: argparse.Namespace) -> ModelRouter:
+    return ModelRouter(load_routing_config(args.config), store)
+
+
+def _routing_choose(store: Storage, args: argparse.Namespace) -> CommandResult:
+    return _router(store, args).choose(
+        decision_id=args.decision_id,
+        subject_kind=args.subject_kind,
+        subject_id=args.subject_id,
+        role=args.role,
+        profile=args.profile,
+        chosen_at=args.at,
+        explicit_model=args.model,
+        explicit_effort=args.effort,
+    ), None
+
+
+def _routing_escalate(store: Storage, args: argparse.Namespace) -> CommandResult:
+    return _router(store, args).escalate(
+        decision_id=args.decision_id,
+        prior_decision_id=args.prior_decision_id,
+        failure_class=args.failure_class,
+        chosen_at=args.at,
+    ), None
+
+
+def _routing_outcome(store: Storage, args: argparse.Namespace) -> CommandResult:
+    return _router(store, args).record_outcome(
+        outcome_id=args.outcome_id,
+        decision_id=args.decision_id,
+        success=args.success == "true",
+        corrections=args.corrections,
+        latency_ms=args.latency_ms,
+        cost_microunits=args.cost_microunits,
+        recorded_at=args.at,
+    ), None
+
+
+def _resource_register(store: Storage, args: argparse.Namespace) -> CommandResult:
+    return CleanupPlanner(store).register_resource(_read_json_object(args.spec), args.at), None
+
+
+def _cleanup_plan(store: Storage, args: argparse.Namespace) -> CommandResult:
+    return CleanupPlanner(store).plan(
+        _read_json_object(args.manifest), operation_id=args.operation_id, at=args.at
+    ), None
+
+
+def _cleanup_status(store: Storage, args: argparse.Namespace) -> CommandResult:
+    value = store.cleanup_operation(args.operation_id)
+    return {"found": value is not None, "operation": value}, None
+
+
 HANDLERS: dict[str, CommandHandler] = {
     "storage.integrity": _storage_integrity,
     "storage.backup": _storage_backup,
@@ -295,6 +440,13 @@ HANDLERS: dict[str, CommandHandler] = {
     "delivery.fail": _delivery_fail,
     "project.resolve": _project_resolve,
     "task.transfer-owner": _task_transfer,
+    "runtime.matrix": _runtime_matrix,
+    "routing.choose": _routing_choose,
+    "routing.escalate": _routing_escalate,
+    "routing.outcome": _routing_outcome,
+    "resource.register": _resource_register,
+    "cleanup.plan": _cleanup_plan,
+    "cleanup.status": _cleanup_status,
 }
 
 

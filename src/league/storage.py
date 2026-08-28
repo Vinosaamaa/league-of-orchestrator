@@ -5,6 +5,7 @@ from __future__ import annotations
 from .storage_admin import AdministrativeStorage
 from .storage_delivery import DeliveryStorage
 from .storage_lifecycle import LifecycleStorage
+from .storage_runtime import RuntimeLifecycleStorage
 from .storage_transfer import TransferStorage
 from .storage_types import (
     ConnectionPolicy,
@@ -20,6 +21,7 @@ class Storage(
     LifecycleStorage,
     DeliveryStorage,
     TransferStorage,
+    RuntimeLifecycleStorage,
 ):
     """The only domain-facing persistence interface.
 

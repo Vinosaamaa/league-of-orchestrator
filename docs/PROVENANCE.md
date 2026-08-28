@@ -18,7 +18,7 @@ used for that comparison.
 | --- | --- | --- | --- |
 | `src/agent_watcher.py` | `agent_watcher.py` | `ab77f3f0d97cb1b09e34c005c45e90b94a8c0e0612f115169bc62827e524e0d7` | None; byte-for-byte import. |
 | `bin/agent-watcher` | `agent-watcher` | `3a049f5315e131bda3deed22cbd18f5b14f7d54b2821fcb8dddbda3d9fbba034` | Launch target changed to `src/agent_watcher.py`. |
-| `config/agent-routing.example.json` | `global-agent-instructions/agent-routing.example.json` | `2d475dd727526336b6635d4cf7b9af14c7e2497456ebdff3117ae4adcea3bbdb` | None. |
+| `config/agent-routing.example.json` | `global-agent-instructions/agent-routing.example.json` | `2d475dd727526336b6635d4cf7b9af14c7e2497456ebdff3117ae4adcea3bbdb` | Deliberately upgraded to schema 2 for strongest-worker baseline, evaluation-gated downgrade, and one escalation. The installed legacy router is unchanged. |
 | `tests/test_agent_watcher.py` | `shell-completions/test-agent-watcher.py` | `203540768c12be053871cf287f5c7a32cf28319eac9be0f2e0d38f634fabad70` | CLI path, description, synthetic identity, and test-only subprocess ceilings. |
 | `tests/test_lifecycle.py` | `shell-completions/test-agent-lifecycle.py` | `3bf652906b86f6eb164a43a80625587d6f0f68d35dd3033fe7d67b92251dc780` | CLI path plus synthetic launch identity, URLs, endpoints, and secret-rejection sentinels. |
 | `tests/test_delivery.py` | `shell-completions/test-agent-delivery.py` | `9c321d6410455b4246f38415bd4934d2e1d6f9ab6c67db5c76d4995f01763e9c` | CLI path, description, synthetic identity, and test-only subprocess ceiling. |
@@ -84,3 +84,26 @@ alter `PATH` for unrelated tests. This keeps self-process and resource-lifecycle
 contracts testable in restricted CI and agent sandboxes that deny host process
 inspection. The adapter is test-only; production process inspection and
 behavior are unchanged.
+
+## Issues #7/#11/#14 implementation provenance
+
+The adapter, runtime, cleanup, routing, runtime-storage, schema-v3, CLI, and
+focused test files are original League implementation. No source or installed
+watcher file, live JSON record, multiplexer session, browser/profile, global
+hook, or canonical pointer was changed.
+
+The deliberate routing difference is narrow and covered by
+`tests/test_model_routing.py`: the repository-local `ModelRouter` keeps bounded
+work on the strongest worker baseline until representative downgrade evidence
+is explicitly approved. The imported `agent-watcher route-model` compatibility
+path remains byte-behavior compatible and is not installed from this branch.
+
+The Pi lifecycle evidence comes only from `tests/runtime_doubles.py`; it is an
+isolated deterministic double, not a real Pi runtime claim. Issue #23 retains
+the real canary, staged install, global cutover, and rollback gates.
+
+The parallel issues #3/#4/#5/#17 branch owns prompt/request/assignment/outbox
+and Stop-hook policy. This branch exposes `ModelRouter` and runtime/cleanup
+storage protocols for that slice to consume without duplicating its state
+machines. Both branches begin at schema v2 and must be integrated by preserving
+both checksummed migrations with contiguous final version numbers.

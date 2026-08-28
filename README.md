@@ -27,12 +27,15 @@ Nothing here installs files, changes hooks, or connects to live Roster state.
 - Synthetic examples, authoring schemas, and focused local regression tests.
 - One standard-library SQLite implementation behind a `Storage` protocol and
   stable `league` command facade.
-- Two checksummed schema migrations, a loaded-runtime WAL gate, verified
+- Three checksummed schema migrations, a loaded-runtime WAL gate, verified
   backups, integrity checks, expected-version writes, and bounded contention.
 - A strict manifest importer covering every canonical issue-#18 artifact
   family, with dry-run digest confirmation before apply.
 - Deterministic bounded inspection and restricted rollback exports with
   machine-readable schemas.
+- Opaque capability-based runtime adapters, typed task resources, separate
+  cleanup obligations with immutable per-action receipts, and evidence-based
+  assignment-neutral model routing.
 
 The proven watcher remains one deep module. The new storage slice is a small
 modular monolith: one composite `Storage` interface with cohesive administrative,
@@ -48,12 +51,15 @@ Requirements: Python 3, Git, and a POSIX shell.
 ```sh
 make test
 make test-storage
+make test-runtime-lifecycle
+make test-affected
 make test-all
 ```
 
 `make test` runs the inherited baseline once, `make test-storage` runs the
-storage slice once, and `make test-all` composes both without overlapping test
-lists. Every target uses temporary fixtures only. It does not install files,
+storage slice once, `make test-runtime-lifecycle` runs issues #7/#11/#14, and
+`make test-affected` combines the two affected suites. `make test-all` composes
+everything without overlapping test lists. Every target uses temporary fixtures only. It does not install files,
 contact GitHub, mutate global agent state, or operate live Herdr/tmux sessions.
 
 The repository does not yet own live installation. The currently installed
@@ -115,6 +121,7 @@ those gates pass, the filesystem watcher remains the only live authority.
 - [SQLite prototype and benchmark](docs/research/sqlite-storage-prototype-benchmark.md)
 - [Reversible migration and install boundary](docs/MIGRATION.md)
 - [Exact source provenance](docs/PROVENANCE.md)
+- [Runtime lifecycle, cleanup, and routing](docs/runtime-lifecycle.md)
 - [Baseline versus planned issues](docs/ROADMAP.md)
 
 ## Non-goals for this implementation PR

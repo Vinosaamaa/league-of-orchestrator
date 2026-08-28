@@ -11,13 +11,14 @@ related partial behavior:
 - [#4: Enforce explicit direct, hidden, or Champion dispatch before work](https://github.com/Vinosaamaa/league-of-orchestrator/issues/4)
 - [#5: Add bounded Stop-hook and Shotcaller wake continuity](https://github.com/Vinosaamaa/league-of-orchestrator/issues/5)
 - [#6: Choose the minimal durable Roster storage contract](https://github.com/Vinosaamaa/league-of-orchestrator/issues/6) — accepted as ADR 0002; implementation and live migration remain separate
-- [#7: Make harness and terminal routing adapter-based](https://github.com/Vinosaamaa/league-of-orchestrator/issues/7)
+- [#7: Make harness and terminal routing adapter-based](https://github.com/Vinosaamaa/league-of-orchestrator/issues/7) — repository-local contracts and isolated non-Codex double are implemented; genuine canary remains #23
 - [#8: Support guarded disposable Shotcaller handoff](https://github.com/Vinosaamaa/league-of-orchestrator/issues/8)
 - [#9: Add an advisory project catalog and project-grouped Roster](https://github.com/Vinosaamaa/league-of-orchestrator/issues/9)
 - [#10: Declare skill provenance and runtime capabilities](https://github.com/Vinosaamaa/league-of-orchestrator/issues/10)
-- [#11: Generalize guarded teardown across task classes](https://github.com/Vinosaamaa/league-of-orchestrator/issues/11)
+- [#11: Generalize guarded teardown across task classes](https://github.com/Vinosaamaa/league-of-orchestrator/issues/11) — repository-local policy/resource/receipt state machine implemented; installed execution remains #23
 - [#12: Design a terminal-first Roster UI](https://github.com/Vinosaamaa/league-of-orchestrator/issues/12)
 - [#13: Add history-aware callsign allocation and reuse cooldown](https://github.com/Vinosaamaa/league-of-orchestrator/issues/13)
+- [#14: Add evidence-based model and effort routing](https://github.com/Vinosaamaa/league-of-orchestrator/issues/14) — assignment-neutral routing API implemented for the #3/#4/#5/#17 slice
 - [#17: Add a durable request inbox and unresolved-work reconciliation](https://github.com/Vinosaamaa/league-of-orchestrator/issues/17)
 - [#18: Audit every JSON/JSONL state dependency before SQLite migration](https://github.com/Vinosaamaa/league-of-orchestrator/issues/18) — completed by the sanitized producer-consumer matrix and cutover inventory
 - [#19: Implement SQLite storage and atomic canonical cutover](https://github.com/Vinosaamaa/league-of-orchestrator/issues/19) — this candidate implements the repository-local store, audited dry-run import, command facade, and focused tests; the issue remains open through live cutover

@@ -35,6 +35,15 @@ The repository keeps the proven runtime and new storage boundary separate:
   `sqlite_core.py` owns the shared transaction mechanics; focused
   `sqlite_*_ops.py` modules own lifecycle, delivery, import, and export SQL,
   while the facade owns connection policy, migrations, integrity, and backup.
+- `adapter_types.py`, `adapters.py`, and `runtime.py` own opaque namespaced
+  identity, capability registration, and the generic harness/backend runtime
+  sequence. They contain no Codex UUID, Herdr, or tmux branch in lifecycle core.
+- `cleanup.py` owns task-class policy selection, typed-resource rules, ordered
+  proof-first plans, and crash-resumable adapter execution;
+  `sqlite_runtime_ops.py` owns the matching bindings, routing evidence,
+  cleanup obligations, fences, actions, and immutable receipts.
+- `routing.py` exposes the assignment-neutral semantic routing API. It neither
+  creates assignments nor imports request lifecycle code.
 - `src/league/importer.py` strictly decodes the explicit issue-#18 manifest and
   produces an in-memory plan; it never opens a database or writes legacy files.
 - `src/league/cli.py` and `bin/league` expose stable domain commands and
@@ -87,7 +96,11 @@ The repository-local SQLite path is separately testable:
    ordered cursors without a second complete in-memory copy. Rollback export is
    deterministic, written mode `0600` beneath the explicit state root, and
    reported by digest without exposing its path.
-5. Configuration, hooks, guides, launchers, immutable failure/teardown/archive
+5. Schema v3 adds runtime bindings, typed task resources, cleanup
+   obligations/operations/actions/receipts, and routing decisions/outcomes.
+   Adapter effects stay outside transactions and are bridged by fences and
+   immutable receipts.
+6. Configuration, hooks, guides, launchers, immutable failure/teardown/archive
    evidence, installer backups, and other-product state remain files.
 
 `src/agent_watcher.py` does not import `league`. The filesystem baseline is the
@@ -96,12 +109,13 @@ generation; there is no dual canonical write path.
 
 ## Portability boundary
 
-The baseline is not fully agent- or backend-agnostic. Champion identity requires
-a Codex-shaped UUID, automatic hooks are Codex-specific, Herdr/tmux are
-hard-coded branches, and the atomic launch command is currently Herdr-specific.
-Semantic routing accepts explicit model and effort strings, but the example
-defaults name current OpenAI models. These are known inputs to issues #7 and
-#10, not claims of completed portability.
+The repository-local lifecycle core is adapter-neutral and accepts opaque
+namespaced session/endpoint identity. Named Codex, Herdr, and tmux compatibility
+contracts preserve the baseline capability surface, while Pi proves the shared
+flow only through deterministic doubles. The imported watcher and installed
+runtime remain Codex/Herdr/tmux-specific and unchanged. Agent/backend agnosticism
+therefore remains unverified until issue #23 runs a fully isolated genuine
+canary and an authorized cutover; this branch makes no stronger claim.
 
 ## Dependencies and side effects
 

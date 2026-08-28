@@ -24,6 +24,7 @@ from .sqlite_lifecycle_ops import reserve_callsign as reserve_callsign_operation
 from .sqlite_lifecycle_ops import resolve_project as resolve_project_operation
 from .sqlite_lifecycle_ops import transfer_task_owner as transfer_task_owner_operation
 from .sqlite_lifecycle_ops import transition as transition_operation
+from . import sqlite_runtime_ops
 from .sqlite_transfer_ops import (
     apply_import as apply_import_operation,
     canonical_counts,
@@ -34,7 +35,7 @@ from .storage_types import LIFECYCLE_STATES
 
 
 WAL_MINIMUM = (3, 51, 3)
-CURRENT_SCHEMA_VERSION = 2
+CURRENT_SCHEMA_VERSION = 3
 DATABASE_NAME = "league.sqlite3"
 DEFAULT_BUSY_TIMEOUT_MS = 500
 MAX_BUSY_TIMEOUT_MS = 10_000
@@ -326,6 +327,151 @@ MIGRATIONS = (
             "CREATE INDEX ix_resources_owner ON resource_leases(owner_agent_id,state)",
         ),
     ),
+    Migration(
+        3,
+        "adapter-runtime-cleanup-and-routing",
+        (
+            """
+            CREATE TABLE runtime_bindings (
+              binding_id TEXT PRIMARY KEY,
+              task_id TEXT NOT NULL REFERENCES tasks(task_id),
+              harness_kind TEXT NOT NULL,
+              backend_kind TEXT NOT NULL,
+              session_identity TEXT NOT NULL UNIQUE,
+              endpoint_identity TEXT NOT NULL UNIQUE,
+              capabilities_json TEXT NOT NULL,
+              state TEXT NOT NULL CHECK (state IN ('active','idle','interrupted','closed','failed')),
+              version INTEGER NOT NULL CHECK (version > 0),
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              last_receipt_json TEXT NOT NULL DEFAULT '{}',
+              CHECK (instr(session_identity, ':') > 1),
+              CHECK (instr(endpoint_identity, ':') > 1)
+            )
+            """,
+            """
+            CREATE TABLE model_routing_decisions (
+              decision_id TEXT PRIMARY KEY,
+              subject_kind TEXT NOT NULL,
+              subject_id TEXT NOT NULL,
+              role TEXT NOT NULL,
+              tier TEXT NOT NULL CHECK (tier IN ('COORDINATOR','WORKER_FAST','WORKER_STRONG')),
+              model TEXT NOT NULL,
+              effort TEXT NOT NULL,
+              reason TEXT NOT NULL,
+              explicit_model INTEGER NOT NULL CHECK (explicit_model IN (0,1)),
+              explicit_effort INTEGER NOT NULL CHECK (explicit_effort IN (0,1)),
+              state TEXT NOT NULL CHECK (state IN ('selected','escalated','blocked')),
+              escalation_count INTEGER NOT NULL CHECK (escalation_count BETWEEN 0 AND 1),
+              prior_decision_id TEXT REFERENCES model_routing_decisions(decision_id),
+              failure_class TEXT,
+              chosen_at TEXT NOT NULL
+            )
+            """,
+            """
+            CREATE TABLE model_routing_outcomes (
+              outcome_id TEXT PRIMARY KEY,
+              decision_id TEXT NOT NULL REFERENCES model_routing_decisions(decision_id),
+              success INTEGER NOT NULL CHECK (success IN (0,1)),
+              corrections INTEGER NOT NULL CHECK (corrections >= 0),
+              latency_ms INTEGER NOT NULL CHECK (latency_ms >= 0),
+              cost_microunits INTEGER NOT NULL CHECK (cost_microunits >= 0),
+              recorded_at TEXT NOT NULL
+            )
+            """,
+            """
+            CREATE TABLE task_resources (
+              resource_id TEXT PRIMARY KEY,
+              task_id TEXT NOT NULL REFERENCES tasks(task_id),
+              owner_id TEXT NOT NULL,
+              owner_role TEXT NOT NULL CHECK (owner_role IN ('champion','hidden-worker','task')),
+              resource_type TEXT NOT NULL,
+              lifetime TEXT NOT NULL CHECK (lifetime IN ('task_owned','shared_lease','persistent_retain')),
+              expected_identity_json TEXT NOT NULL,
+              cleanup_action TEXT NOT NULL,
+              adapter_kind TEXT NOT NULL,
+              applicable INTEGER NOT NULL CHECK (applicable IN (0,1)),
+              applicability_reason TEXT NOT NULL,
+              state TEXT NOT NULL CHECK (state IN ('active','released','retained','stale')),
+              version INTEGER NOT NULL CHECK (version > 0),
+              registered_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            )
+            """,
+            """
+            CREATE TABLE cleanup_obligations (
+              cleanup_obligation_id TEXT PRIMARY KEY,
+              task_id TEXT NOT NULL UNIQUE REFERENCES tasks(task_id),
+              owner_id TEXT NOT NULL,
+              task_class TEXT NOT NULL CHECK (task_class IN ('analysis','local_git','pr_ci','deployed_service')),
+              disposition TEXT NOT NULL CHECK (disposition IN ('completed','rejected','cancelled','failed')),
+              cleanup_state TEXT NOT NULL CHECK (cleanup_state IN ('cleanup_pending','awaiting_authority','verifying','planned','executing','blocked','cleanup_completed')),
+              required_policy TEXT NOT NULL,
+              next_action TEXT NOT NULL,
+              version INTEGER NOT NULL CHECK (version > 0),
+              updated_at TEXT NOT NULL
+            )
+            """,
+            """
+            CREATE TABLE cleanup_operations (
+              operation_id TEXT PRIMARY KEY,
+              cleanup_obligation_id TEXT NOT NULL REFERENCES cleanup_obligations(cleanup_obligation_id),
+              cleanup_revision INTEGER NOT NULL CHECK (cleanup_revision > 0),
+              plan_digest TEXT NOT NULL,
+              state TEXT NOT NULL CHECK (state IN ('planned','executing','blocked','completed')),
+              fence INTEGER NOT NULL CHECK (fence >= 0),
+              executor_id TEXT,
+              leased_until TEXT,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              UNIQUE (cleanup_obligation_id, cleanup_revision)
+            )
+            """,
+            """
+            CREATE TABLE cleanup_actions (
+              action_id TEXT PRIMARY KEY,
+              operation_id TEXT NOT NULL REFERENCES cleanup_operations(operation_id),
+              ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+              action_kind TEXT NOT NULL,
+              adapter_kind TEXT NOT NULL,
+              resource_id TEXT REFERENCES task_resources(resource_id),
+              state TEXT NOT NULL CHECK (state IN ('planned','executing','blocked','completed')),
+              expected_identity_json TEXT NOT NULL,
+              intended_state_json TEXT NOT NULL,
+              UNIQUE (operation_id, ordinal)
+            )
+            """,
+            """
+            CREATE TABLE cleanup_action_receipts (
+              action_id TEXT PRIMARY KEY REFERENCES cleanup_actions(action_id),
+              operation_id TEXT NOT NULL REFERENCES cleanup_operations(operation_id),
+              fence INTEGER NOT NULL CHECK (fence > 0),
+              outcome TEXT NOT NULL CHECK (outcome IN ('applied','already_applied')),
+              before_json TEXT NOT NULL,
+              after_json TEXT NOT NULL,
+              adapter_receipt_json TEXT NOT NULL,
+              receipt_hash TEXT NOT NULL,
+              recorded_at TEXT NOT NULL
+            )
+            """,
+            """
+            CREATE TABLE teardown_receipts (
+              receipt_id TEXT PRIMARY KEY,
+              operation_id TEXT NOT NULL UNIQUE REFERENCES cleanup_operations(operation_id),
+              task_id TEXT NOT NULL REFERENCES tasks(task_id),
+              policy_version TEXT NOT NULL,
+              receipt_hash TEXT NOT NULL UNIQUE,
+              completed_at TEXT NOT NULL
+            )
+            """,
+            "CREATE INDEX ix_runtime_task_state ON runtime_bindings(task_id,state)",
+            "CREATE INDEX ix_routing_subject ON model_routing_decisions(subject_kind,subject_id,chosen_at)",
+            "CREATE INDEX ix_routing_outcomes ON model_routing_outcomes(decision_id,recorded_at)",
+            "CREATE INDEX ix_task_resources_task ON task_resources(task_id,state)",
+            "CREATE INDEX ix_cleanup_state ON cleanup_obligations(cleanup_state,updated_at)",
+            "CREATE INDEX ix_cleanup_actions ON cleanup_actions(operation_id,ordinal,state)",
+        ),
+    ),
 )
 
 
@@ -477,6 +623,15 @@ _EXPORT_TABLES = (
     "relay_receipts",
     "import_runs",
     "imported_artifacts",
+    "runtime_bindings",
+    "model_routing_decisions",
+    "model_routing_outcomes",
+    "task_resources",
+    "cleanup_obligations",
+    "cleanup_operations",
+    "cleanup_actions",
+    "cleanup_action_receipts",
+    "teardown_receipts",
 )
 
 _EXPORT_ORDER = {
@@ -500,6 +655,15 @@ _EXPORT_ORDER = {
     "relay_receipts": "scope_id,source_order,digest",
     "import_runs": "run_id",
     "imported_artifacts": "source_order,artifact_id",
+    "runtime_bindings": "binding_id",
+    "model_routing_decisions": "chosen_at,decision_id",
+    "model_routing_outcomes": "recorded_at,outcome_id",
+    "task_resources": "task_id,resource_id",
+    "cleanup_obligations": "task_id",
+    "cleanup_operations": "cleanup_obligation_id,cleanup_revision",
+    "cleanup_actions": "operation_id,ordinal",
+    "cleanup_action_receipts": "operation_id,action_id",
+    "teardown_receipts": "task_id,receipt_id",
 }
 
 _INSPECTION_REDACTIONS = {
@@ -528,6 +692,11 @@ _INSPECTION_REDACTIONS = {
     "watcher_cursors": {"source_id"},
     "runtime_reconciliation": {"evidence_json"},
     "resource_leases": {"endpoint", "process_pid", "process_start", "metadata_json"},
+    "runtime_bindings": {"session_identity", "endpoint_identity", "capabilities_json", "last_receipt_json"},
+    "model_routing_decisions": {"model", "reason"},
+    "task_resources": {"expected_identity_json", "applicability_reason"},
+    "cleanup_actions": {"expected_identity_json", "intended_state_json"},
+    "cleanup_action_receipts": {"before_json", "after_json", "adapter_receipt_json"},
 }
 
 
@@ -1018,3 +1187,100 @@ class SQLiteStorage(SQLiteTransactionCore):
             destination.unlink(missing_ok=True)
             raise
         return destination
+
+    def register_runtime_binding(
+        self,
+        binding_id: str,
+        task_id: str,
+        harness_kind: str,
+        backend_kind: str,
+        session_identity: str,
+        endpoint_identity: str,
+        capabilities: dict[str, Any],
+        at: str,
+    ) -> dict[str, Any]:
+        return sqlite_runtime_ops.register_runtime_binding(
+            self,
+            binding_id,
+            task_id,
+            harness_kind,
+            backend_kind,
+            session_identity,
+            endpoint_identity,
+            capabilities,
+            at,
+        )
+
+    def runtime_binding(self, binding_id: str) -> Optional[dict[str, Any]]:
+        return sqlite_runtime_ops.runtime_binding(self, binding_id)
+
+    def update_runtime_binding(
+        self,
+        binding_id: str,
+        expected_version: int,
+        state: str,
+        at: str,
+        receipt: dict[str, Any],
+    ) -> dict[str, Any]:
+        return sqlite_runtime_ops.update_runtime_binding(
+            self, binding_id, expected_version, state, at, receipt
+        )
+
+    def record_routing_decision(self, decision: dict[str, Any]) -> dict[str, Any]:
+        return sqlite_runtime_ops.record_routing_decision(self, decision)
+
+    def routing_decision(self, decision_id: str) -> Optional[dict[str, Any]]:
+        return sqlite_runtime_ops.routing_decision(self, decision_id)
+
+    def record_routing_outcome(self, outcome: dict[str, Any]) -> dict[str, Any]:
+        return sqlite_runtime_ops.record_routing_outcome(self, outcome)
+
+    def register_task_resource(self, resource: dict[str, Any], at: str) -> dict[str, Any]:
+        return sqlite_runtime_ops.register_task_resource(self, resource, at)
+
+    def task_resources(self, task_id: str) -> list[dict[str, Any]]:
+        return sqlite_runtime_ops.task_resources(self, task_id)
+
+    def plan_cleanup(self, plan: dict[str, Any]) -> dict[str, Any]:
+        return sqlite_runtime_ops.plan_cleanup(self, plan)
+
+    def cleanup_operation(self, operation_id: str) -> Optional[dict[str, Any]]:
+        return sqlite_runtime_ops.cleanup_operation(self, operation_id)
+
+    def claim_cleanup_operation(
+        self,
+        operation_id: str,
+        expected_fence: int,
+        executor_id: str,
+        leased_until: str,
+        at: str,
+    ) -> dict[str, Any]:
+        return sqlite_runtime_ops.claim_cleanup_operation(
+            self, operation_id, expected_fence, executor_id, leased_until, at
+        )
+
+    def record_cleanup_action_receipt(
+        self,
+        action_id: str,
+        operation_id: str,
+        fence: int,
+        outcome: str,
+        before: dict[str, Any],
+        after: dict[str, Any],
+        adapter_receipt: dict[str, Any],
+        at: str,
+    ) -> dict[str, Any]:
+        return sqlite_runtime_ops.record_cleanup_action_receipt(
+            self,
+            action_id,
+            operation_id,
+            fence,
+            outcome,
+            before,
+            after,
+            adapter_receipt,
+            at,
+        )
+
+    def finalize_cleanup(self, operation_id: str, fence: int, at: str) -> dict[str, Any]:
+        return sqlite_runtime_ops.finalize_cleanup(self, operation_id, fence, at)

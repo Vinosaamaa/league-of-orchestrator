@@ -61,7 +61,8 @@ def test_transactional_upgrade_backup_and_rollback(root: Path) -> None:
         assert unchanged["from_version"] == unchanged["to_version"] == 1
         upgraded = store.migrate(backup_name="backups/pre-v2-retry.sqlite3")
         assert upgraded["from_version"] == 1
-        assert upgraded["to_version"] == 2
+        assert upgraded["to_version"] == 3
+        assert upgraded["applied"] == [2, 3]
         assert upgraded["backup"]["database_schema_version"] == 1
         assert store.integrity()["ok"]
 
@@ -70,7 +71,7 @@ def test_schema_refusals_without_test_sql(root: Path) -> None:
     future, _ = migrated_state(root, "future")
     database = future / "league.sqlite3"
     payload = bytearray(database.read_bytes())
-    payload[60:64] = (3).to_bytes(4, "big")
+    payload[60:64] = (4).to_bytes(4, "big")
     database.write_bytes(payload)
     refused(lambda: SQLiteStorage(future), "schema_newer")
 

@@ -53,7 +53,10 @@ def test_launcher_help_and_schemas() -> None:
         [str(LEAGUE), "--help"], text=True, capture_output=True, check=True, timeout=10
     )
     assert "SQL is not exposed" in " ".join(launcher.stdout.split())
-    assert "{storage,agent,callsign,delivery,project,task,request,assign,hook,help}" in launcher.stdout
+    assert (
+        "{storage,agent,callsign,delivery,project,task,request,assign,hook,help,acceptance}"
+        in launcher.stdout
+    )
     parser = cli._parser()
     groups = next(action for action in parser._actions if getattr(action, "choices", None))
     storage_help = groups.choices["storage"].format_help()
@@ -62,6 +65,7 @@ def test_launcher_help_and_schemas() -> None:
         "league-command-output.schema.json",
         "league-import-report.schema.json",
         "league-export.schema.json",
+        "league-acceptance-receipt.schema.json",
         "league-help.schema.json",
         "league-request-triage.schema.json",
         "league-assignment-receipt.schema.json",
@@ -78,6 +82,13 @@ def test_launcher_help_and_schemas() -> None:
     assert retained["additionalProperties"] is False
     audit = report_schema["properties"]["audit_coverage"]
     assert len(audit["required"]) == 40 and audit["additionalProperties"] is False
+    missing_state = io.BytesIO()
+    code = cli.main(
+        ["agent", "status", "--agent-id", "synthetic-missing-root"],
+        output=missing_state,
+    )
+    assert code == 2
+    assert json.loads(missing_state.getvalue())["error"]["code"] == "state_root_required"
 
 
 def test_storage_migrate_and_import(root: Path) -> None:

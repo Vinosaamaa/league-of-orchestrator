@@ -23,7 +23,7 @@ related partial behavior:
 - [#19: Implement SQLite storage and atomic canonical cutover](https://github.com/Vinosaamaa/league-of-orchestrator/issues/19) — repository-local store, audited dry-run import, command facade, and focused tests are merged; live cutover remains separate
 - [#21: Document the SQLite orchestration design and decision trail](https://github.com/Vinosaamaa/league-of-orchestrator/issues/21) — completed; its accepted resolutions are canonical for lifecycle work
 - [#22: Add evidence-backed League activity and end-of-day reports](https://github.com/Vinosaamaa/league-of-orchestrator/issues/22)
-- [#23: Build an isolated League acceptance sandbox and reversible cutover harness](https://github.com/Vinosaamaa/league-of-orchestrator/issues/23) — owns staged install, read-only shadow, atomic global switch, rollback, and live smoke
+- [#23: Build an isolated League acceptance sandbox and reversible cutover harness](https://github.com/Vinosaamaa/league-of-orchestrator/issues/23) — the repository-local disposable sandbox, fixture shadow, staged rollback, fake canary, and generation-switch fault foundation are merged; lifecycle receipt integration, real-runtime canaries, authorized global switch, and live smoke remain open
 
 The grouped #3/#4/#5/#17 slice extends only the repository-local store, command
 facade, and injected-adapter services. It does not cross #23's install, live

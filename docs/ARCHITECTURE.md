@@ -110,6 +110,16 @@ The repository-local SQLite path is separately testable:
 only live writer until issue #23 switches every consumer at one authorized
 generation; there is no dual canonical write path.
 
+`src/league/acceptance.py` is the issue-#23 repository-local harness. It owns
+explicit-root sentinels, deterministic fake adapters, fixture migration parity,
+staged release/rollback proof, a sandbox-only generation pointer and cutover
+lock, fault-injected operation receipts, and exact fake canary cleanup. It has
+no global path defaults and exposes no canonical cutover operation. The
+request, assignment, watcher, Stop, and teardown acceptance-receipt extensions
+remain pending. The first four are implemented and tested separately in this
+repository-local candidate; they are not wired into a cutover receipt or live
+runtime by this slice.
+
 ## Portability boundary
 
 The live baseline is not fully agent- or backend-agnostic. Champion identity requires

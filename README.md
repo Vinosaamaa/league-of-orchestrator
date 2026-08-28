@@ -56,14 +56,18 @@ Requirements: Python 3, Git, and a POSIX shell.
 make test
 make test-storage
 make test-request-lifecycle
+make test-acceptance
+make test-affected
 make test-all
 ```
 
 `make test` runs the inherited baseline once, `make test-storage` runs the
 storage slice once, `make test-request-lifecycle` runs the grouped lifecycle
-suite, and `make test-all` composes them without overlapping test lists. Every
-target uses temporary fixtures only. It does not install files,
-contact GitHub, mutate global agent state, or operate live Herdr/tmux sessions.
+suite, and `make test-acceptance` runs the isolated issue-#23 foundation.
+`make test-affected` composes storage, acceptance, and request lifecycle without
+overlap; `make test-all` adds the inherited baseline once. Every
+target uses temporary fixtures only. It does not install files, contact GitHub,
+mutate global agent state, or operate live Herdr/tmux sessions.
 
 The repository does not yet own live installation. The currently installed
 watcher and rollback process remain owned by `terminal-environment-toolkit`
@@ -120,6 +124,13 @@ Issue [#23](https://github.com/Vinosaamaa/league-of-orchestrator/issues/23)
 owns the isolated acceptance harness, staged installation, read-only live-state
 shadow, reversible pointer switch, and separately authorized cutover. Until
 those gates pass, the filesystem watcher remains the only live authority.
+The repository-local foundation and its one explicit-root command are
+documented in [isolated acceptance](docs/ACCEPTANCE.md). It records the later
+acceptance-receipt extensions for request, assignment, watcher, Stop, and
+teardown as pending. The first four now have repository-local implementations
+and focused fake-adapter tests, but have not been folded into a cutover receipt;
+the harness does not claim real Codex, Cursor, Pi, Herdr, or tmux support from
+fake adapters.
 
 ## Project map
 
@@ -129,6 +140,7 @@ those gates pass, the filesystem watcher remains the only live authority.
 - [JSON/JSONL dependency audit](docs/research/json-jsonl-state-dependency-audit.md)
 - [SQLite prototype and benchmark](docs/research/sqlite-storage-prototype-benchmark.md)
 - [Reversible migration and install boundary](docs/MIGRATION.md)
+- [Isolated acceptance and reversible cutover foundation](docs/ACCEPTANCE.md)
 - [Exact source provenance](docs/PROVENANCE.md)
 - [Repository-local request lifecycle](docs/REQUEST_LIFECYCLE.md)
 - [Baseline versus planned issues](docs/ROADMAP.md)

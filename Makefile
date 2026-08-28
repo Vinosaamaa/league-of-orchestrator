@@ -22,7 +22,10 @@ REQUEST_LIFECYCLE_TESTS := \
 	tests/test_shotcaller_stop.py \
 	tests/test_request_lifecycle_cli.py
 
-.PHONY: test test-baseline test-storage test-request-lifecycle test-all
+ACCEPTANCE_TESTS := \
+	tests/test_acceptance_harness.py
+
+.PHONY: test test-baseline test-storage test-acceptance test-request-lifecycle test-affected test-all
 test:
 	@$(MAKE) --no-print-directory test-baseline
 
@@ -41,4 +44,11 @@ test-request-lifecycle:
 		PYTHONDONTWRITEBYTECODE=1 $(PYTHON) $$test; \
 	done
 
-test-all: test-baseline test-storage test-request-lifecycle
+test-acceptance:
+	@set -eu; for test in $(ACCEPTANCE_TESTS); do \
+		PYTHONDONTWRITEBYTECODE=1 $(PYTHON) $$test; \
+	done
+
+test-affected: test-storage test-acceptance test-request-lifecycle
+
+test-all: test-baseline test-affected

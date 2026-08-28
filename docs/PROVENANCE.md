@@ -78,6 +78,15 @@ The implementation deliberately leaves `src/agent_watcher.py`,
 state, and immutable archives unchanged. Issue #23 owns staged acceptance and
 any later reversible cutover.
 
+## Issue-#23 acceptance provenance
+
+`src/league/acceptance.py`, `schema/league-acceptance-receipt.schema.json`,
+`docs/ACCEPTANCE.md`, and `tests/test_acceptance_harness.py` are original League
+implementation for issue #23. `VERSION` and the CLI extension are also original
+League work. The canonical behavior, safety boundaries, and verification
+contract live in [`docs/ACCEPTANCE.md`](ACCEPTANCE.md); this file records source
+origin and ownership only.
+
 Tests that require process inspection explicitly inject the single
 `tests/fakes/ps` adapter through `tests/process_adapter.py`; Make targets do not
 alter `PATH` for unrelated tests. This keeps self-process and resource-lifecycle

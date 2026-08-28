@@ -29,8 +29,10 @@ def event_digest(source: str, offset: int, line: str) -> str:
     return hashlib.sha256(f"{source}\0{offset}\0{line}".encode("utf-8")).hexdigest()
 
 
-def _write_roster_records(root: Path) -> dict[str, Any]:
-    runtime_root = root / "synthetic-runtime-observation"
+def _write_roster_records(
+    root: Path, runtime_root: Path | None = None
+) -> dict[str, Any]:
+    runtime_root = runtime_root or root / "synthetic-runtime-observation"
     original_updates = str(runtime_root / "rosters/Garen/champions/Thresh/updates.jsonl")
     champion_record = str(runtime_root / "rosters/Garen/champions/Thresh")
     champion_status_path = str(runtime_root / "rosters/Garen/champions/Thresh/status.json")
@@ -296,9 +298,11 @@ def _write_manifest(root: Path) -> Path:
     return path
 
 
-def write_complete_fixture(root: Path) -> dict[str, Any]:
+def write_complete_fixture(
+    root: Path, *, runtime_root: Path | None = None
+) -> dict[str, Any]:
     """Compose every canonical family plus one retained evidence file."""
-    context = _write_roster_records(root)
+    context = _write_roster_records(root, runtime_root)
     _write_callsign_pools(root)
     _write_pending_launch(root, context)
     _write_watcher_state(root, context)

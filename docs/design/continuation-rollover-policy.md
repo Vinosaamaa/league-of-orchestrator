@@ -6,7 +6,9 @@
 > Issue #8 owns guarded handoff and issue #13 owns the persistent shuffled
 > callsign queue. Issue #23 retains isolated acceptance and live-cutover gates.
 
-Policy identifier: `league.continuation-policy.v1`.
+Policy identifier: `league.continuation-policy.v1`. This Markdown document is
+the sole normative definition. The HTML and diagram are accessible,
+non-normative review views; if either differs, this document governs.
 
 ## Accepted resolutions
 
@@ -141,6 +143,12 @@ explainable.
   "schema": "league.continuation-policy.v1",
   "follow_up_default": "fresh",
   "rollover_authority": "awaiting_authority",
+  "handoff": {
+    "max_bytes": 65536,
+    "active_champion_page_size": 100,
+    "active_champion_page_size_max": 500,
+    "snapshot_ttl_seconds": 900
+  },
   "thresholds": {
     "context_remaining_ratio": {"soft": 0.30, "hard": 0.15, "source": "adapter_declared"},
     "compaction_count": {"soft": null, "hard": null, "source": "adapter_declared"},
@@ -166,7 +174,9 @@ evidence. It contains:
   pending decisions, blockers, next actions, and delivery/cleanup obligations;
 - repository, issue, branch/head, PR/CI or deployment evidence references only
   when applicable, plus clean/unpublished state and safe new binding proof;
-- active Champion bindings for Shotcaller rollover, preserved unchanged;
+- for Shotcaller rollover, one immutable active-Champion binding snapshot
+  reference, version, total count, configured page bound, expiry, and SHA-256
+  digest—never the complete binding map;
 - decisions already made, alternatives rejected, bounded evidence digests, and
   current instruction digests with any reconciled drift;
 - context-health inputs, threshold outcomes, concrete continuity benefit, and
@@ -175,10 +185,23 @@ evidence. It contains:
   point, and handoff expiry.
 
 It never copies a full transcript, secret, credential, private endpoint, local
-absolute path, browser state, or arbitrary generated artifact. The replacement
-acknowledges the exact handoff digest, its own exact identity and binding, the
-scope/non-goals, unresolved work, and—when replacing a Shotcaller—the unchanged
-active Champion map. A prose “received” message is not acknowledgement.
+absolute path, browser state, arbitrary generated artifact, or complete active-
+Champion binding map. The replacement acknowledges the exact handoff digest,
+its own exact identity and binding, the scope/non-goals, and unresolved work. A
+prose “received” message is not acknowledgement.
+
+For a Shotcaller rollover, the snapshot reference resolves only through
+`league rollover bindings OPERATION_ID [--cursor CURSOR] [--limit COUNT]`.
+Every page repeats the immutable snapshot ID/version, total count, page bound,
+expiry, and digest and returns an opaque `next_cursor`; the configured maximum
+is enforced server-side. Snapshot rows are canonically ordered by immutable
+Champion incarnation ID, encoded as stable compact JSON, and hashed with
+SHA-256. The acknowledgement supplies the observed snapshot version, count,
+and digest after retrieving all pages. League independently verifies those
+values against the frozen snapshot and the current Squad owner version/fence
+before accepting the acknowledgement. Missing/repeated rows, cursor/version
+changes, expiry, digest/count mismatch, or a changed owner fence invalidates the
+acknowledgement and requires a fresh snapshot; no partial map may be accepted.
 
 ## Crash, rollback, and callsign behavior
 
@@ -224,6 +247,34 @@ rebound, the resumed thread receives another queue-selected callsign. Historical
 events keep the old callsign and immutable incarnation/thread references; no
 alias is rewritten and no name is stolen.
 
+## Retention, compaction, and archive boundaries
+
+This policy extends issue #21's accepted request-payload rule: immutable small
+identity, lineage, decision, event, and receipt records remain canonical;
+optional bulky bodies and detail rows are bounded and removable only by an
+explicit versioned retention policy. It reuses the configured
+`retention.resolved_days`, `retention.compact_after_mb`, and
+`retention.batch_size` gates and maintenance receipts defined in
+[the accepted pruning policy](sqlite-request-lifecycle.md#13-pruning-and-maintenance),
+rather than introducing rollover-specific ages or size constants.
+
+| Record class | Permanent canonical minimum | Separately bounded or removable material |
+| --- | --- | --- |
+| Thread archives and continuation lineage | Unique namespaced provider thread identity; durability/capability declaration digest; creation/archive time; incarnation links; instruction/policy digests; terminal resumability state; final health summary; continuation decision IDs and reason codes. These small rows are never deleted because they prevent ambiguous or reused identity. | Optional transcript/context exports and superseded detailed signal snapshots live only as private evidence payloads. Their bodies may be pruned; the hash, byte count, retention class, durability, summary, and `pruned_at` tombstone remain. Pruning makes any dependent resume unavailable, never guessed. |
+| Evidence and handoff references | Evidence/reference ID, owning aggregate, content hash, byte count, media type/class, durability, bounded summary, and acknowledgement/commit/abort receipt remain. | Evidence bodies, archived artifacts, handoff bodies, and active-Champion snapshot rows may be removed only after every owning operation is terminal, the required acknowledgement plus `owner_changed` or abort receipt exists, no active claim/pin/reference remains, and the shared age/size gates pass. Snapshot header, count, digest, expiry, and outcome remain. |
+| Callsign assignments | Every immutable assignment identity, callsign, incarnation, queue/lease versions, activation/release timestamps, and activation/release receipt remains. This is the minimum needed to distinguish reuse from continuity. | Adapter-private launch/release response bodies and retry detail are separate payload/detail rows and may compact only after a proved terminal receipt. |
+| Callsign release history | Bounded `callsign_activated` and `callsign_released` event facts, queue versions, reason code, and receipt digest remain immutable. | Repeated delivery/adapter attempt detail may compact under the accepted terminal-attempt policy; the permanent event/outbox summary remains. |
+| Rollover operations | Stable old/new incarnation IDs, role/scope, authority mode, fence and owner versions, handoff/snapshot digests, final state, acknowledgement, owner-change or abort receipt, and policy version remain. | Superseded preparation traces and acknowledged handoff/snapshot bodies follow the evidence rules above. |
+
+Maintenance is never a hook-side or rollover-side effect. One bounded run selects
+at most the configured batch, records the exact policy version and before/after
+counts, and removes only material explicitly named by that policy. Active,
+reserved, preparing, awaiting-authority, unacknowledged, draining, conflicted,
+or otherwise unresolved records are never compacted. Missing summaries,
+receipts, digests, reference closure, or export proof refuse pruning. Space
+reclamation remains separately explicit; a crash resumes or rolls back the
+bounded maintenance unit without leaving a missing body and absent tombstone.
+
 ## Minimal future implementation contract for #8 and #13
 
 Implementation should extend the current stable `league.command.v1` envelope,
@@ -238,6 +289,7 @@ state machine.
 | --- | --- | --- |
 | #8 | `league continuation decide|status` | Record/read one evidence snapshot and `resume`, `fresh`, `rollover`, `awaiting_authority`, or `refuse` outcome. `decide` is side-effect free outside canonical state. |
 | #8 | `league rollover prepare|acknowledge|commit|abort|status` | One fenced two-phase replacement for either role. `commit` requires exact acknowledgement and performs the single owner change; `abort` is pre-commit only. |
+| #8 | `league rollover bindings OPERATION_ID [--cursor CURSOR] [--limit COUNT]` | Read one frozen Shotcaller active-Champion snapshot in bounded stable pages. Each page repeats snapshot version/count/digest/expiry and returns an opaque next cursor; acknowledgement verifies the fully retrieved digest against the owner fence. |
 | #13 | `league callsign allocate|status` | Select and reserve the first compatible queue entry atomically; return queue version and bounded refusal counts. |
 | #13 | existing `league callsign release` | Append an activated released assignment to the tail under an exact lease/version precondition. Failed unactivated reservations restore their recorded queue position. |
 
@@ -252,7 +304,12 @@ state machine.
   snapshot, policy/configuration digest, outcome, reason codes, and authority;
 - `rollover_operations`: role-neutral old/new incarnation references, stable
   scope/Squad reference, state, fence, owner versions, handoff digest,
-  acknowledgement, and rollback/commit receipts;
+  acknowledgement, active-Champion snapshot reference when applicable, and
+  rollback/commit receipts;
+- `active_champion_binding_snapshots`: one immutable header per applicable
+  Shotcaller rollover with snapshot version/count/digest/expiry plus normalized
+  binding rows in canonical incarnation order. Rows are retrieved in bounded
+  pages and never copied into handoffs;
 - issue-#21's accepted `callsign_queue` and immutable
   `callsign_assignments`, migrated deterministically from current pool position,
   lease, and release history; and
@@ -267,6 +324,9 @@ canonical effect: `continuation_decided`, `thread_resumed`,
 `rollover_aborted`, `callsign_reserved`, `callsign_activated`, and
 `callsign_released`. Payloads contain stable IDs, versions, digests, outcomes,
 and reason codes—not transcript text or adapter-private locators.
+`rollover_prepared` carries only the active-Champion snapshot reference and
+digest; `rollover_acknowledged` carries the independently verified snapshot
+version, count, and digest, not the rows.
 `owner_changed` uses a `task` aggregate for Champion rollover and a `squad`
 aggregate for Shotcaller rollover; #8 must extend the current event subject
 constraint rather than encode a Squad change as an unrelated agent/task event.
@@ -276,7 +336,8 @@ At minimum, clients may rely on these refusal codes:
 `thread_identity_reused`, `thread_not_durable`, `resume_unsupported`,
 `workspace_binding_unsafe`, `continuation_conflict`,
 `instruction_drift_unreconciled`, `rollover_authority_required`,
-`handoff_ack_mismatch`, and `callsign_unavailable`.
+`handoff_ack_mismatch`, `active_champion_snapshot_stale`,
+`active_champion_snapshot_incomplete`, and `callsign_unavailable`.
 
 ## Focused future acceptance
 
@@ -289,7 +350,12 @@ cover:
 - exact resume into a new binding without restoring old runtime resources;
 - handoff acknowledgement mismatch and crashes before/after every external
   action and the atomic owner switch, proving one owner and no duplicate intake;
-- Shotcaller rollover with unchanged active Champion bindings;
+- Shotcaller rollover with enough active Champion bindings to require multiple
+  pages, no embedded complete map, stable cursor/version semantics, digest/count
+  verification, and refusal for a missing/repeated/mutated/expired page set;
+- retention eligibility and crash recovery proving immutable identity, receipt,
+  reference, assignment, and release summaries survive while only configured
+  terminal bulky payload/detail rows are pruned in bounded batches;
 - persisted shuffled order across restart, concurrent non-duplication,
   incompatible skip without reorder, reservation rollback, release-to-tail,
   full sequential rotation, and sole-compatible recent reuse; and
@@ -300,15 +366,19 @@ Repository-local deterministic proof does not establish a real adapter, live
 hook, installed runtime, migration, cutover, or smoke result. Those claims stay
 pending until issue #23 records the separately authorized acceptance receipt.
 
-## Questions resolved
+## Questions resolved: non-normative index
 
-| Issue #15 question | Resolution |
+This table is navigation only. It neither restates nor modifies policy; the
+linked normative sections are authoritative.
+
+| Issue #15 question | Normative source |
 | --- | --- |
-| When is a follow-up related enough? | Only when it records `same_task_recovery`, `same_artifact_revision`, or `unresolved_decision_chain`; labels and broad topic similarity do not qualify. |
-| Is fresh still the default for related work? | Yes. Resume additionally requires a concrete benefit and healthy exact context. |
-| Which size/staleness signals are reliable? | Exact canonical age/task counts plus adapter-declared normalized context, compaction, and budget signals; raw transcript guesses are excluded. |
-| Does crossing a threshold automatically replace the agent? | No by default. It records `awaiting_authority`; automatic rollover requires stored same-scope opt-in and all safe-boundary gates. |
-| What if the historical callsign was reused? | Never steal or alias it. Allocate normally through #13 and preserve historical identity by immutable IDs. |
-| Do Champions and Shotcallers differ? | They share the full policy. Only the atomic ownership target differs: one task versus one stable Squad pointer. |
+| When is a follow-up related enough? | [Concrete continuity benefit](#concrete-continuity-benefit) |
+| Is fresh still the default for related work? | [Accepted resolutions](#accepted-resolutions) and [Decision table](#decision-table) |
+| Which size/staleness signals are reliable? | [Provider-neutral evidence and health](#provider-neutral-evidence-and-health) |
+| Does crossing a threshold automatically replace the agent? | [Decision table](#decision-table) and [Initial versioned configuration](#initial-versioned-configuration) |
+| What if the historical callsign was reused? | [Crash, rollback, and callsign behavior](#crash-rollback-and-callsign-behavior) |
+| How are durable history and bulky payloads retained? | [Retention, compaction, and archive boundaries](#retention-compaction-and-archive-boundaries) |
+| Do Champions and Shotcallers differ? | [Accepted resolutions](#accepted-resolutions) and [Handoff and acknowledgement](#handoff-and-acknowledgement) |
 
 There are no unresolved design questions in this candidate.

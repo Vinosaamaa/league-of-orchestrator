@@ -194,6 +194,14 @@
       border-color: rgba(255, 255, 255, 0.24);
     }
 
+    .policy-source {
+      max-width: 780px;
+      margin: 22px 0 0;
+      color: #e9f1f8;
+    }
+
+    .policy-source a { color: #fff4d6; }
+
     .policy-nav {
       display: flex;
       flex-wrap: wrap;
@@ -626,7 +634,7 @@
       body { background: #fff; }
       .page-shell { width: 100%; }
       .masthead { color: #000; background: #fff; border: 2px solid #000; box-shadow: none; }
-      .masthead .chip, .thesis, .eyebrow { color: #000; }
+      .masthead .chip, .thesis, .eyebrow, .policy-source, .policy-source a { color: #000; }
       .section { break-inside: avoid; box-shadow: none; }
       .policy-nav { display: none; }
     }
@@ -647,8 +655,13 @@
         <span class="chip">accepted-policy candidate</span>
         <span class="chip">league.continuation-policy.v1</span>
         <span class="chip">Champion + Shotcaller core</span>
-        <span class="chip">no runtime implementation</span>
+        <span class="chip">non-normative visual companion</span>
       </div>
+      <p class="policy-source">
+        This page is an accessible review view, not a second policy source. The
+        <a href="../docs/design/continuation-rollover-policy.md">Markdown policy</a>
+        is the sole normative definition and governs any difference.
+      </p>
     </header>
 
     <nav class="policy-nav" aria-label="Policy sections">
@@ -658,17 +671,19 @@
       <a href="#signals">Signals</a>
       <a href="#handoff">Handoff</a>
       <a href="#contracts">#8 + #13 contract</a>
-      <a href="#resolved">Questions resolved</a>
+      <a href="#retention">Retention</a>
+      <a href="#resolved">Question index</a>
     </nav>
 
     <main id="main">
       <section id="decision" class="section" aria-labelledby="decision-title">
         <p class="section-kicker">Decision first</p>
-        <h2 id="decision-title">One router, four outcomes</h2>
+        <h2 id="decision-title">Five decisions plus one no-op state</h2>
         <p class="lede">
-          The router records an evidence snapshot and chooses resume, fresh, rollover, or
-          refusal. A soft threshold may instead produce <code>awaiting_authority</code>;
-          it never manufactures permission to launch or switch owners.
+          A continuation decision records <code>resume</code>, <code>fresh</code>,
+          <code>rollover</code>, <code>awaiting_authority</code>, or <code>refuse</code>.
+          A healthy active thread instead returns the no-op state <code>continue_current</code>
+          without a continuation decision or owner change.
         </p>
 
         <div class="decision-banner">
@@ -685,7 +700,7 @@
         <figure class="diagram-frame">
           <img
             src="continuation-rollover-policy.drawio.svg"
-            alt="Decision flow. Conflicted identity or unsafe binding refuses. A follow-up uses a fresh Champion unless a concrete continuity benefit and healthy exact archive justify resume. An active unhealthy thread awaits authority unless automatic same-scope authority and a safe handoff boundary are recorded, in which case it rolls over. Callsign allocation remains independent."
+            alt="Decision flow. An explicit target with a missing or conflicting identity, undeclared durability or exact-resume capability, failed route gate, or unsafe binding refuses. An unrequested follow-up uses a fresh Champion unless a concrete continuity benefit and healthy exact archive justify resume. A healthy active thread continues. An unhealthy active thread awaits authority unless automatic same-scope authority and a safe handoff boundary are recorded, in which case it rolls over. Callsign allocation remains independent."
           >
           <figcaption>
             The dashed callsign rule is deliberately outside the routing branches. Editable source:
@@ -695,8 +710,8 @@
             <summary>Text alternative for the flow</summary>
             <ol>
               <li>Verify the trigger, role, scope, explicit route, identity evidence, and policy version.</li>
-              <li>If a targeted identity is conflicted or the workspace binding is unsafe, refuse and preserve state.</li>
-              <li>For a follow-up, resume only when a concrete continuity benefit and a healthy exact archive are both proven; otherwise choose a fresh Champion.</li>
+              <li>If an explicit target has missing, ambiguous, reused, or conflicting identity; undeclared durability or exact-resume capability; an unsafe binding; or any other failed route gate, refuse and preserve state.</li>
+              <li>For an unrequested follow-up, resume only when a concrete continuity benefit and a healthy exact archive are both proven; otherwise choose a fresh Champion. Never downgrade a failed explicit resume target to fresh.</li>
               <li>For an active thread, continue while no hard health boundary or reconciled material drift exists.</li>
               <li>When rollover is required, await authority by default. With recorded automatic authority and a safe boundary, prepare a replacement, hand off, acknowledge, atomically switch ownership, then drain and clean up.</li>
               <li>Every new incarnation gets its callsign from issue #13's queue; resume never bypasses it.</li>
@@ -872,6 +887,12 @@
   "schema": "league.continuation-policy.v1",
   "follow_up_default": "fresh",
   "rollover_authority": "awaiting_authority",
+  "handoff": {
+    "max_bytes": 65536,
+    "active_champion_page_size": 100,
+    "active_champion_page_size_max": 500,
+    "snapshot_ttl_seconds": 900
+  },
   "thresholds": {
     "context_remaining_ratio": {"soft": 0.30, "hard": 0.15, "source": "adapter_declared"},
     "compaction_count": {"soft": null, "hard": null, "source": "adapter_declared"},
@@ -911,7 +932,7 @@
               <li>Authority, non-goals, policy/config digest, and instruction-drift result.</li>
               <li>Current state, unresolved work, claims, blockers, next actions, delivery and cleanup obligations.</li>
               <li>Applicable repository/head and owner-source evidence references with safe new binding proof.</li>
-              <li>Shotcaller active-Champion map, unchanged.</li>
+              <li>Shotcaller active-Champion snapshot reference, version, count, page bound, expiry, and digest—never the complete map.</li>
               <li>Health inputs, decision reason, callsign reservation, rollback point, and expiry.</li>
             </ul>
           </article>
@@ -930,7 +951,7 @@
         <ol class="phase-list">
           <li><span><strong>Decide.</strong> Persist evidence, reason codes, policy digest, and automatic/awaiting authority mode.</span></li>
           <li><span><strong>Prepare.</strong> Reserve through #13 and create only the replacement's exact runtime/workspace resources. Old owner remains active.</span></li>
-          <li><span><strong>Acknowledge.</strong> Replacement proves its identity/binding and acknowledges the exact handoff digest, scope, non-goals, unresolved work, and preserved Champion map.</span></li>
+          <li><span><strong>Acknowledge.</strong> Replacement proves its identity/binding and acknowledges the exact handoff digest, scope, non-goals, and unresolved work. A Shotcaller replacement retrieves every bounded snapshot page, then League verifies its observed version/count/digest against the frozen snapshot and owner fence.</span></li>
           <li><span><strong>Commit.</strong> Compare owner version + fence; atomically switch task/Squad owner, append one <code>owner_changed</code>, and enqueue recipient effects.</span></li>
           <li><span><strong>Drain.</strong> Predecessor refuses new intake; Champion task cleanup or #8's separately guarded Shotcaller cleanup reuses proof-first actions, receipts, and fences, then releases callsign last.</span></li>
         </ol>
@@ -960,7 +981,7 @@
           <article class="mini-card">
             <span class="mono-label">#8 · commands</span>
             <h3>Continuation + rollover</h3>
-            <p><code>continuation decide|status</code><br><code>rollover prepare|acknowledge|commit|abort|status</code></p>
+            <p><code>continuation decide|status</code><br><code>rollover prepare|acknowledge|commit|abort|status</code><br><code>rollover bindings OPERATION_ID --cursor … --limit …</code></p>
           </article>
           <article class="mini-card">
             <span class="mono-label">#13 · commands</span>
@@ -983,13 +1004,35 @@
             <tbody>
               <tr><td><code>thread_archives</code></td><td>One unique opaque provider identity, durability/capabilities, instruction digests, health snapshot, and evidence references. Incarnation bindings reference it and retain unique endpoints/generations.</td><td>Duplicate thread identity, live endpoint, or callsign lease.</td></tr>
               <tr><td><code>continuation_decisions</code></td><td>Trigger, explicit route, benefit, signals, policy digest, outcome, reasons, authority.</td><td>Runtime or owner mutation.</td></tr>
-              <tr><td><code>rollover_operations</code></td><td>Old/new incarnation, role-neutral scope, fence, handoff digest, acknowledgement, commit/rollback receipts.</td><td>Request/assignment/delivery duplicate state.</td></tr>
+              <tr><td><code>rollover_operations</code></td><td>Old/new incarnation, role-neutral scope, fence, handoff/snapshot reference, acknowledgement, commit/rollback receipts.</td><td>Request/assignment/delivery duplicate state.</td></tr>
+              <tr><td><code>active_champion_binding_snapshots</code></td><td>Immutable version/count/digest/expiry header and canonically ordered binding rows for bounded paging and acknowledgement verification.</td><td>An embedded complete map in the handoff or event payload.</td></tr>
               <tr><td><code>callsign_queue</code> + <code>callsign_assignments</code></td><td>Stable shuffled rank and immutable assignment history.</td><td>Continuation preference.</td></tr>
             </tbody>
           </table>
         </div>
 
-        <h3 style="margin-top: 30px;">Issue #13 supersedes the obsolete issue-#15 candidate</h3>
+        <h3 id="retention" style="margin-top: 30px;">Permanent small facts; configured bulky-payload pruning</h3>
+        <p class="lede">
+          The accepted issue-#21 retention gates are reused: configured resolved age,
+          database-size trigger, batch size, terminal proof, bounded maintenance receipts,
+          and explicit space reclamation. No rollover hook performs maintenance.
+        </p>
+        <div class="table-wrap" tabindex="0" aria-label="Scrollable retention boundary table">
+          <table>
+            <caption>Non-normative view of the Markdown retention contract</caption>
+            <thead>
+              <tr><th scope="col">Class</th><th scope="col">Always retained</th><th scope="col">Eligible only under configured policy</th></tr>
+            </thead>
+            <tbody>
+              <tr><td>Thread lineage</td><td>Unique provider identity, durability/capability digest, timestamps, incarnation links, final health/resume state, decisions and reasons.</td><td>Optional private transcript/context bodies and superseded signal detail; pruning leaves hash, size, summary, policy, and tombstone and makes dependent resume unavailable.</td></tr>
+              <tr><td>Evidence + handoff</td><td>Stable reference metadata, hashes, bounded summary, and acknowledgement/owner-change/abort receipts.</td><td>Evidence/handoff bodies and Champion-snapshot rows only after terminal proof, reference closure, age/size gates, and no active claim or pin. Snapshot header/count/digest remain.</td></tr>
+              <tr><td>Callsign history</td><td>Immutable assignment identity, incarnation, queue/lease versions, activation/release times, events, and receipt digests.</td><td>Adapter-private response bodies and proved-terminal retry detail; permanent event/outbox summaries remain.</td></tr>
+              <tr><td>Rollover history</td><td>Old/new IDs, role/scope, authority, fences/versions, digests, final state, acknowledgement, and commit/abort receipt.</td><td>Superseded preparation detail and terminal acknowledged handoff/snapshot bodies.</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3 id="callsign" style="margin-top: 30px;">Issue #13 supersedes the obsolete issue-#15 candidate</h3>
         <div class="role-grid">
           <article class="mini-card">
             <span class="mono-label">removed</span>
@@ -1013,21 +1056,26 @@
       </section>
 
       <section id="resolved" class="section" aria-labelledby="resolved-title">
-        <p class="section-kicker">No open design questions</p>
-        <h2 id="resolved-title">Issue #15's questions are resolved</h2>
+        <p class="section-kicker">Non-normative navigation only</p>
+        <h2 id="resolved-title">Issue #15 question index</h2>
+        <p class="lede">
+          This table deliberately contains no policy answers. Each link points to the
+          sole normative Markdown definition, which governs this visual companion.
+        </p>
         <div class="table-wrap" tabindex="0" aria-label="Scrollable resolved questions table">
           <table>
-            <caption>Explicit issue questions and accepted candidate answers</caption>
+            <caption>Non-normative cross-references to the Markdown policy</caption>
             <thead>
-              <tr><th scope="col">Question</th><th scope="col">Resolution</th></tr>
+              <tr><th scope="col">Question</th><th scope="col">Normative source</th></tr>
             </thead>
             <tbody>
-              <tr><td>When is a follow-up related enough?</td><td>Only with one of three recorded concrete benefits; labels and broad similarity do not qualify.</td></tr>
-              <tr><td>Does fresh remain the default?</td><td>Yes. Resume additionally requires exact durable identity, safe binding, healthy context, and reconciled instructions.</td></tr>
-              <tr><td>Which health signals are reliable?</td><td>Canonical age/task counts plus declared normalized adapter signals. Raw transcript guesses are excluded.</td></tr>
-              <tr><td>Does a threshold auto-create a replacement?</td><td>No by default. Await authority; automatic rollover requires explicit stored same-scope opt-in and a safe boundary.</td></tr>
-              <tr><td>What if the old callsign was reused?</td><td>Allocate normally through #13. Never steal, alias, or rewrite historical identity.</td></tr>
-              <tr><td>How do roles differ?</td><td>The contract is identical; only the atomic owner target differs: one task or one stable Squad pointer.</td></tr>
+              <tr><td>When is a follow-up related enough?</td><td><a href="../docs/design/continuation-rollover-policy.md#concrete-continuity-benefit">Concrete continuity benefit</a></td></tr>
+              <tr><td>Does fresh remain the default?</td><td><a href="../docs/design/continuation-rollover-policy.md#accepted-resolutions">Accepted resolutions</a> · <a href="../docs/design/continuation-rollover-policy.md#decision-table">Decision table</a></td></tr>
+              <tr><td>Which health signals are reliable?</td><td><a href="../docs/design/continuation-rollover-policy.md#provider-neutral-evidence-and-health">Provider-neutral evidence and health</a></td></tr>
+              <tr><td>Does a threshold auto-create a replacement?</td><td><a href="../docs/design/continuation-rollover-policy.md#initial-versioned-configuration">Initial versioned configuration</a></td></tr>
+              <tr><td>What if the old callsign was reused?</td><td><a href="../docs/design/continuation-rollover-policy.md#crash-rollback-and-callsign-behavior">Crash, rollback, and callsign behavior</a></td></tr>
+              <tr><td>How is durable history retained?</td><td><a href="../docs/design/continuation-rollover-policy.md#retention-compaction-and-archive-boundaries">Retention, compaction, and archive boundaries</a></td></tr>
+              <tr><td>How do roles differ?</td><td><a href="../docs/design/continuation-rollover-policy.md#handoff-and-acknowledgement">Handoff and acknowledgement</a></td></tr>
             </tbody>
           </table>
         </div>
@@ -1042,7 +1090,7 @@
     </main>
 
     <footer class="footer-note">
-      Issue #15 accepted-policy candidate · public-safe synthetic field names only · no private paths or runtime identifiers
+      Issue #15 non-normative visual companion · public-safe synthetic field names only · no private paths or runtime identifiers
     </footer>
   </div>
 </body>

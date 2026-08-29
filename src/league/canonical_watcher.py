@@ -68,15 +68,43 @@ def _state_root() -> Path:
 def _actor(store: SQLiteStorage, args: argparse.Namespace, payload: dict[str, Any]) -> Any:
     session = args.session_id or payload.get("session_id") or payload.get("conversation_id")
     if session:
-        row = store.connection.execute(
-            "SELECT agent_id,callsign FROM agent_instances WHERE retired_at IS NULL AND (thread_id=? OR agent_id=?)",
+        runtime_rows = store.connection.execute(
+            """
+            SELECT DISTINCT a.agent_id,a.callsign,a.role
+              FROM runtime_instances r
+              JOIN agent_instances a ON a.agent_id=r.actor_agent_id
+             WHERE r.session_ref=? AND r.status IN ('active','idle') AND r.verified=1
+               AND a.retired_at IS NULL
+             ORDER BY a.agent_id
+            """,
+            (session,),
+        ).fetchall()
+        if len(runtime_rows) > 1:
+            raise StorageRefusal(
+                "runtime_identity_ambiguous",
+                "hook session matches more than one live verified runtime",
+            )
+        if runtime_rows:
+            return runtime_rows[0]
+        legacy_rows = store.connection.execute(
+            """
+            SELECT agent_id,callsign,role
+              FROM agent_instances
+             WHERE retired_at IS NULL AND (thread_id=? OR agent_id=?)
+             ORDER BY agent_id
+            """,
             (session, session),
-        ).fetchone()
-        if row is not None:
-            return row
+        ).fetchall()
+        if len(legacy_rows) > 1:
+            raise StorageRefusal(
+                "runtime_identity_ambiguous",
+                "hook session matches more than one active agent identity",
+            )
+        if legacy_rows:
+            return legacy_rows[0]
     if args.shotcaller:
         return store.connection.execute(
-            "SELECT agent_id,callsign FROM agent_instances WHERE retired_at IS NULL AND role='shotcaller' AND callsign=?",
+            "SELECT agent_id,callsign,role FROM agent_instances WHERE retired_at IS NULL AND role='shotcaller' AND callsign=?",
             (args.shotcaller,),
         ).fetchone()
     return None
@@ -119,6 +147,7 @@ def _capture_prompt(
     store: SQLiteStorage,
     scope: str | None,
     actor_id: str | None,
+    actor_role: str | None,
     payload: dict[str, Any],
     *,
     adapter_kind: str,
@@ -149,6 +178,10 @@ def _capture_prompt(
     prompt_id = f"prompt:hook:{hashlib.sha256(identity.encode()).hexdigest()}"
     now = datetime.now().astimezone().isoformat(timespec="seconds")
     if actor_id is None:
+        return store.quarantine_prompt(
+            prompt_id, adapter_kind, session_ref, source_event_key, body, now
+        )
+    if actor_role != "shotcaller":
         return store.quarantine_prompt(
             prompt_id, adapter_kind, session_ref, source_event_key, body, now
         )
@@ -303,7 +336,7 @@ def _supervise(
               FROM runtime_instances r
               JOIN agent_instances a ON a.agent_id=r.actor_agent_id
              WHERE r.actor_agent_id=? AND r.status IN ('active','idle') AND r.verified=1
-               AND r.session_ref=a.thread_id AND a.retired_at IS NULL
+               AND a.retired_at IS NULL AND a.role='shotcaller'
              ORDER BY r.runtime_instance_id
             """,
             (actor_id,),
@@ -421,12 +454,14 @@ def main(argv: list[str] | None = None) -> int:
         actor = _actor(store, args, payload)
         actor_id = None if actor is None else str(actor[0])
         callsign = None if actor is None else str(actor[1])
+        actor_role = None if actor is None else str(actor[2])
         scope = None if actor is None else _scope(store, actor_id, callsign)
         if args.command in {"codex-user-prompt-hook", "cursor-before-submit-hook"}:
             _capture_prompt(
                 store,
                 scope,
                 actor_id,
+                actor_role,
                 payload,
                 adapter_kind=(
                     "codex" if args.command == "codex-user-prompt-hook" else "cursor"

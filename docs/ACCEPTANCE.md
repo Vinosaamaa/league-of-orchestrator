@@ -292,6 +292,15 @@ every archived node before any separately authorized rollback. The archive is
 never an active writer; stable hooks retain their existing command paths and
 switch together by resolving the new SQLite-backed launcher.
 
+After cutover, the stable watcher derives its SQLite state root from the same
+exact writer-pointer directory used to select the canonical writer. Codex and
+Cursor hook sessions bind first through one active or idle verified runtime;
+only if none exists may the imported active identity match directly. Multiple
+matches refuse. A non-Shotcaller prompt is accepted and retained exactly once
+as `runtime_unverified` quarantine without attempting a Shotcaller wake.
+Supervision registers only against one verified runtime owned by the exact
+active Shotcaller, independent of the archived thread identity.
+
 The command refuses missing, relative, symbolic-link, or malformed sentinels
 and refuses an existing namespace. It accepts at most 16 byte sentinels so a
 caller cannot create an unbounded preflight workload. The global

@@ -2695,9 +2695,16 @@ class SQLiteStorage(SQLiteTransactionCore):
         actor_agent_id: str,
         terminal_generation: str,
         at: str,
+        *,
+        block_on_fresh_terminal: bool = False,
     ) -> dict[str, Any]:
         return stop_decision_operation(
-            self, scope_id, actor_agent_id, terminal_generation, at
+            self,
+            scope_id,
+            actor_agent_id,
+            terminal_generation,
+            at,
+            block_on_fresh_terminal=block_on_fresh_terminal,
         )
 
     def _canonical_counts(self) -> dict[str, int]:

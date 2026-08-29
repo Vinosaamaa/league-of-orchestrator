@@ -387,6 +387,8 @@ def stop_decision(
     actor_agent_id: str,
     terminal_generation: str,
     at: str,
+    *,
+    block_on_fresh_terminal: bool = False,
 ) -> dict[str, Any]:
     _time(at, "Stop decision time")
     if not terminal_generation:
@@ -453,7 +455,10 @@ def stop_decision(
                     "priority": "explicit_allow_stop_once",
                 }
             wait_generation = int(scope["wait_generation"])
-            if int(scope["last_blocked_wait_generation"]) < wait_generation:
+            if (
+                (block_on_fresh_terminal and terminal_fresh)
+                or int(scope["last_blocked_wait_generation"]) < wait_generation
+            ):
                 store.connection.execute(
                     """
                     UPDATE watcher_scopes

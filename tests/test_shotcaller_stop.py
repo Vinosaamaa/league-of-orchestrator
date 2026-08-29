@@ -139,7 +139,7 @@ def test_user_priority_explicit_allow_and_configuration(root: Path) -> None:
     )
     assert priority["decision"] == "block" and priority["status"] == "blocked_once"
     next_stop = store.stop_decision(
-        "Garen-lifecycle", SHOTCALLER_ID, "terminal:after-user", clock.now()
+        "Garen-lifecycle", SHOTCALLER_ID, "terminal:user", clock.now()
     )
     assert next_stop["decision"] == "allow"
     store.rearm_wait("Garen-lifecycle", SHOTCALLER_ID, "event:explicit", clock.now())

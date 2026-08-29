@@ -136,7 +136,13 @@ def test_explicit_and_session_stop_dispatch(root: Path) -> None:
         (
             "session",
             ("codex-stop-hook",),
-            {"session_id": SHOTCALLER_ID, "hook_event_name": "Stop"},
+            {
+                "session_id": SHOTCALLER_ID,
+                "turn_id": "turn:real-session-dispatch",
+                "hook_event_name": "Stop",
+                "stop_hook_active": False,
+                "last_assistant_message": "Attempting to finish.",
+            },
         ),
     ):
         _, state, _ = seeded_state(root, name)
@@ -159,7 +165,12 @@ def test_supervise_wakes_and_stop_allows_after_settlement(root: Path) -> None:
     first = _watcher(
         env,
         "codex-stop-hook",
-        payload={"session_id": SHOTCALLER_ID, "hook_event_name": "Stop", "turn": "one"},
+        payload={
+            "session_id": SHOTCALLER_ID,
+            "turn_id": "turn:settlement-one",
+            "hook_event_name": "Stop",
+            "stop_hook_active": False,
+        },
     )
     assert first["decision"] == "block"
     waiter = subprocess.Popen(
@@ -200,7 +211,12 @@ def test_supervise_wakes_and_stop_allows_after_settlement(root: Path) -> None:
     allowed = _watcher(
         env,
         "codex-stop-hook",
-        payload={"session_id": SHOTCALLER_ID, "hook_event_name": "Stop", "turn": "two"},
+        payload={
+            "session_id": SHOTCALLER_ID,
+            "turn_id": "turn:settlement-two",
+            "hook_event_name": "Stop",
+            "stop_hook_active": False,
+        },
     )
     assert allowed == {}, allowed
 
@@ -350,7 +366,12 @@ def test_codex_and_cursor_prompt_capture_exactly_once(root: Path) -> None:
             "--shotcaller",
             "Garen",
             "codex-stop-hook",
-            payload={"hook_event_name": "Stop", "session_id": SHOTCALLER_ID},
+            payload={
+                "hook_event_name": "Stop",
+                "session_id": SHOTCALLER_ID,
+                "turn_id": f"turn:triaged-{name}",
+                "stop_hook_active": False,
+            },
         )
         assert stop["decision"] == "block"
 
@@ -446,6 +467,7 @@ def test_quarantined_prompt_rearms_one_shot_stop(root: Path) -> None:
         "session_id": SHOTCALLER_ID,
         "turn_id": "turn:stop-generation-one",
         "hook_event_name": "Stop",
+        "stop_hook_active": False,
     }
     first = _watcher(
         env, "--shotcaller", "Garen", "codex-stop-hook", payload=first_generation
@@ -489,11 +511,66 @@ def test_quarantined_prompt_rearms_one_shot_stop(root: Path) -> None:
         "session_id": SHOTCALLER_ID,
         "turn_id": "turn:stop-generation-two",
         "hook_event_name": "Stop",
+        "stop_hook_active": False,
     }
     again = _watcher(
         env, "--shotcaller", "Garen", "codex-stop-hook", payload=second_generation
     )
     assert again["decision"] == "block"
+
+
+def test_real_codex_stop_payload_blocks_once_per_turn(root: Path) -> None:
+    _, state, _ = seeded_state(root, "real-codex-stop-generation")
+    env = _environment(root / "real-codex-stop-generation", state)
+    first = {
+        "session_id": SHOTCALLER_ID,
+        "turn_id": "turn:owner-visible-one",
+        "hook_event_name": "Stop",
+        "stop_hook_active": False,
+        "last_assistant_message": "First end attempt.",
+    }
+    blocked = _watcher(env, "codex-stop-hook", payload=first)
+    assert blocked["decision"] == "block"
+    assert "turn:owner-visible-one" in str(blocked["reason"])
+
+    retry = {
+        **first,
+        "stop_hook_active": True,
+        "last_assistant_message": "Continuation end attempt.",
+    }
+    assert _watcher(env, "codex-stop-hook", payload=retry) == {}
+
+    # A new Codex turn is a fresh terminal generation even if prompt intake was
+    # temporarily unavailable and therefore did not increment wait_generation.
+    next_turn = {
+        **first,
+        "turn_id": "turn:owner-visible-two",
+        "last_assistant_message": "Next real user turn end attempt.",
+    }
+    next_block = _watcher(env, "codex-stop-hook", payload=next_turn)
+    assert next_block["decision"] == "block"
+    assert "turn:owner-visible-two" in str(next_block["reason"])
+
+
+def test_codex_stop_rejects_incomplete_real_payload(root: Path) -> None:
+    _, state, _ = seeded_state(root, "invalid-real-codex-stop")
+    env = _environment(root / "invalid-real-codex-stop", state)
+    result = subprocess.run(
+        [env["TEST_INSTALLED_WATCHER"], "codex-stop-hook"],
+        input=json.dumps(
+            {
+                "session_id": SHOTCALLER_ID,
+                "hook_event_name": "Stop",
+                "stop_hook_active": False,
+            }
+        ),
+        text=True,
+        capture_output=True,
+        env=env,
+        check=False,
+    )
+    assert result.returncode == 2
+    assert "stop_hook_invalid" in result.stderr
 
 
 def test_material_delivery_watcher_direct_dedup_and_unavailable(root: Path) -> None:
@@ -623,6 +700,8 @@ def main() -> None:
         test_codex_and_cursor_prompt_capture_exactly_once(root)
         test_missing_identity_quarantines_then_binds_and_triages(root)
         test_quarantined_prompt_rearms_one_shot_stop(root)
+        test_real_codex_stop_payload_blocks_once_per_turn(root)
+        test_codex_stop_rejects_incomplete_real_payload(root)
         test_material_delivery_watcher_direct_dedup_and_unavailable(root)
     print("PASS: installed SQLite Stop/supervise plus watcher/direct exact-once delivery and pending fallback")
 

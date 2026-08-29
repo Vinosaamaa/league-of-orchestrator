@@ -40,6 +40,21 @@ interrupt → resume → exact guarded exit. It is never reported as real-runtim
 proof. Separate deterministic contract tests cover Codex+Herdr creation and
 Codex+tmux attach/input/inspect/close behavior without launching either backend.
 
+Shotcaller rollover adds a narrower configured-provider command boundary,
+`league.rollover-provider-adapters.v1`. It maps an opaque harness kind to one
+absolute local command and never branches in core code on Codex, Cursor, or a
+future provider name. `league rollover run` sends that command one bounded JSON
+request for `acknowledge`, `abort`, or `drain`; the command must return the exact
+verified receipt schema. Input and output are capped, command time is bounded,
+nonzero/timeout outcomes are retryable with the same idempotency key, and raw
+stdout/stderr never becomes public League output. Both predecessor and
+successor harness adapters are preflighted before owner commit. The normalized
+configuration digest is part of the durable handoff plan and must match on
+every retry; the command paths themselves remain local adapter input. Each
+adapter must durably reconcile the request's idempotency key before applying an
+external effect and echo that exact key in its verified receipt, so a crash
+before the local transition can retrieve the same outcome without repeating it.
+
 Issue #10's `league skill matrix` reuses this generated adapter matrix as its
 runtime-pair evidence. Skill requirements remain a separate provider/model-
 neutral capability vector; they do not add adapter kinds or driver selection.

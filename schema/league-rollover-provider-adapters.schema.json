@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Vinosaamaa/league-of-orchestrator/schema/league-rollover-provider-adapters.schema.json",
+  "title": "League configured rollover provider adapters",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "adapters"],
+  "properties": {
+    "schema": {"const": "league.rollover-provider-adapters.v1"},
+    "adapters": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 16,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["harness_kind", "command"],
+        "properties": {
+          "harness_kind": {"type": "string", "pattern": "^[a-z][a-z0-9._-]{0,31}$"},
+          "command": {"type": "array", "minItems": 1, "maxItems": 16, "items": {"type": "string", "minLength": 1, "maxLength": 4096}}
+        }
+      }
+    }
+  }
+}

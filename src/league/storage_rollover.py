@@ -76,3 +76,21 @@ class RolloverStorage(Protocol):
 
     def rollover_status(self, operation_id: str) -> Optional[dict[str, Any]]: ...
     def rollover_cleanup_target(self, operation_id: str) -> Optional[dict[str, Any]]: ...
+
+    def rollover_execution_context(
+        self,
+        operation_id: str,
+        predecessor_runtime_instance_id: str,
+        successor_runtime_instance_id: str,
+    ) -> dict[str, Any]: ...
+
+    def record_rollover_runtime_closed(
+        self,
+        operation_id: str,
+        participant: str,
+        runtime_instance_id: str,
+        session_identity: str,
+        endpoint_identity: str,
+        runtime_generation: str,
+        at: str,
+    ) -> dict[str, Any]: ...

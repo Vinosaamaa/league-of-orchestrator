@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Vinosaamaa/league-of-orchestrator/schema/league-rollover-provider-request.schema.json",
+  "title": "League private rollover provider request",
+  "oneOf": [
+    {"$ref": "#/$defs/acknowledgement"},
+    {"$ref": "#/$defs/cleanup"}
+  ],
+  "$defs": {
+    "acknowledgement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "action", "idempotency_key", "operation", "startup_context", "bindings"],
+      "properties": {
+        "schema": {"const": "league.rollover-provider-request.v1"},
+        "action": {"const": "acknowledge"},
+        "idempotency_key": {"$ref": "#/$defs/digest"},
+        "operation": {"$ref": "#/$defs/operation"},
+        "startup_context": {"$ref": "league-startup-context.schema.json"},
+        "bindings": {"$ref": "league-rollover-pages.schema.json"}
+      }
+    },
+    "cleanup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "action", "idempotency_key", "operation", "participant", "runtime", "pending_obligations"],
+      "properties": {
+        "schema": {"const": "league.rollover-provider-request.v1"},
+        "action": {"enum": ["abort", "drain"]},
+        "idempotency_key": {"$ref": "#/$defs/digest"},
+        "operation": {"$ref": "#/$defs/operation"},
+        "participant": {"enum": ["predecessor", "successor"]},
+        "runtime": {"$ref": "league-rollover-provider-runtime.schema.json"},
+        "pending_obligations": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["requests", "deliveries", "durable"],
+          "properties": {
+            "requests": {"type": "integer", "minimum": 0},
+            "deliveries": {"type": "integer", "minimum": 0},
+            "durable": {"type": "integer", "minimum": 0}
+          }
+        }
+      }
+    },
+    "operation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "operation_id", "squad_id", "predecessor_agent_id", "successor_agent_id", "state", "version", "authority_kind", "plan_digest", "handoff_digest", "snapshot", "acknowledgement_digest", "owner_event_id", "owner_outbox_id"],
+      "properties": {
+        "schema": {"const": "league.rollover.v1"},
+        "operation_id": {"type": "string", "minLength": 1},
+        "squad_id": {"type": "string", "minLength": 1},
+        "predecessor_agent_id": {"type": "string", "minLength": 1},
+        "successor_agent_id": {"type": "string", "minLength": 1},
+        "state": {"enum": ["prepared", "acknowledged", "switched", "completed", "aborted"]},
+        "version": {"type": "integer", "minimum": 1},
+        "authority_kind": {"enum": ["explicit", "automatic"]},
+        "plan_digest": {"$ref": "#/$defs/digest"},
+        "handoff_digest": {"$ref": "#/$defs/digest"},
+        "snapshot": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["snapshot_id", "version", "count", "page_bound", "expires_at", "digest"],
+          "properties": {
+            "snapshot_id": {"type": "string", "minLength": 1},
+            "version": {"type": "integer", "minimum": 1},
+            "count": {"type": "integer", "minimum": 0, "maximum": 10000},
+            "page_bound": {"type": "integer", "minimum": 1, "maximum": 500},
+            "expires_at": {"type": "string", "format": "date-time"},
+            "digest": {"$ref": "#/$defs/digest"}
+          }
+        },
+        "acknowledgement_digest": {"oneOf": [{"$ref": "#/$defs/digest"}, {"type": "null"}]},
+        "owner_event_id": {"type": ["string", "null"], "minLength": 1},
+        "owner_outbox_id": {"type": ["string", "null"], "minLength": 1}
+      }
+    },
+    "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

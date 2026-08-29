@@ -37,6 +37,9 @@
     "obligations": {"$ref": "#/$defs/boundedTextList"},
     "policy_digest": {"type": "string", "minLength": 1, "maxLength": 256},
     "instruction_digest": {"type": "string", "minLength": 1, "maxLength": 256},
+    "provider_adapter_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "predecessor_runtime_instance_id": {"type": "string", "minLength": 1, "maxLength": 4096},
+    "successor_runtime_instance_id": {"type": "string", "minLength": 1, "maxLength": 4096},
     "expires_at": {"type": "string", "format": "date-time"},
     "page_bound": {"type": "integer", "minimum": 1, "maximum": 500}
   },

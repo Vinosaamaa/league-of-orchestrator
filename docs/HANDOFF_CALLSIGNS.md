@@ -80,7 +80,35 @@ rewritten.
   callsign; and
 - `drain` — after the switch, require successor proof, zero predecessor intake
   or delivery obligations, exact predecessor runtime cleanup, archive/resource
-  receipts, and callsign release before closing the predecessor.
+  receipts, and callsign release before closing the predecessor; and
+- `run` — recoverably compose those same stages from one strict manifest and
+  configured provider-adapter registry. It creates no second lifecycle state.
+
+`run` freezes the plan first, waits safely if the separately launched successor
+has not yet completed exact runtime acceptance, retrieves every immutable
+binding page, passes the bounded startup context to the successor's configured
+harness adapter, commits only its exact acknowledgement, and invokes the
+predecessor adapter only after request, delivery, and durable obligation counts
+are all zero. Both runtime harness kinds must have configured adapters before
+the owner switch, and the normalized adapter configuration SHA-256 is stored in
+the durable public-safe plan so a retry cannot silently substitute commands.
+Adapter commands receive stable action idempotency keys;
+they must durably reconcile and echo the key before applying an effect. Unknown
+outcomes remain retryable with that same key, a pre-switch `--abort` uses the existing
+abort transition, and a retry after the switch resumes drain without another
+owner event or outbox row. Raw adapter output and private runtime locators are
+never copied into the public command envelope.
+
+`league agent startup-context` is the shared startup read for a newly activated
+Champion or successor Shotcaller. The caller supplies the exact agent and
+runtime IDs. The read refuses stale, duplicated, retired, unverified, or
+callsign-mismatched incarnations and returns at most 65,536 bytes and 128
+obligations. Its fields are limited to verified role/callsign identity,
+owning/requesting Shotcallers, task/request state, stable Squad and routing
+context, a redacted runtime binding, permitted next commands, and pending
+obligations. Session, endpoint, generation, repository, branch, worktree,
+prompt, transcript, and adapter-command values are absent; runtime generation
+is represented only by a SHA-256 digest.
 
 The handoff stores a reference to the active-Champion snapshot, never the full
 binding map. Every page repeats snapshot ID, version, total count, page bound,
@@ -114,6 +142,7 @@ task, merge, deploy, install, teardown, or publication authority. Direct SQL is
 unsupported; callers use the stable command envelope and storage facade.
 
 Repository-local deterministic tests use temporary state roots and synthetic
-adapters only. They do not establish real Herdr/tmux/Codex support, installation,
-live migration, cutover, or smoke. Issue #23 must record those separately
-authorized receipts.
+configured adapters only. They prove both Codex-to-Cursor and Cursor-to-Codex
+orchestration directions without launching either provider. They do not
+establish real Herdr/tmux/Codex/Cursor support, installation, live migration,
+cutover, or smoke. Issue #23 must record those separately authorized receipts.

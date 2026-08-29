@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Vinosaamaa/league-of-orchestrator/schema/league-rollover-provider-receipt.schema.json",
+  "title": "League private rollover provider receipt",
+  "oneOf": [
+    {"$ref": "#/$defs/acknowledgement"},
+    {"$ref": "#/$defs/abort"},
+    {"$ref": "#/$defs/drain"}
+  ],
+  "$defs": {
+    "acknowledgement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "action", "verified", "idempotency_key", "operation_id", "successor_agent_id", "runtime_instance_id", "handoff_digest", "snapshot_version", "snapshot_count", "snapshot_digest", "pages_digest"],
+      "properties": {
+        "schema": {"const": "league.rollover-provider-receipt.v1"},
+        "action": {"const": "acknowledge"},
+        "verified": {"const": true},
+        "idempotency_key": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "operation_id": {"type": "string", "minLength": 1},
+        "successor_agent_id": {"type": "string", "minLength": 1},
+        "runtime_instance_id": {"type": "string", "minLength": 1},
+        "handoff_digest": {"type": "string", "minLength": 1},
+        "snapshot_version": {"type": "integer", "minimum": 1},
+        "snapshot_count": {"type": "integer", "minimum": 0, "maximum": 10000},
+        "snapshot_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "pages_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "abort": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "action", "verified", "idempotency_key", "operation_id", "predecessor_agent_id", "successor_agent_id", "runtime", "runtime_cleanup_receipt_digest", "cleanup_digest"],
+      "properties": {
+        "schema": {"const": "league.rollover-provider-receipt.v1"},
+        "action": {"const": "abort"},
+        "verified": {"const": true},
+        "idempotency_key": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "operation_id": {"type": "string", "minLength": 1},
+        "predecessor_agent_id": {"type": "string", "minLength": 1},
+        "successor_agent_id": {"type": "string", "minLength": 1},
+        "runtime": {"$ref": "league-rollover-provider-runtime.schema.json"},
+        "runtime_cleanup_receipt_digest": {"type": "string", "minLength": 1},
+        "cleanup_digest": {"type": "string", "minLength": 1}
+      }
+    },
+    "drain": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "action", "verified", "idempotency_key", "operation_id", "predecessor_agent_id", "successor_agent_id", "owner_event_id", "runtime", "archive_digest", "resource_receipt_digest", "callsign_release_receipt_digest"],
+      "properties": {
+        "schema": {"const": "league.rollover-provider-receipt.v1"},
+        "action": {"const": "drain"},
+        "verified": {"const": true},
+        "idempotency_key": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "operation_id": {"type": "string", "minLength": 1},
+        "predecessor_agent_id": {"type": "string", "minLength": 1},
+        "successor_agent_id": {"type": "string", "minLength": 1},
+        "owner_event_id": {"type": "string", "minLength": 1},
+        "runtime": {"$ref": "league-rollover-provider-runtime.schema.json"},
+        "archive_digest": {"type": "string", "minLength": 1},
+        "resource_receipt_digest": {"type": "string", "minLength": 1},
+        "callsign_release_receipt_digest": {"type": "string", "minLength": 1}
+      }
+    }
+  }
+}

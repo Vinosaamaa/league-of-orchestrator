@@ -39,7 +39,13 @@ class InjectedCrash(RuntimeError):
     pass
 
 
-def runtime_receipt(assignment: dict, suffix: str, caps: list[str]) -> dict:
+def runtime_receipt(
+    assignment: dict,
+    suffix: str,
+    caps: list[str],
+    *,
+    harness_kind: str = "synthetic",
+) -> dict:
     return {
         "schema": "league.runtime-acceptance.v1",
         "verified": True,
@@ -47,13 +53,13 @@ def runtime_receipt(assignment: dict, suffix: str, caps: list[str]) -> dict:
         "agent_id": assignment["agent_id"],
         "callsign": assignment["callsign"],
         "runtime_instance_id": f"runtime:{suffix}",
-        "harness_kind": "synthetic",
+        "harness_kind": harness_kind,
         "backend_kind": "herdr",
-        "session_identity": f"synthetic:{suffix}",
+        "session_identity": f"{harness_kind}:{suffix}",
         "endpoint_identity": f"synthetic-endpoint:{suffix}",
         "endpoint_generation": f"generation:{suffix}",
         "routing_name": assignment["callsign"].lower(),
-        "display_agent": "synthetic",
+        "display_agent": harness_kind,
         "capabilities": caps,
     }
 
@@ -78,7 +84,12 @@ def plan(*, page_bound: int = 2, unsafe: bool = False) -> dict:
     return value
 
 
-def seed_rollover(store: SQLiteStorage, *, champion_count: int = 3) -> dict:
+def seed_rollover(
+    store: SQLiteStorage,
+    *,
+    champion_count: int = 3,
+    old_harness_kind: str = "synthetic",
+) -> dict:
     store.reconcile_callsign_pool(
         "shotcaller",
         1,
@@ -103,7 +114,12 @@ def seed_rollover(store: SQLiteStorage, *, champion_count: int = 3) -> dict:
     store.activate_callsign(
         old["assignment_id"],
         1,
-        runtime_receipt(old, "old-shotcaller", ["rollover.accept"]),
+        runtime_receipt(
+            old,
+            "old-shotcaller",
+            ["rollover.accept"],
+            harness_kind=old_harness_kind,
+        ),
         AT1,
     )
     store.connection.execute(

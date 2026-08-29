@@ -48,6 +48,21 @@ registration contract. Registration cannot activate routing; acceptance
 atomically creates stable Squad/intake/event/requester-outbox state, and active
 replacement remains a guarded rollover operation.
 
+`league agent startup-context` is the only startup read for an activated
+Champion or successor Shotcaller. It requires one exact active verified runtime
+and callsign acceptance, rejects ambiguous or stale identity, and returns only
+bounded task/request, owning/requesting Shotcaller, stable Squad/routing,
+permitted-action, and pending-obligation facts. It never returns prompt bodies,
+summaries, transcripts, session/endpoint values, or repository/worktree paths.
+
+`league rollover run` composes the existing prepare/bindings/acknowledge/commit/
+abort/drain/status operations. The commit atomically redirects open durable
+Shotcaller obligations with Squad intake and pending delivery ownership while
+leaving every Champion task, thread, runtime, worktree, callsign, and historical
+coordinator binding unchanged. The provider-backed predecessor drain is not
+invoked until the predecessor has zero direct request, delivery, and durable
+obligation rows.
+
 `league assign` exposes the shared durable state machine: `prepare` commits the
 role-specific reservation, `launching` commits external-launch intent,
 `activate` accepts only the exact machine-readable Champion or hidden-scientist

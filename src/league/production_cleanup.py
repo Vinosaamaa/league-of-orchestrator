@@ -44,15 +44,14 @@ class SystemProcessPort:
     def inspect(self, pid: int) -> Optional[Mapping[str, Any]]:
         if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 1:
             raise StorageRefusal("cleanup_identity_mismatch", "process PID is unsafe")
-        started = self.runner.run(
-            ("ps", "-p", str(pid), "-o", "lstart="), allow_failure=True
+        inspected = self.runner.run(
+            ("ps", "-p", str(pid), "-o", "lstart=", "-o", "stat="),
+            allow_failure=True,
         )
-        state = self.runner.run(
-            ("ps", "-p", str(pid), "-o", "stat="), allow_failure=True
-        )
-        start_text = started.stdout.strip()
-        state_text = state.stdout.strip()
-        if started.returncode != 0 or state.returncode != 0 or not start_text or not state_text:
+        line = inspected.stdout.rstrip("\n")
+        start_text = line[:24].strip()
+        state_text = line[24:].strip()
+        if inspected.returncode != 0 or not start_text or not state_text:
             return None
         if state_text.startswith("Z"):
             return None
@@ -70,7 +69,7 @@ class SystemProcessPort:
         while time.monotonic() < deadline:
             if self.inspect(pid) is None:
                 return {"pid": pid, "exit_verified": True, "signal": "SIGTERM"}
-            time.sleep(0.05)
+            time.sleep(0.1)
         raise StorageRefusal("cleanup_adapter_failed", "exact process did not exit after SIGTERM")
 
 

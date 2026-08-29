@@ -615,6 +615,20 @@ def cleanup_operation(store: Any, operation_id: str) -> Optional[dict[str, Any]]
     ).fetchone())
     if operation is None:
         return None
+    receipts = {
+        row["action_id"]: {
+            "outcome": row["outcome"],
+            "receipt_hash": row["receipt_hash"],
+            "recorded_at": row["recorded_at"],
+        }
+        for row in store.connection.execute(
+            """
+            SELECT action_id,outcome,receipt_hash,recorded_at
+              FROM cleanup_action_receipts WHERE operation_id=?
+            """,
+            (operation_id,),
+        )
+    }
     actions = []
     for row in store.connection.execute(
         "SELECT * FROM cleanup_actions WHERE operation_id=? ORDER BY ordinal", (operation_id,)
@@ -622,11 +636,7 @@ def cleanup_operation(store: Any, operation_id: str) -> Optional[dict[str, Any]]
         action = dict(row)
         action["expected_identity"] = json.loads(action.pop("expected_identity_json"))
         action["intended_state"] = json.loads(action.pop("intended_state_json"))
-        receipt = store.connection.execute(
-            "SELECT outcome,receipt_hash,recorded_at FROM cleanup_action_receipts WHERE action_id=?",
-            (action["action_id"],),
-        ).fetchone()
-        action["receipt"] = None if receipt is None else dict(receipt)
+        action["receipt"] = receipts.get(action["action_id"])
         actions.append(action)
     operation["actions"] = actions
     final = store.connection.execute(
@@ -635,6 +645,87 @@ def cleanup_operation(store: Any, operation_id: str) -> Optional[dict[str, Any]]
     ).fetchone()
     operation["final_receipt"] = None if final is None else dict(final)
     return operation
+
+
+def _validate_cleanup_resources(
+    resources: list[dict[str, Any]], archived_resources: Any, actions: list[dict[str, Any]]
+) -> dict[str, list[dict[str, Any]]]:
+    """Prove the registered-resource snapshot and its exact action bindings."""
+
+    if not isinstance(archived_resources, list) or any(
+        not isinstance(resource, dict) for resource in archived_resources
+    ):
+        raise StorageRefusal(
+            "cleanup_operation_invalid",
+            "cleanup plan has no immutable registered-resource snapshot",
+        )
+    resource_fields = {
+        "resource_id",
+        "task_id",
+        "owner_id",
+        "owner_role",
+        "resource_type",
+        "lifetime",
+        "expected_identity",
+        "cleanup_action",
+        "adapter_kind",
+        "applicable",
+        "applicability_reason",
+    }
+    canonical_resources = {
+        resource["resource_id"]: {key: resource[key] for key in resource_fields}
+        for resource in resources
+    }
+    canonical_states = {
+        resource["resource_id"]: resource["state"] for resource in resources
+    }
+    archived_by_id = {
+        resource.get("resource_id"): resource for resource in archived_resources
+    }
+    if (
+        len(archived_by_id) != len(archived_resources)
+        or set(canonical_resources) != set(archived_by_id)
+        or any(
+            set(archived) != resource_fields
+            or canonical_resources[resource_id] != archived
+            for resource_id, archived in archived_by_id.items()
+        )
+    ):
+        raise StorageRefusal(
+            "cleanup_resource_changed",
+            "registered cleanup resources changed after the immutable plan was created",
+        )
+    resource_actions: dict[str, list[dict[str, Any]]] = {
+        resource_id: [] for resource_id in canonical_resources
+    }
+    for action in actions:
+        resource_id = action.get("resource_id")
+        if resource_id is not None:
+            if resource_id not in resource_actions:
+                raise StorageRefusal(
+                    "cleanup_resource_changed",
+                    "cleanup action refers to an unregistered task resource",
+                )
+            resource_actions[resource_id].append(action)
+    for resource_id, resource in canonical_resources.items():
+        expected_count = 0 if resource["lifetime"] == "persistent_retain" else 1
+        matching = resource_actions[resource_id]
+        if (
+            len(matching) != expected_count
+            or resource["applicable"] is not True
+            or canonical_states[resource_id] == "stale"
+            or any(
+                action["action_kind"] != resource["cleanup_action"]
+                or action["adapter_kind"] != resource["adapter_kind"]
+                or action["expected_identity"] != resource["expected_identity"]
+                for action in matching
+            )
+        ):
+            raise StorageRefusal(
+                "cleanup_resource_changed",
+                "cleanup resource action, applicability, or identity changed",
+            )
+    return resource_actions
 
 
 def cleanup_execution_context(store: Any, operation_id: str) -> dict[str, Any]:
@@ -732,83 +823,7 @@ def cleanup_execution_context(store: Any, operation_id: str) -> dict[str, Any]:
         value["expected_identity"] = json.loads(value.pop("expected_identity_json"))
         value["applicable"] = bool(value["applicable"])
         resources.append(value)
-    archived_resources = archive.get("resources")
-    if not isinstance(archived_resources, list) or any(
-        not isinstance(resource, dict) for resource in archived_resources
-    ):
-        raise StorageRefusal(
-            "cleanup_operation_invalid",
-            "cleanup plan has no immutable registered-resource snapshot",
-        )
-    resource_fields = {
-        "resource_id",
-        "task_id",
-        "owner_id",
-        "owner_role",
-        "resource_type",
-        "lifetime",
-        "expected_identity",
-        "cleanup_action",
-        "adapter_kind",
-        "applicable",
-        "applicability_reason",
-    }
-    canonical_resources = {
-        resource["resource_id"]: {
-            key: resource[key]
-            for key in resource_fields
-        }
-        for resource in resources
-    }
-    canonical_resource_states = {
-        resource["resource_id"]: resource["state"] for resource in resources
-    }
-    archived_by_id = {
-        resource.get("resource_id"): resource for resource in archived_resources
-    }
-    if (
-        len(archived_by_id) != len(archived_resources)
-        or set(canonical_resources) != set(archived_by_id)
-        or any(
-            set(archived) != resource_fields
-            or canonical_resources[resource_id] != archived
-            for resource_id, archived in archived_by_id.items()
-        )
-    ):
-        raise StorageRefusal(
-            "cleanup_resource_changed",
-            "registered cleanup resources changed after the immutable plan was created",
-        )
-    resource_actions: dict[str, list[dict[str, Any]]] = {
-        resource_id: [] for resource_id in canonical_resources
-    }
-    for action in actions:
-        resource_id = action.get("resource_id")
-        if resource_id is not None:
-            if resource_id not in resource_actions:
-                raise StorageRefusal(
-                    "cleanup_resource_changed",
-                    "cleanup action refers to an unregistered task resource",
-                )
-            resource_actions[resource_id].append(action)
-    for resource_id, resource in canonical_resources.items():
-        expected_count = 0 if resource["lifetime"] == "persistent_retain" else 1
-        matching = resource_actions[resource_id]
-        if (
-            len(matching) != expected_count
-            or resource["applicable"] is not True
-            or canonical_resource_states[resource_id] == "stale"
-            or any(
-                action["action_kind"] != resource["cleanup_action"]
-                or action["adapter_kind"] != resource["adapter_kind"]
-                or action["expected_identity"] != resource["expected_identity"]
-                for action in matching
-            )
-        ):
-            raise StorageRefusal(
-                "cleanup_resource_changed",
-                "cleanup resource action, applicability, or identity changed",
-            )
+    _validate_cleanup_resources(resources, archive.get("resources"), actions)
     immutable_actions = [
         {
             key: action[key]

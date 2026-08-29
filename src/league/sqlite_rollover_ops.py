@@ -1316,35 +1316,33 @@ def complete_rollover_drain(
                 raise StorageRefusal("runtime_active", "predecessor runtime is not closed")
             assignment = store.connection.execute(
                 """
-                SELECT * FROM callsign_assignments WHERE agent_id=? AND state='active'
-                 ORDER BY reserved_at DESC LIMIT 1
+                SELECT * FROM callsign_assignments
+                 WHERE agent_id=? AND state IN ('active','released')
+                 ORDER BY CASE state WHEN 'active' THEN 0 ELSE 1 END,
+                          reserved_at DESC
+                 LIMIT 1
                 """,
                 (operation["predecessor_agent_id"],),
             ).fetchone()
             if assignment is None:
-                assignment = store.connection.execute(
-                    """
-                    SELECT * FROM callsign_assignments WHERE agent_id=? AND state='released'
-                     ORDER BY reserved_at DESC LIMIT 1
-                    """,
-                    (operation["predecessor_agent_id"],),
-                ).fetchone()
-                if (
-                    assignment is None
-                    or assignment["release_receipt_digest"]
-                    != receipt["callsign_release_receipt_digest"]
-                ):
-                    raise StorageRefusal(
-                        "callsign_assignment_missing",
-                        "predecessor callsign release is missing or belongs to another cleanup",
-                    )
-            else:
+                raise StorageRefusal(
+                    "callsign_assignment_missing", "predecessor callsign assignment is unknown"
+                )
+            if assignment["state"] == "active":
                 _release_active_in_transaction(
                     store,
                     assignment,
                     int(assignment["version"]),
                     receipt["callsign_release_receipt_digest"],
                     at,
+                )
+            elif (
+                assignment["release_receipt_digest"]
+                != receipt["callsign_release_receipt_digest"]
+            ):
+                raise StorageRefusal(
+                    "callsign_assignment_missing",
+                    "predecessor callsign release belongs to another cleanup",
                 )
             store.connection.execute(
                 """

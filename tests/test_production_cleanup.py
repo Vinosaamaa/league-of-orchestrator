@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 
 
@@ -13,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / "src"), str(ROOT / "tests")]
 
 from league.cleanup import CleanupPlanner, cleanup_action_digest  # noqa: E402
-from league.production_cleanup import ProductionCleanup  # noqa: E402
+from league.production_cleanup import ProductionCleanup, SystemProcessPort  # noqa: E402
 from league.real_cleanup import SubprocessRunner  # noqa: E402
 from league.real_canary import (  # noqa: E402
     CHAMPION_ID,
@@ -44,6 +46,17 @@ class HybridRunner:
         if arguments[0] == "herdr":
             return self.herdr.run(arguments, allow_failure=allow_failure)
         return self.system.run(arguments, allow_failure=allow_failure)
+
+
+class ProcessInspectionRunner:
+    def __init__(self) -> None:
+        self.calls = []
+
+    def run(self, arguments, *, allow_failure: bool = False):
+        self.calls.append(tuple(arguments))
+        return subprocess.CompletedProcess(
+            arguments, 0, "Thu Jan  1 00:00:00 2026 Ss+\n", ""
+        )
 
 
 class RolloverPlanningStore:
@@ -169,6 +182,19 @@ def test_rollover_predecessor_requires_exact_switch_and_emits_drain_receipt() ->
     assert receipt["callsign_release_receipt_digest"] == cleanup_action_digest(callsign)
 
 
+def test_process_inspection_uses_one_exact_query() -> None:
+    runner = ProcessInspectionRunner()
+    observed = SystemProcessPort(runner).inspect(4242)
+    assert observed == {
+        "pid": 4242,
+        "process_start": "Thu Jan  1 00:00:00 2026",
+        "state": "Ss+",
+    }
+    assert runner.calls == [
+        ("ps", "-p", "4242", "-o", "lstart=", "-o", "stat=")
+    ]
+
+
 def _resource(
     resource_id: str,
     lifetime: str,
@@ -189,6 +215,27 @@ def _resource(
         "applicable": True,
         "applicability_reason": "Synthetic production cleanup fixture.",
     }
+
+
+@contextmanager
+def _temporarily_register_late_resource(store: SQLiteStorage):
+    late = _resource(
+        "persistent:late-foreign-plan",
+        "persistent_retain",
+        "retain",
+        "retain",
+        {
+            "resource_id": "persistent:late-foreign-plan",
+            "generation": "late",
+        },
+    )
+    store.register_task_resource(late, AT_PLAN)
+    try:
+        yield
+    finally:
+        store.connection.execute(
+            "DELETE FROM task_resources WHERE resource_id=?", (late["resource_id"],)
+        )
 
 
 def test_production_cleanup_crash_resume_and_lease_scope(root: Path) -> None:
@@ -275,35 +322,13 @@ def test_production_cleanup_crash_resume_and_lease_scope(root: Path) -> None:
             "callsign",
             "lease",
         }
-        store.connection.execute(
-            """
-            INSERT INTO task_resources
-              (resource_id,task_id,owner_id,owner_role,resource_type,lifetime,
-               expected_identity_json,cleanup_action,adapter_kind,applicable,
-               applicability_reason,state,version,registered_at,updated_at)
-            VALUES(?,?,?,?,?,'persistent_retain',?,'retain','retain',1,?,'active',1,?,?)
-            """,
-            (
-                "persistent:late-foreign-plan",
-                LIFECYCLE_TASK_ID,
-                CHAMPION_ID,
-                "champion",
-                "synthetic-retained",
-                '{"generation":"late","resource_id":"persistent:late-foreign-plan"}',
-                "Late resource must never be guessed into an existing plan.",
-                AT_PLAN,
-                AT_PLAN,
-            ),
-        )
-        try:
-            store.cleanup_execution_context(planned["operation_id"])
-        except StorageRefusal as exc:
-            assert exc.code == "cleanup_resource_changed"
-        else:
-            raise AssertionError("late resource was guessed into an immutable cleanup plan")
-        store.connection.execute(
-            "DELETE FROM task_resources WHERE resource_id='persistent:late-foreign-plan'"
-        )
+        with _temporarily_register_late_resource(store):
+            try:
+                store.cleanup_execution_context(planned["operation_id"])
+            except StorageRefusal as exc:
+                assert exc.code == "cleanup_resource_changed"
+            else:
+                raise AssertionError("late resource was guessed into an immutable cleanup plan")
         service = ProductionCleanup(store, runner=HybridRunner(runner))
 
         def crash(event: object) -> None:
@@ -384,6 +409,7 @@ def test_stable_execute_command_refuses_unknown_operation(root: Path) -> None:
 
 def main() -> None:
     test_rollover_predecessor_requires_exact_switch_and_emits_drain_receipt()
+    test_process_inspection_uses_one_exact_query()
     with tempfile.TemporaryDirectory(prefix="league-production-cleanup-") as temporary:
         root = Path(temporary)
         test_production_cleanup_crash_resume_and_lease_scope(root / "e2e")

@@ -1196,6 +1196,77 @@ def assignment_launch_context(store: Any, assignment_id: str) -> dict[str, Any]:
     }
 
 
+def _settle_assignment_activation_delivery(
+    store: Any,
+    assignment_id: str,
+    effect_sha256: str,
+    at: str,
+) -> dict[str, str]:
+    rows = store.connection.execute(
+        """
+        SELECT o.outbox_id,o.event_id,o.recipient_agent_id,o.state,
+               r.effect_kind,r.effect_id
+          FROM events e
+          JOIN delivery_outbox o ON o.event_id=e.event_id
+          LEFT JOIN recipient_receipts r
+            ON r.event_id=o.event_id AND r.recipient_agent_id=o.recipient_agent_id
+         WHERE e.aggregate_kind='assignment' AND e.aggregate_id=?
+           AND e.event_type='assignment_active'
+        """,
+        (assignment_id,),
+    ).fetchall()
+    if len(rows) != 1:
+        raise StorageRefusal(
+            "assignment_incomplete",
+            "assignment context has no exact activation delivery",
+        )
+    row = rows[0]
+    if row["effect_kind"] is not None:
+        if (
+            row["effect_kind"] != "assignment_context"
+            or row["effect_id"] != effect_sha256
+        ):
+            raise StorageRefusal(
+                "assignment_context_conflict",
+                "assignment activation already has a different recipient effect",
+            )
+        if row["state"] != "delivered":
+            raise StorageRefusal(
+                "assignment_context_conflict",
+                "assignment activation receipt and outbox state disagree",
+            )
+    else:
+        if row["state"] != "pending":
+            raise StorageRefusal(
+                "assignment_context_conflict",
+                "assignment activation is not available for exact context delivery",
+            )
+        store.connection.execute(
+            """
+            INSERT INTO recipient_receipts
+              (event_id,recipient_agent_id,received_at,effect_kind,effect_id)
+            VALUES(?,?,?,'assignment_context',?)
+            """,
+            (row["event_id"], row["recipient_agent_id"], at, effect_sha256),
+        )
+        store.connection.execute(
+            """
+            UPDATE delivery_outbox
+               SET state='delivered',last_outcome='assignment_context_delivered',delivered_at=?
+             WHERE outbox_id=? AND state='pending'
+            """,
+            (at, row["outbox_id"]),
+        )
+        store.connection.execute(
+            """
+            UPDATE obligations SET state='satisfied',updated_at=?
+             WHERE kind='delivery' AND aggregate_id=? AND state='open'
+            """,
+            (at, row["outbox_id"]),
+        )
+    return {"outbox_id": str(row["outbox_id"]), "delivery_state": "delivered"}
+
+
 def record_assignment_context_delivery(
     store: Any,
     assignment_id: str,
@@ -1240,6 +1311,9 @@ def record_assignment_context_delivery(
                         "assignment_context_conflict",
                         "assignment context was already delivered with different bytes",
                     )
+                activation = _settle_assignment_activation_delivery(
+                    store, assignment_id, effect_sha256, at
+                )
                 return {
                     "assignment_id": assignment_id,
                     "state": "active",
@@ -1247,6 +1321,8 @@ def record_assignment_context_delivery(
                     "event_id": existing[0]["event_id"],
                     "context_sha256": context_sha256,
                     "bytes": byte_count,
+                    "effect_sha256": effect_sha256,
+                    **activation,
                     "idempotent": True,
                 }
             assignment = store.connection.execute(
@@ -1284,6 +1360,9 @@ def record_assignment_context_delivery(
                 "UPDATE task_assignments SET version=?,updated_at=? WHERE task_assignment_id=?",
                 (next_version, at, assignment_id),
             )
+            activation = _settle_assignment_activation_delivery(
+                store, assignment_id, effect_sha256, at
+            )
     except StorageRefusal:
         raise
     except sqlite3.DatabaseError as exc:
@@ -1297,6 +1376,8 @@ def record_assignment_context_delivery(
         "event_id": event_id,
         "context_sha256": context_sha256,
         "bytes": byte_count,
+        "effect_sha256": effect_sha256,
+        **activation,
         "idempotent": False,
     }
 

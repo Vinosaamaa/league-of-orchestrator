@@ -334,7 +334,11 @@ class HerdrCodexLaunchAdapter:
                 "pane_id": str(pane_id),
                 "terminal_id": str(terminal_id),
                 "routing_name": routing_name,
+                "worktree": str(worktree.resolve()),
             }
+            trust_override = (
+                f"projects.{json.dumps(str(worktree.resolve()))}.trust_level=\"trusted\""
+            )
             self._command(
                 (
                     "herdr",
@@ -357,6 +361,8 @@ class HerdrCodexLaunchAdapter:
                     "--config",
                     "sandbox_workspace_write.writable_roots="
                     + json.dumps([self.options.state_root], separators=(",", ":")),
+                    "--config",
+                    trust_override,
                 ),
                 "Herdr Codex start",
                 timeout_seconds=(self.options.startup_timeout_ms // 1000) + 10,
@@ -461,25 +467,42 @@ class HerdrCodexLaunchAdapter:
             agent = self._matching_agent(routing_name)
             if agent is not None:
                 expected_thread = identity.get("thread_id")
-                if agent.get("pane_id") != pane_id or (
-                    expected_thread and _session_id(agent) != expected_thread
-                ):
+                if agent.get("pane_id") != pane_id:
                     return False
-                completed = self.runner.run(
-                    (
-                        "herdr",
-                        "agent",
-                        "prompt",
-                        routing_name,
-                        "/exit",
-                        "--wait",
-                        "--timeout",
-                        "30000",
-                    ),
-                    timeout_seconds=35,
+                observed_thread = _session_id(agent)
+                exact_endpoint = (
+                    agent.get("terminal_id") == identity.get("terminal_id")
+                    and agent.get("cwd") == identity.get("worktree")
+                    and agent.get("foreground_cwd") == identity.get("worktree")
                 )
-                if completed.returncode != 0:
-                    return False
+                if expected_thread or observed_thread is not None:
+                    if not exact_endpoint or (
+                        expected_thread and observed_thread != expected_thread
+                    ):
+                        return False
+                    completed = self.runner.run(
+                        (
+                            "herdr",
+                            "agent",
+                            "prompt",
+                            routing_name,
+                            "/exit",
+                            "--wait",
+                            "--timeout",
+                            "30000",
+                        ),
+                        timeout_seconds=35,
+                    )
+                    if completed.returncode != 0:
+                        return False
+                else:
+                    pending_exact = (
+                        agent.get("launch_pending") is True
+                        and observed_thread is None
+                        and exact_endpoint
+                    )
+                    if not pending_exact:
+                        return False
             completed = self.runner.run(
                 ("herdr", "pane", "close", pane_id), timeout_seconds=30
             )

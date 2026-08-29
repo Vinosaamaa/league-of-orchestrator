@@ -568,7 +568,6 @@ def main(argv: list[str] | None = None) -> int:
         store_context = SQLiteStorage(
             _state_root(),
             busy_timeout_ms=_hook_busy_timeout(args.command),
-            request_wal=False,
         )
     except StorageRefusal as exc:
         if exc.code == "busy" and args.command in {

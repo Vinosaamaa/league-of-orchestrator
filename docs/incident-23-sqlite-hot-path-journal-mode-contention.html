@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Issue 23 incident review · SQLite hot-path journal-mode contention</title>
+  <style>
+    :root{--ink:#12212f;--muted:#607080;--paper:#f5f8f9;--panel:#fff;--line:#cbd8df;--blue:#1769aa;--blue-soft:#dcecf7;--amber:#ad6900;--amber-soft:#fff0c7;--jade:#167456;--jade-soft:#d9f0e7;--red:#a63b32;--red-soft:#f9dfdc;--shadow:0 16px 44px rgba(18,33,47,.12)}
+    *{box-sizing:border-box}html{background:var(--paper);color:var(--ink);font-family:"Avenir Next",Avenir,system-ui,sans-serif;scroll-behavior:smooth}body{margin:0;min-width:320px;background-image:linear-gradient(rgba(23,105,170,.05) 1px,transparent 1px),linear-gradient(90deg,rgba(23,105,170,.05) 1px,transparent 1px);background-size:24px 24px}code,.eyebrow,.tag,.time{font-family:"SFMono-Regular",Consolas,monospace}main{width:min(1180px,calc(100% - 32px));margin:32px auto 64px}.panel{min-width:0;background:rgba(255,255,255,.97);border:1px solid var(--line);border-radius:14px;box-shadow:var(--shadow)}.masthead{display:grid;grid-template-columns:minmax(0,1.5fr) minmax(260px,.5fr);gap:18px}.title{padding:28px}.eyebrow{font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--blue);font-weight:800}.title h1{font-family:"Avenir Next Condensed","Arial Narrow",sans-serif;font-size:clamp(38px,6vw,70px);line-height:.94;letter-spacing:-.035em;margin:12px 0 18px;max-width:15ch}.lede{font-size:17px;line-height:1.6;max-width:72ch;color:#304555}.status{padding:22px;border-top:7px solid var(--amber);display:flex;flex-direction:column;justify-content:space-between}.status strong{display:block;color:var(--amber);font-family:"Avenir Next Condensed","Arial Narrow",sans-serif;font-size:31px;line-height:1}.status dl{display:grid;grid-template-columns:1fr auto;gap:9px 12px;margin:24px 0 0;font-size:12px}.status dt{color:var(--muted)}.status dd{margin:0;text-align:right;font-family:"SFMono-Regular",Consolas,monospace}.section{padding:24px;margin-top:18px}.section h2{font-family:"Avenir Next Condensed","Arial Narrow",sans-serif;font-size:28px;margin:0 0 16px}.section h3{font-size:17px;margin:24px 0 10px}.section p,.section li{line-height:1.62}.notice{border-left:5px solid var(--red);background:var(--red-soft);padding:14px 16px;border-radius:8px;margin:16px 0}.notice strong{color:var(--red)}.good{border-left-color:var(--jade);background:var(--jade-soft)}.good strong{color:var(--jade)}.grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:18px}.flow{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:28px;align-items:stretch;margin:20px 0}.node{position:relative;min-width:0;border:1px solid var(--line);border-radius:12px;padding:16px;background:#f8fafb}.node:not(:last-child)::after{content:"→";position:absolute;right:-23px;top:50%;transform:translateY(-50%);font-size:24px;color:var(--blue);font-weight:900}.node .tag{display:inline-block;padding:4px 7px;border-radius:999px;background:var(--blue-soft);color:var(--blue);font-size:10px;font-weight:800;text-transform:uppercase}.node.fail{background:var(--red-soft);border-color:#e6aaa4}.node.fail .tag{background:#fff;color:var(--red)}.node h3{margin:10px 0 7px}.node p{font-size:13px;margin:0;color:#405565}.timeline{display:grid;gap:0}.event{display:grid;grid-template-columns:145px minmax(0,1fr);gap:18px;padding:16px 0;border-top:1px solid var(--line)}.event:first-child{border-top:0}.time{color:var(--blue);font-size:11px;font-weight:800;padding-top:3px}.event h3{margin:0 0 6px}.event p{margin:0;color:#405565}.error{display:block;white-space:pre-wrap;overflow-wrap:anywhere;background:#172633;color:#f6fafc;border-radius:10px;padding:14px 16px;font:13px/1.55 "SFMono-Regular",Consolas,monospace}.list{padding-left:20px}.list li+li{margin-top:7px}table{width:100%;border-collapse:collapse;font-size:13px;line-height:1.45}th,td{text-align:left;vertical-align:top;padding:11px 10px;border-bottom:1px solid var(--line);overflow-wrap:anywhere}th{background:#edf3f6;font-size:11px;text-transform:uppercase;letter-spacing:.06em}tr:last-child td{border-bottom:0}.pill{display:inline-block;padding:4px 7px;border-radius:999px;font:800 10px/1 "SFMono-Regular",Consolas,monospace;text-transform:uppercase}.pass{background:var(--jade-soft);color:var(--jade)}.pending{background:var(--amber-soft);color:var(--amber)}.footer{color:var(--muted);font-size:12px}.footer strong{color:var(--ink)}@media(max-width:860px){.masthead,.grid{grid-template-columns:minmax(0,1fr)}.flow{grid-template-columns:minmax(0,1fr)}.node:not(:last-child)::after{content:"↓";right:auto;left:50%;top:auto;bottom:-27px;transform:translateX(-50%)}.event{grid-template-columns:minmax(0,1fr);gap:5px}}@media(max-width:560px){main{width:min(100% - 18px,1180px);margin-top:10px}.title,.status,.section{padding:18px}table{display:block;overflow-x:auto}.title h1{font-size:40px}}@media print{body{background:#fff}.panel{box-shadow:none;break-inside:avoid}main{width:100%;margin:0}.section{margin-top:10px}}
+  </style>
+</head>
+<body>
+  <main>
+    <header class="masthead">
+      <section class="panel title">
+        <div class="eyebrow">League incident review · Issue 23 · P0</div>
+        <h1>Hot-path journal-mode contention</h1>
+        <p class="lede">A normal hook connection attempted a maintenance-only WAL-to-DELETE mode change while a foreground supervisor held the canonical database open. SQLite refused the exclusive mode change before prompt or Stop processing began.</p>
+      </section>
+      <aside class="panel status">
+        <div><div class="eyebrow">Current verdict</div><strong>Gate pending</strong></div>
+        <dl><dt>Date</dt><dd>2026-08-29</dd><dt>Severity</dt><dd>P0</dd><dt>Containment</dt><dd>Prompt hook disabled</dd><dt>Issue</dt><dd>#23 open</dd></dl>
+      </aside>
+    </header>
+
+    <section class="panel section" id="summary">
+      <h2>Executive summary</h2>
+      <p>The canonical database was already operating in write-ahead logging (WAL) mode. A foreground supervisor kept a correct WAL connection open. Every newly started supervisor, prompt, or Stop process nevertheless opened <code>SQLiteStorage</code> with <code>request_wal=False</code>. Connection setup then issued <code>PRAGMA journal_mode=DELETE</code>, which requires an exclusive database lock.</p>
+      <p>The open supervisor made that maintenance operation unsafe. Stop returned a safe retry message, while UserPromptSubmit surfaced <code>SQLITE_BUSY</code>. Codex did not automatically resend the rejected prompt, so League had no canonical capture receipt for those bytes.</p>
+      <div class="notice"><strong>Not resolved yet.</strong> Candidate code and focused synthetic acceptance pass. Resolution still requires an exact installed gate and a fresh owner-visible Darius-and-Garen gate after owner-controlled hook re-enable.</div>
+    </section>
+
+    <section class="panel section" id="symptom">
+      <h2>Exact symptom and error</h2>
+      <div class="grid">
+        <div>
+          <h3>Stop behavior</h3>
+          <span class="error">League canonical state is busy; unresolved obligations remain authoritative and Stop is safely retryable. The turn was not consumed.</span>
+        </div>
+        <div>
+          <h3>Prompt behavior</h3>
+          <span class="error">ERROR: busy: SQLite contention exceeded the bounded timeout</span>
+        </div>
+      </div>
+      <p>The prompt was rejected before canonical intake. A later model-visible message is not proof that League captured the original hook event.</p>
+    </section>
+
+    <section class="panel section" id="flow">
+      <h2>Failure flow</h2>
+      <div class="flow" aria-label="Journal mode contention flow">
+        <article class="node"><span class="tag">Canonical state</span><h3>Database is WAL</h3><p>One database-level mode is already established.</p></article>
+        <article class="node"><span class="tag">Supervisor</span><h3>Connection stays open</h3><p>A foreground wait reads canonical state normally.</p></article>
+        <article class="node"><span class="tag">Hot hook</span><h3>Requests DELETE</h3><p>Connection setup issues a WAL-to-DELETE mode change.</p></article>
+        <article class="node fail"><span class="tag">Failure</span><h3>Exclusive lock refused</h3><p><code>SQLITE_BUSY</code> occurs before prompt or Stop logic.</p></article>
+      </div>
+    </section>
+
+    <section class="panel section" id="worked-failed">
+      <h2>What worked and what failed</h2>
+      <div class="grid">
+        <div>
+          <h3>What previously worked</h3>
+          <ul class="list">
+            <li>Prompt capture without a conflicting journal-mode negotiation.</li>
+            <li>Exact retry deduplication after canonical intake.</li>
+            <li>League 0.2.8 body-hash source identity for distinct queued prompts.</li>
+            <li>League 0.2.9 preservation of obligations during short writer contention.</li>
+          </ul>
+        </div>
+        <div>
+          <h3>Failed</h3>
+          <ul class="list">
+            <li>Hot connections treated <code>request_wal=False</code> as maintenance authority.</li>
+            <li>Every watcher hook attempted <code>PRAGMA journal_mode=DELETE</code>.</li>
+            <li>The exclusive mode change failed before domain logic.</li>
+            <li>The rejected prompt was not automatically resent or captured.</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel section" id="timeline">
+      <h2>Chronological timeline</h2>
+      <div class="timeline">
+        <article class="event"><div class="time">League 0.2.5</div><div><h3>Source identity collision</h3><p>A second distinct prompt reused a source identity and failed <code>prompt_source_conflict</code>.</p></div></article>
+        <article class="event"><div class="time">Initial acceptance</div><div><h3>Identical retry only</h3><p>An identical Kled retry proved deduplication but did not prove two different consecutive Garen prompts.</p></div></article>
+        <article class="event"><div class="time">League 0.2.8</div><div><h3>Distinct prompt identity</h3><p>The exact body hash joined adapter, session, and raw event identity. Distinct bodies became distinct sources.</p></div></article>
+        <article class="event"><div class="time">League 0.2.9</div><div><h3>Bounded Stop retry</h3><p>Stop preserved obligations during short contention, and a short transition/prompt/Stop canary passed.</p></div></article>
+        <article class="event"><div class="time">Owner-visible gate</div><div><h3>Long-lived supervisor exposes mode conflict</h3><p>Garen Stop retried twice. Darius prompt intake then failed busy before capture and was not resent.</p></div></article>
+        <article class="event"><div class="time">Containment</div><div><h3>Prompt hook disabled</h3><p>The owner disabled only League UserPromptSubmit. Stop stayed enabled; state and supervisor evidence were preserved.</p></div></article>
+        <article class="event"><div class="time">Candidate</div><div><h3>Maintenance boundary corrected</h3><p>Normal connections now read and validate established mode. Only migration may establish or change it.</p></div></article>
+      </div>
+    </section>
+
+    <section class="panel section" id="root-cause">
+      <h2>Exact technical root cause</h2>
+      <ol class="list">
+        <li>The canonical database had established WAL mode.</li>
+        <li>A foreground supervisor held a long-lived WAL connection.</li>
+        <li><code>src/league/canonical_watcher.py</code> opened each new supervisor, prompt, and Stop connection with <code>request_wal=False</code>.</li>
+        <li><code>src/league/sqlite_store.py</code> translated that flag into <code>PRAGMA journal_mode=DELETE</code> on every connection.</li>
+        <li>WAL-to-DELETE requires an exclusive database lock.</li>
+        <li>The active supervisor prevented that mode change, so SQLite returned busy during connection setup.</li>
+        <li>Prompt identity, prompt capture, obligation counting, and Stop generation logic were never reached.</li>
+      </ol>
+      <p>This is a system-boundary defect, not an operator error. The supervisor was behaving correctly; the hot connection incorrectly attempted a maintenance operation.</p>
+    </section>
+
+    <section class="panel section" id="gaps">
+      <h2>Why prior canaries missed it</h2>
+      <ul class="list">
+        <li>The earliest canary covered identical retry deduplication, not different consecutive Garen prompts.</li>
+        <li>The 0.2.8 canary proved source identity without a long-lived supervisor.</li>
+        <li>The 0.2.9 test modeled a short write transaction, not connection initialization against established WAL.</li>
+        <li>Some synthetic stores established DELETE before concurrency, so <code>request_wal=False</code> requested no actual mode change.</li>
+        <li>Model-visible delivery was observed, but model receipt is not canonical capture evidence.</li>
+      </ul>
+    </section>
+
+    <section class="panel section" id="impact-containment">
+      <h2>User impact and containment</h2>
+      <div class="grid">
+        <div>
+          <h3>User impact</h3>
+          <ul class="list">
+            <li>An ordinary prompt was rejected before League captured it.</li>
+            <li>Codex did not automatically resend the rejected hook event.</li>
+            <li>The prompt remained queued or stuck from League's perspective.</li>
+            <li>Stop could not settle through normal supervision.</li>
+          </ul>
+        </div>
+        <div>
+          <h3>Immediate containment</h3>
+          <ul class="list">
+            <li>Owner disabled only League UserPromptSubmit.</li>
+            <li>League Stop remained enabled.</li>
+            <li>Supervisor and canonical state were preserved.</li>
+            <li>No direct SQLite edit, history rewrite, or automatic hook re-enable occurred.</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel section" id="correction">
+      <h2>Corrective code</h2>
+      <ol class="list">
+        <li><code>SQLiteStorage.for_migration</code> remains the maintenance-only path that may establish WAL or DELETE.</li>
+        <li>Normal opens issue read-only <code>PRAGMA journal_mode</code>, accept only WAL or DELETE, and validate WAL against SQLite 3.51.3 or newer.</li>
+        <li><code>canonical_watcher</code> no longer asks hot supervisor, prompt, or Stop connections to select DELETE.</li>
+        <li>A focused regression keeps a real supervisor subprocess open while prompt and Stop hook subprocesses open together.</li>
+      </ol>
+      <div class="notice good"><strong>No timeout inflation.</strong> The correction removes the conflicting maintenance operation. It introduces no schema migration, prompt rewrite, outbox rewrite, or second canonical store.</div>
+    </section>
+
+    <section class="panel section" id="acceptance">
+      <h2>Focused and installed acceptance matrix</h2>
+      <table>
+        <thead><tr><th>Gate</th><th>Required evidence</th><th>Status</th></tr></thead>
+        <tbody>
+          <tr><td>Established mode</td><td>Long-lived WAL connection plus second hot open; mode stays WAL</td><td><span class="pill pass">Passed</span></td></tr>
+          <tr><td>Actual supervisor regression</td><td>Supervisor subprocess remains open while prompt and Stop start together</td><td><span class="pill pass">Passed</span></td></tr>
+          <tr><td>Prompt durability</td><td>Success plus one exact body hash and byte count</td><td><span class="pill pass">Synthetic pass</span></td></tr>
+          <tr><td>Stop safety</td><td>Normal block; no raw busy error</td><td><span class="pill pass">Synthetic pass</span></td></tr>
+          <tr><td>Supervisor wake</td><td>Foreground wait exits for user priority</td><td><span class="pill pass">Synthetic pass</span></td></tr>
+          <tr><td>Focused affected suites</td><td>Watcher, migration, concurrency, request, acceptance, live-cutover, safety</td><td><span class="pill pass">Local pass</span></td></tr>
+          <tr><td>Exact-head CI</td><td>Hosted checks bind to published PR head</td><td><span class="pill pending">Pending</span></td></tr>
+          <tr><td>Installed release</td><td>Tested merge tree installed; prior release retained</td><td><span class="pill pending">Pending</span></td></tr>
+          <tr><td>Installed synthetic gate</td><td>Installed supervisor, prompt, and Stop preserve WAL</td><td><span class="pill pending">Pending</span></td></tr>
+          <tr><td>Owner-visible gate</td><td>Fresh Darius supervisor plus Garen Stop and Darius prompt</td><td><span class="pill pending">Required</span></td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="panel section" id="rollback-risks">
+      <h2>Rollback and remaining risks</h2>
+      <div class="grid">
+        <div>
+          <h3>Rollback</h3>
+          <ol class="list">
+            <li>Keep UserPromptSubmit disabled.</li>
+            <li>Atomically restore the prior installed release pointer.</li>
+            <li>Preserve WAL state, prompts, obligations, outbox, and supervisor evidence.</li>
+            <li>Do not fabricate capture or resend rejected content.</li>
+            <li>Record the first failing gate and keep issue #23 open.</li>
+          </ol>
+        </div>
+        <div>
+          <h3>Remaining risks</h3>
+          <ul class="list">
+            <li>Pre-install supervisor processes retain already loaded code until owner replacement.</li>
+            <li>Unsupported or externally altered modes remain fail-closed.</li>
+            <li>WAL still requires the pinned SQLite minimum.</li>
+            <li>Hook success alone is not canonical capture proof.</li>
+            <li>Owner-visible acceptance remains outstanding.</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel section" id="actions">
+      <h2>Action items</h2>
+      <table>
+        <thead><tr><th>Priority</th><th>Action</th><th>Owner</th><th>Status</th></tr></thead>
+        <tbody>
+          <tr><td>P0</td><td>Validate established mode on every normal connection</td><td>Issue #23 implementer</td><td><span class="pill pass">Candidate complete</span></td></tr>
+          <tr><td>P0</td><td>Add long-lived supervisor with concurrent prompt/Stop regression</td><td>Issue #23 implementer</td><td><span class="pill pass">Candidate complete</span></td></tr>
+          <tr><td>P0</td><td>Publish sanitized Markdown and HTML incident artifacts</td><td>Issue #23 implementer</td><td><span class="pill pass">Candidate complete</span></td></tr>
+          <tr><td>P0</td><td>Run focused tests, public safety, and exact-head CI</td><td>Issue #23 implementer</td><td><span class="pill pending">Local pass; CI pending</span></td></tr>
+          <tr><td>P0</td><td>Install exact tested release with rollback retained</td><td>Release owner</td><td><span class="pill pending">Pending</span></td></tr>
+          <tr><td>P0</td><td>Run installed synthetic supervisor/prompt/Stop acceptance</td><td>Issue #23 implementer</td><td><span class="pill pending">Pending</span></td></tr>
+          <tr><td>P0</td><td>Owner re-enables prompt hook and runs fresh Darius/Garen gate</td><td>Owner</td><td><span class="pill pending">Required</span></td></tr>
+          <tr><td>P1</td><td>Keep journal-mode changes maintenance-only</td><td>League maintainers</td><td><span class="pill pass">Invariant</span></td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <footer class="panel section footer">
+      <strong>Resolution criterion:</strong> issue #23 remains open until a freshly started Darius foreground supervisor stays active, Garen Stop behaves normally, a distinct Darius prompt returns success and appears exactly once in canonical storage, and no hot connection attempts a journal-mode change.
+    </footer>
+  </main>
+</body>
+</html>

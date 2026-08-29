@@ -5,9 +5,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
+from html.parser import HTMLParser
 from pathlib import Path
 
 
@@ -493,7 +495,42 @@ def test_schema_and_command_inventory() -> None:
     version = subprocess.run(
         [str(LEAGUE), "--version"], text=True, capture_output=True, check=True, timeout=10
     )
-    assert version.stdout.strip() == "league 0.2.9"
+    assert version.stdout.strip() == "league 0.2.10"
+
+
+def test_issue_23_incident_artifacts_are_complete_and_public_safe() -> None:
+    markdown = ROOT / "docs/incident-23-sqlite-hot-path-journal-mode-contention.md"
+    html = ROOT / "docs/incident-23-sqlite-hot-path-journal-mode-contention.html"
+    markdown_text = markdown.read_text(encoding="utf-8")
+    html_text = html.read_text(encoding="utf-8")
+    for heading in (
+        "Executive summary",
+        "Exact symptom and error",
+        "What previously worked",
+        "What failed",
+        "Chronological timeline",
+        "Technical root cause",
+        "Why prior canaries missed it",
+        "User impact",
+        "Immediate containment",
+        "Corrective code",
+        "Acceptance matrix",
+        "Rollback",
+        "Remaining risks",
+        "Action items",
+    ):
+        assert heading.lower() in markdown_text.lower()
+        assert heading.lower() in html_text.lower()
+    forbidden = re.compile(
+        r"/Users/|wenkxu|4239|"
+        r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|"
+        r"i reenabled|is this correct",
+        re.IGNORECASE,
+    )
+    assert forbidden.search(markdown_text) is None
+    assert forbidden.search(html_text) is None
+    assert not re.search(r"<script|<link|\s(?:src|href)=", html_text, re.IGNORECASE)
+    HTMLParser().feed(html_text)
 
 
 def main() -> None:
@@ -502,6 +539,7 @@ def main() -> None:
         test_foundation_through_command_without_home(root / "command")
         test_fail_closed_inputs(root / "failure")
         test_schema_and_command_inventory()
+        test_issue_23_incident_artifacts_are_complete_and_public_safe()
     print(
         "PASS: explicit-root sandbox, fake adapters, sentinels, migration parity, staged rollback, "
         "generation-fenced fault matrix, resumable receipts, exact canary cleanup, "

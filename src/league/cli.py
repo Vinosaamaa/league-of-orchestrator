@@ -993,7 +993,10 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--no-wal",
         action="store_true",
-        help="Request rollback-journal mode even when the loaded runtime passes the WAL gate.",
+        help=(
+            "During migration, establish rollback-journal mode even when the loaded "
+            "runtime passes the WAL gate; normal commands only validate the established mode."
+        ),
     )
     groups = parser.add_subparsers(dest="group", required=True)
     for builder in (

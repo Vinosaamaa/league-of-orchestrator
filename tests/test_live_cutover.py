@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -51,6 +53,24 @@ def main() -> None:
         assert json.loads(
             Path(fixture["plan"]["proposed"]["writer_pointer"]).read_text()
         )["writer"] == "sqlite"
+        watcher = subprocess.run(
+            [
+                str(Path(fixture["plan"]["proposed"]["watcher_launcher"])),
+                "--shotcaller",
+                "Garen",
+                "status",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            env={
+                **os.environ,
+                "LEAGUE_WRITER_POINTER": fixture["plan"]["proposed"]["writer_pointer"],
+                "LEAGUE_STATE_ROOT": fixture["plan"]["proposed"]["state_root"],
+            },
+        )
+        assert watcher.returncode == 0, watcher.stderr
+        assert json.loads(watcher.stdout)["writer"] == "sqlite"
         try:
             run_live_cutover(
                 acceptance,

@@ -13,9 +13,13 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from .sqlite_store import SQLiteStorage
+from .sqlite_store import DEFAULT_BUSY_TIMEOUT_MS, SQLiteStorage
 from .sqlite_watcher_ops import _obligation_counts
 from .storage import RuntimeRegistrationCommand, StorageRefusal
+
+
+STOP_BUSY_TIMEOUT_MS = 250
+PROMPT_BUSY_TIMEOUT_MS = 1000
 
 
 def _emit(value: Any) -> None:
@@ -141,6 +145,34 @@ def _codex_stop_generation(
         )
     identity = f"codex\0{session_ref}\0{turn_id}"
     return hashlib.sha256(identity.encode()).hexdigest(), turn_id
+
+
+def _busy_stop_result(
+    args: argparse.Namespace, payload: dict[str, Any]
+) -> dict[str, str]:
+    if args.command == "cursor-stop-hook":
+        return {
+            "followup_message": (
+                "League canonical state is busy; unresolved obligations remain "
+                "authoritative and Stop is safely retryable."
+            )
+        }
+    _, turn_id = _codex_stop_generation(args, payload)
+    reason = (
+        "League canonical state is busy; unresolved obligations remain "
+        "authoritative and Stop is safely retryable."
+    )
+    if turn_id is not None:
+        reason = f"{reason} Codex turn {turn_id} was not consumed."
+    return {"decision": "block", "reason": reason}
+
+
+def _hook_busy_timeout(command: str) -> int:
+    if command in {"codex-stop-hook", "cursor-stop-hook"}:
+        return STOP_BUSY_TIMEOUT_MS
+    if command in {"codex-user-prompt-hook", "cursor-before-submit-hook"}:
+        return PROMPT_BUSY_TIMEOUT_MS
+    return DEFAULT_BUSY_TIMEOUT_MS
 
 
 def _prompt_identity(
@@ -532,7 +564,21 @@ def main(argv: list[str] | None = None) -> int:
             "SQLite is canonical; this legacy writer command is fenced",
         )
     payload = _payload() if args.command.endswith("-hook") else {}
-    with SQLiteStorage(_state_root(), request_wal=False) as store:
+    try:
+        store_context = SQLiteStorage(
+            _state_root(),
+            busy_timeout_ms=_hook_busy_timeout(args.command),
+            request_wal=False,
+        )
+    except StorageRefusal as exc:
+        if exc.code == "busy" and args.command in {
+            "codex-stop-hook",
+            "cursor-stop-hook",
+        }:
+            _emit(_busy_stop_result(args, payload))
+            return 0
+        raise
+    with store_context as store:
         actor = _actor(store, args, payload)
         actor_id = None if actor is None else str(actor[0])
         callsign = None if actor is None else str(actor[1])
@@ -591,13 +637,19 @@ def main(argv: list[str] | None = None) -> int:
                     json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
                 ).hexdigest()
                 turn_id = None
-            result = store.stop_decision(
-                scope,
-                actor_id,
-                terminal,
-                datetime.now().astimezone().isoformat(timespec="seconds"),
-                block_on_fresh_terminal=args.command == "codex-stop-hook",
-            )
+            try:
+                result = store.stop_decision(
+                    scope,
+                    actor_id,
+                    terminal,
+                    datetime.now().astimezone().isoformat(timespec="seconds"),
+                    block_on_fresh_terminal=args.command == "codex-stop-hook",
+                )
+            except StorageRefusal as exc:
+                if exc.code != "busy":
+                    raise
+                _emit(_busy_stop_result(args, payload))
+                return 0
             blocked = result["decision"] == "block"
             if args.command == "cursor-stop-hook":
                 _emit({"followup_message": "League has unresolved obligations."} if blocked else {})

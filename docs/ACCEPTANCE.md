@@ -58,6 +58,17 @@ replacement for it: prompt capture, quarantine, user-priority wake, and their
 atomic user/wait generation increments remain required. Missing event, session,
 turn, or boolean active fields are refused instead of guessed.
 
+SQLite writer contention is a retryable Stop boundary, not a hook failure. Stop
+waits at most 250 milliseconds for the writer reservation; if that bound is
+exceeded, Codex receives a normal blocking continuation stating that the turn
+was not consumed. No Stop generation or obligation is changed, so the same
+payload can retry against canonical state. Prompt intake has a separate bounded
+one-second writer wait so an ordinary prompt already queued behind a short
+transition can commit its exact bytes after that transition releases. Focused
+coverage holds an `agent.transition` transaction open while UserPromptSubmit
+and Stop overlap, then proves the retry block, prompt bytes, transition event,
+delivery, and unresolved obligations all remain durable.
+
 Run the complete foundation with one command after creating task-owned sentinel
 fixtures outside the requested namespace:
 

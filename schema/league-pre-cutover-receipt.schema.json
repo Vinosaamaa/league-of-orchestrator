@@ -201,6 +201,7 @@
         "source_unchanged": {"const": true},
         "binding_count": {"type": "integer", "minimum": 1},
         "manifest_sha256": {"$ref": "#/$defs/sha256"},
+        "legacy_reconciliation": {"$ref": "#/$defs/legacyReconciliationReceipt"},
         "database_backup": {"$ref": "#/$defs/databaseBackup"},
         "rollback_export": {
           "type": "object",
@@ -209,6 +210,64 @@
             "sha256": {"$ref": "#/$defs/sha256"},
             "bytes": {"type": "integer", "minimum": 1},
             "restricted": {"const": true}
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "legacyTriple": {
+      "type": "object",
+      "required": ["status", "at", "update"],
+      "properties": {
+        "status": {"type": "string", "minLength": 1},
+        "at": {"type": "string", "format": "date-time"},
+        "update": {"type": "string", "minLength": 1}
+      },
+      "additionalProperties": false
+    },
+    "legacyPairHashes": {
+      "type": "object",
+      "required": ["status", "updates"],
+      "properties": {"status": {"$ref": "#/$defs/sha256"}, "updates": {"$ref": "#/$defs/sha256"}},
+      "additionalProperties": false
+    },
+    "legacyReconciliationReceipt": {
+      "type": "object",
+      "required": ["schema", "artifact_pair", "original_source_sha256", "original_pair_sha256", "normalized_snapshot_sha256", "normalized_sha256", "reason", "resolution", "result"],
+      "properties": {
+        "schema": {"const": "league.legacy-roster-reconciliation-receipt.v1"},
+        "artifact_pair": {
+          "type": "object",
+          "required": ["artifact_id", "status", "updates"],
+          "properties": {
+            "artifact_id": {"type": "string", "minLength": 1, "maxLength": 128},
+            "status": {"type": "string", "minLength": 1},
+            "updates": {"type": "string", "minLength": 1}
+          },
+          "additionalProperties": false
+        },
+        "original_source_sha256": {"$ref": "#/$defs/legacyPairHashes"},
+        "original_pair_sha256": {"$ref": "#/$defs/sha256"},
+        "normalized_snapshot_sha256": {"$ref": "#/$defs/legacyPairHashes"},
+        "normalized_sha256": {"$ref": "#/$defs/sha256"},
+        "reason": {"type": "string", "minLength": 1, "maxLength": 512},
+        "resolution": {
+          "type": "object",
+          "required": ["authoritative", "normalized_triple"],
+          "properties": {
+            "authoritative": {"enum": ["status_snapshot", "latest_transition", "normalized_triple"]},
+            "normalized_triple": {"$ref": "#/$defs/legacyTriple"}
+          },
+          "additionalProperties": false
+        },
+        "result": {
+          "type": "object",
+          "required": ["normalized", "scope", "live_source_mutated"],
+          "properties": {
+            "normalized": {"const": true},
+            "scope": {"const": "temporary_snapshot_only"},
+            "live_source_mutated": {"const": false}
           },
           "additionalProperties": false
         }

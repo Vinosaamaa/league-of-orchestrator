@@ -53,6 +53,28 @@ snapshot parity plus zero preflight writes. It does not claim continuous
 external stability; a separately authorized cutover must quiesce and lock live
 writers before relying on those preconditions.
 
+### Issue 23 legacy initialization reconciliation
+
+Ordinary importer parity remains fail-closed. If a Shotcaller status snapshot
+and its sole initialization transition disagree, `snapshot_event_mismatch`
+still blocks the preflight unless the plan contains one
+`league.legacy-roster-reconciliation.v1` object. That object must bind one exact
+manifest artifact ID and status/updates pair, both current source SHA-256
+hashes, a bounded reason, and either the authoritative status snapshot, the
+authoritative latest transition, or one exact normalized
+`status`/`at`/`update` triple.
+
+The exception is initialization-only and snapshot-only. The gate refuses
+missing, stale, duplicate, broad, ambiguous, non-Shotcaller, already-matching,
+or multi-transition authorizations before creating the temporary SQLite state.
+It rewrites only the copied pair beneath the explicit temporary root, rechecks
+the original source hashes after import, and never edits the declared legacy
+files. A successful normalization creates one owner-only, create-once
+`legacy-reconciliation-receipt.json` containing the artifact pair, original
+hashes, normalized hash, reason, authoritative triple, and a
+`temporary_snapshot_only` result. The same sanitized inputs yield the same
+receipt and pre-cutover operation history in independent attempts.
+
 The receipt `league.pre-cutover-receipt.v1` adds four grouped proofs.
 
 ### Migration and rollback proof
@@ -60,6 +82,8 @@ The receipt `league.pre-cutover-receipt.v1` adds four grouped proofs.
 - a consistent explicit-binding copy of the caller's legacy state, strict
   dry-run, isolated import, exact legacy-field and row-count parity, source
   recheck, verified SQLite backup, and restricted rollback export;
+- optional exact-hash Shotcaller initialization reconciliation with an
+  immutable snapshot-only receipt; no authorization leaves parity fail-closed;
 - sandbox-only backup and restore of every current target, including exact
   absent-target rollback instructions;
 

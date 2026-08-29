@@ -492,6 +492,12 @@ def test_missing_identity_quarantines_then_binds_and_triages(root: Path) -> None
 def test_unverified_champion_prompt_quarantines_without_shotcaller_wake(root: Path) -> None:
     _, state, _ = seeded_state(root, "champion-quarantine")
     env = _environment(root / "champion-quarantine", state)
+    with SQLiteStorage(state, request_wal=False) as store:
+        with store._transaction():
+            store.connection.execute(
+                "UPDATE agent_instances SET backend=NULL,address=NULL WHERE agent_id=?",
+                (CHAMPION_ID,),
+            )
     payload = {
         "session_id": CHAMPION_ID,
         "turn_id": "turn:champion-quarantine",
@@ -544,9 +550,10 @@ def test_unverified_champion_prompt_quarantines_without_shotcaller_wake(root: Pa
 def test_verified_champion_prompt_captures_without_shotcaller_wake(root: Path) -> None:
     _, state, _ = seeded_state(root, "verified-champion-capture")
     env = _environment(root / "verified-champion-capture", state)
-    runtime_id = _register_champion_runtime(
-        state, "verified-capture", CHAMPION_ID
-    )
+    runtime_digest = hashlib.sha256(
+        f"codex\0{CHAMPION_ID}\0herdr\0w1:p2".encode()
+    ).hexdigest()
+    runtime_id = f"runtime:hook:{runtime_digest}"
     payload = {
         "session_id": CHAMPION_ID,
         "turn_id": "turn:verified-champion-capture",
@@ -574,6 +581,13 @@ def test_verified_champion_prompt_captures_without_shotcaller_wake(root: Path) -
             "SELECT COUNT(*) FROM prompt_quarantine WHERE source_event_key=?",
             (payload["turn_id"],),
         ).fetchone()[0]
+        runtime = store.connection.execute(
+            """
+            SELECT actor_agent_id,session_ref,status,verified,capabilities_json
+              FROM runtime_instances WHERE runtime_instance_id=?
+            """,
+            (runtime_id,),
+        ).fetchone()
         champion_scope = store.connection.execute(
             "SELECT COUNT(*) FROM watcher_scopes WHERE actor_agent_id=?",
             (CHAMPION_ID,),
@@ -593,6 +607,8 @@ def test_verified_champion_prompt_captures_without_shotcaller_wake(root: Path) -
         len(encoded),
     )
     assert quarantined == 0
+    assert tuple(runtime[:4]) == (CHAMPION_ID, CHAMPION_ID, "active", 1)
+    assert json.loads(runtime["capabilities_json"]) == ["prompt.capture"]
     assert champion_scope == 0
     assert garen_after == garen_before
 

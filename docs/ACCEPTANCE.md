@@ -299,7 +299,9 @@ only if none exists may the imported active identity match directly. Multiple
 matches refuse. A non-Shotcaller prompt is accepted and retained exactly once
 against its exact verified runtime without a wake; when that runtime is absent
 or unverified, the prompt is retained as `runtime_unverified` quarantine without
-attempting a Shotcaller wake.
+attempting a Shotcaller wake. The hook invocation itself may bootstrap a
+prompt-capture-only runtime when the non-retired Champion's exact thread,
+Herdr/tmux backend, and address all match; incomplete locators never bootstrap.
 Supervision registers only against one verified runtime owned by the exact
 active Shotcaller, independent of the archived thread identity.
 

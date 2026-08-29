@@ -192,6 +192,41 @@ def _capture_prompt(
         (actor_id, session_ref),
     ).fetchall()
     if actor_role != "shotcaller":
+        if not runtimes:
+            actor = store.connection.execute(
+                """
+                SELECT thread_id,backend,address
+                  FROM agent_instances
+                 WHERE agent_id=? AND retired_at IS NULL
+                """,
+                (actor_id,),
+            ).fetchone()
+            if (
+                actor is not None
+                and actor["thread_id"] == session_ref
+                and actor["backend"] in {"herdr", "tmux"}
+                and actor["address"]
+            ):
+                runtime_digest = hashlib.sha256(
+                    f"{adapter_kind}\0{session_ref}\0{actor['backend']}\0{actor['address']}".encode()
+                ).hexdigest()
+                runtime_id = f"runtime:hook:{runtime_digest}"
+                store.register_runtime(
+                    RuntimeRegistrationCommand(
+                        runtime_instance_id=runtime_id,
+                        actor_agent_id=actor_id,
+                        harness_kind=f"{adapter_kind}-thread",
+                        backend_kind=str(actor["backend"]),
+                        session_ref=session_ref,
+                        endpoint=str(actor["address"]),
+                        runtime_generation=f"hook:{runtime_digest}",
+                        status="active",
+                        verified=True,
+                        at=now,
+                        capabilities=("prompt.capture",),
+                    )
+                )
+                runtimes = [{"runtime_instance_id": runtime_id}]
         if len(runtimes) != 1:
             return store.quarantine_prompt(
                 prompt_id, adapter_kind, session_ref, source_event_key, body, now

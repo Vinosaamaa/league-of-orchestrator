@@ -168,6 +168,17 @@ prompt; distinct bodies remain distinct prompts. A stale owner/source collision
 is quarantined without wake instead of escaping the hook as an ordinary-input
 failure.
 
+The Stop-contention successor deliberately changes only canonical hook
+contention behavior. An `agent.transition` transaction owns SQLite's single
+writer reservation until its event, state, and delivery outbox commit together;
+a concurrent Stop must also reserve the writer to persist its one-shot guard.
+Stop now waits a bounded 250 milliseconds and converts only a retryable SQLite
+busy refusal into a normal fail-closed continuation without consuming the
+terminal generation. Prompt intake keeps its exact-once transaction and uses a
+separate bounded one-second wait, so it is neither silently stripped nor routed
+through a second store. All non-busy refusals and public storage commands retain
+their prior behavior.
+
 Tests that require process inspection explicitly inject the single
 `tests/fakes/ps` adapter through `tests/process_adapter.py`; Make targets do not
 alter `PATH` for unrelated tests. This keeps self-process and resource-lifecycle

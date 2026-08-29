@@ -8,6 +8,7 @@ import hashlib
 import os
 import subprocess
 import tempfile
+import threading
 import time
 from pathlib import Path
 import sys
@@ -19,6 +20,7 @@ sys.path[:0] = [str(ROOT / "src"), str(ROOT / "tests")]
 from storage_fixture import AT2, CHAMPION_ID, SHOTCALLER_ID  # noqa: E402
 from storage_test_support import seeded_state  # noqa: E402
 from league.sqlite_store import SQLiteStorage  # noqa: E402
+from league.sqlite_watcher_ops import _obligation_counts  # noqa: E402
 
 
 WATCHER = ROOT / "bin/agent-watcher"
@@ -878,6 +880,120 @@ def test_real_codex_stop_payload_blocks_once_per_turn(root: Path) -> None:
     assert "turn:owner-visible-two" in str(next_block["reason"])
 
 
+def test_transition_contention_keeps_stop_safe_and_prompt_durable(root: Path) -> None:
+    _, state, _ = seeded_state(root, "stop-contention")
+    env = _environment(root / "stop-contention", state)
+    _register_garen_runtime(state, "stop-contention", session_ref=SHOTCALLER_ID)
+    holder = SQLiteStorage(state, busy_timeout_ms=1000, request_wal=False)
+    entered = threading.Event()
+    release = threading.Event()
+    transition_errors: list[BaseException] = []
+    results: dict[str, tuple[subprocess.CompletedProcess[str], float]] = {}
+
+    def hold(point: str) -> None:
+        if point == "after_event_insert":
+            entered.set()
+            assert release.wait(timeout=5)
+
+    def transition() -> None:
+        try:
+            holder.transition(
+                CHAMPION_ID,
+                2,
+                "blocked",
+                "Synthetic transition holds the exact writer reservation.",
+                "2026-01-01T00:02:00Z",
+                fault=hold,
+            )
+        except BaseException as exc:
+            transition_errors.append(exc)
+
+    stop_payload = {
+        "session_id": SHOTCALLER_ID,
+        "turn_id": "turn:transition-contention",
+        "hook_event_name": "Stop",
+        "stop_hook_active": False,
+    }
+    prompt_payload = {
+        "session_id": SHOTCALLER_ID,
+        "turn_id": "turn:transition-contention",
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": "Ordinary prompt submitted while a transition commits.",
+    }
+
+    def invoke(name: str, command: str, payload: dict[str, object]) -> None:
+        started = time.monotonic()
+        completed = subprocess.run(
+            [env["TEST_INSTALLED_WATCHER"], command],
+            input=json.dumps(payload),
+            text=True,
+            capture_output=True,
+            env=env,
+            check=False,
+        )
+        results[name] = (completed, time.monotonic() - started)
+
+    transition_thread = threading.Thread(target=transition)
+    transition_thread.start()
+    assert entered.wait(timeout=5)
+    stop_thread = threading.Thread(
+        target=invoke, args=("stop", "codex-stop-hook", stop_payload)
+    )
+    stop_thread.start()
+    prompt_thread = threading.Thread(
+        target=invoke,
+        args=("prompt", "codex-user-prompt-hook", prompt_payload),
+    )
+    prompt_thread.start()
+    stop_thread.join(timeout=1.5)
+    assert not stop_thread.is_alive()
+    release.set()
+    transition_thread.join(timeout=5)
+    prompt_thread.join(timeout=5)
+    assert not transition_thread.is_alive()
+    assert not stop_thread.is_alive()
+    assert not prompt_thread.is_alive()
+    assert not transition_errors
+
+    stop, stop_elapsed = results["stop"]
+    prompt, prompt_elapsed = results["prompt"]
+    assert stop.returncode == 0, stop.stdout + stop.stderr
+    stop_result = json.loads(stop.stdout)
+    assert stop_result["decision"] == "block"
+    assert "retry" in stop_result["reason"].lower()
+    assert stop_elapsed < 1.0
+    assert prompt.returncode == 0, prompt.stdout + prompt.stderr
+    assert json.loads(prompt.stdout) == {}
+    assert prompt_elapsed < 1.5
+
+    retry = _watcher(env, "codex-stop-hook", payload=stop_payload)
+    assert retry["decision"] == "block"
+    with SQLiteStorage(state, request_wal=False) as store:
+        champion = store.agent_status(CHAMPION_ID)
+        prompt_rows = store.connection.execute(
+            """
+            SELECT p.source_event_key,pp.body_hash,pp.byte_count
+              FROM prompts p JOIN prompt_payloads pp ON pp.prompt_id=p.prompt_id
+             WHERE p.source_event_key=?
+            """,
+            (_hook_source_event_key("codex", prompt_payload),),
+        ).fetchall()
+        obligations = _obligation_counts(store, SHOTCALLER_ID)
+    holder.close()
+    assert champion is not None and champion["version"] == 3
+    assert champion["status"] == "blocked"
+    assert len(prompt_rows) == 1
+    encoded = prompt_payload["prompt"].encode("utf-8")
+    assert tuple(prompt_rows[0]) == (
+        _hook_source_event_key("codex", prompt_payload),
+        hashlib.sha256(encoded).hexdigest(),
+        len(encoded),
+    )
+    assert obligations["active_champions"] >= 1
+    assert obligations["unresolved_requests"] >= 1
+    assert obligations["pending_deliveries"] >= 1
+
+
 def test_codex_stop_rejects_incomplete_real_payload(root: Path) -> None:
     _, state, _ = seeded_state(root, "invalid-real-codex-stop")
     env = _environment(root / "invalid-real-codex-stop", state)
@@ -1031,6 +1147,7 @@ def main() -> None:
         test_verified_runtime_session_routes_stop_and_pointer_state(root)
         test_quarantined_prompt_rearms_one_shot_stop(root)
         test_real_codex_stop_payload_blocks_once_per_turn(root)
+        test_transition_contention_keeps_stop_safe_and_prompt_durable(root)
         test_codex_stop_rejects_incomplete_real_payload(root)
         test_material_delivery_watcher_direct_dedup_and_unavailable(root)
     print("PASS: installed SQLite Stop/supervise plus watcher/direct exact-once delivery and pending fallback")

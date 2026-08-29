@@ -105,6 +105,15 @@ def _add_acceptance_commands(groups: argparse._SubParsersAction) -> None:
     )
     preflight.add_argument("--config-sentinel", type=Path, required=True)
     preflight.add_argument("--process-sentinel", type=Path, required=True)
+    cutover = commands.add_parser(
+        "cutover", help="Apply one exact authorized issue-23 live cutover atomically."
+    )
+    cutover.add_argument("--temporary-root", type=Path, required=True)
+    cutover.add_argument("--namespace", required=True)
+    cutover.add_argument("--plan", type=Path, required=True)
+    cutover.add_argument("--authority-receipt", type=Path, required=True)
+    cutover.add_argument("--authority-digest", required=True)
+    cutover.add_argument("--source-root", type=Path, required=True)
     cleanup_canary = commands.add_parser(
         "cleanup-canary",
         help=(
@@ -2133,6 +2142,7 @@ def _help_inventory() -> dict[str, Any]:
                 "storage.migrate",
                 "acceptance.run",
                 "acceptance.preflight",
+                "acceptance.cutover",
                 "acceptance.cleanup-canary",
                 "help.inventory",
             )
@@ -2190,6 +2200,22 @@ def _run(args: argparse.Namespace) -> CommandResult:
             sentinel_paths=tuple(args.sentinel_path),
             config_sentinel=args.config_sentinel,
             process_sentinel=args.process_sentinel,
+        ), None
+    if command == "acceptance.cutover":
+        from .livecutover import run_live_cutover
+
+        if args.state_root is not None:
+            raise StorageRefusal(
+                "invalid_acceptance_root",
+                "live cutover uses --temporary-root and refuses --state-root",
+            )
+        return run_live_cutover(
+            args.temporary_root,
+            args.namespace,
+            plan_path=args.plan,
+            authority_receipt=args.authority_receipt,
+            authority_digest=args.authority_digest,
+            source_root=args.source_root,
         ), None
     if command == "acceptance.cleanup-canary":
         from .real_canary import run_real_cleanup_canary

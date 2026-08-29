@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Vinosaamaa/league-of-orchestrator/schema/league-rollover-provider-runtime.schema.json",
+  "title": "League private rollover provider runtime identity",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["runtime_instance_id", "harness_kind", "backend_kind", "session_identity", "endpoint_identity", "runtime_generation"],
+  "properties": {
+    "runtime_instance_id": {"type": "string", "minLength": 1},
+    "harness_kind": {"type": "string", "minLength": 1},
+    "backend_kind": {"type": "string", "minLength": 1},
+    "session_identity": {"type": "string", "minLength": 1},
+    "endpoint_identity": {"type": "string", "minLength": 1},
+    "runtime_generation": {"type": "string", "minLength": 1}
+  }
+}

@@ -20,6 +20,7 @@ from .storage_request import (
 from .storage_runtime import RuntimeLifecycleStorage
 from .storage_roster import RosterStorage
 from .storage_rollover import RolloverStorage
+from .storage_startup import StartupContextStorage
 from .storage_transfer import TransferStorage
 from .storage_watcher import RuntimeRegistrationCommand, WatcherStorage
 from .storage_types import (
@@ -47,6 +48,7 @@ class Storage(
     RosterStorage,
     CallsignQueueStorage,
     RolloverStorage,
+    StartupContextStorage,
 ):
     """The only domain-facing persistence interface.
 

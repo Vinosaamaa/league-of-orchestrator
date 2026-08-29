@@ -43,7 +43,8 @@ SKILL_CONTRACT_TESTS := \
 
 HANDOFF_CALLSIGN_TESTS := \
 	tests/test_callsign_queue.py \
-	tests/test_shotcaller_rollover.py
+	tests/test_shotcaller_rollover.py \
+	tests/test_rollover_successor.py
 
 ACCEPTANCE_TESTS := \
 	tests/test_acceptance_harness.py \

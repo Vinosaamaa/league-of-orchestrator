@@ -172,6 +172,13 @@ def _add_agent_commands(groups: argparse._SubParsersAction) -> None:
     transition.add_argument("--status", required=True)
     transition.add_argument("--update", required=True)
     transition.add_argument("--at", required=True)
+    startup = commands.add_parser(
+        "startup-context",
+        help="Return one exact bounded public-safe startup context.",
+    )
+    startup.add_argument("--agent-id", required=True)
+    startup.add_argument("--runtime-instance-id", required=True)
+    startup.add_argument("--at", required=True)
 
 
 def _add_callsign_commands(groups: argparse._SubParsersAction) -> None:
@@ -277,6 +284,14 @@ def _add_rollover_commands(groups: argparse._SubParsersAction) -> None:
         command.add_argument("--at", required=True)
     status = commands.add_parser("status", help="Read durable rollover state and public digests.")
     status.add_argument("--operation-id", required=True)
+    run = commands.add_parser(
+        "run",
+        help="Recoverably advance one rollover through configured provider adapters.",
+    )
+    run.add_argument("--manifest", type=Path, required=True)
+    run.add_argument("--adapter-config", type=Path, required=True)
+    run.add_argument("--at", required=True)
+    run.add_argument("--abort", action="store_true")
 
 
 def _add_delivery_commands(groups: argparse._SubParsersAction) -> None:
@@ -1117,6 +1132,10 @@ def _agent_transition(store: Storage, args: argparse.Namespace) -> CommandResult
     return transition, None
 
 
+def _agent_startup_context(store: Storage, args: argparse.Namespace) -> CommandResult:
+    return store.startup_context(args.agent_id, args.runtime_instance_id, args.at), None
+
+
 def _callsign_reconcile(store: Storage, args: argparse.Namespace) -> CommandResult:
     catalog = _read_json_object(args.catalog)
     if set(catalog) != {"entries"} or not isinstance(catalog["entries"], list):
@@ -1246,6 +1265,15 @@ def _rollover_drain(store: Storage, args: argparse.Namespace) -> CommandResult:
 def _rollover_status(store: Storage, args: argparse.Namespace) -> CommandResult:
     value = store.rollover_status(args.operation_id)
     return {"found": value is not None, "rollover": value}, None
+
+
+def _rollover_run(store: Storage, args: argparse.Namespace) -> CommandResult:
+    from .rollover_service import ConfiguredProviderAdapters, ShotcallerRolloverRunner
+
+    adapters = ConfiguredProviderAdapters(_read_json_object(args.adapter_config))
+    return ShotcallerRolloverRunner(store, adapters).run(
+        _read_json_object(args.manifest), at=args.at, abort=args.abort
+    ), None
 
 
 def _delivery_claim(store: Storage, args: argparse.Namespace) -> CommandResult:
@@ -2061,6 +2089,7 @@ HANDLERS: dict[str, CommandHandler] = {
     "storage.import": _storage_import,
     "agent.status": _agent_status,
     "agent.transition": _agent_transition,
+    "agent.startup-context": _agent_startup_context,
     "callsign.reconcile": _callsign_reconcile,
     "callsign.allocate": _callsign_allocate,
     "callsign.activate": _callsign_activate,
@@ -2074,6 +2103,7 @@ HANDLERS: dict[str, CommandHandler] = {
     "rollover.abort": _rollover_abort,
     "rollover.drain": _rollover_drain,
     "rollover.status": _rollover_status,
+    "rollover.run": _rollover_run,
     "delivery.claim": _delivery_claim,
     "delivery.ack": _delivery_ack,
     "delivery.fail": _delivery_fail,
@@ -2168,6 +2198,12 @@ SCHEMA_INVENTORY = (
     "league-rollover-pages.schema.json",
     "league-rollover-abort-receipt.schema.json",
     "league-rollover-drain-receipt.schema.json",
+    "league-startup-context.schema.json",
+    "league-shotcaller-rollover-run.schema.json",
+    "league-rollover-provider-adapters.schema.json",
+    "league-rollover-provider-request.schema.json",
+    "league-rollover-provider-runtime.schema.json",
+    "league-rollover-provider-receipt.schema.json",
     "league-activity-evidence.schema.json",
     "league-report.schema.json",
     "league-outbound-receipt.schema.json",

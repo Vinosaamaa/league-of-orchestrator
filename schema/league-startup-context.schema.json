@@ -1,0 +1,118 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Vinosaamaa/league-of-orchestrator/schema/league-startup-context.schema.json",
+  "title": "League bounded startup context",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "verified", "observed_at", "identity", "owning_shotcaller", "requesting_shotcaller", "task", "request", "squad", "routing", "runtime", "permitted_next_actions", "pending_obligations"],
+  "properties": {
+    "schema": {"const": "league.startup-context.v1"},
+    "verified": {"const": true},
+    "observed_at": {"type": "string", "format": "date-time"},
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["agent_id", "callsign", "role"],
+      "properties": {
+        "agent_id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "callsign": {"type": "string", "minLength": 1, "maxLength": 64},
+        "role": {"enum": ["champion", "shotcaller"]}
+      }
+    },
+    "owning_shotcaller": {"$ref": "#/$defs/agentRef"},
+    "requesting_shotcaller": {"$ref": "#/$defs/agentRef"},
+    "task": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["task_id", "state", "version"],
+          "properties": {
+            "task_id": {"type": "string", "minLength": 1, "maxLength": 256},
+            "state": {"type": "string", "minLength": 1, "maxLength": 64},
+            "version": {"type": "integer", "minimum": 1}
+          }
+        }
+      ]
+    },
+    "request": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["request_id", "state", "version", "execution_mode"],
+          "properties": {
+            "request_id": {"type": "string", "minLength": 1, "maxLength": 256},
+            "state": {"type": "string", "minLength": 1, "maxLength": 64},
+            "version": {"type": "integer", "minimum": 1},
+            "execution_mode": {"type": ["string", "null"], "maxLength": 64}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["pending_count", "digest"],
+          "properties": {
+            "pending_count": {"type": "integer", "minimum": 0, "maximum": 128},
+            "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+          }
+        }
+      ]
+    },
+    "squad": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["squad_id", "owner_version", "owner_fence"],
+      "properties": {
+        "squad_id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "owner_version": {"type": "integer", "minimum": 1},
+        "owner_fence": {"type": "integer", "minimum": 1}
+      }
+    },
+    "routing": {
+      "type": "object",
+      "maxProperties": 8,
+      "propertyNames": {"enum": ["project_id", "reason_code", "policy_version", "confidence", "operation_id", "rollover_state", "intake_state", "intake_fence", "routing_name", "display_agent"]},
+      "additionalProperties": {"type": ["string", "integer", "null"], "maxLength": 256}
+    },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["runtime_instance_id", "harness_kind", "backend_kind", "runtime_generation_digest", "capabilities", "verified"],
+      "properties": {
+        "runtime_instance_id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "harness_kind": {"type": "string", "pattern": "^[a-z][a-z0-9._-]{0,31}$"},
+        "backend_kind": {"type": "string", "pattern": "^[a-z][a-z0-9._-]{0,31}$"},
+        "runtime_generation_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "capabilities": {"type": "array", "maxItems": 64, "uniqueItems": true, "items": {"type": "string", "maxLength": 64}},
+        "verified": {"const": true}
+      }
+    },
+    "permitted_next_actions": {"type": "array", "maxItems": 16, "uniqueItems": true, "items": {"type": "string", "maxLength": 64}},
+    "pending_obligations": {"type": "array", "maxItems": 128, "items": {"$ref": "#/$defs/obligation"}}
+  },
+  "$defs": {
+    "agentRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["agent_id", "callsign"],
+      "properties": {
+        "agent_id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "callsign": {"type": "string", "minLength": 1, "maxLength": 64}
+      }
+    },
+    "obligation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "id", "state"],
+      "properties": {
+        "kind": {"type": "string", "minLength": 1, "maxLength": 64},
+        "id": {"type": "string", "minLength": 1, "maxLength": 512},
+        "state": {"type": "string", "minLength": 1, "maxLength": 64},
+        "detail": {"type": "string", "maxLength": 4096},
+        "count": {"type": "integer", "minimum": 1}
+      }
+    }
+  }
+}

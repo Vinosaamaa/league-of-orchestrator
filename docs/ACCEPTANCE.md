@@ -323,6 +323,27 @@ content or sessions cannot share the stored source key. A residual ownership or
 source conflict is retained in no-wake quarantine and never rejects the user
 message.
 
+## Bidirectional Shotcaller rollover release gate
+
+Repository-local configured-adapter tests are not live provider evidence. After
+the issue-#8 successor lands, issue #23 must run two separately namespaced live
+acceptance operations through the installed command and canonical SQLite
+writer: Codex predecessor to Cursor successor, then Cursor predecessor to Codex
+successor. Each receipt must prove:
+
+- **Identity:** the exact configured adapter commands, both runtime and callsign
+  acceptances, and the startup-context digest.
+- **Snapshot:** the complete immutable Champion count, version, and digest, with
+  unchanged Champion bindings.
+- **Switch:** exactly one acknowledgement and one owner event/outbox delivery.
+- **Intake:** predecessor refusal and successor acceptance without duplicate
+  intake.
+- **Drain:** zero remaining obligations and recoverable cleanup.
+
+A failed direction, missing exact receipt, provider mismatch, private public
+output, or any duplicate intake/event/outbox leaves issue #8 open and does not
+authorize installation, teardown, or another live rollover.
+
 The command refuses missing, relative, symbolic-link, or malformed sentinels
 and refuses an existing namespace. It accepts at most 16 byte sentinels so a
 caller cannot create an unbounded preflight workload. The global

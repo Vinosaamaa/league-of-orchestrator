@@ -37,6 +37,11 @@ HANDOFF_KEYS = {
     "expires_at",
     "page_bound",
 }
+HANDOFF_OPTIONAL_KEYS = {
+    "provider_adapter_digest",
+    "predecessor_runtime_instance_id",
+    "successor_runtime_instance_id",
+}
 ABORT_RECEIPT_KEYS = {
     "schema",
     "verified",
@@ -96,7 +101,10 @@ def _safe_plan_value(value: Any, *, depth: int = 0) -> None:
 
 
 def _handoff_plan(plan: Mapping[str, Any], squad_id: str) -> tuple[dict[str, Any], str]:
-    if set(plan) != HANDOFF_KEYS or plan.get("schema") != "league.shotcaller-handoff-plan.v1":
+    if (
+        not HANDOFF_KEYS <= set(plan) <= HANDOFF_KEYS | HANDOFF_OPTIONAL_KEYS
+        or plan.get("schema") != "league.shotcaller-handoff-plan.v1"
+    ):
         raise StorageRefusal("invalid_handoff", "handoff plan shape is invalid")
     if plan.get("scope") != {"kind": "squad", "id": squad_id}:
         raise StorageRefusal("invalid_handoff", "handoff scope does not match the stable Squad")
@@ -108,6 +116,13 @@ def _handoff_plan(plan: Mapping[str, Any], squad_id: str) -> tuple[dict[str, Any
     for key in ("policy_digest", "instruction_digest"):
         if not isinstance(plan.get(key), str) or not plan[key]:
             raise StorageRefusal("invalid_handoff", f"handoff {key} is required")
+    if "provider_adapter_digest" in plan and not re.fullmatch(
+        r"[0-9a-f]{64}", str(plan["provider_adapter_digest"])
+    ):
+        raise StorageRefusal("invalid_handoff", "handoff provider adapter digest is invalid")
+    for key in ("predecessor_runtime_instance_id", "successor_runtime_instance_id"):
+        if key in plan and (not isinstance(plan[key], str) or not plan[key]):
+            raise StorageRefusal("invalid_handoff", f"handoff {key} is invalid")
     timestamp(str(plan.get("expires_at", "")), "handoff expiry")
     page_bound = plan.get("page_bound")
     if not isinstance(page_bound, int) or not 1 <= page_bound <= 500:
@@ -120,7 +135,14 @@ def _handoff_plan(plan: Mapping[str, Any], squad_id: str) -> tuple[dict[str, Any
     return value, digest(value)
 
 
-def _runtime_identity(store: Any, agent_id: str, runtime_instance_id: str) -> tuple[Any, tuple[str, ...]]:
+def _exact_runtime_row(
+    store: Any,
+    agent_id: str,
+    runtime_instance_id: str,
+    *,
+    optional: bool = False,
+    refusal_code: str = "rollover_runtime_mismatch",
+) -> Optional[Any]:
     row = store.connection.execute(
         """
         SELECT r.*,a.thread_id,a.address,a.backend,a.routing_name,a.display_agent,a.retired_at
@@ -129,15 +151,47 @@ def _runtime_identity(store: Any, agent_id: str, runtime_instance_id: str) -> tu
         """,
         (runtime_instance_id, agent_id),
     ).fetchone()
+    if row is None and optional:
+        other_live = store.connection.execute(
+            """
+            SELECT 1 FROM runtime_instances WHERE actor_agent_id=?
+             AND status IN ('active','idle') LIMIT 1
+            """,
+            (agent_id,),
+        ).fetchone()
+        if other_live is not None:
+            raise StorageRefusal(refusal_code, "rollover runtime identity is ambiguous")
+        return None
+    if row is None or row["retired_at"] is not None:
+        raise StorageRefusal(
+            refusal_code, "rollover runtime identity is missing or retired"
+        )
+    other_live = store.connection.execute(
+        """
+        SELECT 1 FROM runtime_instances WHERE actor_agent_id=?
+         AND runtime_instance_id<>? AND status IN ('active','idle') LIMIT 1
+        """,
+        (agent_id, runtime_instance_id),
+    ).fetchone()
+    if other_live is not None:
+        raise StorageRefusal(refusal_code, "rollover runtime identity is ambiguous")
     if (
-        row is None
-        or row["retired_at"] is not None
-        or row["status"] != "active"
-        or not row["verified"]
-        or row["session_ref"] != row["thread_id"]
+        row["session_ref"] != row["thread_id"]
         or row["endpoint"] != row["address"]
         or (row["backend"] is not None and row["backend_kind"] != row["backend"])
     ):
+        raise StorageRefusal(refusal_code, "rollover runtime identity changed")
+    return row
+
+
+def _runtime_identity(store: Any, agent_id: str, runtime_instance_id: str) -> tuple[Any, tuple[str, ...]]:
+    row = _exact_runtime_row(
+        store,
+        agent_id,
+        runtime_instance_id,
+        refusal_code="successor_identity_mismatch",
+    )
+    if row["status"] != "active" or not row["verified"]:
         raise StorageRefusal(
             "successor_identity_mismatch", "successor runtime identity is not exact and active"
         )
@@ -330,6 +384,148 @@ def rollover_cleanup_target(store: Any, operation_id: str) -> Optional[dict[str,
         "squad_id": row["squad_id"],
         "successor_runtime_instance_id": row["successor_runtime_instance_id"],
     }
+
+
+def rollover_execution_context(
+    store: Any,
+    operation_id: str,
+    predecessor_runtime_instance_id: str,
+    successor_runtime_instance_id: str,
+) -> dict[str, Any]:
+    """Return private exact-runtime inputs only to the local rollover service."""
+
+    operation = _operation(store, operation_id)
+    plan = json.loads(operation["plan_json"])
+    if (
+        plan.get("predecessor_runtime_instance_id") != predecessor_runtime_instance_id
+        or plan.get("successor_runtime_instance_id") != successor_runtime_instance_id
+    ):
+        raise StorageRefusal(
+            "rollover_runtime_mismatch", "rollover runtime identity changed from the durable plan"
+        )
+    assignment = store.connection.execute(
+        "SELECT * FROM callsign_assignments WHERE callsign_assignment_id=?",
+        (operation["callsign_assignment_id"],),
+    ).fetchone()
+    if assignment is None:
+        raise StorageRefusal("successor_identity_mismatch", "successor callsign assignment is missing")
+
+    def runtime(agent_id: str, runtime_instance_id: str, *, optional: bool = False) -> Optional[dict[str, Any]]:
+        row = _exact_runtime_row(
+            store, agent_id, runtime_instance_id, optional=optional
+        )
+        if row is None:
+            return None
+        return {
+            "runtime_instance_id": row["runtime_instance_id"],
+            "harness_kind": row["harness_kind"],
+            "backend_kind": row["backend_kind"],
+            "session_identity": row["session_ref"],
+            "endpoint_identity": row["endpoint"],
+            "runtime_generation": row["runtime_generation"],
+            "status": row["status"],
+            "verified": bool(row["verified"]),
+        }
+
+    predecessor = runtime(
+        operation["predecessor_agent_id"], predecessor_runtime_instance_id
+    )
+    successor = runtime(
+        operation["successor_agent_id"],
+        successor_runtime_instance_id,
+        optional=assignment["state"] == "reserved",
+    )
+    if assignment["state"] == "active":
+        if (
+            successor is None
+            or assignment["runtime_instance_id"] != successor_runtime_instance_id
+            or successor["status"] != "active"
+            or not successor["verified"]
+        ):
+            raise StorageRefusal(
+                "successor_identity_mismatch",
+                "successor callsign does not bind the exact active runtime",
+            )
+    elif assignment["state"] != "reserved" and operation["state"] not in {"aborted", "completed"}:
+        raise StorageRefusal("successor_identity_mismatch", "successor callsign state changed")
+    if predecessor is None:
+        raise StorageRefusal("rollover_runtime_mismatch", "predecessor runtime is missing")
+    owner_id = operation["predecessor_agent_id"]
+    counts = store.connection.execute(
+        """
+        SELECT
+          (SELECT COUNT(*) FROM requests WHERE owner_agent_id=?
+            AND state NOT IN ('answered','cancelled')) AS requests,
+          (SELECT COUNT(*) FROM delivery_outbox WHERE recipient_agent_id=?
+            AND state NOT IN ('delivered','cancelled')) AS deliveries,
+          (SELECT COUNT(*) FROM obligations WHERE owner_agent_id=? AND state='open') AS durable
+        """,
+        (owner_id, owner_id, owner_id),
+    ).fetchone()
+    obligations = {key: int(counts[key]) for key in ("requests", "deliveries", "durable")}
+    return {
+        "operation_id": operation_id,
+        "state": operation["state"],
+        "version": int(operation["version"]),
+        "squad_id": operation["squad_id"],
+        "predecessor_agent_id": operation["predecessor_agent_id"],
+        "successor_agent_id": operation["successor_agent_id"],
+        "assignment_state": assignment["state"],
+        "predecessor_runtime": predecessor,
+        "successor_runtime": successor,
+        "pending_obligations": obligations,
+        "owner_event_id": operation["owner_event_id"],
+    }
+
+
+def record_rollover_runtime_closed(
+    store: Any,
+    operation_id: str,
+    participant: str,
+    runtime_instance_id: str,
+    session_identity: str,
+    endpoint_identity: str,
+    runtime_generation: str,
+    at: str,
+) -> dict[str, Any]:
+    """Persist one provider-verified external close without weakening its evidence."""
+
+    timestamp(at, "rollover runtime close time")
+    if participant not in {"predecessor", "successor"}:
+        raise StorageRefusal("rollover_runtime_mismatch", "rollover participant is invalid")
+    operation = _operation(store, operation_id)
+    plan = json.loads(operation["plan_json"])
+    expected_runtime_instance_id = plan.get(f"{participant}_runtime_instance_id")
+    if expected_runtime_instance_id != runtime_instance_id:
+        raise StorageRefusal(
+            "rollover_runtime_mismatch", "closed runtime is not the operation-bound incarnation"
+        )
+    agent_id = operation[f"{participant}_agent_id"]
+    with store._transaction():
+        row = store.connection.execute(
+            "SELECT * FROM runtime_instances WHERE runtime_instance_id=? AND actor_agent_id=?",
+            (runtime_instance_id, agent_id),
+        ).fetchone()
+        if row is None or (
+            row["session_ref"] != session_identity
+            or row["endpoint"] != endpoint_identity
+            or row["runtime_generation"] != runtime_generation
+            or not bool(row["verified"])
+        ):
+            raise StorageRefusal("rollover_runtime_mismatch", "closed runtime identity changed")
+        if row["status"] == "closed":
+            return {
+                "runtime_instance_id": runtime_instance_id,
+                "status": "closed",
+                "idempotent": True,
+            }
+        if row["status"] not in {"active", "idle"}:
+            raise StorageRefusal("rollover_runtime_mismatch", "runtime is not closeable")
+        store.connection.execute(
+            "UPDATE runtime_instances SET status='closed',last_seen_at=? WHERE runtime_instance_id=?",
+            (at, runtime_instance_id),
+        )
+    return {"runtime_instance_id": runtime_instance_id, "status": "closed", "idempotent": False}
 
 
 def prepare_rollover(
@@ -1023,6 +1219,17 @@ def commit_rollover(
                 """,
                 (operation["successor_agent_id"], operation["predecessor_agent_id"]),
             )
+            store.connection.execute(
+                """
+                UPDATE obligations SET owner_agent_id=?,updated_at=?
+                 WHERE owner_agent_id=? AND state='open'
+                """,
+                (
+                    operation["successor_agent_id"],
+                    at,
+                    operation["predecessor_agent_id"],
+                ),
+            )
             switch_receipt = digest(
                 {
                     "operation_id": operation_id,
@@ -1127,9 +1334,15 @@ def _verified_closed_runtime_cleanup(
         (agent_id,),
     ).fetchall()
     if runtime_instance_id == "not-created":
-        if rows:
+        legacy_conflict = expected_runtime_instance_id is None and bool(rows)
+        scoped_conflict = expected_runtime_instance_id is not None and any(
+            row["runtime_instance_id"] == expected_runtime_instance_id
+            or row["status"] in {"active", "idle"}
+            for row in rows
+        )
+        if legacy_conflict or scoped_conflict:
             raise StorageRefusal(
-                "cleanup_incomplete", "successor runtime exists despite no-runtime receipt"
+                "cleanup_incomplete", "operation-bound successor runtime may still exist"
             )
         return
     matches = [row for row in rows if row["runtime_instance_id"] == runtime_instance_id]
@@ -1182,10 +1395,14 @@ def abort_rollover(
                 (operation["callsign_assignment_id"],),
             ).fetchone()
             if assignment["state"] == "reserved":
+                plan = json.loads(operation["plan_json"])
                 _verified_closed_runtime_cleanup(
                     store,
                     operation["successor_agent_id"],
                     receipt["runtime_instance_id"],
+                    expected_runtime_instance_id=plan.get(
+                        "successor_runtime_instance_id"
+                    ),
                 )
                 _rollback_reserved_in_transaction(
                     store, assignment, int(assignment["version"]), receipt_digest, at
@@ -1303,8 +1520,21 @@ def complete_rollover_drain(
                 """,
                 (operation["predecessor_agent_id"],),
             ).fetchone()
-            if unresolved is not None or pending_delivery is not None:
-                raise StorageRefusal("drain_incomplete", "predecessor still owns intake or delivery")
+            pending_obligation = store.connection.execute(
+                """
+                SELECT 1 FROM obligations WHERE owner_agent_id=? AND state='open' LIMIT 1
+                """,
+                (operation["predecessor_agent_id"],),
+            ).fetchone()
+            if (
+                unresolved is not None
+                or pending_delivery is not None
+                or pending_obligation is not None
+            ):
+                raise StorageRefusal(
+                    "drain_incomplete",
+                    "predecessor still owns request, delivery, or durable obligations",
+                )
             live_runtime = store.connection.execute(
                 """
                 SELECT 1 FROM runtime_instances WHERE actor_agent_id=?

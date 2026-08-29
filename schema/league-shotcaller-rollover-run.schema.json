@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Vinosaamaa/league-of-orchestrator/schema/league-shotcaller-rollover-run.schema.json",
+  "title": "League high-level Shotcaller rollover run manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "operation_id", "squad_id", "predecessor_agent_id", "successor_agent_id", "predecessor_runtime_instance_id", "successor_runtime_instance_id", "callsign_assignment_id", "expected_owner_version", "expected_owner_fence", "authority_kind", "authority_digest", "required_capabilities", "plan", "owner_event_id", "owner_outbox_id"],
+  "properties": {
+    "schema": {"const": "league.shotcaller-rollover-run.v1"},
+    "operation_id": {"$ref": "#/$defs/id"},
+    "squad_id": {"$ref": "#/$defs/id"},
+    "predecessor_agent_id": {"$ref": "#/$defs/id"},
+    "successor_agent_id": {"$ref": "#/$defs/id"},
+    "predecessor_runtime_instance_id": {"$ref": "#/$defs/id"},
+    "successor_runtime_instance_id": {"$ref": "#/$defs/id"},
+    "callsign_assignment_id": {"$ref": "#/$defs/id"},
+    "expected_owner_version": {"type": "integer", "minimum": 1},
+    "expected_owner_fence": {"type": "integer", "minimum": 1},
+    "authority_kind": {"enum": ["explicit", "automatic"]},
+    "authority_digest": {"$ref": "#/$defs/id"},
+    "required_capabilities": {"type": "array", "maxItems": 64, "uniqueItems": true, "items": {"type": "string", "pattern": "^[a-z][a-z0-9._-]{0,63}$"}},
+    "plan": {"$ref": "league-shotcaller-handoff-plan.schema.json"},
+    "owner_event_id": {"$ref": "#/$defs/id"},
+    "owner_outbox_id": {"$ref": "#/$defs/id"}
+  },
+  "$defs": {
+    "id": {"type": "string", "minLength": 1, "maxLength": 4096}
+  }
+}

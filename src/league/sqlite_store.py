@@ -74,6 +74,9 @@ from .sqlite_rollover_ops import prepare_rollover as prepare_rollover_operation
 from .sqlite_rollover_ops import rollover_bindings as rollover_bindings_operation
 from .sqlite_rollover_ops import rollover_status as rollover_status_operation
 from .sqlite_rollover_ops import rollover_cleanup_target as rollover_cleanup_target_operation
+from .sqlite_rollover_ops import rollover_execution_context as rollover_execution_context_operation
+from .sqlite_rollover_ops import record_rollover_runtime_closed as record_rollover_runtime_closed_operation
+from .sqlite_startup_ops import startup_context as startup_context_operation
 from .sqlite_roster_ops import roster_snapshot as roster_snapshot_operation
 from .sqlite_report_ops import generate_report as generate_report_operation
 from .sqlite_report_ops import record_activity_evidence as record_activity_evidence_operation
@@ -2064,6 +2067,45 @@ class SQLiteStorage(SQLiteTransactionCore):
 
     def rollover_cleanup_target(self, operation_id: str) -> Optional[dict[str, Any]]:
         return rollover_cleanup_target_operation(self, operation_id)
+
+    def rollover_execution_context(
+        self,
+        operation_id: str,
+        predecessor_runtime_instance_id: str,
+        successor_runtime_instance_id: str,
+    ) -> dict[str, Any]:
+        return rollover_execution_context_operation(
+            self,
+            operation_id,
+            predecessor_runtime_instance_id,
+            successor_runtime_instance_id,
+        )
+
+    def record_rollover_runtime_closed(
+        self,
+        operation_id: str,
+        participant: str,
+        runtime_instance_id: str,
+        session_identity: str,
+        endpoint_identity: str,
+        runtime_generation: str,
+        at: str,
+    ) -> dict[str, Any]:
+        return record_rollover_runtime_closed_operation(
+            self,
+            operation_id,
+            participant,
+            runtime_instance_id,
+            session_identity,
+            endpoint_identity,
+            runtime_generation,
+            at,
+        )
+
+    def startup_context(
+        self, agent_id: str, runtime_instance_id: str, at: str
+    ) -> dict[str, Any]:
+        return startup_context_operation(self, agent_id, runtime_instance_id, at)
 
     def claim_delivery(
         self,

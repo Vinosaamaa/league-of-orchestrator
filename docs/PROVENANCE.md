@@ -220,6 +220,19 @@ cleanup adapters in the suite are deterministic isolated doubles, not
 real-runtime evidence. Installed drivers, a genuine isolated canary, global
 installation, live migration, cutover, and rollback remain issue-#23 gates.
 
+## Issue-#8 successor command provenance
+
+`src/league/sqlite_startup_ops.py`, `src/league/rollover_service.py`, their
+storage/CLI extensions, strict startup/run/provider schemas, and
+`tests/test_rollover_successor.py` are original League implementation for the
+issue-#8 successor slice. They add no migration or parallel state machine. The
+high-level runner composes canonical v6 rollover rows and v3/v4 request,
+runtime, obligation, event, and outbox state through the existing `Storage`
+facade. The configured provider process is local, bounded, provider-neutral,
+and suppressed from public output. Synthetic Codex/Cursor directions establish
+deterministic contract behavior only; issue #23 retains installed bidirectional
+live acceptance and every global mutation gate.
+
 ## Skill-contract implementation provenance
 
 `src/league/skill_contracts.py`, the `league skill` CLI family, skill JSON

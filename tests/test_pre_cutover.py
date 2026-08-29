@@ -194,7 +194,7 @@ def command_preflight(fixture: dict[str, Any], temporary_root: Path, namespace: 
     return envelope["result"]
 
 
-def assert_receipt(result: dict[str, Any], fixture: dict[str, Any]) -> None:
+def assert_receipt_operation(result: dict[str, Any]) -> None:
     assert set(result) == {
         "schema",
         "version",
@@ -227,6 +227,9 @@ def assert_receipt(result: dict[str, Any], fixture: dict[str, Any]) -> None:
     ]
     assert result["sentinels"]["unchanged"] is True
     assert result["live_targets"]["unchanged"] is True
+
+
+def assert_receipt_migration_and_install(result: dict[str, Any]) -> None:
     assert result["fixture_migration_shadow"]["exact_parity"] is True
     assert result["live_migration_shadow"]["exact_parity"] is True
     assert result["live_migration_shadow"]["source_unchanged"] is True
@@ -252,6 +255,9 @@ def assert_receipt(result: dict[str, Any], fixture: dict[str, Any]) -> None:
     checks = result["manifest_checks"]
     assert checks["version_parity"] and checks["source_release_staged_parity"]
     assert checks["current_installed_unchanged"]
+
+
+def assert_receipt_lifecycle(result: dict[str, Any]) -> None:
     assert all(
         item["status"] == "passed"
         for item in result["integrated_lifecycle"].values()
@@ -264,6 +270,10 @@ def assert_receipt(result: dict[str, Any], fixture: dict[str, Any]) -> None:
         "cursor",
         "real-herdr-tmux",
     }
+    assert result["cutover_fault_matrix"]["never_two_writers"]
+
+
+def assert_receipt_supervision(result: dict[str, Any]) -> None:
     benchmark = result["supervision_benchmark"]
     assert benchmark["status"] == "passed"
     assert benchmark["presentation"]["initial_messages"] == 1
@@ -278,7 +288,11 @@ def assert_receipt(result: dict[str, Any], fixture: dict[str, Any]) -> None:
     assert not benchmark["permanent_daemon_created"]
     assert not benchmark["transcript_polling_used"]
     assert benchmark["listener_terminated"]
-    assert result["cutover_fault_matrix"]["never_two_writers"]
+
+
+def assert_receipt_mutation_and_claims(
+    result: dict[str, Any], fixture: dict[str, Any]
+) -> None:
     manifest = result["mutation_manifest"]
     assert not manifest["applied"] and manifest["authority_required"]
     assert all(not item["applied"] for item in manifest["operations"])
@@ -295,6 +309,14 @@ def assert_receipt(result: dict[str, Any], fixture: dict[str, Any]) -> None:
     }
     assert backup_targets == expected_targets
     assert all(value is False for value in result["public_claims"].values())
+
+
+def assert_receipt(result: dict[str, Any], fixture: dict[str, Any]) -> None:
+    assert_receipt_operation(result)
+    assert_receipt_migration_and_install(result)
+    assert_receipt_lifecycle(result)
+    assert_receipt_supervision(result)
+    assert_receipt_mutation_and_claims(result, fixture)
 
 
 def test_command_e2e_and_deterministic_manifest(root: Path) -> None:

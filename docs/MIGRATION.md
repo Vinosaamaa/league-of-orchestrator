@@ -109,14 +109,13 @@ reporting indexes, immutable activity evidence, and report specifications. It
 does not duplicate source evidence or create parallel request, outbox, runtime,
 assignment, rollover, or callsign authority.
 
-Version 8 is `bounded-routing-policy-and-request-progress`, checksum
-`593e2cf05d0200463800b6be7cbf5918a9b5fc3304f793d2ec3fad30b538e80c`.
-Version 9 is `repository-owned-artifact-publication`, checksum
-`9231da781de45a8e912cd7193034a0b1b56f3a13e5e737e5681f18f6c6e3c852`.
-It records declarations and exact merged-publication receipts for repository-
-owned artifacts and blocks cleanup while any declaration is unresolved. The
-strict acceptance migration schema names all nine contiguous versions; an
-older receipt contract cannot silently accept a partial current migration.
+Version 8 adds bounded routing policy and requester progress. Version 9 adds
+repository-owned artifact declarations and exact merged-publication receipts,
+and blocks cleanup while any declaration is unresolved. Canonical migration
+names and checksums live in the routing and repository-artifact sections of
+[`docs/PROVENANCE.md`](PROVENANCE.md). The strict acceptance migration schema
+names all nine contiguous versions; an older receipt contract cannot silently
+accept a partial current migration.
 
 Dry-run import plans bind `target_schema_version` into their digest. A plan
 created for an earlier schema is refused as `import_plan_incompatible` before

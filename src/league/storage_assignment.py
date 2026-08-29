@@ -68,6 +68,37 @@ class AssignmentStorage(Protocol):
         at: str,
     ) -> dict[str, Any]: ...
 
+    def assignment_launch_context(self, assignment_id: str) -> dict[str, Any]: ...
+
+    def record_assignment_context_delivery(
+        self,
+        assignment_id: str,
+        expected_version: int,
+        context_sha256: str,
+        byte_count: int,
+        effect_sha256: str,
+        event_id: str,
+        at: str,
+    ) -> dict[str, Any]: ...
+
+    def fail_assignment_context_delivery(
+        self,
+        assignment_id: str,
+        expected_version: int,
+        failure_class: str,
+        event_id: str,
+        outbox_id: str,
+        at: str,
+    ) -> dict[str, Any]: ...
+
+    def settle_assignment_launch_cleanup(
+        self,
+        assignment_id: str,
+        expected_version: int,
+        cleanup_receipt_digest: str,
+        at: str,
+    ) -> dict[str, Any]: ...
+
     def finish_hidden_assignment(
         self, command: FinishHiddenAssignmentCommand
     ) -> dict[str, Any]: ...

@@ -9,6 +9,8 @@ from .orchestration import OrchestrationSignals
 
 
 MAX_TRIAGE_JSON_BYTES = 65_536
+MAX_TRIAGE_TURN_BYTES = 1_000_000
+MAX_TRIAGE_TURN_PROMPTS = 20
 MAX_TASK_RESULT_SOURCES = 128
 
 
@@ -87,6 +89,14 @@ class AnswerRequestCommand:
     at: str
 
 
+@dataclass(frozen=True)
+class TurnDispatchPlan:
+    runtime_instance_id: str
+    claim_token: str
+    leased_until: str
+    command: DispatchRequestCommand
+
+
 class RequestStorage(Protocol):
     def intake_prompt(
         self,
@@ -112,6 +122,32 @@ class RequestStorage(Protocol):
         at: str, *, wake_scope_id: Optional[str] = None, wake: bool = True,
     ) -> dict[str, Any]: ...
     def triage_prompt(self, prompt_id: str, items: list[dict[str, Any]], at: str) -> dict[str, Any]: ...
+
+    def triage_prompt_batch(
+        self,
+        owner_agent_id: str,
+        expected_prompt_ids: tuple[str, ...],
+        decisions: list[dict[str, Any]],
+        at: str,
+    ) -> dict[str, Any]: ...
+
+    def begin_request_turn(
+        self,
+        owner_agent_id: str,
+        expected_prompt_ids: tuple[str, ...],
+        decisions: list[dict[str, Any]],
+        plans: tuple[TurnDispatchPlan, ...],
+        at: str,
+    ) -> dict[str, Any]: ...
+
+    def commit_request_turn(
+        self,
+        owner_agent_id: str,
+        actions: tuple[AnswerRequestCommand | RequestResultCommand, ...],
+        at: str,
+    ) -> dict[str, Any]: ...
+
+    def request_turn_boundary(self, owner_agent_id: str) -> dict[str, Any]: ...
 
     def claim_request(
         self,
@@ -174,4 +210,12 @@ class RequestStorage(Protocol):
         *,
         limit: int = 100,
         before_action: Optional[str] = None,
+    ) -> dict[str, Any]: ...
+
+    def untriaged_intake(
+        self,
+        owner_agent_id: str,
+        *,
+        limit: int = 20,
+        max_bytes: int = 1_000_000,
     ) -> dict[str, Any]: ...

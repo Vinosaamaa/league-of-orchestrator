@@ -29,6 +29,21 @@ class SQLiteTransactionCore:
 
     @contextmanager
     def _transaction(self) -> Iterator[None]:
+        if self.connection.in_transaction:
+            depth = int(getattr(self, "_transaction_depth", 0)) + 1
+            setattr(self, "_transaction_depth", depth)
+            savepoint = f"league_nested_{depth}"
+            self.connection.execute(f"SAVEPOINT {savepoint}")
+            try:
+                yield
+                self.connection.execute(f"RELEASE SAVEPOINT {savepoint}")
+            except BaseException:
+                self.connection.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+                self.connection.execute(f"RELEASE SAVEPOINT {savepoint}")
+                raise
+            finally:
+                setattr(self, "_transaction_depth", depth - 1)
+            return
         try:
             self.connection.execute("BEGIN IMMEDIATE")
             yield

@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Issue 23 incident review · SQLite hot-path journal-mode contention</title>
+  <title>Issue 23 incident review · SQLite contention and incomplete runtime wiring</title>
   <style>
     :root{--ink:#12212f;--muted:#607080;--paper:#f5f8f9;--panel:#fff;--line:#cbd8df;--blue:#1769aa;--blue-soft:#dcecf7;--amber:#ad6900;--amber-soft:#fff0c7;--jade:#167456;--jade-soft:#d9f0e7;--red:#a63b32;--red-soft:#f9dfdc;--shadow:0 16px 44px rgba(18,33,47,.12)}
     *{box-sizing:border-box}html{background:var(--paper);color:var(--ink);font-family:"Avenir Next",Avenir,system-ui,sans-serif;scroll-behavior:smooth}body{margin:0;min-width:320px;background-image:linear-gradient(rgba(23,105,170,.05) 1px,transparent 1px),linear-gradient(90deg,rgba(23,105,170,.05) 1px,transparent 1px);background-size:24px 24px}code,.eyebrow,.tag,.time{font-family:"SFMono-Regular",Consolas,monospace}main{width:min(1180px,calc(100% - 32px));margin:32px auto 64px}.panel{min-width:0;background:rgba(255,255,255,.97);border:1px solid var(--line);border-radius:14px;box-shadow:var(--shadow)}.masthead{display:grid;grid-template-columns:minmax(0,1.5fr) minmax(260px,.5fr);gap:18px}.title{padding:28px}.eyebrow{font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--blue);font-weight:800}.title h1{font-family:"Avenir Next Condensed","Arial Narrow",sans-serif;font-size:clamp(38px,6vw,70px);line-height:.94;letter-spacing:-.035em;margin:12px 0 18px;max-width:15ch}.lede{font-size:17px;line-height:1.6;max-width:72ch;color:#304555}.status{padding:22px;border-top:7px solid var(--amber);display:flex;flex-direction:column;justify-content:space-between}.status strong{display:block;color:var(--amber);font-family:"Avenir Next Condensed","Arial Narrow",sans-serif;font-size:31px;line-height:1}.status dl{display:grid;grid-template-columns:1fr auto;gap:9px 12px;margin:24px 0 0;font-size:12px}.status dt{color:var(--muted)}.status dd{margin:0;text-align:right;font-family:"SFMono-Regular",Consolas,monospace}.section{padding:24px;margin-top:18px}.section h2{font-family:"Avenir Next Condensed","Arial Narrow",sans-serif;font-size:28px;margin:0 0 16px}.section h3{font-size:17px;margin:24px 0 10px}.section p,.section li{line-height:1.62}.notice{border-left:5px solid var(--red);background:var(--red-soft);padding:14px 16px;border-radius:8px;margin:16px 0}.notice strong{color:var(--red)}.good{border-left-color:var(--jade);background:var(--jade-soft)}.good strong{color:var(--jade)}.grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:18px}.flow{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:28px;align-items:stretch;margin:20px 0}.node{position:relative;min-width:0;border:1px solid var(--line);border-radius:12px;padding:16px;background:#f8fafb}.node:not(:last-child)::after{content:"→";position:absolute;right:-23px;top:50%;transform:translateY(-50%);font-size:24px;color:var(--blue);font-weight:900}.node .tag{display:inline-block;padding:4px 7px;border-radius:999px;background:var(--blue-soft);color:var(--blue);font-size:10px;font-weight:800;text-transform:uppercase}.node.fail{background:var(--red-soft);border-color:#e6aaa4}.node.fail .tag{background:#fff;color:var(--red)}.node h3{margin:10px 0 7px}.node p{font-size:13px;margin:0;color:#405565}.timeline{display:grid;gap:0}.event{display:grid;grid-template-columns:145px minmax(0,1fr);gap:18px;padding:16px 0;border-top:1px solid var(--line)}.event:first-child{border-top:0}.time{color:var(--blue);font-size:11px;font-weight:800;padding-top:3px}.event h3{margin:0 0 6px}.event p{margin:0;color:#405565}.error{display:block;white-space:pre-wrap;overflow-wrap:anywhere;background:#172633;color:#f6fafc;border-radius:10px;padding:14px 16px;font:13px/1.55 "SFMono-Regular",Consolas,monospace}.list{padding-left:20px}.list li+li{margin-top:7px}table{width:100%;border-collapse:collapse;font-size:13px;line-height:1.45}th,td{text-align:left;vertical-align:top;padding:11px 10px;border-bottom:1px solid var(--line);overflow-wrap:anywhere}th{background:#edf3f6;font-size:11px;text-transform:uppercase;letter-spacing:.06em}tr:last-child td{border-bottom:0}.pill{display:inline-block;padding:4px 7px;border-radius:999px;font:800 10px/1 "SFMono-Regular",Consolas,monospace;text-transform:uppercase}.pass{background:var(--jade-soft);color:var(--jade)}.pending{background:var(--amber-soft);color:var(--amber)}.footer{color:var(--muted);font-size:12px}.footer strong{color:var(--ink)}@media(max-width:860px){.masthead,.grid{grid-template-columns:minmax(0,1fr)}.flow{grid-template-columns:minmax(0,1fr)}.node:not(:last-child)::after{content:"↓";right:auto;left:50%;top:auto;bottom:-27px;transform:translateX(-50%)}.event{grid-template-columns:minmax(0,1fr);gap:5px}}@media(max-width:560px){main{width:min(100% - 18px,1180px);margin-top:10px}.title,.status,.section{padding:18px}table{display:block;overflow-x:auto}.title h1{font-size:40px}}@media print{body{background:#fff}.panel{box-shadow:none;break-inside:avoid}main{width:100%;margin:0}.section{margin-top:10px}}
@@ -14,11 +14,11 @@
     <header class="masthead">
       <section class="panel title">
         <div class="eyebrow">League incident review · Issue 23 · P0</div>
-        <h1>Hot-path journal-mode contention</h1>
-        <p class="lede">A normal hook connection attempted a maintenance-only WAL-to-DELETE mode change while a foreground supervisor held the canonical database open. SQLite refused the exclusive mode change before prompt or Stop processing began.</p>
+        <h1>Contention fixed; runtime wiring incomplete</h1>
+        <p class="lede">A hot hook incorrectly attempted a WAL-to-DELETE maintenance change. The installed correction exposed the next boundaries: a missing visible launcher, legacy guidance, inaccessible canonical state in Champion sandboxes, and chatty per-item turn commands. The successor keeps SQLite and removes the process choreography.</p>
       </section>
       <aside class="panel status">
-        <div><div class="eyebrow">Current verdict</div><strong>Gate pending</strong></div>
+        <div><div class="eyebrow">Current verdict</div><strong>Successor gate pending</strong></div>
         <dl><dt>Date</dt><dd>2026-08-29</dd><dt>Severity</dt><dd>P0</dd><dt>Containment</dt><dd>Prompt hook disabled</dd><dt>Issue</dt><dd>#23 open</dd></dl>
       </aside>
     </header>
@@ -27,7 +27,29 @@
       <h2>Executive summary</h2>
       <p>The canonical database was already operating in write-ahead logging (WAL) mode. A foreground supervisor kept a correct WAL connection open. Every newly started supervisor, prompt, or Stop process nevertheless opened <code>SQLiteStorage</code> with <code>request_wal=False</code>. Connection setup then issued <code>PRAGMA journal_mode=DELETE</code>, which requires an exclusive database lock.</p>
       <p>The open supervisor made that maintenance operation unsafe. Stop returned a safe retry message, while UserPromptSubmit surfaced <code>SQLITE_BUSY</code>. Codex did not automatically resend the rejected prompt, so League had no canonical capture receipt for those bytes.</p>
-      <div class="notice"><strong>Not resolved yet.</strong> Candidate code and focused synthetic acceptance pass. Resolution still requires an exact installed gate and a fresh owner-visible Darius-and-Garen gate after owner-controlled hook re-enable.</div>
+      <p>The installed journal correction passed the real long-lived-supervisor gate without increasing timeouts. That success exposed the next release boundary: stable <code>league assign</code> had only internal phases, the global guide still prescribed retired JSON writers, the Shotcaller could not query exact retained untriaged bodies, and a default Champion sandbox could not open the canonical League root.</p>
+      <p>The successor adds one <code>league request turn</code> process that emits exact intake, atomically accepts model-authored triage/claims/routing, stays open without a transaction while the model works, atomically accepts answers/results and delivery effects, returns the full obligation boundary, and exits. It also adds one recoverable <code>league assign run</code> and only the exact canonical state root as an additional Champion writable root.</p>
+      <p>UserPromptSubmit still only captures and wakes. It never rewrites the owner body, injects control text, chooses a semantic split, or starts the turn process.</p>
+      <div class="notice"><strong>Not resolved yet.</strong> Resolution requires one exact installed disposable flow from capture and explicit triage through visible launch, transition, Garen delivery, cleanup, callsign release, zero active residue, and SQLite integrity.</div>
+    </section>
+
+    <section class="panel section" id="architecture">
+      <h2>Original SQLite architecture</h2>
+      <p>One local SQLite database is the canonical state machine. JSON and JSONL are immutable migration input, backup, or bounded export—not a second writer. Normal connections validate the established mode; only migration may establish it.</p>
+      <table>
+        <thead><tr><th>Responsibility</th><th>Principal tables</th><th>Invariant</th></tr></thead>
+        <tbody>
+          <tr><td>Import</td><td><code>schema_migrations</code>, <code>import_runs</code>, <code>imported_artifacts</code>, <code>legacy_event_aliases</code></td><td>Contiguous migrations and source-hash traceability</td></tr>
+          <tr><td>Identity</td><td><code>projects</code>, <code>agent_instances</code>, <code>runtime_instances</code>, <code>runtime_bindings</code>, <code>squads</code></td><td>One exact actor/runtime/repository owner</td></tr>
+          <tr><td>Prompt/request</td><td><code>prompts</code>, <code>prompt_payloads</code>, <code>prompt_quarantine</code>, <code>prompt_items</code>, <code>requests</code>, <code>request_claims</code>, <code>request_dispatches</code>, <code>request_results</code></td><td>Exact bytes, explicit semantics, claims, and versions</td></tr>
+          <tr><td>Assignment</td><td><code>callsign_queue</code>, <code>callsign_assignments</code>, <code>task_assignments</code>, <code>assignment_receipts</code>, <code>launch_attempts</code></td><td>Reservation and visible runtime recover together</td></tr>
+          <tr><td>Task/delivery</td><td><code>tasks</code>, <code>task_transitions</code>, <code>events</code>, <code>delivery_outbox</code>, <code>delivery_attempts</code>, <code>recipient_receipts</code></td><td>Transition and outbox commit atomically</td></tr>
+          <tr><td>Supervision</td><td><code>watcher_scopes</code>, <code>watcher_registrations</code>, <code>obligations</code>, <code>cleanup_obligations</code></td><td>Wake/Stop derive from durable generations and work</td></tr>
+          <tr><td>Cleanup</td><td><code>task_resources</code>, <code>cleanup_operations</code>, <code>cleanup_actions</code>, <code>cleanup_action_receipts</code>, <code>teardown_receipts</code></td><td>Every external effect is leased, receipted, and resumable</td></tr>
+          <tr><td>Rollover/evidence</td><td><code>shotcaller_intake</code>, <code>rollover_operations</code>, <code>active_champion_snapshots</code>, <code>activity_evidence</code>, <code>repository_artifacts</code></td><td>Owner replacement and publication stay explicit</td></tr>
+        </tbody>
+      </table>
+      <div class="notice good"><strong>Why SQLite stays.</strong> Atomic task/outbox transitions, foreign keys, unique idempotency keys, compare-and-swap versions, and crash-resumable teardown solve the integrity problems mutable JSON could not. The latency defect was repeated process startup, not the database transaction model.</div>
     </section>
 
     <section class="panel section" id="symptom">
@@ -79,6 +101,43 @@
       </div>
     </section>
 
+    <section class="panel section" id="p0-history">
+      <h2>Observed P0 failures and settled fixes</h2>
+      <table>
+        <thead><tr><th>Boundary</th><th>Observed failure</th><th>Settled fix</th></tr></thead>
+        <tbody>
+          <tr><td>Legacy parity</td><td>Shotcaller initialization mismatches, then a second required pair</td><td>Exact hash-bound, ordered, duplicate-free temporary-snapshot reconciliation with immutable receipt</td></tr>
+          <tr><td>Import compatibility</td><td>Visible locator, archived cursor, and pending-launch aliases refused</td><td>Explicit modeled locator, archive-only classification, conflict-checked aliases; no invented history</td></tr>
+          <tr><td>Identity drift</td><td>Concurrent legacy supervision changed sentinels</td><td>Fresh quiesced baseline; drift is not corruption and history is never hand-edited</td></tr>
+          <tr><td>Watcher dispatch</td><td>Status used SQLite while Stop/supervise remained fenced; material event did not wake</td><td>Stable adapter routes SQLite hooks/supervision/delivery; actual legacy writers stay fenced</td></tr>
+          <tr><td>Runtime identity</td><td>Champion or missing identity blocked ordinary prompt intake</td><td>Verified Champion capture has no Shotcaller wake; unverified input quarantines and returns success</td></tr>
+          <tr><td>Prompt identity</td><td>Distinct queued bodies collided on one source key</td><td>Source identity includes exact body hash; exact retry deduplicates</td></tr>
+          <tr><td>Stop continuity</td><td>Later turns ended after one block</td><td>Accepted/quarantined input advances wait generation atomically and rearms Stop</td></tr>
+          <tr><td>SQLite contention</td><td>Long-lived WAL supervisor caused prompt/Stop <code>busy</code></td><td>Journal mode is migration-only; hot connections read/validate it</td></tr>
+          <tr><td>Champion runtime</td><td>Canonical root inaccessible and no one-command launcher existed</td><td>Exact extra writable root plus <code>assign run</code> with verified external-effect cleanup</td></tr>
+          <tr><td>Performance</td><td>Six prompts created seconds of serialized process startup</td><td>One request-turn PID covers exact intake, begin, work, commit, and final boundary</td></tr>
+          <tr><td>Manual supervise</td><td>Active turns polled compatibility status/supervise</td><td>Event-driven watcher/direct fallback runs outside the model turn</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="panel section" id="owner-decisions">
+      <h2>Owner questions and settled answers</h2>
+      <table>
+        <thead><tr><th>Question</th><th>Settled answer</th></tr></thead>
+        <tbody>
+          <tr><td>Why rollback?</td><td>Only a failed proof gate restores the exact prior pointer; delay or uncertainty does not imply rollback.</td></tr>
+          <tr><td>Why did the old directory remain?</td><td>It was retained rollback evidence. Active-path removal waits for absent-directory cold-start proof; the archived copy and restoration runbook remain.</td></tr>
+          <tr><td>Same watcher name?</td><td>Yes. The stable name routes hooks, status, delivery, and registered supervision to SQLite; legacy writer verbs remain fenced.</td></tr>
+          <tr><td>Do Codex and Cursor still work?</td><td>Both installed adapter payloads follow exact capture/quarantine/generation and Stop rules; release acceptance proves each path.</td></tr>
+          <tr><td>Can launch accept trust?</td><td>No. An unresolved workspace-trust prompt is a recoverable launch failure, never an implicit user approval.</td></tr>
+          <tr><td>Does the hook inject triage instructions?</td><td>No. The hook only captures and wakes. The permanent guide starts the turn surface; the model explicitly authors semantics.</td></tr>
+          <tr><td>Why SQLite, not JSON?</td><td>Atomic versions, outbox, uniqueness, foreign keys, and crash resume are required. Repeated process startup—not SQLite—caused latency.</td></tr>
+          <tr><td>Should Garen poll supervise/status?</td><td>No. One request-turn process is the active-turn surface; delivery watchers run event-driven outside it.</td></tr>
+        </tbody>
+      </table>
+    </section>
+
     <section class="panel section" id="timeline">
       <h2>Chronological timeline</h2>
       <div class="timeline">
@@ -89,6 +148,13 @@
         <article class="event"><div class="time">Owner-visible gate</div><div><h3>Long-lived supervisor exposes mode conflict</h3><p>Garen Stop retried twice. Darius prompt intake then failed busy before capture and was not resent.</p></div></article>
         <article class="event"><div class="time">Containment</div><div><h3>Prompt hook disabled</h3><p>The owner disabled only League UserPromptSubmit. Stop stayed enabled; state and supervisor evidence were preserved.</p></div></article>
         <article class="event"><div class="time">Candidate</div><div><h3>Maintenance boundary corrected</h3><p>Normal connections now read and validate established mode. Only migration may establish or change it.</p></div></article>
+        <article class="event"><div class="time">Installed gate</div><div><h3>Journal fix passes</h3><p>A long-lived supervisor stayed open while prompt and Stop completed without busy; canonical mode remained WAL.</p></div></article>
+        <article class="event"><div class="time">Next boundary</div><div><h3>Visible launch path missing</h3><p>Legacy launch was correctly fenced, but stable League exposed only prepare, launching, and activate with no operational Herdr/Codex command.</p></div></article>
+        <article class="event"><div class="time">Guide + sandbox</div><div><h3>Runtime could not complete the contract</h3><p>The installed guide mandated legacy JSON writers, exact retained prompt bodies had no turn-start query, and the Champion sandbox could not open canonical state.</p></div></article>
+        <article class="event"><div class="time">First successor</div><div><h3>Correct semantics, chatty mechanics</h3><p>Exact-body intake, explicit triage, <code>assign run</code>, narrow state-root access, and exact launch cleanup shared the canonical domain, but each item still started another process.</p></div></article>
+        <article class="event"><div class="time">Performance gate</div><div><h3>Process choreography measured</h3><p>Cold CLI cost about two hundred milliseconds locally. Six prompts expanded to 26 League process launches.</p></div></article>
+        <article class="event"><div class="time">Owner correction</div><div><h3>No prompt injection</h3><p>The hook remained exact capture-and-wake only. The model—not the adapter—continued to author semantic decisions.</p></div></article>
+        <article class="event"><div class="time">One-process successor</div><div><h3>Whole turn stays on one PID</h3><p>One process now spans intake, atomic begin, model work, atomic commit, delivery effects, and final Stop-equivalent boundary.</p></div></article>
       </div>
     </section>
 
@@ -150,6 +216,122 @@
         <li>A focused regression keeps a real supervisor subprocess open while prompt and Stop hook subprocesses open together.</li>
       </ol>
       <div class="notice good"><strong>No timeout inflation.</strong> The correction removes the conflicting maintenance operation. It introduces no schema migration, prompt rewrite, outbox rewrite, or second canonical store.</div>
+      <h3>Successor runtime wiring</h3>
+      <ol class="list">
+        <li><code>league request turn</code> opens one process/connection and emits exact retained bodies only to the live owning Shotcaller under count and byte bounds.</li>
+        <li>The model authors every semantic item and routing choice in the same normal reasoning pass and supplies no mechanical fields. The already-open adapter deterministically manufactures IDs, claims, hashes, timestamps, JSON, locators, and arguments.</li>
+        <li>One begin line atomically commits triage, claims, and routing. The connection holds no transaction while the model works.</li>
+        <li>One commit line atomically records answers/results and delivery effects, returns the full Stop-equivalent boundary, and exits with <code>phase=committed</code>.</li>
+        <li><code>league assign run</code> reserves, marks launching, creates one Herdr tab, starts Codex, observes its generated UUID, verifies identity, activates, and delivers bounded context.</li>
+        <li>Codex remains workspace-write and receives only the exact canonical League root as an additional writable root.</li>
+        <li>Unproven launch cleanup remains pending. A blocked settlement requires matching endpoint, runtime, and callsign receipts.</li>
+        <li>The source guide prohibits legacy writers and per-turn status, unresolved, or supervise polling.</li>
+      </ol>
+    </section>
+
+    <section class="panel section" id="runtime-flow">
+      <h2>SQLite-native release flow</h2>
+      <div class="flow" aria-label="SQLite-native prompt to cleanup flow">
+        <article class="node"><span class="tag">Capture</span><h3>Exact bytes once</h3><p>The hook stores the prompt unchanged and wakes the Shotcaller.</p></article>
+        <article class="node"><span class="tag">One process</span><h3>Model chooses split</h3><p>Atomic begin records all triage, claims, and routing; no transaction remains open during work.</p></article>
+        <article class="node"><span class="tag">Run</span><h3>Assign and transition</h3><p>League verifies the generated Champion, then task transition commits its outbox.</p></article>
+        <article class="node"><span class="tag">Commit + cleanup</span><h3>Boundary and proof</h3><p>The same turn process commits outcomes; endpoint, runtime, callsign, and teardown receipts settle exactly.</p></article>
+      </div>
+    </section>
+
+    <section class="panel section" id="system-flows">
+      <h2>Canonical flow study guide</h2>
+      <div class="grid">
+        <div>
+          <h3>Prompt → request → dispatch</h3>
+          <ol class="list">
+            <li>Hook stores exact bytes/source identity and advances wake generation in one transaction.</li>
+            <li>One turn process emits bounded exact intake.</li>
+            <li>Model-authored items become prompt sources, requests, claims, and direct/hidden/Champion plans atomically.</li>
+            <li>Direct answers/results commit on the same process; cross-Squad route and explicit states retain dedicated commands.</li>
+          </ol>
+          <h3>Assignment → transition → outbox</h3>
+          <ol class="list">
+            <li><code>assign run</code> reserves, marks launching, creates the exact endpoint, observes its generated UUID, verifies, activates, and hashes bounded context.</li>
+            <li><code>task transition</code> commits task version, event, and recipient outbox together.</li>
+            <li>A registered watcher owns one wake; otherwise one direct fallback is attempted. Offline delivery stays pending.</li>
+          </ol>
+        </div>
+        <div>
+          <h3>Supervision → Stop</h3>
+          <ol class="list">
+            <li>Event-driven registration lives outside the active model turn; no status/supervise polling.</li>
+            <li>User messages outrank material-event waits and rearm the generation.</li>
+            <li>Stop blocks once while any request, prompt, assignment, Champion, delivery, task, or cleanup obligation remains; an identical retry may allow.</li>
+          </ol>
+          <h3>Reconciliation → cleanup → rollover</h3>
+          <ol class="list">
+            <li>Fresh preflight hashes every source and permits only exact temporary-snapshot reconciliation; live legacy bytes never change.</li>
+            <li>Cleanup plans immutable ordered effects. Each action receipt makes crash resume start at the first unreceipted step.</li>
+            <li>Rollover drains intake, snapshots active Champions, binds/acknowledges a replacement, and atomically advances the owner fence.</li>
+          </ol>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel section" id="performance">
+      <h2>Command-level performance evidence</h2>
+      <div class="grid">
+        <article class="notice good"><span class="tag">Layer 1</span><h3>Protocol mock</h3><p>No SQLite or model reasoning. Five PTY samples: two stages about 251–252 ms, commit 0.003–0.011 ms, total median 503.123 ms, maximum 504.013 ms. Minimum tool yield dominates; this is not release proof.</p></article>
+        <article class="notice good"><span class="tag">Layer 2</span><h3>Real candidate CLI + SQLite</h3><p>Six prompts, one process. Median infrastructure turn 195.750 ms: startup/intake 169.193 ms, decision/plan 3.489 ms, commit/boundary 21.820 ms, pure DB 3.339 ms. Independently observed values are not mechanically added.</p></article>
+        <article class="notice good"><span class="tag">Layer 3</span><h3>Garen semantic reasoning</h3><p>Excluded and variable. Triage is part of the same normal Garen reasoning pass—never a separate model invocation. Garen supplies semantics; the adapter supplies only IDs, tokens, times, hashes, locators, JSON, and arguments.</p></article>
+        <article class="notice"><span class="tag">Release gate</span><h3>Installed combined path</h3><p>Measured separately in the installed E2E. It does not add mock, candidate, or model numbers. Multi-second handoffs fail and require an in-process adapter.</p></article>
+      </div>
+      <p>The reproducible candidate benchmark uses synthetic temporary state and identical direct work. It measures command/storage overhead only—never vanilla versus orchestrated model quality.</p>
+      <table>
+        <thead><tr><th>Measurement</th><th>Launches</th><th>Exact result</th></tr></thead>
+        <tbody>
+          <tr><td>Twenty cold unresolved CLI calls</td><td>20</td><td>3,870.940 ms total; 193.547 ms mean</td></tr>
+          <tr><td>Prior chatty six-prompt turn</td><td>26</td><td>5,259.356 / 5,322.373 / 5,453.322 ms min/median/max</td></tr>
+          <tr><td>Accepted real candidate startup → intake</td><td>1 shared process</td><td>169.193 ms</td></tr>
+          <tr><td>Accepted real candidate decisions → begun plan</td><td>same process</td><td>3.489 ms</td></tr>
+          <tr><td>Accepted real candidate commit → final boundary</td><td>same process</td><td>21.820 ms</td></tr>
+          <tr><td>Accepted real candidate whole infrastructure turn</td><td>1</td><td>195.750 ms median</td></tr>
+          <tr><td>Accepted real candidate pure database phases</td><td>0</td><td>3.339 ms</td></tr>
+        </tbody>
+      </table>
+      <p>The installed E2E measures the combined infrastructure path separately. Multi-second installed handoffs fail and require an in-process League adapter while retaining SQLite and exactly one external Garen process.</p>
+    </section>
+
+    <section class="panel section" id="commands">
+      <h2>Installed commands and deferred surfaces</h2>
+      <table>
+        <thead><tr><th>Surface</th><th>Normal use</th><th>Boundary</th></tr></thead>
+        <tbody>
+          <tr><td><code>request turn</code></td><td>One active-turn process: intake, begin, work, commit, boundary</td><td>Preferred ordinary direct path</td></tr>
+          <tr><td>Low-level request triage/claim/dispatch/answer/result/unresolved</td><td>Recovery, inspection, non-model automation</td><td>Supported but deferred from normal turns</td></tr>
+          <tr><td>Route, defer, awaiting-user, block, cancel</td><td>Explicit non-ordinary owner decisions</td><td>Never inferred by the adapter</td></tr>
+          <tr><td><code>assign run</code></td><td>Visible Champion reservation through verified context</td><td>Manual phases are recovery-only</td></tr>
+          <tr><td><code>task transition</code></td><td>Material state plus event/outbox</td><td>One command per material transition</td></tr>
+          <tr><td>Delivery and watcher adapter</td><td>Event-driven watcher or direct fallback</td><td>No active-turn polling</td></tr>
+          <tr><td>Cleanup plan/execute/status/reconcile</td><td>Proof-gated teardown and crash resume</td><td>Disposable reconcile remains narrowly scoped</td></tr>
+          <tr><td>Rollover prepare/bindings/acknowledge/commit/abort/drain/status</td><td>Explicit Shotcaller replacement</td><td>Separate reliability workflow</td></tr>
+          <tr><td>Storage migrate/backup/import/integrity/export</td><td>Explicit maintenance</td><td>Only migrate changes journal mode; import defaults no-apply</td></tr>
+          <tr><td>Legacy watcher writers and mutable JSON/JSONL</td><td>None</td><td>Fenced/retired; archive is read-only</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="panel section" id="receipts">
+      <h2>Teardown and crash-resume receipts</h2>
+      <table>
+        <thead><tr><th>Receipt</th><th>Must bind</th></tr></thead>
+        <tbody>
+          <tr><td>Install</td><td>Tested/merged tree, version, tracked and installed hashes, guide parity, backup, smoke, rollback</td></tr>
+          <tr><td>Turn</td><td>One process across phases, prompt/body identities, triage digest, claims, routes, outcomes, outbox effects, final obligations; hosted form omits PID</td></tr>
+          <tr><td>Launch</td><td>Request/task/assignment/agent/callsign, generated thread, endpoint/cwd/title, context/effect hashes</td></tr>
+          <tr><td>Transition/delivery</td><td>Transition key/version, event/outbox/recipient, watcher/direct receipt, duplicate and offline behavior</td></tr>
+          <tr><td>Cleanup plan/action</td><td>Manifest digest, operation/fence/lease, ordered action, external effect digest, before/after identity</td></tr>
+          <tr><td>Crash resume</td><td>Completed receipt set, first unreceipted action, new fence/lease, no replay of proven effects</td></tr>
+          <tr><td>Teardown</td><td>Endpoint/runtime close, preserved artifacts/history/remote branch, worktree/local branch decision, callsign release, zero residue, integrity</td></tr>
+          <tr><td>Legacy retirement</td><td>Archive hash manifest, restoration runbook, absent-active-path cold start, rollback move proof</td></tr>
+        </tbody>
+      </table>
     </section>
 
     <section class="panel section" id="acceptance">
@@ -163,10 +345,14 @@
           <tr><td>Stop safety</td><td>Normal block; no raw busy error</td><td><span class="pill pass">Synthetic pass</span></td></tr>
           <tr><td>Supervisor wake</td><td>Foreground wait exits for user priority</td><td><span class="pill pass">Synthetic pass</span></td></tr>
           <tr><td>Focused affected suites</td><td>Watcher, migration, concurrency, request, acceptance, live-cutover, safety</td><td><span class="pill pass">Local pass</span></td></tr>
-          <tr><td>Exact-head CI</td><td>Hosted checks bind to published PR head</td><td><span class="pill pending">Pending</span></td></tr>
-          <tr><td>Installed release</td><td>Tested merge tree installed; prior release retained</td><td><span class="pill pending">Pending</span></td></tr>
-          <tr><td>Installed synthetic gate</td><td>Installed supervisor, prompt, and Stop preserve WAL</td><td><span class="pill pending">Pending</span></td></tr>
-          <tr><td>Owner-visible gate</td><td>Fresh Darius supervisor plus Garen Stop and Darius prompt</td><td><span class="pill pending">Required</span></td></tr>
+          <tr><td>Exact-head CI</td><td>Hosted checks bind to published successor PR head</td><td><span class="pill pending">Pending</span></td></tr>
+          <tr><td>Installed release</td><td>Tested merge tree and source-managed guide installed; prior release retained</td><td><span class="pill pending">Pending</span></td></tr>
+          <tr><td>Whole direct turn</td><td>One PID emits two bodies, begins atomic triage/claims/routing, remains alive, commits outcome/delivery, returns full boundary, then exits without another League spawn</td><td><span class="pill pass">Focused pass</span></td></tr>
+          <tr><td>Performance layers</td><td>Mock, real candidate CLI+SQLite, variable Garen reasoning, and installed combined path remain separate</td><td><span class="pill pending">Installed gate pending</span></td></tr>
+          <tr><td>Visible launch</td><td>One command reserves, starts, observes UUID, verifies, activates, and briefs</td><td><span class="pill pass">Focused pass</span></td></tr>
+          <tr><td>Sandbox access</td><td>Champion receives only the exact League root and runs stable commands</td><td><span class="pill pending">Real gate</span></td></tr>
+          <tr><td>Failure cleanup</td><td>Pending is preserved until endpoint, runtime, and callsign proof agree</td><td><span class="pill pass">Focused pass</span></td></tr>
+          <tr><td>Disposable E2E</td><td>Capture, triage, assign run, transition, Garen delivery, cleanup, zero residue, integrity</td><td><span class="pill pending">Required</span></td></tr>
         </tbody>
       </table>
     </section>
@@ -191,7 +377,11 @@
             <li>Unsupported or externally altered modes remain fail-closed.</li>
             <li>WAL still requires the pinned SQLite minimum.</li>
             <li>Hook success alone is not canonical capture proof.</li>
-            <li>Owner-visible acceptance remains outstanding.</li>
+            <li>The successor has not yet passed exact-head CI, installation, or the real disposable E2E.</li>
+            <li>Narrow writable-root syntax remains unproven in the installed Champion sandbox until that gate.</li>
+            <li>A model that never sends the commit line leaves the bounded turn process waiting; Stop and owner interruption remain recovery boundaries.</li>
+            <li>Cross-Squad route and defer/block/cancel remain dedicated commands to preserve semantic authority.</li>
+            <li>UserPromptSubmit remains owner-disabled; this implementation does not re-enable it.</li>
           </ul>
         </div>
       </div>
@@ -204,18 +394,22 @@
         <tbody>
           <tr><td>P0</td><td>Validate established mode on every normal connection</td><td>Issue #23 implementer</td><td><span class="pill pass">Candidate complete</span></td></tr>
           <tr><td>P0</td><td>Add long-lived supervisor with concurrent prompt/Stop regression</td><td>Issue #23 implementer</td><td><span class="pill pass">Candidate complete</span></td></tr>
+          <tr><td>P0</td><td>Add one-process exact intake, atomic semantic begin, atomic outcome commit, and full boundary without injection</td><td>Issue #23 implementer</td><td><span class="pill pass">Candidate complete</span></td></tr>
+          <tr><td>P0</td><td>Add adapter-backed <code>league assign run</code> with narrow canonical-root access</td><td>Issue #23 implementer</td><td><span class="pill pass">Candidate complete</span></td></tr>
+          <tr><td>P0</td><td>Replace legacy-writer guide from exact merged source bytes</td><td>Issue #23 implementer</td><td><span class="pill pending">Install pending</span></td></tr>
           <tr><td>P0</td><td>Publish sanitized Markdown and HTML incident artifacts</td><td>Issue #23 implementer</td><td><span class="pill pass">Candidate complete</span></td></tr>
           <tr><td>P0</td><td>Run focused tests, public safety, and exact-head CI</td><td>Issue #23 implementer</td><td><span class="pill pending">Local pass; CI pending</span></td></tr>
           <tr><td>P0</td><td>Install exact tested release with rollback retained</td><td>Release owner</td><td><span class="pill pending">Pending</span></td></tr>
-          <tr><td>P0</td><td>Run installed synthetic supervisor/prompt/Stop acceptance</td><td>Issue #23 implementer</td><td><span class="pill pending">Pending</span></td></tr>
-          <tr><td>P0</td><td>Owner re-enables prompt hook and runs fresh Darius/Garen gate</td><td>Owner</td><td><span class="pill pending">Required</span></td></tr>
+          <tr><td>P0</td><td>Run one installed disposable capture-to-cleanup E2E</td><td>Issue #23 implementer</td><td><span class="pill pending">Required</span></td></tr>
+          <tr><td>P0</td><td>Measure installed intake, begin, commit, and combined infrastructure separately</td><td>Issue #23 implementer</td><td><span class="pill pending">Required</span></td></tr>
+          <tr><td>P0</td><td>Re-enable UserPromptSubmit only after installed disposable acceptance</td><td>Owner</td><td><span class="pill pending">Required</span></td></tr>
           <tr><td>P1</td><td>Keep journal-mode changes maintenance-only</td><td>League maintainers</td><td><span class="pill pass">Invariant</span></td></tr>
         </tbody>
       </table>
     </section>
 
     <footer class="panel section footer">
-      <strong>Resolution criterion:</strong> issue #23 remains open until a freshly started Darius foreground supervisor stays active, Garen Stop behaves normally, a distinct Darius prompt returns success and appears exactly once in canonical storage, and no hot connection attempts a journal-mode change.
+      <strong>Resolution criterion:</strong> issue #23 remains open until two prompts capture and the same one-process turn receives explicit model-authored triage/routing and commits without conflict or busy; <code>league assign run</code> launches one visible Champion that can use canonical League state; working transition wakes Garen; and exact cleanup releases the pane and callsign with zero active residue and passing SQLite integrity.
     </footer>
   </main>
 </body>

@@ -11,10 +11,12 @@ from datetime import datetime
 from typing import Any, Optional
 
 from .storage_request import (
+    MAX_TRIAGE_TURN_PROMPTS,
     MAX_TASK_RESULT_SOURCES,
     AnswerRequestCommand,
     DispatchRequestCommand,
     RequestResultCommand,
+    TurnDispatchPlan,
 )
 from .storage_types import StorageRefusal
 from .orchestration import (
@@ -660,6 +662,75 @@ def _persist_triage_item(
         )
 
 
+def _triage_prompt_in_transaction(
+    store: Any,
+    prompt_id: str,
+    normalized: list[dict[str, Any]],
+    triage_digest: str,
+    at: str,
+    *,
+    expected_owner_agent_id: str | None = None,
+) -> dict[str, Any]:
+    counts = _triage_counts()
+    prompt = store.connection.execute(
+        "SELECT intake_actor_id,triage_state,triage_digest FROM prompts WHERE prompt_id=?",
+        (prompt_id,),
+    ).fetchone()
+    if prompt is None:
+        raise StorageRefusal("prompt_unknown", "prompt does not exist")
+    if (
+        expected_owner_agent_id is not None
+        and prompt["intake_actor_id"] != expected_owner_agent_id
+    ):
+        raise StorageRefusal(
+            "owner_mismatch", "triage batch contains a prompt owned by another actor"
+        )
+    if prompt["triage_state"] == "complete":
+        if prompt["triage_digest"] != triage_digest:
+            raise StorageRefusal(
+                "triage_conflict", "prompt was already triaged with different items"
+            )
+        persisted = store.connection.execute(
+            "SELECT disposition,COUNT(*) count FROM prompt_items WHERE prompt_id=? GROUP BY disposition",
+            (prompt_id,),
+        ).fetchall()
+        for row in persisted:
+            counts[row["disposition"]] = int(row["count"])
+        return {
+            "prompt_id": prompt_id,
+            "triage_state": "complete",
+            "item_count": len(normalized),
+            "request_count": sum(
+                1
+                for item in normalized
+                if item["disposition"] in {"new_request", "deferred"}
+            ),
+            "dispositions": counts,
+            "idempotent": True,
+        }
+    for item in normalized:
+        counts[item["disposition"]] += 1
+        _persist_triage_item(
+            store,
+            prompt_id=prompt_id,
+            intake_actor_id=prompt["intake_actor_id"],
+            item=item,
+            at=at,
+        )
+    store.connection.execute(
+        "UPDATE prompts SET triage_state='complete',triage_digest=? WHERE prompt_id=?",
+        (triage_digest, prompt_id),
+    )
+    return {
+        "prompt_id": prompt_id,
+        "triage_state": "complete",
+        "item_count": len(normalized),
+        "request_count": counts["new_request"] + counts["deferred"],
+        "dispositions": counts,
+        "idempotent": False,
+    }
+
+
 def triage_prompt(
     store: Any,
     prompt_id: str,
@@ -669,60 +740,219 @@ def triage_prompt(
     _time(at, "triage time")
     normalized = _normalize_triage_items(items)
     triage_digest = _digest(_json(normalized))
-    counts = _triage_counts()
     try:
         with store._transaction():
-            prompt = store.connection.execute(
-                "SELECT intake_actor_id,triage_state,triage_digest FROM prompts WHERE prompt_id=?",
-                (prompt_id,),
-            ).fetchone()
-            if prompt is None:
-                raise StorageRefusal("prompt_unknown", "prompt does not exist")
-            if prompt["triage_state"] == "complete":
-                if prompt["triage_digest"] != triage_digest:
-                    raise StorageRefusal("triage_conflict", "prompt was already triaged with different items")
-                persisted = store.connection.execute(
-                    "SELECT disposition,COUNT(*) count FROM prompt_items WHERE prompt_id=? GROUP BY disposition",
-                    (prompt_id,),
-                ).fetchall()
-                for row in persisted:
-                    counts[row["disposition"]] = int(row["count"])
-                return {
-                    "prompt_id": prompt_id,
-                    "triage_state": "complete",
-                    "item_count": len(normalized),
-                    "request_count": sum(
-                        1
-                        for item in normalized
-                        if item["disposition"] in {"new_request", "deferred"}
-                    ),
-                    "dispositions": counts,
-                    "idempotent": True,
-                }
-            for item in normalized:
-                counts[item["disposition"]] += 1
-                _persist_triage_item(
-                    store,
-                    prompt_id=prompt_id,
-                    intake_actor_id=prompt["intake_actor_id"],
-                    item=item,
-                    at=at,
-                )
-            store.connection.execute(
-                "UPDATE prompts SET triage_state='complete',triage_digest=? WHERE prompt_id=?",
-                (triage_digest, prompt_id),
+            result = _triage_prompt_in_transaction(
+                store, prompt_id, normalized, triage_digest, at
             )
     except StorageRefusal:
         raise
     except sqlite3.DatabaseError as exc:
         raise store._translate_database_error(exc, "prompt triage conflicted with canonical state") from exc
+    return result
+
+
+def triage_prompt_batch(
+    store: Any,
+    owner_agent_id: str,
+    expected_prompt_ids: tuple[str, ...],
+    decisions: list[dict[str, Any]],
+    at: str,
+) -> dict[str, Any]:
+    """Commit one exact turn's model-authored decisions in one transaction."""
+
+    _time(at, "triage time")
+    if not 0 <= len(expected_prompt_ids) <= MAX_TRIAGE_TURN_PROMPTS:
+        raise StorageRefusal("invalid_triage_batch", "triage turn prompt count is invalid")
+    if len(set(expected_prompt_ids)) != len(expected_prompt_ids):
+        raise StorageRefusal("invalid_triage_batch", "triage turn prompt identities are duplicated")
+    if not isinstance(decisions, list) or len(decisions) != len(expected_prompt_ids):
+        raise StorageRefusal(
+            "incomplete_triage_batch", "triage turn must decide every fetched prompt exactly once"
+        )
+    prepared: list[tuple[str, list[dict[str, Any]], str]] = []
+    decision_prompt_ids: list[str] = []
+    for decision in decisions:
+        if not isinstance(decision, dict) or set(decision) != {"prompt_id", "items"}:
+            raise StorageRefusal(
+                "invalid_triage_batch", "each triage decision must contain only prompt_id and items"
+            )
+        prompt_id = decision["prompt_id"]
+        items = decision["items"]
+        if not isinstance(prompt_id, str) or not isinstance(items, list):
+            raise StorageRefusal("invalid_triage_batch", "triage decision shape is invalid")
+        normalized = _normalize_triage_items(items)
+        prepared.append((prompt_id, normalized, _digest(_json(normalized))))
+        decision_prompt_ids.append(prompt_id)
+    if tuple(decision_prompt_ids) != expected_prompt_ids:
+        raise StorageRefusal(
+            "incomplete_triage_batch",
+            "triage decisions must match the fetched prompt identities and order exactly",
+        )
+    try:
+        with store._transaction():
+            owner = store.connection.execute(
+                "SELECT role,retired_at FROM agent_instances WHERE agent_id=?",
+                (owner_agent_id,),
+            ).fetchone()
+            if owner is None or owner["role"] != "shotcaller" or owner["retired_at"] is not None:
+                raise StorageRefusal(
+                    "owner_invalid", "triage batch requires one live Shotcaller owner"
+                )
+            receipts = [
+                _triage_prompt_in_transaction(
+                    store,
+                    prompt_id,
+                    normalized,
+                    digest,
+                    at,
+                    expected_owner_agent_id=owner_agent_id,
+                )
+                for prompt_id, normalized, digest in prepared
+            ]
+            linked_request_ids = tuple(
+                dict.fromkeys(
+                    str(item["request_id"])
+                    for _, normalized, _ in prepared
+                    for item in normalized
+                    if item["request_id"] is not None
+                )
+            )
+            readiness: list[dict[str, Any]] = []
+            for request_id in linked_request_ids:
+                request = _request_row(store, request_id)
+                claim = store.connection.execute(
+                    "SELECT released_at FROM request_claims WHERE request_id=?",
+                    (request_id,),
+                ).fetchone()
+                has_claim = claim is not None and claim["released_at"] is None
+                readiness.append(
+                    {
+                        "request_id": request_id,
+                        "state": request["state"],
+                        "version": int(request["version"]),
+                        "claim_required": not has_claim,
+                        "dispatch_ready": request["state"] in {"open", "accepted"} and has_claim,
+                    }
+                )
+    except StorageRefusal:
+        raise
+    except sqlite3.DatabaseError as exc:
+        raise store._translate_database_error(
+            exc, "prompt triage batch conflicted with canonical state"
+        ) from exc
     return {
-        "prompt_id": prompt_id,
-        "triage_state": "complete",
-        "item_count": len(normalized),
-        "request_count": counts["new_request"] + counts["deferred"],
-        "dispositions": counts,
-        "idempotent": False,
+        "owner_agent_id": owner_agent_id,
+        "prompt_count": len(receipts),
+        "triage": receipts,
+        "dispatch_readiness": readiness,
+        "idempotent": bool(receipts) and all(item["idempotent"] for item in receipts),
+    }
+
+
+def begin_request_turn(
+    store: Any,
+    owner_agent_id: str,
+    expected_prompt_ids: tuple[str, ...],
+    decisions: list[dict[str, Any]],
+    plans: tuple[TurnDispatchPlan, ...],
+    at: str,
+) -> dict[str, Any]:
+    """Triage, claim, and record each new request's routing plan atomically."""
+
+    planned_request_ids = tuple(plan.command.request_id for plan in plans)
+    if len(set(planned_request_ids)) != len(planned_request_ids):
+        raise StorageRefusal("invalid_turn_plan", "turn routing plans contain duplicate requests")
+    new_request_ids = tuple(
+        str(item.get("request_id"))
+        for decision in decisions
+        if isinstance(decision, dict)
+        for item in decision.get("items", [])
+        if isinstance(item, dict) and item.get("disposition") == "new_request"
+    )
+    if planned_request_ids != new_request_ids:
+        raise StorageRefusal(
+            "incomplete_turn_plan",
+            "turn routing plans must match each new request identity and order exactly",
+        )
+    if any(plan.command.at != at for plan in plans):
+        raise StorageRefusal("invalid_turn_plan", "turn routing plan timestamps must be exact")
+    try:
+        with store._transaction():
+            batch = triage_prompt_batch(
+                store,
+                owner_agent_id,
+                expected_prompt_ids,
+                decisions,
+                at,
+            )
+            routed: list[dict[str, Any]] = []
+            for plan in plans:
+                claim = claim_request(
+                    store,
+                    plan.command.request_id,
+                    plan.runtime_instance_id,
+                    plan.claim_token,
+                    plan.leased_until,
+                    at,
+                )
+                dispatch = dispatch_request(store, plan.command)
+                routed.append({"claim": claim, "dispatch": dispatch})
+    except StorageRefusal:
+        raise
+    except sqlite3.DatabaseError as exc:
+        raise store._translate_database_error(
+            exc, "request turn begin conflicted with canonical state"
+        ) from exc
+    return {"batch": batch, "routing": routed}
+
+
+def commit_request_turn(
+    store: Any,
+    owner_agent_id: str,
+    actions: tuple[AnswerRequestCommand | RequestResultCommand, ...],
+    at: str,
+) -> dict[str, Any]:
+    """Commit bounded direct answers/results and their delivery effects atomically."""
+
+    _time(at, "turn commit time")
+    if not 0 <= len(actions) <= 100:
+        raise StorageRefusal("invalid_turn_commit", "turn commit action count is invalid")
+    if any(action.at != at for action in actions):
+        raise StorageRefusal("invalid_turn_commit", "turn commit timestamps must be exact")
+    try:
+        with store._transaction():
+            receipts: list[dict[str, Any]] = []
+            for action in actions:
+                request = _request_row(store, action.request_id)
+                if request["owner_agent_id"] != owner_agent_id:
+                    raise StorageRefusal(
+                        "owner_mismatch", "turn commit action belongs to another request owner"
+                    )
+                if isinstance(action, AnswerRequestCommand):
+                    receipts.append(answer_request(store, action))
+                else:
+                    receipts.append(record_request_result(store, action))
+    except StorageRefusal:
+        raise
+    except sqlite3.DatabaseError as exc:
+        raise store._translate_database_error(
+            exc, "request turn commit conflicted with canonical state"
+        ) from exc
+    return {"owner_agent_id": owner_agent_id, "actions": receipts}
+
+
+def request_turn_boundary(store: Any, owner_agent_id: str) -> dict[str, Any]:
+    """Return the full Stop-equivalent obligation boundary on the open connection."""
+
+    from .sqlite_watcher_ops import _obligation_counts
+
+    requests = unresolved_requests(store, owner_agent_id)
+    obligations = _obligation_counts(store, owner_agent_id)
+    return {
+        **requests,
+        "obligations": obligations,
+        "safe_to_finish": sum(obligations.values()) == 0,
     }
 
 
@@ -1817,4 +2047,85 @@ def unresolved_requests(
         "safe_to_finish": request_total == 0 and untriaged_prompt_count == 0 and obligations == 0,
         "untriaged_prompts": [dict(row) for row in prompt_rows],
         "requests": [dict(row) for row in rows],
+    }
+
+
+def untriaged_intake(
+    store: Any,
+    owner_agent_id: str,
+    *,
+    limit: int = 20,
+    max_bytes: int = 1_000_000,
+) -> dict[str, Any]:
+    """Return exact retained prompt bytes only to their live Shotcaller owner."""
+
+    if not 1 <= limit <= 100 or not MAX_PROMPT_BYTES <= max_bytes <= 4_000_000:
+        raise StorageRefusal(
+            "invalid_limit", "untriaged intake bounds are outside the supported range"
+        )
+    owner = store.connection.execute(
+        "SELECT role,retired_at FROM agent_instances WHERE agent_id=?",
+        (owner_agent_id,),
+    ).fetchone()
+    if owner is None or owner["role"] != "shotcaller" or owner["retired_at"] is not None:
+        raise StorageRefusal(
+            "owner_invalid", "untriaged intake requires one live Shotcaller owner"
+        )
+    total = int(
+        store.connection.execute(
+            "SELECT COUNT(*) FROM prompts WHERE intake_actor_id=? AND triage_state='untriaged'",
+            (owner_agent_id,),
+        ).fetchone()[0]
+    )
+    rows = store.connection.execute(
+        """
+        SELECT p.prompt_id,p.runtime_instance_id,p.adapter_kind,p.session_ref,p.source_event_key,p.created_at,
+               pp.body,pp.body_hash,pp.byte_count,pp.pruned_at
+          FROM prompts p JOIN prompt_payloads pp ON pp.prompt_id=p.prompt_id
+         WHERE p.intake_actor_id=? AND p.triage_state='untriaged'
+         ORDER BY p.created_at,p.prompt_id
+         LIMIT ?
+        """,
+        (owner_agent_id, limit),
+    ).fetchall()
+    prompts: list[dict[str, Any]] = []
+    returned_bytes = 0
+    for row in rows:
+        body = row["body"]
+        if body is None or row["pruned_at"] is not None:
+            raise StorageRefusal(
+                "prompt_payload_unavailable",
+                "an untriaged prompt no longer has its exact retained body",
+            )
+        encoded = str(body).encode("utf-8")
+        if (
+            len(encoded) != int(row["byte_count"])
+            or hashlib.sha256(encoded).hexdigest() != row["body_hash"]
+        ):
+            raise StorageRefusal(
+                "prompt_payload_mismatch", "retained prompt bytes do not match their identity"
+            )
+        if returned_bytes + len(encoded) > max_bytes:
+            break
+        prompts.append(
+            {
+                "prompt_id": row["prompt_id"],
+                "runtime_instance_id": row["runtime_instance_id"],
+                "adapter_kind": row["adapter_kind"],
+                "session_ref": row["session_ref"],
+                "source_event_key": row["source_event_key"],
+                "created_at": row["created_at"],
+                "body": body,
+                "body_hash": row["body_hash"],
+                "byte_count": int(row["byte_count"]),
+            }
+        )
+        returned_bytes += len(encoded)
+    return {
+        "owner_agent_id": owner_agent_id,
+        "untriaged_prompt_count": total,
+        "returned_count": len(prompts),
+        "returned_bytes": returned_bytes,
+        "truncated": total > len(prompts),
+        "prompts": prompts,
     }

@@ -153,10 +153,11 @@ The issue-#23 installed-routing successor derives the canonical state root from
 the exact writer pointer when no explicit test root is supplied and resolves a
 hook session through its one live verified runtime generation before consulting
 the imported legacy thread identity. Runtime ambiguity remains a refusal.
-Non-Shotcaller prompts are retained once in quarantine without a wake actor or
-watcher generation, while SQLite supervision accepts only one verified runtime
-owned by an active Shotcaller. No legacy file, transcript, or second writer is
-read or changed by this compatibility path.
+Non-Shotcaller prompts bind once to their exact verified runtime without a wake
+actor or watcher generation; missing or unverified runtime identity remains a
+no-wake quarantine. SQLite supervision accepts only one verified runtime owned
+by an active Shotcaller. No legacy file, transcript, or second writer is read
+or changed by this compatibility path.
 
 Tests that require process inspection explicitly inject the single
 `tests/fakes/ps` adapter through `tests/process_adapter.py`; Make targets do not

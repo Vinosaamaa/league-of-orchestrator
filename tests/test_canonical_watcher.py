@@ -116,6 +116,35 @@ def _register_garen_runtime(
     return runtime_id
 
 
+def _register_champion_runtime(state: Path, suffix: str, session_ref: str) -> str:
+    runtime_id = f"runtime:champion:{suffix}"
+    _league(
+        state,
+        "hook",
+        "register-runtime",
+        "--runtime-instance-id",
+        runtime_id,
+        "--actor-agent-id",
+        CHAMPION_ID,
+        "--harness-kind",
+        "codex-thread",
+        "--backend-kind",
+        "herdr",
+        "--session-ref",
+        session_ref,
+        "--endpoint",
+        "synthetic-champion",
+        "--runtime-generation",
+        f"generation:{suffix}",
+        "--status",
+        "active",
+        "--verified",
+        "--at",
+        AT2,
+    )
+    return runtime_id
+
+
 def _fake_herdr(root: Path, env: dict[str, str]) -> Path:
     fake_bin = root / "fake-bin"
     fake_bin.mkdir()
@@ -460,7 +489,7 @@ def test_missing_identity_quarantines_then_binds_and_triages(root: Path) -> None
     assert triaged["triage_state"] == "complete"
 
 
-def test_champion_prompt_quarantines_without_shotcaller_wake(root: Path) -> None:
+def test_unverified_champion_prompt_quarantines_without_shotcaller_wake(root: Path) -> None:
     _, state, _ = seeded_state(root, "champion-quarantine")
     env = _environment(root / "champion-quarantine", state)
     payload = {
@@ -486,6 +515,86 @@ def test_champion_prompt_quarantines_without_shotcaller_wake(root: Path) -> None
     assert len(rows) == 1
     assert tuple(rows[0]) == ("quarantined", "runtime_unverified", None, None, 0)
     assert champion_scope is None
+
+    runtime_id = _register_champion_runtime(
+        state, "later-verified", CHAMPION_ID
+    )
+    assert _watcher(env, "codex-user-prompt-hook", payload=payload) == {}
+    with SQLiteStorage(state, request_wal=False) as store:
+        bound = store.connection.execute(
+            """
+            SELECT q.state,q.bound_actor_id,q.bound_runtime_instance_id,
+                   q.wake_actor_id,q.wake_scope_id,q.wake_committed,
+                   p.runtime_instance_id
+              FROM prompt_quarantine q JOIN prompts p ON p.prompt_id=q.prompt_id
+             WHERE q.source_event_key=?
+            """,
+            (payload["turn_id"],),
+        ).fetchone()
+        champion_scope = store.connection.execute(
+            "SELECT COUNT(*) FROM watcher_scopes WHERE actor_agent_id=?",
+            (CHAMPION_ID,),
+        ).fetchone()[0]
+    assert tuple(bound) == (
+        "bound", CHAMPION_ID, runtime_id, None, None, 0, runtime_id
+    )
+    assert champion_scope == 0
+
+
+def test_verified_champion_prompt_captures_without_shotcaller_wake(root: Path) -> None:
+    _, state, _ = seeded_state(root, "verified-champion-capture")
+    env = _environment(root / "verified-champion-capture", state)
+    runtime_id = _register_champion_runtime(
+        state, "verified-capture", CHAMPION_ID
+    )
+    payload = {
+        "session_id": CHAMPION_ID,
+        "turn_id": "turn:verified-champion-capture",
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": "Exact verified Champion prompt is retained without a wake.",
+    }
+    with SQLiteStorage(state, request_wal=False) as store:
+        garen_before = store.connection.execute(
+            "SELECT COUNT(*) FROM watcher_scopes WHERE actor_agent_id=?",
+            (SHOTCALLER_ID,),
+        ).fetchone()[0]
+    assert _watcher(env, "codex-user-prompt-hook", payload=payload) == {}
+    assert _watcher(env, "codex-user-prompt-hook", payload=payload) == {}
+    with SQLiteStorage(state, request_wal=False) as store:
+        prompts = store.connection.execute(
+            """
+            SELECT p.intake_actor_id,p.runtime_instance_id,p.triage_state,
+                   pp.body,pp.body_hash,pp.byte_count
+              FROM prompts p JOIN prompt_payloads pp ON pp.prompt_id=p.prompt_id
+             WHERE p.source_event_key=?
+            """,
+            (payload["turn_id"],),
+        ).fetchall()
+        quarantined = store.connection.execute(
+            "SELECT COUNT(*) FROM prompt_quarantine WHERE source_event_key=?",
+            (payload["turn_id"],),
+        ).fetchone()[0]
+        champion_scope = store.connection.execute(
+            "SELECT COUNT(*) FROM watcher_scopes WHERE actor_agent_id=?",
+            (CHAMPION_ID,),
+        ).fetchone()[0]
+        garen_after = store.connection.execute(
+            "SELECT COUNT(*) FROM watcher_scopes WHERE actor_agent_id=?",
+            (SHOTCALLER_ID,),
+        ).fetchone()[0]
+    encoded = payload["prompt"].encode("utf-8")
+    assert len(prompts) == 1
+    assert tuple(prompts[0]) == (
+        CHAMPION_ID,
+        runtime_id,
+        "untriaged",
+        payload["prompt"],
+        hashlib.sha256(encoded).hexdigest(),
+        len(encoded),
+    )
+    assert quarantined == 0
+    assert champion_scope == 0
+    assert garen_after == garen_before
 
 
 def test_verified_runtime_session_routes_stop_and_pointer_state(root: Path) -> None:
@@ -754,7 +863,8 @@ def main() -> None:
         test_supervise_user_priority(root)
         test_codex_and_cursor_prompt_capture_exactly_once(root)
         test_missing_identity_quarantines_then_binds_and_triages(root)
-        test_champion_prompt_quarantines_without_shotcaller_wake(root)
+        test_unverified_champion_prompt_quarantines_without_shotcaller_wake(root)
+        test_verified_champion_prompt_captures_without_shotcaller_wake(root)
         test_verified_runtime_session_routes_stop_and_pointer_state(root)
         test_quarantined_prompt_rearms_one_shot_stop(root)
         test_real_codex_stop_payload_blocks_once_per_turn(root)

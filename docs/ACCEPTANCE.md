@@ -297,7 +297,9 @@ exact writer-pointer directory used to select the canonical writer. Codex and
 Cursor hook sessions bind first through one active or idle verified runtime;
 only if none exists may the imported active identity match directly. Multiple
 matches refuse. A non-Shotcaller prompt is accepted and retained exactly once
-as `runtime_unverified` quarantine without attempting a Shotcaller wake.
+against its exact verified runtime without a wake; when that runtime is absent
+or unverified, the prompt is retained as `runtime_unverified` quarantine without
+attempting a Shotcaller wake.
 Supervision registers only against one verified runtime owned by the exact
 active Shotcaller, independent of the archived thread identity.
 

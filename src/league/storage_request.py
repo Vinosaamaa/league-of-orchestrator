@@ -100,6 +100,7 @@ class RequestStorage(Protocol):
         at: str,
         *,
         wake_scope_id: Optional[str] = None,
+        wake: bool = True,
     ) -> dict[str, Any]: ...
     def quarantine_prompt(
         self, prompt_id: str, adapter_kind: str, session_ref: str,
@@ -108,7 +109,7 @@ class RequestStorage(Protocol):
     ) -> dict[str, Any]: ...
     def bind_quarantined_prompt(
         self, prompt_id: str, intake_actor_id: str, runtime_instance_id: str,
-        at: str, *, wake_scope_id: Optional[str] = None,
+        at: str, *, wake_scope_id: Optional[str] = None, wake: bool = True,
     ) -> dict[str, Any]: ...
     def triage_prompt(self, prompt_id: str, items: list[dict[str, Any]], at: str) -> dict[str, Any]: ...
 

@@ -2318,6 +2318,7 @@ class SQLiteStorage(SQLiteTransactionCore):
         at: str,
         *,
         wake_scope_id: Optional[str] = None,
+        wake: bool = True,
     ) -> dict[str, Any]:
         return intake_prompt_operation(
             self,
@@ -2330,6 +2331,7 @@ class SQLiteStorage(SQLiteTransactionCore):
             body,
             at,
             wake_scope_id=wake_scope_id,
+            wake=wake,
         )
 
     def triage_prompt(
@@ -2364,6 +2366,7 @@ class SQLiteStorage(SQLiteTransactionCore):
         at: str,
         *,
         wake_scope_id: Optional[str] = None,
+        wake: bool = True,
     ) -> dict[str, Any]:
         from .sqlite_request_ops import bind_quarantined_prompt
 
@@ -2374,6 +2377,7 @@ class SQLiteStorage(SQLiteTransactionCore):
             runtime_instance_id,
             at,
             wake_scope_id=wake_scope_id,
+            wake=wake,
         )
 
     def claim_request(

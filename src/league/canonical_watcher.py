@@ -181,10 +181,6 @@ def _capture_prompt(
         return store.quarantine_prompt(
             prompt_id, adapter_kind, session_ref, source_event_key, body, now
         )
-    if actor_role != "shotcaller":
-        return store.quarantine_prompt(
-            prompt_id, adapter_kind, session_ref, source_event_key, body, now
-        )
     runtimes = store.connection.execute(
         """
         SELECT runtime_instance_id
@@ -195,6 +191,37 @@ def _capture_prompt(
         """,
         (actor_id, session_ref),
     ).fetchall()
+    if actor_role != "shotcaller":
+        if len(runtimes) != 1:
+            return store.quarantine_prompt(
+                prompt_id, adapter_kind, session_ref, source_event_key, body, now
+            )
+        runtime_id = str(runtimes[0]["runtime_instance_id"])
+        quarantined = store.connection.execute(
+            "SELECT state FROM prompt_quarantine WHERE prompt_id=?", (prompt_id,)
+        ).fetchone()
+        if quarantined is not None:
+            return store.bind_quarantined_prompt(
+                prompt_id, actor_id, runtime_id, now, wake=False
+            )
+        try:
+            return store.intake_prompt(
+                prompt_id,
+                actor_id,
+                runtime_id,
+                adapter_kind,
+                session_ref,
+                source_event_key,
+                body,
+                now,
+                wake=False,
+            )
+        except StorageRefusal as exc:
+            if exc.code != "runtime_unverified":
+                raise
+            return store.quarantine_prompt(
+                prompt_id, adapter_kind, session_ref, source_event_key, body, now
+            )
     if not runtimes:
         actor = store.connection.execute(
             """

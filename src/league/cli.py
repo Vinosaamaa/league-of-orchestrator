@@ -114,6 +114,10 @@ def _add_acceptance_commands(groups: argparse._SubParsersAction) -> None:
     cutover.add_argument("--authority-receipt", type=Path, required=True)
     cutover.add_argument("--authority-digest", required=True)
     cutover.add_argument("--source-root", type=Path, required=True)
+    archive_verify = commands.add_parser(
+        "archive-verify", help="Verify one immutable legacy-system archive."
+    )
+    archive_verify.add_argument("--archive", type=Path, required=True)
     cleanup_canary = commands.add_parser(
         "cleanup-canary",
         help=(
@@ -2217,6 +2221,15 @@ def _run(args: argparse.Namespace) -> CommandResult:
             authority_digest=args.authority_digest,
             source_root=args.source_root,
         ), None
+    if command == "acceptance.archive-verify":
+        from .livecutover import verify_legacy_archive
+
+        if args.state_root is not None:
+            raise StorageRefusal(
+                "invalid_acceptance_root",
+                "legacy archive verification refuses --state-root",
+            )
+        return verify_legacy_archive(args.archive), None
     if command == "acceptance.cleanup-canary":
         from .real_canary import run_real_cleanup_canary
 

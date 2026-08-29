@@ -574,6 +574,8 @@ if args[:2] == ["agent", "list"]:
         }]
     result = {"agents": agents}
 elif args[:2] == ["agent", "prompt"]:
+    if "--until" in args:
+        raise SystemExit(2)
     state["done"] = True
     path.write_text(json.dumps(state), encoding="utf-8")
     result = {"submitted": True}

@@ -337,8 +337,6 @@ class HerdrHarnessAdapter(_BaseAdapter):
                 self.identity["agent_name"],
                 "/exit",
                 "--wait",
-                "--until",
-                "done",
                 "--timeout",
                 "30000",
             )

@@ -123,6 +123,12 @@ lifecycle and issue-#39/PR-#41 report receipts are composed inputs, not
 reimplemented here; the cleanup-canary contract and runtime scope remain
 canonical in [`docs/ACCEPTANCE.md`](ACCEPTANCE.md).
 
+The issue-#23 final cutover successor removes an idle-only Herdr readiness wait
+that was incompatible with settled background-agent states, while preserving
+the same bounded prompt and exact cleanup identity. It also makes the complete
+pre-cutover legacy system an immutable, hash-verifiable inactive archive with a
+co-located restoration runbook; it does not reactivate or rewrite legacy data.
+
 Tests that require process inspection explicitly inject the single
 `tests/fakes/ps` adapter through `tests/process_adapter.py`; Make targets do not
 alter `PATH` for unrelated tests. This keeps self-process and resource-lifecycle

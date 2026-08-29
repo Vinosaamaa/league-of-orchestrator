@@ -103,7 +103,8 @@ class RequestStorage(Protocol):
     ) -> dict[str, Any]: ...
     def quarantine_prompt(
         self, prompt_id: str, adapter_kind: str, session_ref: str,
-        source_event_key: str, body: str, at: str,
+        source_event_key: str, body: str, at: str, *,
+        wake_actor_id: Optional[str] = None, wake_scope_id: Optional[str] = None,
     ) -> dict[str, Any]: ...
     def bind_quarantined_prompt(
         self, prompt_id: str, intake_actor_id: str, runtime_instance_id: str,

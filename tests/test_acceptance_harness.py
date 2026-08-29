@@ -13,7 +13,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 LEAGUE = ROOT / "bin/league"
-EXPECTED_MIGRATION_REPORT = "210e502c2e783fc0cb17006ba0a7f1bdfc432565b890eafe1e9837df9b7679c1"
+EXPECTED_MIGRATION_REPORT = "9844f64151bfbe880699700795797c52707535935234522c4d306f6625f0b91f"
 EXPECTED_MIGRATION_SOURCE = "0f7d57871907fabdab99b01b39e280d6ea2d12901c4a22ea765e9bbe24241499"
 EXPECTED_MIGRATION_PARITY = "4091f020741dd6251bf9aec10425cc3a248900912cad70a413d8f5664ccb85e6"
 sys.path.insert(0, str(ROOT / "src"))
@@ -493,7 +493,7 @@ def test_schema_and_command_inventory() -> None:
     version = subprocess.run(
         [str(LEAGUE), "--version"], text=True, capture_output=True, check=True, timeout=10
     )
-    assert version.stdout.strip() == "league 0.2.2"
+    assert version.stdout.strip() == "league 0.2.3"
 
 
 def main() -> None:

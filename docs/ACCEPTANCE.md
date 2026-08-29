@@ -42,6 +42,12 @@ canonical quarantine with a `runtime_unverified` obligation and returns success
 so the local prompt proceeds. `league request bind-prompt` later requires one
 exact actor/runtime/session match, promotes the same prompt without changing its
 identity or bytes, and wakes the bound Shotcaller for model-authored triage.
+When the hook session already identifies one canonical Shotcaller but its exact
+runtime is unavailable, the quarantine insert and that Shotcaller's
+`user_message_generation` and `wait_generation` increments are one transaction.
+A byte-identical hook retry changes neither generation. This rearms the bounded
+Stop guard: one Stop blocks, an identical retry may allow to prevent a loop,
+and the next accepted user prompt makes the next Stop block once again.
 
 Run the complete foundation with one command after creating task-owned sentinel
 fixtures outside the requested namespace:

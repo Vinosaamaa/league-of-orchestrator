@@ -353,6 +353,9 @@ def quarantine_prompt(
     source_event_key: str,
     body: str,
     at: str,
+    *,
+    wake_actor_id: str | None = None,
+    wake_scope_id: str | None = None,
 ) -> dict[str, Any]:
     _time(at, "prompt quarantine time")
     encoded = body.encode("utf-8")
@@ -361,6 +364,10 @@ def quarantine_prompt(
     if not encoded or len(encoded) > MAX_PROMPT_BYTES:
         raise StorageRefusal("invalid_prompt", "prompt body must be non-empty and within the bounded size")
     body_hash = hashlib.sha256(encoded).hexdigest()
+    if (wake_actor_id is None) != (wake_scope_id is None):
+        raise StorageRefusal(
+            "invalid_prompt_wake", "prompt wake requires both exact actor and scope"
+        )
     try:
         with store._transaction():
             existing = store.connection.execute(
@@ -391,6 +398,37 @@ def quarantine_prompt(
                 """,
                 (prompt_id, adapter_kind, session_ref, source_event_key, body, body_hash, len(encoded), at),
             )
+            if wake_actor_id is not None and wake_scope_id is not None:
+                from .sqlite_watcher_ops import ensure_watcher_scope
+
+                actor = store.connection.execute(
+                    "SELECT role FROM agent_instances WHERE agent_id=? AND retired_at IS NULL",
+                    (wake_actor_id,),
+                ).fetchone()
+                if actor is None or actor["role"] != "shotcaller":
+                    raise StorageRefusal(
+                        "runtime_unverified", "quarantine wake actor is not a live Shotcaller"
+                    )
+                ensure_watcher_scope(
+                    store, wake_scope_id, wake_actor_id, block_on_obligations=None
+                )
+                store.connection.execute(
+                    """
+                    UPDATE watcher_scopes
+                       SET user_message_generation=user_message_generation+1,
+                           wait_generation=wait_generation+1,stop_blocked=0,wait_active=0
+                     WHERE scope_id=? AND actor_agent_id=?
+                    """,
+                    (wake_scope_id, wake_actor_id),
+                )
+                store.connection.execute(
+                    """
+                    UPDATE prompt_quarantine
+                       SET wake_actor_id=?,wake_scope_id=?,wake_committed=1
+                     WHERE prompt_id=?
+                    """,
+                    (wake_actor_id, wake_scope_id, prompt_id),
+                )
     except StorageRefusal:
         raise
     except sqlite3.DatabaseError as exc:
@@ -470,7 +508,9 @@ def bind_quarantined_prompt(
                 """,
                 (intake_actor_id, runtime_instance_id, at, prompt_id),
             )
-            if wake_scope_id is None:
+            if row["wake_committed"]:
+                wake_scope_id = None
+            elif wake_scope_id is None:
                 scope_row = store.connection.execute(
                     "SELECT scope_id FROM watcher_scopes WHERE actor_agent_id=? ORDER BY scope_id LIMIT 1",
                     (intake_actor_id,),
@@ -496,6 +536,14 @@ def bind_quarantined_prompt(
                      WHERE scope_id=?
                     """,
                     (wake_scope_id,),
+                )
+                store.connection.execute(
+                    """
+                    UPDATE prompt_quarantine
+                       SET wake_actor_id=?,wake_scope_id=?,wake_committed=1
+                     WHERE prompt_id=?
+                    """,
+                    (intake_actor_id, wake_scope_id, prompt_id),
                 )
     except StorageRefusal:
         raise

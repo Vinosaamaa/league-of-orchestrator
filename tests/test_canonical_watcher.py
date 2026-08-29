@@ -18,6 +18,7 @@ sys.path[:0] = [str(ROOT / "src"), str(ROOT / "tests")]
 
 from storage_fixture import AT2, CHAMPION_ID, SHOTCALLER_ID  # noqa: E402
 from storage_test_support import seeded_state  # noqa: E402
+from league.sqlite_store import SQLiteStorage  # noqa: E402
 
 
 WATCHER = ROOT / "bin/agent-watcher"
@@ -432,6 +433,69 @@ def test_missing_identity_quarantines_then_binds_and_triages(root: Path) -> None
     assert triaged["triage_state"] == "complete"
 
 
+def test_quarantined_prompt_rearms_one_shot_stop(root: Path) -> None:
+    _, state, _ = seeded_state(root, "quarantine-stop-continuity")
+    env = _environment(root / "quarantine-stop-continuity", state)
+    with SQLiteStorage(state, request_wal=False) as store:
+        with store._transaction():
+            store.connection.execute(
+                "UPDATE agent_instances SET backend=NULL,address=NULL WHERE agent_id=?",
+                (SHOTCALLER_ID,),
+            )
+    first_generation = {
+        "session_id": SHOTCALLER_ID,
+        "turn_id": "turn:stop-generation-one",
+        "hook_event_name": "Stop",
+    }
+    first = _watcher(
+        env, "--shotcaller", "Garen", "codex-stop-hook", payload=first_generation
+    )
+    assert first["decision"] == "block"
+    assert _watcher(
+        env, "--shotcaller", "Garen", "codex-stop-hook", payload=first_generation
+    ) == {}
+    with SQLiteStorage(state, request_wal=False) as store:
+        before = store.connection.execute(
+            "SELECT user_message_generation,wait_generation FROM watcher_scopes WHERE actor_agent_id=?",
+            (SHOTCALLER_ID,),
+        ).fetchone()
+        before = tuple(before)
+    prompt = {
+        "session_id": SHOTCALLER_ID,
+        "turn_id": "turn:quarantined-rearm",
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": "Quarantined prompt must atomically rearm Stop.",
+    }
+    assert _watcher(env, "codex-user-prompt-hook", payload=prompt) == {}
+    assert _watcher(env, "codex-user-prompt-hook", payload=prompt) == {}
+    with SQLiteStorage(state, request_wal=False) as store:
+        after = store.connection.execute(
+            "SELECT user_message_generation,wait_generation FROM watcher_scopes WHERE actor_agent_id=?",
+            (SHOTCALLER_ID,),
+        ).fetchone()
+        quarantine = store.connection.execute(
+            "SELECT state,reason,wake_actor_id,wake_scope_id,wake_committed FROM prompt_quarantine WHERE source_event_key=?",
+            (prompt["turn_id"],),
+        ).fetchone()
+    assert tuple(after) == (before[0] + 1, before[1] + 1)
+    assert tuple(quarantine) == (
+        "quarantined",
+        "runtime_unverified",
+        SHOTCALLER_ID,
+        "watcher:Garen",
+        1,
+    )
+    second_generation = {
+        "session_id": SHOTCALLER_ID,
+        "turn_id": "turn:stop-generation-two",
+        "hook_event_name": "Stop",
+    }
+    again = _watcher(
+        env, "--shotcaller", "Garen", "codex-stop-hook", payload=second_generation
+    )
+    assert again["decision"] == "block"
+
+
 def test_material_delivery_watcher_direct_dedup_and_unavailable(root: Path) -> None:
     _, watcher_state, _ = seeded_state(root, "watcher-delivery")
     watcher_env = _environment(root / "watcher-delivery", watcher_state)
@@ -558,6 +622,7 @@ def main() -> None:
         test_supervise_user_priority(root)
         test_codex_and_cursor_prompt_capture_exactly_once(root)
         test_missing_identity_quarantines_then_binds_and_triages(root)
+        test_quarantined_prompt_rearms_one_shot_stop(root)
         test_material_delivery_watcher_direct_dedup_and_unavailable(root)
     print("PASS: installed SQLite Stop/supervise plus watcher/direct exact-once delivery and pending fallback")
 

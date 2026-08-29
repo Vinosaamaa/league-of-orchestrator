@@ -16,6 +16,10 @@ from pathlib import Path
 from typing import Any, Iterable, Optional, Sequence
 
 from . import sqlite_runtime_ops
+from .sqlite_artifact_ops import declare as declare_repository_artifact_operation
+from .sqlite_artifact_ops import publish as record_repository_publication_operation
+from .sqlite_artifact_ops import status as task_artifacts_operation
+from .sqlite_artifact_ops import unresolved as unresolved_repository_publications_operation
 from .sqlite_core import SQLiteTransactionCore
 from .sqlite_assignment_ops import activate_assignment as activate_assignment_operation
 from .sqlite_assignment_ops import block_assignment as block_assignment_operation
@@ -105,7 +109,7 @@ from .sqlite_routing_policy_schema import STATEMENTS as ROUTING_POLICY_MIGRATION
 
 
 WAL_MINIMUM = (3, 51, 3)
-CURRENT_SCHEMA_VERSION = 8
+CURRENT_SCHEMA_VERSION = 9
 DATABASE_NAME = "league.sqlite3"
 DEFAULT_BUSY_TIMEOUT_MS = 500
 MAX_BUSY_TIMEOUT_MS = 10_000
@@ -1028,6 +1032,43 @@ MIGRATIONS = (
         ROUTING_POLICY_MIGRATION_STATEMENTS,
         rebuilds_foreign_keys=True,
     ),
+    Migration(
+        9,
+        "repository-owned-artifact-publication",
+        (
+            """
+            CREATE TABLE repository_artifacts (
+              artifact_id TEXT PRIMARY KEY,
+              task_id TEXT NOT NULL REFERENCES tasks(task_id),
+              name TEXT NOT NULL,
+              classification TEXT NOT NULL CHECK (classification='repository_owned'),
+              repository TEXT NOT NULL,
+              issue INTEGER NOT NULL CHECK (issue > 0),
+              worktree TEXT NOT NULL,
+              branch TEXT NOT NULL CHECK (lower(branch) NOT IN ('main','master')),
+              repository_path TEXT NOT NULL,
+              pull_request_number INTEGER CHECK (pull_request_number IS NULL OR pull_request_number > 0),
+              pull_request_url TEXT,
+              tested_head TEXT,
+              merge_commit TEXT,
+              merge_url TEXT,
+              merge_receipt_json TEXT,
+              state TEXT NOT NULL CHECK (state IN ('pending','published')),
+              version INTEGER NOT NULL CHECK (version > 0),
+              declared_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              CHECK (
+                state!='published'
+                OR (pull_request_number IS NOT NULL AND pull_request_url IS NOT NULL
+                    AND tested_head IS NOT NULL AND length(tested_head)=40
+                    AND merge_commit IS NOT NULL AND length(merge_commit)=40
+                    AND merge_url IS NOT NULL AND merge_receipt_json IS NOT NULL)
+              )
+            )
+            """,
+            "CREATE INDEX ix_repository_artifacts_task ON repository_artifacts(task_id,state,artifact_id)",
+        ),
+    ),
 )
 
 
@@ -1246,6 +1287,7 @@ _EXPORT_TABLES = (
     "teardown_receipts",
     "activity_evidence",
     "report_specs",
+    "repository_artifacts",
 )
 
 _EXPORT_ORDER = {
@@ -1314,6 +1356,7 @@ _EXPORT_ORDER = {
     "teardown_receipts": "task_id,receipt_id",
     "activity_evidence": "occurred_at,evidence_id",
     "report_specs": "created_at,report_id",
+    "repository_artifacts": "task_id,artifact_id",
 }
 
 _INSPECTION_REDACTIONS = {
@@ -1384,6 +1427,7 @@ _INSPECTION_REDACTIONS = {
     "cleanup_actions": {"expected_identity_json", "intended_state_json"},
     "cleanup_action_receipts": {"before_json", "after_json", "adapter_receipt_json"},
     "activity_evidence": {"local_evidence_ref", "local_evidence_json"},
+    "repository_artifacts": {"worktree"},
 }
 
 
@@ -2145,6 +2189,30 @@ class SQLiteStorage(SQLiteTransactionCore):
 
     def record_activity_evidence(self, evidence: dict[str, Any]) -> dict[str, Any]:
         return record_activity_evidence_operation(self, evidence)
+
+    def declare_repository_artifact(
+        self, declaration: dict[str, Any], at: str
+    ) -> dict[str, Any]:
+        return declare_repository_artifact_operation(self, declaration, at)
+
+    def record_repository_publication(
+        self,
+        artifact_id: str,
+        expected_version: int,
+        receipt: dict[str, Any],
+        at: str,
+    ) -> dict[str, Any]:
+        return record_repository_publication_operation(
+            self, artifact_id, expected_version, receipt, at
+        )
+
+    def task_artifacts(self, task_id: str) -> list[dict[str, Any]]:
+        return task_artifacts_operation(self, task_id)
+
+    def unresolved_repository_publications(
+        self, task_id: str
+    ) -> list[dict[str, Any]]:
+        return unresolved_repository_publications_operation(self, task_id)
 
     def generate_report(
         self,

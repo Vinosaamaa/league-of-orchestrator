@@ -174,6 +174,7 @@ class ResourceRegistration:
 
 
 class CleanupStorage(Protocol):
+    def unresolved_repository_publications(self, task_id: str) -> list[dict[str, Any]]: ...
     def register_task_resource(self, resource: Mapping[str, Any], at: str) -> dict[str, Any]: ...
     def task_resources(self, task_id: str) -> list[dict[str, Any]]: ...
     def plan_cleanup(self, plan: Mapping[str, Any]) -> dict[str, Any]: ...
@@ -264,6 +265,12 @@ class CleanupPlanner:
             raise StorageRefusal("cleanup_owner_refused", "cleanup owner identity is not an eligible task owner")
         if manifest.get("pending_decisions_clear") is not True:
             raise StorageRefusal("pending_decision", "cleanup has a pending owner decision")
+        unresolved = self.storage.unresolved_repository_publications(task_id)
+        if unresolved:
+            raise StorageRefusal(
+                "repository_publication_unresolved",
+                "required repository artifact publication is not merged",
+            )
         policy = select_cleanup_policy(str(manifest.get("task_class")), str(manifest.get("disposition")))
         proof = manifest.get("proof")
         if not isinstance(proof, Mapping):

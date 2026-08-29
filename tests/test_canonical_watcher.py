@@ -46,6 +46,12 @@ def _environment(root: Path, state: Path) -> dict[str, str]:
     }
 
 
+def _pointer_environment(root: Path) -> dict[str, str]:
+    env = _environment(root, root / "league")
+    env.pop("LEAGUE_STATE_ROOT")
+    return env
+
+
 def _watcher(
     env: dict[str, str], *arguments: str, payload: dict[str, str] | None = None
 ) -> dict[str, object]:
@@ -160,7 +166,7 @@ def test_explicit_and_session_stop_dispatch(root: Path) -> None:
 def test_supervise_wakes_and_stop_allows_after_settlement(root: Path) -> None:
     _, state, _ = seeded_state(root, "supervise")
     env = _environment(root / "supervise", state)
-    _register_garen_runtime(state, "settlement", session_ref=SHOTCALLER_ID)
+    _register_garen_runtime(state, "settlement", session_ref="session:current-garen")
     _fake_herdr(root / "supervise", env)
     first = _watcher(
         env,
@@ -225,7 +231,7 @@ def test_supervise_user_priority(root: Path) -> None:
     _, state, _ = seeded_state(root, "user-priority")
     env = _environment(root / "user-priority", state)
     _register_garen_runtime(
-        state, "user-priority", session_ref=SHOTCALLER_ID
+        state, "user-priority", session_ref="session:current-garen-priority"
     )
     waiter = subprocess.Popen(
         [env["TEST_INSTALLED_WATCHER"], "--shotcaller", "Garen", "supervise", "--poll-seconds", "0.1"],
@@ -454,6 +460,55 @@ def test_missing_identity_quarantines_then_binds_and_triages(root: Path) -> None
     assert triaged["triage_state"] == "complete"
 
 
+def test_champion_prompt_quarantines_without_shotcaller_wake(root: Path) -> None:
+    _, state, _ = seeded_state(root, "champion-quarantine")
+    env = _environment(root / "champion-quarantine", state)
+    payload = {
+        "session_id": CHAMPION_ID,
+        "turn_id": "turn:champion-quarantine",
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": "Exact Champion prompt must continue without a Shotcaller wake.",
+    }
+    assert _watcher(env, "codex-user-prompt-hook", payload=payload) == {}
+    assert _watcher(env, "codex-user-prompt-hook", payload=payload) == {}
+    with SQLiteStorage(state, request_wal=False) as store:
+        rows = store.connection.execute(
+            """
+            SELECT state,reason,wake_actor_id,wake_scope_id,wake_committed
+              FROM prompt_quarantine WHERE source_event_key=?
+            """,
+            (payload["turn_id"],),
+        ).fetchall()
+        champion_scope = store.connection.execute(
+            "SELECT user_message_generation,wait_generation FROM watcher_scopes WHERE actor_agent_id=?",
+            (CHAMPION_ID,),
+        ).fetchone()
+    assert len(rows) == 1
+    assert tuple(rows[0]) == ("quarantined", "runtime_unverified", None, None, 0)
+    assert champion_scope is None
+
+
+def test_verified_runtime_session_routes_stop_and_pointer_state(root: Path) -> None:
+    _, state, _ = seeded_state(root, "runtime-session-routing")
+    derived = root / "runtime-session-routing" / "league"
+    state.rename(derived)
+    env = _pointer_environment(root / "runtime-session-routing")
+    session = "session:verified-current-garen"
+    _register_garen_runtime(derived, "verified-current-garen", session_ref=session)
+    assert _watcher(env, "--shotcaller", "Garen", "status") == {
+        "shotcaller": "Garen",
+        "writer": "sqlite",
+    }
+    payload = {
+        "session_id": session,
+        "turn_id": "turn:verified-current-garen",
+        "hook_event_name": "Stop",
+        "stop_hook_active": False,
+    }
+    assert _watcher(env, "codex-stop-hook", payload=payload)["decision"] == "block"
+    assert _watcher(env, "codex-stop-hook", payload=payload) == {}
+
+
 def test_quarantined_prompt_rearms_one_shot_stop(root: Path) -> None:
     _, state, _ = seeded_state(root, "quarantine-stop-continuity")
     env = _environment(root / "quarantine-stop-continuity", state)
@@ -577,7 +632,7 @@ def test_material_delivery_watcher_direct_dedup_and_unavailable(root: Path) -> N
     _, watcher_state, _ = seeded_state(root, "watcher-delivery")
     watcher_env = _environment(root / "watcher-delivery", watcher_state)
     _register_garen_runtime(
-        watcher_state, "watcher", session_ref=SHOTCALLER_ID
+        watcher_state, "watcher", session_ref="session:current-watcher"
     )
     waiter = subprocess.Popen(
         [watcher_env["TEST_INSTALLED_WATCHER"], "--shotcaller", "Garen", "supervise", "--poll-seconds", "0.1"],
@@ -699,6 +754,8 @@ def main() -> None:
         test_supervise_user_priority(root)
         test_codex_and_cursor_prompt_capture_exactly_once(root)
         test_missing_identity_quarantines_then_binds_and_triages(root)
+        test_champion_prompt_quarantines_without_shotcaller_wake(root)
+        test_verified_runtime_session_routes_stop_and_pointer_state(root)
         test_quarantined_prompt_rearms_one_shot_stop(root)
         test_real_codex_stop_payload_blocks_once_per_turn(root)
         test_codex_stop_rejects_incomplete_real_payload(root)

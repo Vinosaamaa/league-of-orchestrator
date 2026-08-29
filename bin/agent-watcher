@@ -12,6 +12,12 @@ script_dir=$(CDPATH= cd -P -- "$(dirname -- "$script_path")" && pwd)
 project_root=$(CDPATH= cd -P -- "$script_dir/.." && pwd)
 pointer=${LEAGUE_WRITER_POINTER:-"${HOME:-/nonexistent}/.local/state/league-writer-pointer.json"}
 if [ -f "$pointer" ] && grep -q '"writer":"sqlite"' "$pointer"; then
+  LEAGUE_WRITER_POINTER=$pointer
+  export LEAGUE_WRITER_POINTER
+  if [ -z "${LEAGUE_STATE_ROOT:-}" ]; then
+    LEAGUE_STATE_ROOT=$(dirname -- "$pointer")/league
+    export LEAGUE_STATE_ROOT
+  fi
   PYTHONPATH="$project_root/src${PYTHONPATH:+:$PYTHONPATH}"
   export PYTHONPATH
   exec python3 -m league.canonical_watcher "$@"

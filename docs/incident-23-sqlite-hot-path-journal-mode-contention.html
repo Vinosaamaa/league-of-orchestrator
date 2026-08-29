@@ -289,16 +289,16 @@
       <table>
         <thead><tr><th>Corrected path / phase</th><th>Commands</th><th>Median</th><th>p95</th></tr></thead>
         <tbody>
-          <tr><td>Retired JSON process startup</td><td>7</td><td>18.382 ms</td><td>19.158 ms</td></tr>
-          <tr><td>Retired JSON intake</td><td>same turn</td><td>231.913 ms</td><td>297.328 ms</td></tr>
+          <tr><td>Retired JSON process startup</td><td>7</td><td>17.530 ms</td><td>18.930 ms</td></tr>
+          <tr><td>Retired JSON intake</td><td>same turn</td><td>234.995 ms</td><td>268.874 ms</td></tr>
           <tr><td>Retired JSON begin</td><td>unsupported</td><td>0.000 ms</td><td>0.000 ms</td></tr>
-          <tr><td>Retired JSON commit</td><td>6 transitions</td><td>1,413.908 ms</td><td>1,467.716 ms</td></tr>
-          <tr><td>Retired JSON total</td><td>7</td><td>1,673.611 ms</td><td>1,790.575 ms</td></tr>
-          <tr><td>Installed SQLite process startup</td><td>1</td><td>2.989 ms</td><td>3.463 ms</td></tr>
-          <tr><td>Installed SQLite intake</td><td>same process</td><td>177.761 ms</td><td>196.571 ms</td></tr>
-          <tr><td>Installed SQLite begin</td><td>same process</td><td>3.762 ms</td><td>4.017 ms</td></tr>
-          <tr><td>Installed SQLite commit/boundary/exit</td><td>same process</td><td>22.049 ms</td><td>22.961 ms</td></tr>
-          <tr><td>Installed SQLite total</td><td>1</td><td>207.009 ms</td><td>225.106 ms</td></tr>
+          <tr><td>Retired JSON commit</td><td>6 transitions</td><td>1,413.798 ms</td><td>1,516.760 ms</td></tr>
+          <tr><td>Retired JSON total</td><td>7</td><td>1,694.151 ms</td><td>1,782.884 ms</td></tr>
+          <tr><td>Installed SQLite process startup</td><td>1</td><td>3.101 ms</td><td>3.799 ms</td></tr>
+          <tr><td>Installed SQLite intake</td><td>same process</td><td>183.118 ms</td><td>194.061 ms</td></tr>
+          <tr><td>Installed SQLite begin</td><td>same process</td><td>3.653 ms</td><td>4.038 ms</td></tr>
+          <tr><td>Installed SQLite commit/boundary/exit</td><td>same process</td><td>21.926 ms</td><td>22.740 ms</td></tr>
+          <tr><td>Installed SQLite total</td><td>1</td><td>211.236 ms</td><td>222.712 ms</td></tr>
         </tbody>
       </table>
       <p>Process startup is parent-side child-process creation overhead; interpreter and CLI initialization remain in intake or commit and the total. The one-process path performed zero per-prompt status, unresolved, supervise, triage, claim, dispatch, or answer shell-outs. Its largest phase output was 8,854 bytes under the 1,100,000-byte bound. Phase medians are independently computed and are not mechanically added.</p>

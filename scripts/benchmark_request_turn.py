@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import select
 import statistics
 import subprocess
 import sys
@@ -24,6 +25,7 @@ from storage_fixture import SHOTCALLER_ID  # noqa: E402
 PROMPT_COUNT = 6
 AT = "2026-01-01T01:00:00Z"
 MAX_PHASE_OUTPUT_BYTES = 1_100_000
+PROCESS_TIMEOUT_SECONDS = 30
 LEGACY_CALLSIGNS = ("Annie", "Ashe", "Braum", "Caitlyn", "Ekko", "Fiora")
 
 
@@ -159,7 +161,12 @@ def _invoke(
             env=environment,
         )
         spawned = time.perf_counter()
-        process.wait(timeout=30)
+        try:
+            process.wait(timeout=PROCESS_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired as exc:
+            process.kill()
+            process.wait()
+            raise RuntimeError("benchmark command exceeded its timeout") from exc
         completed = time.perf_counter()
         for stream in (stdout_file, stderr_file):
             if stream.tell() > MAX_PHASE_OUTPUT_BYTES:
@@ -170,6 +177,19 @@ def _invoke(
     if process.returncode != 0:
         raise RuntimeError((stdout or stderr).decode("utf-8", errors="replace"))
     return (spawned - started) * 1000, (completed - spawned) * 1000, stdout
+
+
+def _phase_line(process: subprocess.Popen[bytes], deadline: float) -> bytes:
+    if process.stdout is None:
+        raise RuntimeError("one-process turn output pipe is unavailable")
+    remaining = deadline - time.monotonic()
+    readable, _, _ = select.select([process.stdout], [], [], max(0.0, remaining))
+    if not readable:
+        raise RuntimeError("one-process turn phase exceeded its timeout")
+    line = process.stdout.readline(MAX_PHASE_OUTPUT_BYTES + 1)
+    if not line or len(line) > MAX_PHASE_OUTPUT_BYTES:
+        raise RuntimeError("one-process turn phase output is missing or exceeds its bound")
+    return line
 
 
 def _legacy_turn(root: Path, legacy_command: Path) -> dict[str, float | int]:
@@ -261,35 +281,42 @@ def _sqlite_turn(
         spawned = time.perf_counter()
         if process.stdin is None or process.stdout is None:
             raise RuntimeError("one-process turn pipes are unavailable")
-        intake_line = process.stdout.readline(MAX_PHASE_OUTPUT_BYTES + 1)
-        intake_at = time.perf_counter()
-        intake = json.loads(intake_line)
-        if intake["result"]["returned_count"] != PROMPT_COUNT:
-            raise RuntimeError("one-process intake count mismatch")
-        begin = {
-            "decisions": [_semantic_decision(item) for item in range(1, PROMPT_COUNT + 1)],
-            "plans": [_semantic_plan() for _ in range(PROMPT_COUNT)],
-        }
-        process.stdin.write(json.dumps(begin, separators=(",", ":")).encode() + b"\n")
-        process.stdin.flush()
-        begun_line = process.stdout.readline(MAX_PHASE_OUTPUT_BYTES + 1)
-        begun_at = time.perf_counter()
-        begun = json.loads(begun_line)
-        if begun["result"]["phase"] != "begun" or process.poll() is not None:
-            raise RuntimeError("one-process begin failed or exited early")
-        commit = {
-            "actions": [_semantic_answer(item) for item in range(1, PROMPT_COUNT + 1)]
-        }
-        process.stdin.write(json.dumps(commit, separators=(",", ":")).encode() + b"\n")
-        process.stdin.flush()
-        committed_line = process.stdout.readline(MAX_PHASE_OUTPUT_BYTES + 1)
-        committed = json.loads(committed_line)
-        returncode = process.wait(timeout=30)
-        completed = time.perf_counter()
-        if errors.tell() > MAX_PHASE_OUTPUT_BYTES:
-            raise RuntimeError("one-process turn error output exceeded its bound")
-        errors.seek(0)
-        error = errors.read()
+        deadline = time.monotonic() + PROCESS_TIMEOUT_SECONDS
+        try:
+            intake_line = _phase_line(process, deadline)
+            intake_at = time.perf_counter()
+            intake = json.loads(intake_line)
+            if intake["result"]["returned_count"] != PROMPT_COUNT:
+                raise RuntimeError("one-process intake count mismatch")
+            begin = {
+                "decisions": [_semantic_decision(item) for item in range(1, PROMPT_COUNT + 1)],
+                "plans": [_semantic_plan() for _ in range(PROMPT_COUNT)],
+            }
+            process.stdin.write(json.dumps(begin, separators=(",", ":")).encode() + b"\n")
+            process.stdin.flush()
+            begun_line = _phase_line(process, deadline)
+            begun_at = time.perf_counter()
+            begun = json.loads(begun_line)
+            if begun["result"]["phase"] != "begun" or process.poll() is not None:
+                raise RuntimeError("one-process begin failed or exited early")
+            commit = {
+                "actions": [_semantic_answer(item) for item in range(1, PROMPT_COUNT + 1)]
+            }
+            process.stdin.write(json.dumps(commit, separators=(",", ":")).encode() + b"\n")
+            process.stdin.flush()
+            committed_line = _phase_line(process, deadline)
+            committed = json.loads(committed_line)
+            returncode = process.wait(timeout=max(0.0, deadline - time.monotonic()))
+            completed = time.perf_counter()
+            if errors.tell() > MAX_PHASE_OUTPUT_BYTES:
+                raise RuntimeError("one-process turn error output exceeded its bound")
+            errors.seek(0)
+            error = errors.read()
+        except BaseException:
+            if process.poll() is None:
+                process.kill()
+            process.wait()
+            raise
     if returncode != 0 or committed["result"]["phase"] != "committed":
         raise RuntimeError(error.decode("utf-8", errors="replace"))
     maximum = max(len(intake_line), len(begun_line), len(committed_line))

@@ -493,16 +493,16 @@ independently.
 
 | Corrected path/phase | Commands per turn | Median | p95 |
 | --- | ---: | ---: | ---: |
-| Retired JSON process startup | 7 | 18.382 ms | 19.158 ms |
-| Retired JSON intake | same 7-command turn | 231.913 ms | 297.328 ms |
+| Retired JSON process startup | 7 | 17.530 ms | 18.930 ms |
+| Retired JSON intake | same 7-command turn | 234.995 ms | 268.874 ms |
 | Retired JSON begin | unsupported; no fabricated write | 0.000 ms | 0.000 ms |
-| Retired JSON commit | 6 per-item transition commands | 1,413.908 ms | 1,467.716 ms |
-| Retired JSON total | 7 | 1,673.611 ms | 1,790.575 ms |
-| Installed one-process SQLite startup | 1 | 2.989 ms | 3.463 ms |
-| Installed one-process SQLite intake | same process | 177.761 ms | 196.571 ms |
-| Installed one-process SQLite begin | same process | 3.762 ms | 4.017 ms |
-| Installed one-process SQLite commit/boundary/exit | same process | 22.049 ms | 22.961 ms |
-| Installed one-process SQLite total | 1 | 207.009 ms | 225.106 ms |
+| Retired JSON commit | 6 per-item transition commands | 1,413.798 ms | 1,516.760 ms |
+| Retired JSON total | 7 | 1,694.151 ms | 1,782.884 ms |
+| Installed one-process SQLite startup | 1 | 3.101 ms | 3.799 ms |
+| Installed one-process SQLite intake | same process | 183.118 ms | 194.061 ms |
+| Installed one-process SQLite begin | same process | 3.653 ms | 4.038 ms |
+| Installed one-process SQLite commit/boundary/exit | same process | 21.926 ms | 22.740 ms |
+| Installed one-process SQLite total | 1 | 211.236 ms | 222.712 ms |
 
 The largest observed SQLite phase output was 8,854 bytes under a 1,100,000-byte
 bound. The normal-turn budget is exactly one `request turn` process and zero

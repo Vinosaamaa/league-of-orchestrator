@@ -511,7 +511,7 @@ def render_launch_context(
             f"League command: {options.league_command}",
             f"League state root: {options.state_root}",
             "Use only the stable League SQLite commands for status, task transitions, delivery, and cleanup.",
-            "Use league assign run for visible launch and the canonical task and cleanup commands for lifecycle writes.",
+            "Use league assign run for launch and canonical task/cleanup commands for lifecycle writes.",
             "First record a working task transition with the exact runtime ID, then perform only this bounded assignment.",
         )
     )

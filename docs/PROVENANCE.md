@@ -250,3 +250,15 @@ hidden-promotion, and rollover tests cover those boundaries. Existing migration
 index recreation, progress-generation uniqueness, committed offer expiry, hidden
 Roster exclusion, and immediate stale-owner escalation were retained after their
 focused tests disproved the reported regressions.
+
+## Repository-artifact publication provenance
+
+Issue #40 adds only repository-local durable declarations, merged-publication
+receipts, stable artifact commands, and a cleanup refusal for unresolved
+publication. Migration v9 is contiguous and named
+`repository-owned-artifact-publication`, checksum
+`9231da781de45a8e912cd7193034a0b1b56f3a13e5e737e5681f18f6c6e3c852`.
+The deliberate baseline difference is that a declared repository artifact now
+blocks cleanup until its pull request, tested head, and merge receipt are
+recorded. Focused synthetic CLI coverage proves the refusal and release; no
+live repository, runtime, installation, cutover, or teardown is exercised.

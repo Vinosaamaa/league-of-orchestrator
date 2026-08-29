@@ -26,6 +26,7 @@ REQUEST_LIFECYCLE_TESTS := \
 RUNTIME_LIFECYCLE_TESTS := \
 	tests/test_runtime_adapters.py \
 	tests/test_cleanup_lifecycle.py \
+	tests/test_repository_artifacts.py \
 	tests/test_model_routing.py
 
 ROUTING_POLICY_TESTS := \

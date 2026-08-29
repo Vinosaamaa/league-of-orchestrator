@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from . import MAX_ACCEPTANCE_SENTINEL_PATHS, __version__
 from .adapters import builtin_contract_registry
+from .artifacts import ArtifactLifecycle
 from .cleanup import CleanupPlanner
 from .importer import build_import_plan
 from .orchestration import OrchestrationSignals
@@ -359,6 +360,23 @@ def _add_evidence_commands(groups: argparse._SubParsersAction) -> None:
     commands = evidence.add_subparsers(dest="action", required=True)
     record = commands.add_parser("record", help="Record one versioned activity-evidence object.")
     record.add_argument("--input", type=Path, required=True)
+
+
+def _add_artifact_commands(groups: argparse._SubParsersAction) -> None:
+    artifact = groups.add_parser(
+        "artifact", help="Declare and prove merged repository-owned artifacts."
+    )
+    commands = artifact.add_subparsers(dest="action", required=True)
+    declare = commands.add_parser("declare", help="Declare one expected repository artifact.")
+    declare.add_argument("--input", type=Path, required=True)
+    declare.add_argument("--at", required=True)
+    publish = commands.add_parser("publish", help="Record one exact merged publication receipt.")
+    publish.add_argument("--artifact-id", required=True)
+    publish.add_argument("--expected-version", type=int, required=True)
+    publish.add_argument("--receipt", type=Path, required=True)
+    publish.add_argument("--at", required=True)
+    status = commands.add_parser("status", help="Read repository artifacts for one task.")
+    status.add_argument("--task-id", required=True)
 
 
 def _add_report_options(parser: argparse.ArgumentParser, *, show: bool) -> None:
@@ -920,6 +938,7 @@ def _parser() -> argparse.ArgumentParser:
         _add_project_commands,
         _add_roster_commands,
         _add_evidence_commands,
+        _add_artifact_commands,
         _add_report_commands,
         _add_squad_commands,
         _add_task_commands,
@@ -1445,6 +1464,23 @@ def _resource_register(store: Storage, args: argparse.Namespace) -> CommandResul
     return CleanupPlanner(store).register_resource(_read_json_object(args.spec), args.at), None
 
 
+def _artifact_declare(store: Storage, args: argparse.Namespace) -> CommandResult:
+    return ArtifactLifecycle(store).declare(_read_json_object(args.input), args.at), None
+
+
+def _artifact_publish(store: Storage, args: argparse.Namespace) -> CommandResult:
+    return ArtifactLifecycle(store).publish(
+        args.artifact_id,
+        args.expected_version,
+        _read_json_object(args.receipt),
+        args.at,
+    ), None
+
+
+def _artifact_status(store: Storage, args: argparse.Namespace) -> CommandResult:
+    return ArtifactLifecycle(store).status(args.task_id), None
+
+
 def _cleanup_plan(store: Storage, args: argparse.Namespace) -> CommandResult:
     return CleanupPlanner(store).plan(
         _read_json_object(args.manifest), operation_id=args.operation_id, at=args.at
@@ -1921,6 +1957,9 @@ HANDLERS: dict[str, CommandHandler] = {
     "routing.choose": _routing_choose,
     "routing.escalate": _routing_escalate,
     "routing.outcome": _routing_outcome,
+    "artifact.declare": _artifact_declare,
+    "artifact.publish": _artifact_publish,
+    "artifact.status": _artifact_status,
     "resource.register": _resource_register,
     "cleanup.plan": _cleanup_plan,
     "cleanup.status": _cleanup_status,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from .storage_admin import AdministrativeStorage
+from .storage_artifact import ArtifactStorage
 from .storage_assignment import AssignmentStorage, PrepareAssignmentCommand
 from .storage_callsign import CallsignQueueStorage
 from .storage_delivery import DeliveryStorage
@@ -32,6 +33,7 @@ from .storage_types import (
 
 class Storage(
     AdministrativeStorage,
+    ArtifactStorage,
     LifecycleStorage,
     DeliveryStorage,
     TransferStorage,

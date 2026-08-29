@@ -18,7 +18,7 @@ from request_lifecycle_fixture import (  # noqa: E402
     create_context,
     dispatch_request,
 )
-from league.storage import PrepareAssignmentCommand  # noqa: E402
+from league.storage import OutboxDispatchIdentity, PrepareAssignmentCommand  # noqa: E402
 from storage_fixture import CHAMPION_ID, REPOSITORY, SHOTCALLER_ID  # noqa: E402
 
 
@@ -137,11 +137,11 @@ def test_user_priority_explicit_allow_and_configuration(root: Path) -> None:
     priority = store.stop_decision(
         "Garen-lifecycle", SHOTCALLER_ID, "terminal:user", clock.now()
     )
-    assert priority["decision"] == "allow" and priority["priority"] == "user"
+    assert priority["decision"] == "block" and priority["status"] == "blocked_once"
     next_stop = store.stop_decision(
         "Garen-lifecycle", SHOTCALLER_ID, "terminal:after-user", clock.now()
     )
-    assert next_stop["decision"] == "block"
+    assert next_stop["decision"] == "allow"
     store.rearm_wait("Garen-lifecycle", SHOTCALLER_ID, "event:explicit", clock.now())
     store.set_allow_stop_once("Garen-lifecycle", SHOTCALLER_ID)
     allowed = store.stop_decision(
@@ -184,6 +184,32 @@ def test_role_awareness_reconciliation_and_distinct_leases(root: Path) -> None:
     store.close()
 
     _, clear_store, clear_clock = create_context(root, "clear-stop")
+    champion = clear_store.agent_status(CHAMPION_ID)
+    settled = clear_store.transition(
+        CHAMPION_ID,
+        champion["version"],
+        "completed",
+        "Synthetic Champion obligations settled.",
+        clear_clock.now(),
+    )
+    identity = OutboxDispatchIdentity(
+        settled["outbox_id"],
+        settled["event_id"],
+        settled["recipient_agent_id"],
+        "dispatcher:clear-stop",
+        "attempt:clear-stop",
+    )
+    claim = clear_store.claim_outbox(
+        identity, clear_clock.after(30), clear_clock.now()
+    )
+    clear_store.acknowledge_outbox(
+        identity,
+        claim["fence"],
+        "watcher",
+        "watcher_event",
+        "effect:clear-stop",
+        clear_clock.now(),
+    )
     clear = clear_store.stop_decision(
         "Garen-clear", SHOTCALLER_ID, "terminal:clear", clear_clock.now()
     )

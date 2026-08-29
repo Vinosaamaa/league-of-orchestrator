@@ -213,6 +213,8 @@ def intake_prompt(
     source_event_key: str,
     body: str,
     at: str,
+    *,
+    wake_scope_id: str | None = None,
 ) -> dict[str, Any]:
     _time(at, "prompt capture time")
     encoded = body.encode("utf-8")
@@ -307,6 +309,21 @@ def intake_prompt(
                 "INSERT INTO prompt_payloads(prompt_id,body,body_hash,byte_count,pruned_at) VALUES(?,?,?,?,NULL)",
                 (prompt_id, body, body_hash, len(encoded)),
             )
+            if wake_scope_id is not None:
+                from .sqlite_watcher_ops import ensure_watcher_scope
+
+                ensure_watcher_scope(
+                    store, wake_scope_id, intake_actor_id, block_on_obligations=None
+                )
+                store.connection.execute(
+                    """
+                    UPDATE watcher_scopes
+                       SET user_message_generation=user_message_generation+1,
+                           wait_generation=wait_generation+1,stop_blocked=0,wait_active=0
+                     WHERE scope_id=?
+                    """,
+                    (wake_scope_id,),
+                )
     except StorageRefusal:
         raise
     except sqlite3.DatabaseError as exc:
@@ -1522,12 +1539,30 @@ def unresolved_requests(
         raise StorageRefusal("invalid_limit", "unresolved limit must be between 1 and 500")
     if before_action is not None and before_action not in {"reply", "wait", "handoff", "end"}:
         raise StorageRefusal("invalid_reconciliation", "before-action is invalid")
-    total = int(
+    request_total = int(
         store.connection.execute(
             "SELECT COUNT(*) FROM requests WHERE owner_agent_id=? AND state NOT IN ('answered','cancelled')",
             (owner_agent_id,),
         ).fetchone()[0]
     )
+    untriaged_prompt_count = int(
+        store.connection.execute(
+            "SELECT COUNT(*) FROM prompts WHERE intake_actor_id=? AND triage_state='untriaged'",
+            (owner_agent_id,),
+        ).fetchone()[0]
+    )
+    prompt_rows = store.connection.execute(
+        """
+        SELECT p.prompt_id,p.adapter_kind,p.session_ref,p.source_event_key,p.created_at,
+               pp.body_hash,pp.byte_count
+          FROM prompts p JOIN prompt_payloads pp ON pp.prompt_id=p.prompt_id
+         WHERE p.intake_actor_id=? AND p.triage_state='untriaged'
+         ORDER BY p.created_at,p.prompt_id
+         LIMIT ?
+        """,
+        (owner_agent_id, limit),
+    ).fetchall()
+    request_limit = max(0, limit - len(prompt_rows))
     rows = store.connection.execute(
         """
         SELECT request_id,summary,state,execution_mode,owner_agent_id,return_to_agent_id,
@@ -1537,7 +1572,7 @@ def unresolved_requests(
          ORDER BY COALESCE(next_attention_at,updated_at),created_at,request_id
          LIMIT ?
         """,
-        (owner_agent_id, limit),
+        (owner_agent_id, request_limit),
     ).fetchall()
     obligations = int(
         store.connection.execute(
@@ -1548,9 +1583,11 @@ def unresolved_requests(
     return {
         "owner_agent_id": owner_agent_id,
         "before_action": before_action,
-        "unresolved_count": total,
+        "unresolved_count": request_total + untriaged_prompt_count,
+        "untriaged_prompt_count": untriaged_prompt_count,
         "open_obligation_count": obligations,
-        "truncated": total > len(rows),
-        "safe_to_finish": total == 0 and obligations == 0,
+        "truncated": request_total + untriaged_prompt_count > len(rows) + len(prompt_rows),
+        "safe_to_finish": request_total == 0 and untriaged_prompt_count == 0 and obligations == 0,
+        "untriaged_prompts": [dict(row) for row in prompt_rows],
         "requests": [dict(row) for row in rows],
     }

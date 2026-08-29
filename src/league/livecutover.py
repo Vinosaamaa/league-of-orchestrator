@@ -187,7 +187,11 @@ def _live_watcher_smoke(
             env=environment,
         )
         if completed.returncode != 0:
-            raise StorageRefusal("cutover_watcher_smoke_failed", "installed watcher refused")
+            detail = " ".join(completed.stderr.split())[:256]
+            raise StorageRefusal(
+                "cutover_watcher_smoke_failed",
+                f"installed watcher refused: {detail or 'no error detail'}",
+            )
         try:
             value = json.loads(completed.stdout)
         except json.JSONDecodeError as exc:
@@ -203,11 +207,22 @@ def _live_watcher_smoke(
     if status != {"shotcaller": callsign, "writer": "sqlite"}:
         raise StorageRefusal("cutover_watcher_smoke_failed", "installed watcher is not on SQLite")
     codex = run(
-        [str(watcher_launcher), "codex-user-prompt-hook"], {"session_id": thread_id}
+        [str(watcher_launcher), "codex-user-prompt-hook"],
+        {
+            "session_id": thread_id,
+            "turn_id": "cutover-smoke-codex-turn",
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "Synthetic cutover hook capture.",
+        },
     )
     cursor = run(
         [str(watcher_launcher), "cursor-before-submit-hook"],
-        {"conversation_id": thread_id},
+        {
+            "conversation_id": thread_id,
+            "generation_id": "cutover-smoke-cursor-generation",
+            "hook_event_name": "beforeSubmitPrompt",
+            "prompt": "Synthetic cutover Cursor hook capture.",
+        },
     )
     return {
         "status": "passed",

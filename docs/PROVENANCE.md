@@ -129,6 +129,18 @@ the same bounded prompt and exact cleanup identity. It also makes the complete
 pre-cutover legacy system an immutable, hash-verifiable inactive archive with a
 co-located restoration runbook; it does not reactivate or rewrite legacy data.
 
+The issue-#23 post-cutover compatibility successor keeps the stable watcher
+name while routing Stop and bounded supervision through the canonical SQLite
+store. It counts preserved Shotcaller-to-Champion ownership from imported agent
+instances and leaves every legacy mutation command fenced.
+
+The same successor binds complete Codex and Cursor prompt-hook payloads to one
+verified runtime and deterministic source identity, then wakes supervision in
+the intake transaction. Semantic triage remains a model decision expressed
+through the already-merged request commands. Transition delivery uses the
+canonical outbox and recipient receipt; no transcript backfill or legacy state
+writer is introduced.
+
 Tests that require process inspection explicitly inject the single
 `tests/fakes/ps` adapter through `tests/process_adapter.py`; Make targets do not
 alter `PATH` for unrelated tests. This keeps self-process and resource-lifecycle

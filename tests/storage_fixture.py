@@ -68,6 +68,7 @@ def _write_roster_records(
             "kind": "codex-thread",
             "address": "w1:p1",
             "thread_id": SHOTCALLER_ID,
+            "backend": "herdr",
             "task": "Synthetic coordination",
             "status": "working",
             "updated_at": AT2,

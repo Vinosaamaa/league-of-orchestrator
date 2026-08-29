@@ -6,6 +6,36 @@ beneath an explicit existing temporary root. It does not discover or use a home
 directory, global Roster, installed watcher, callsign pool, hook file, browser
 profile, live delivery endpoint, or canonical writer.
 
+## Post-cutover Stop and supervision compatibility
+
+After the writer pointer selects SQLite, the stable `agent-watcher` dispatcher
+resolves both an explicit Shotcaller and the hook payload session identity from
+canonical agent instances. Stop obligations include active imported Champions
+through their preserved Shotcaller ownership even when legacy task rows have no
+canonical coordinator fields. An ordinary prompt rearms the single Stop block;
+it does not permit an unresolved Shotcaller turn to end.
+
+`agent-watcher --shotcaller <Callsign> supervise` is a SQLite reader/waiter in
+this mode. It wakes on one observed Champion state change, obligation-count
+change, or newer user-message generation. Legacy mutation commands remain
+fenced after cutover. Focused acceptance exercises the installed-shape symlink
+dispatcher, explicit and session-ID Stop paths, one supervision wake, user
+priority, and final allow only after the synthetic Champion is settled.
+
+Codex `UserPromptSubmit` and Cursor `beforeSubmitPrompt` hooks capture the exact
+local prompt once under the verified Shotcaller runtime. Adapter/session/source
+identity determines the prompt ID; the stored body hash and UTF-8 byte count
+bind the retained bytes. The same transaction rearms supervision. The model
+then uses `league request triage` to commit its semantic split into ordered
+items and uses the existing claim, dispatch, route, explicit-state, answer, and
+unresolved commands. An untriaged captured prompt is itself an unresolved Stop
+obligation; hooks never infer a split or mine a transcript.
+
+Champion transitions create one recipient outbox row in the same transaction.
+An active SQLite supervisor owns delivery; without one, the dispatcher uses one
+verified Herdr endpoint. Receipt uniqueness makes a duplicate retry inert, and
+an unavailable endpoint leaves the row pending.
+
 Run the complete foundation with one command after creating task-owned sentinel
 fixtures outside the requested namespace:
 

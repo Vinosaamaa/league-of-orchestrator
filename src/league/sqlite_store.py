@@ -2275,6 +2275,8 @@ class SQLiteStorage(SQLiteTransactionCore):
         source_event_key: str,
         body: str,
         at: str,
+        *,
+        wake_scope_id: Optional[str] = None,
     ) -> dict[str, Any]:
         return intake_prompt_operation(
             self,
@@ -2286,6 +2288,7 @@ class SQLiteStorage(SQLiteTransactionCore):
             source_event_key,
             body,
             at,
+            wake_scope_id=wake_scope_id,
         )
 
     def triage_prompt(

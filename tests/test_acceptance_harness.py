@@ -13,9 +13,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 LEAGUE = ROOT / "bin/league"
-EXPECTED_MIGRATION_REPORT = "6e637405e750802daf90efc038e717954c923804d019fff7e8f2d31daf350537"
-EXPECTED_MIGRATION_SOURCE = "2c0f1d4338f327b5b8f96f5b67783d3e90d54df798b08698ff4f4bfc788302ae"
-EXPECTED_MIGRATION_PARITY = "07887230b18b49ed9e94bc5877581571da19c8259e47356b5fdc4bb5bdc00e8a"
+EXPECTED_MIGRATION_REPORT = "e9af3219ff30ef6eddf79c56512e0c974cfc99b84dc0444439e9787c7e132cca"
+EXPECTED_MIGRATION_SOURCE = "0f7d57871907fabdab99b01b39e280d6ea2d12901c4a22ea765e9bbe24241499"
+EXPECTED_MIGRATION_PARITY = "4091f020741dd6251bf9aec10425cc3a248900912cad70a413d8f5664ccb85e6"
 sys.path.insert(0, str(ROOT / "src"))
 
 from league import MAX_ACCEPTANCE_SENTINEL_PATHS  # noqa: E402
@@ -493,7 +493,7 @@ def test_schema_and_command_inventory() -> None:
     version = subprocess.run(
         [str(LEAGUE), "--version"], text=True, capture_output=True, check=True, timeout=10
     )
-    assert version.stdout.strip() == "league 0.2.0"
+    assert version.stdout.strip() == "league 0.2.1"
 
 
 def main() -> None:

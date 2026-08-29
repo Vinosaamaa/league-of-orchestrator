@@ -338,14 +338,37 @@ def _obligation_counts(store: Any, actor_agent_id: str) -> dict[str, int]:
     row = store.connection.execute(
         """
         SELECT
-          (SELECT COUNT(*) FROM tasks
-            WHERE coordinator_agent_id=?
-              AND state IN ('pending','accepted','in_progress','blocked','ready_to_land')) active_champions,
+          (
+            SELECT COUNT(*) FROM agent_instances a
+            LEFT JOIN tasks t ON t.task_id=a.task_id
+             WHERE a.role='champion'
+               AND a.shotcaller_agent_id=?
+               AND a.retired_at IS NULL
+               AND a.status IN ('active','started','working','progress','blocked','ready_to_land')
+               AND (
+                 a.task_id IS NULL
+                 OR t.state IN ('active','pending','accepted','in_progress','blocked','ready_to_land')
+               )
+          ) + (
+            SELECT COUNT(*) FROM tasks t
+             WHERE t.coordinator_agent_id=?
+               AND t.state IN ('active','pending','accepted','in_progress','blocked','ready_to_land')
+               AND NOT EXISTS (
+                 SELECT 1 FROM agent_instances a
+                  WHERE a.task_id=t.task_id
+                    AND a.role='champion'
+                    AND a.shotcaller_agent_id=?
+                    AND a.retired_at IS NULL
+                    AND a.status IN ('active','started','working','progress','blocked','ready_to_land')
+               )
+          ) active_champions,
           (SELECT COUNT(*) FROM task_assignments
             WHERE coordinator_agent_id=?
               AND state IN ('pending','launching','cleanup_pending')) pending_assignments,
           (SELECT COUNT(*) FROM requests
-            WHERE owner_agent_id=? AND state NOT IN ('answered','cancelled')) unresolved_requests,
+            WHERE owner_agent_id=? AND state NOT IN ('answered','cancelled'))
+          + (SELECT COUNT(*) FROM prompts
+              WHERE intake_actor_id=? AND triage_state='untriaged') unresolved_requests,
           (SELECT COUNT(*) FROM delivery_outbox
             WHERE recipient_agent_id=?
               AND state IN ('pending','in_flight','awaiting_receipt')) pending_deliveries,
@@ -353,7 +376,7 @@ def _obligation_counts(store: Any, actor_agent_id: str) -> dict[str, int]:
             WHERE t.coordinator_agent_id=?
               AND c.cleanup_state NOT IN ('completed','cleanup_completed')) cleanup_obligations
         """,
-        (actor_agent_id,) * 5,
+        (actor_agent_id,) * 8,
     ).fetchone()
     return {name: int(row[name]) for name in row.keys()}
 
@@ -405,13 +428,11 @@ def stop_decision(
                 store.connection.execute(
                     """
                     UPDATE watcher_scopes
-                       SET last_user_priority_generation=user_message_generation,
-                           stop_blocked=0,wait_active=0
+                       SET last_user_priority_generation=user_message_generation
                      WHERE scope_id=?
                     """,
                     (scope_id,),
                 )
-                return {**common, "status": "allowed", "decision": "allow", "priority": "user"}
             if total == 0:
                 store.connection.execute(
                     "UPDATE watcher_scopes SET stop_blocked=0,wait_active=0 WHERE scope_id=?",

@@ -577,12 +577,14 @@ def activate_assignment(
             store.connection.execute(
                 """
                 UPDATE agent_instances
-                   SET kind=?,address=?,thread_id=?,backend=?,routing_name=?,display_agent=?,
+                   SET shotcaller_agent_id=?,task_id=?,kind=?,address=?,thread_id=?,backend=?,routing_name=?,display_agent=?,
                        status='working',version=?,updated_at=?,update_text='assignment accepted',
                        next_action=?
                  WHERE agent_id=?
                 """,
                 (
+                    assignment["coordinator_agent_id"],
+                    assignment["task_id"],
                     receipt["harness_kind"],
                     receipt["endpoint"],
                     receipt["thread_id"],

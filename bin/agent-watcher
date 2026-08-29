@@ -10,4 +10,8 @@ while [ -L "$script_path" ]; do
 done
 script_dir=$(CDPATH= cd -P -- "$(dirname -- "$script_path")" && pwd)
 project_root=$(CDPATH= cd -P -- "$script_dir/.." && pwd)
+pointer=${LEAGUE_WRITER_POINTER:-"${HOME:-/nonexistent}/.local/state/league-writer-pointer.json"}
+if [ -f "$pointer" ] && grep -q '"writer":"sqlite"' "$pointer"; then
+  exec python3 "$project_root/src/league/canonical_watcher.py" "$@"
+fi
 exec python3 "$project_root/src/agent_watcher.py" "$@"

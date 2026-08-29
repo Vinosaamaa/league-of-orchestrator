@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from . import MAX_ACCEPTANCE_SENTINEL_PATHS, __version__
 from .adapters import builtin_contract_registry
 from .artifacts import ArtifactLifecycle
-from .cleanup import CleanupPlanner
+from .cleanup import CleanupExecutor, CleanupPlanner
 from .importer import build_import_plan
 from .orchestration import OrchestrationSignals
 from .routing import ModelRouter, load_routing_config
@@ -90,6 +90,31 @@ def _add_acceptance_commands(groups: argparse._SubParsersAction) -> None:
     )
     run.add_argument("--config-sentinel", type=Path, required=True)
     run.add_argument("--process-sentinel", type=Path, required=True)
+    preflight = commands.add_parser(
+        "preflight",
+        help="Run the complete no-apply pre-cutover gate from an explicit plan.",
+    )
+    preflight.add_argument("--temporary-root", type=Path, required=True)
+    preflight.add_argument("--namespace", required=True)
+    preflight.add_argument("--plan", type=Path, required=True)
+    preflight.add_argument(
+        "--sentinel-path",
+        type=Path,
+        action=_BoundedSentinelPath,
+        required=True,
+    )
+    preflight.add_argument("--config-sentinel", type=Path, required=True)
+    preflight.add_argument("--process-sentinel", type=Path, required=True)
+    cleanup_canary = commands.add_parser(
+        "cleanup-canary",
+        help=(
+            "Run one real disposable Herdr/Codex Champion through terminal transition, "
+            "interrupted cleanup, restart, and Stop clearance."
+        ),
+    )
+    cleanup_canary.add_argument("--temporary-root", type=Path, required=True)
+    cleanup_canary.add_argument("--namespace", required=True)
+    cleanup_canary.add_argument("--source-root", type=Path, required=True)
 
 
 def _add_storage_commands(groups: argparse._SubParsersAction) -> None:
@@ -578,6 +603,21 @@ def _add_cleanup_commands(groups: argparse._SubParsersAction) -> None:
     plan.add_argument("--at", required=True)
     status = commands.add_parser("status", help="Read one cleanup operation and ordered action state.")
     status.add_argument("--operation-id", required=True)
+    reconcile = commands.add_parser(
+        "reconcile",
+        help="Plan and automatically execute one exact disposable-canary cleanup.",
+    )
+    reconcile.add_argument("--manifest", type=Path, required=True)
+    reconcile.add_argument("--operation-id", required=True)
+    reconcile.add_argument("--adapter-config", type=Path, required=True)
+    reconcile.add_argument("--executor-id", required=True)
+    reconcile.add_argument("--leased-until", required=True)
+    reconcile.add_argument("--at", required=True)
+    reconcile.add_argument(
+        "--simulate-interruption-after-archive",
+        action="store_true",
+        help="Disposable-canary-only crash injection after the archive external effect.",
+    )
 
 
 def _add_request_commands(groups: argparse._SubParsersAction) -> None:
@@ -1492,6 +1532,54 @@ def _cleanup_status(store: Storage, args: argparse.Namespace) -> CommandResult:
     return {"found": value is not None, "operation": value}, None
 
 
+def _cleanup_reconcile(store: Storage, args: argparse.Namespace) -> CommandResult:
+    from .real_cleanup import canary_cleanup_registry
+
+    manifest = _read_json_object(args.manifest)
+    existing = store.cleanup_operation(args.operation_id)
+    if existing is not None:
+        manifest = {
+            **manifest,
+            "expected_cleanup_version": int(existing["cleanup_revision"]),
+        }
+    planned = CleanupPlanner(store).plan(
+        manifest, operation_id=args.operation_id, at=args.at
+    )
+    operation = store.cleanup_operation(args.operation_id)
+    if operation is None:
+        raise StorageRefusal("cleanup_operation_unknown", "cleanup operation disappeared")
+    adapters = canary_cleanup_registry(
+        store,
+        _read_json_object(args.adapter_config),
+        at=args.at,
+    )
+
+    def fault(point: str) -> None:
+        if (
+            args.simulate_interruption_after_archive
+            and point == "after_external_action:archive_identity_evidence"
+        ):
+            raise StorageRefusal(
+                "cleanup_interrupted",
+                "disposable canary cleanup was interrupted after archive",
+                retryable=True,
+            )
+
+    executed = CleanupExecutor(store, adapters).execute(
+        args.operation_id,
+        expected_fence=int(operation["fence"]),
+        executor_id=args.executor_id,
+        leased_until=args.leased_until,
+        at=args.at,
+        fault=fault,
+    )
+    return {
+        "automatic_after_proof": True,
+        "plan": planned,
+        "execution": executed,
+    }, None
+
+
 def _request_intake(store: Storage, args: argparse.Namespace) -> CommandResult:
     return store.intake_prompt(
         args.prompt_id,
@@ -1962,6 +2050,7 @@ HANDLERS: dict[str, CommandHandler] = {
     "artifact.status": _artifact_status,
     "resource.register": _resource_register,
     "cleanup.plan": _cleanup_plan,
+    "cleanup.reconcile": _cleanup_reconcile,
     "cleanup.status": _cleanup_status,
     "request.intake": _request_intake,
     "request.triage": _request_triage,
@@ -2000,6 +2089,10 @@ SCHEMA_INVENTORY = (
     "league-import-report.schema.json",
     "league-export.schema.json",
     "league-acceptance-receipt.schema.json",
+    "league-pre-cutover-plan.schema.json",
+    "league-pre-cutover-receipt.schema.json",
+    "league-cleanup-canary-adapters.schema.json",
+    "league-real-cleanup-canary-receipt.schema.json",
     "league-help.schema.json",
     "league-request-triage.schema.json",
     "league-assignment-receipt.schema.json",
@@ -2039,6 +2132,8 @@ def _help_inventory() -> dict[str, Any]:
                 *CONFIG_ONLY_COMMANDS,
                 "storage.migrate",
                 "acceptance.run",
+                "acceptance.preflight",
+                "acceptance.cleanup-canary",
                 "help.inventory",
             )
         ),
@@ -2079,6 +2174,35 @@ def _run(args: argparse.Namespace) -> CommandResult:
             sentinel_paths=tuple(args.sentinel_path),
             config_sentinel=args.config_sentinel,
             process_sentinel=args.process_sentinel,
+        ), None
+    if command == "acceptance.preflight":
+        from .precutover import run_pre_cutover
+
+        if args.state_root is not None:
+            raise StorageRefusal(
+                "invalid_acceptance_root",
+                "pre-cutover acceptance uses --temporary-root and refuses --state-root",
+            )
+        return run_pre_cutover(
+            args.temporary_root,
+            args.namespace,
+            plan_path=args.plan,
+            sentinel_paths=tuple(args.sentinel_path),
+            config_sentinel=args.config_sentinel,
+            process_sentinel=args.process_sentinel,
+        ), None
+    if command == "acceptance.cleanup-canary":
+        from .real_canary import run_real_cleanup_canary
+
+        if args.state_root is not None:
+            raise StorageRefusal(
+                "invalid_acceptance_root",
+                "real cleanup canary uses --temporary-root and refuses --state-root",
+            )
+        return run_real_cleanup_canary(
+            args.temporary_root,
+            args.namespace,
+            source_root=args.source_root,
         ), None
     if command in CONFIG_ONLY_COMMANDS:
         if args.state_root is not None:

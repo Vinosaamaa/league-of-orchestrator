@@ -333,7 +333,9 @@ def _migration_shadow(home: Path, source_root: Path) -> dict[str, Any]:
 def _release_files(source_root: Path) -> list[Path]:
     files = [
         source_root / "VERSION",
+        source_root / "bin/agent-watcher",
         source_root / "bin/league",
+        source_root / "src/agent_watcher.py",
         source_root / "tests/storage_fixture.py",
         source_root / "src/league/report_template.html",
         source_root / "skills/league-report/SKILL.md",
@@ -382,7 +384,7 @@ def _stage_release_bytes(
     for source in _release_files(source_root):
         relative = source.relative_to(source_root)
         name = relative.as_posix()
-        mode = 0o755 if relative == Path("bin/league") else 0o644
+        mode = 0o755 if relative.parent == Path("bin") else 0o644
         payload = source.read_bytes()
         if any(value in payload for value in forbidden_paths):
             raise StorageRefusal(
@@ -507,7 +509,7 @@ def _check_staged_permissions(
     manifest: dict[str, str],
 ) -> None:
     expected_modes = {
-        relative: (0o755 if relative == "bin/league" else 0o644)
+        relative: (0o755 if Path(relative).parent == Path("bin") else 0o644)
         for relative in manifest
     }
     staged_modes = {

@@ -24,6 +24,104 @@ The process sentinel is synthetic and has this exact outer shape:
 {"processes":[],"schema":"league.synthetic-process-sentinel.v1"}
 ```
 
+## Complete no-apply pre-cutover gate
+
+After the legacy sources and every possible live destination have been listed
+in a strict `league.pre-cutover-plan.v1` file, this one command runs the complete
+repository-local gate:
+
+```sh
+./bin/league acceptance preflight \
+  --temporary-root /absolute/task-owned/temporary-root \
+  --namespace issue-23-precutover \
+  --plan /absolute/task-owned/precutover-plan.json \
+  --sentinel-path /absolute/caller-specified/live-byte-sentinel \
+  --config-sentinel /absolute/caller-specified/config-sentinel.json \
+  --process-sentinel /absolute/caller-specified/process-sentinel.json
+```
+
+The plan never authorizes a write. It binds each manifest-relative legacy file
+to one explicit absolute regular-file source, inventories bounded current
+targets (including absent proposed destinations), and names the future backup,
+release, League launcher, watcher launcher, SQLite state, writer pointer,
+archive, and hook targets. Every proposed destination must have one exact
+current-target precondition. The command refuses a temporary root that overlaps
+any planned target and never scans a home directory.
+
+The receipt `league.pre-cutover-receipt.v1` adds these proofs to the foundation:
+
+- a consistent explicit-binding copy of the caller's legacy state, strict
+  dry-run, isolated import, exact legacy-field and row-count parity, source
+  recheck, verified SQLite backup, and restricted rollback export;
+- sandbox-only backup and restore of every current target, including exact
+  absent-target rollback instructions;
+- a staged-inactive League and compatibility-watcher bundle with exact
+  source/release/staged bytes, version and manifest parity, executable
+  permissions, launcher/help/schema/hook checks, and pointer rollback;
+- one fully integrated synthetic request, assignment, transition delivery,
+  Stop block/allow, exact fake-resource teardown, answer, and safe-finish gate;
+- Codex/Herdr, Pi/Herdr, and attached Codex/tmux contract canaries using only
+  deterministic doubles. Cursor and genuine Herdr/tmux execution remain
+  explicitly unverified; these receipts are not real-runtime claims;
+- the crash-restart writer-pointer matrix, exact fake canary cleanup, live-path
+  and caller sentinel parity, and source/staged/current-installed manifest
+  checks; and
+- one deterministic `league.cutover-mutation-manifest.v1` containing every
+  proposed backup, inactive install/import, launcher/hook/pointer switch,
+  writer activation, live smoke, intake reopen, and exact rollback target. Every
+  operation has `applied:false`, and the operation receipt stops at
+  `awaiting_authority`.
+
+Supervision evidence keeps normal transitions and user prompts on an immediate
+event-driven registered-listener path. The isolated benchmark records wake
+latency, silent idle CPU/RSS observation, runtime snapshot cost at 1/8/32
+Champions, and the simulated missed-wake bound. It prints no periodic unchanged
+message and creates no daemon or transcript poller. The proposed installed
+compatibility defaults remain exactly 30 seconds and two identical mismatch
+observations (earliest simulated fallback: 60 seconds); there is no separate
+15-second policy. The mutation manifest records the exact default command and
+the two configurable arguments. A different cadence requires measured evidence
+and explicit cutover authority.
+
+## Real disposable cleanup canary
+
+The cleanup gate has one deliberately real runtime command. It creates a new
+Git repository and issue worktree beneath the explicit temporary root, opens
+one no-focus Herdr pane, launches one Codex Champion routed as
+`gpt-5.6-sol high`, and stores the lifecycle in the canary's real SQLite state:
+
+```sh
+./bin/league acceptance cleanup-canary \
+  --temporary-root /absolute/task-owned/temporary-root \
+  --namespace issue-23-cleanup-canary \
+  --source-root /absolute/path/to/league-of-orchestrator
+```
+
+The command proves that the terminal transition creates exactly one durable
+cleanup obligation, event, and outbox row; the same Shotcaller Stop decision
+blocks both wait and end while cleanup alone is pending; and complete stored
+authority starts adapter-backed cleanup without a reminder. Cleanup archives
+identity/evidence first, exits only the exact Codex session, closes only its
+Herdr pane and runtime binding, removes only the clean registered worktree and
+eligible local branch, and releases the callsign last. It writes immutable
+per-action and final teardown receipts. Fault injection stops after the archive
+external effect, then a separate League CLI process reopens the SQLite store and
+resumes the same operation idempotently. Only `cleanup_completed` clears Stop.
+
+Readiness uses the same 30-second, maximum-two-observation compatibility cadence
+recorded by the pre-cutover mutation manifest. It sends no periodic unchanged
+message and defines no 15-second fallback. The command never uses the user's
+home directory, canonical League state, or a global install. It is a real
+Codex/Herdr canary only; it is not evidence for Cursor, Pi, another harness,
+tmux, a live repository, or the final cutover.
+
+Final issue-#23 acceptance remains gated on merged issue #40. After that merge,
+this branch must be rebased on current `main` and add the repository-owned
+artifact lifecycle gate: produce report, create its isolated issue worktree and
+PR, record the exact merge receipt, clear the artifact and cleanup obligations,
+and complete teardown. Until that gate passes, no pre-cutover receipt is a
+recommendation or authority for global mutation.
+
 The command refuses missing, relative, symbolic-link, or malformed sentinels
 and refuses an existing namespace. It accepts at most 16 byte sentinels so a
 caller cannot create an unbounded preflight workload. The global
@@ -56,13 +154,11 @@ supplied state root. It leaves an owner-only
   writers;
 - exact fake canary registration and identity-bound cleanup.
 
-The request, assignment, watcher, Stop, and teardown acceptance-receipt
-extensions remain machine-readable `pending` entries. Request, assignment,
-watcher delivery, Stop, and teardown now have repository-local implementations
-and focused deterministic tests, but these slices deliberately do not rewrite
-the already isolated acceptance receipt or claim a cutover canary. Codex,
-Cursor, Pi, Herdr, and tmux remain `unverified`; consuming a synthetic payload
-or fake endpoint is never reported as real-runtime support.
+The original `acceptance run` receipt retains machine-readable `pending`
+entries for request, assignment, watcher, Stop, and teardown so its v1 contract
+does not retroactively claim broader coverage. The separate pre-cutover receipt
+is the integrated contract described above. Neither receipt reports a double or
+synthetic hook payload as real-runtime support.
 
 Focused and combined affected verification are:
 
@@ -76,11 +172,10 @@ make test-reporting-privacy
 make test-affected
 ```
 
-The staged migration assertion follows `CURRENT_SCHEMA_VERSION`; canonical
-request migrations are `[1,2,3]`, runtime lifecycle appends v4, the advisory
-project/Roster catalog appends v5, and guarded rollover/callsign allocation
-appends v6. Reporting/privacy appends v7 without changing the acceptance
-operation or sentinel contract.
+The staged migration assertion and strict receipt schema follow
+`CURRENT_SCHEMA_VERSION`; the current contiguous sequence is `[1,2,3,4,5,6,7,8]`.
+Version 8 adds the provider-neutral routing and orchestration policy without
+changing the acceptance operation or sentinel contract.
 
 The skill-contract suite uses only synthetic temporary custom roots and fake
 capability profiles. The current machine inventory was audited separately in a
@@ -95,7 +190,7 @@ source. The guidance adapter tests stage only beneath disposable explicit roots;
 the acceptance harness does not install or cut over global Codex, Cursor, or Pi
 instructions.
 
-The generation switch in this harness is a model exercised beneath the
+The generation switch in these harnesses is a model exercised beneath the
 disposable namespace. It is not a global cutover command. Canonical cutover,
 live import, real hook mutation, watcher replacement, installation, delivery,
 and real-runtime canaries still require merged prerequisites plus separate

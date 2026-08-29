@@ -51,6 +51,14 @@ class RuntimeBindingStorage(Protocol):
         receipt: Mapping[str, Any],
     ) -> dict[str, Any]: ...
 
+    def close_runtime_for_cleanup(
+        self,
+        runtime_instance_id: str,
+        endpoint_identity: str,
+        runtime_generation: str,
+        at: str,
+    ) -> dict[str, Any]: ...
+
 
 class RuntimeLifecycleStorage(RuntimeBindingStorage, Protocol):
     """Composite protocol exposed by the SQLite facade."""

@@ -465,6 +465,25 @@ def test_schema_and_command_inventory() -> None:
             "adapters",
         )
     )
+    for name in (
+        "league-pre-cutover-plan.schema.json",
+        "league-pre-cutover-receipt.schema.json",
+        "league-cleanup-canary-adapters.schema.json",
+        "league-real-cleanup-canary-receipt.schema.json",
+    ):
+        added = json.loads((ROOT / "schema" / name).read_text(encoding="utf-8"))
+        assert added["$schema"] == "https://json-schema.org/draft/2020-12/schema"
+        assert added["additionalProperties"] is False
+    inventory = subprocess.run(
+        [str(LEAGUE), "help", "inventory"],
+        text=True,
+        capture_output=True,
+        check=True,
+        timeout=10,
+    )
+    inventory_value = json.loads(inventory.stdout)["result"]
+    assert "acceptance.cleanup-canary" in inventory_value["commands"]
+    assert "league-real-cleanup-canary-receipt.schema.json" in inventory_value["schemas"]
     help_result = subprocess.run(
         [str(LEAGUE), "--help"], text=True, capture_output=True, check=True, timeout=10
     )
@@ -472,7 +491,7 @@ def test_schema_and_command_inventory() -> None:
     version = subprocess.run(
         [str(LEAGUE), "--version"], text=True, capture_output=True, check=True, timeout=10
     )
-    assert version.stdout.strip() == "league 0.1.0"
+    assert version.stdout.strip() == "league 0.2.0"
 
 
 def main() -> None:

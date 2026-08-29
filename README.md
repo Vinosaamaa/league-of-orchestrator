@@ -27,7 +27,7 @@ Nothing here installs files, changes hooks, or connects to live Roster state.
 - Synthetic examples, authoring schemas, and focused local regression tests.
 - One standard-library SQLite implementation behind a `Storage` protocol and
   stable `league` command facade.
-- Seven contiguous checksummed schema migrations, a loaded-runtime WAL gate, verified
+- Eight contiguous checksummed schema migrations, a loaded-runtime WAL gate, verified
   backups, integrity checks, expected-version writes, and bounded contention.
 - A strict manifest importer covering every canonical issue-#18 artifact
   family, with dry-run digest confirmation before apply.
@@ -102,8 +102,9 @@ suite, `make test-runtime-lifecycle` runs issues #7/#11/#14, and
 Squad registration, parent-progress, and hidden-scientist contract, while
 `make test-skill-contracts` runs issue #10's synthetic provenance, privacy,
 duplicate-parity, CLI, and runtime-fallback contract, while
-`make test-handoff-callsigns` runs issues #8/#13, `make test-acceptance`
-runs the isolated issue-#23 foundation. `make test-affected` composes storage,
+`make test-handoff-callsigns` runs issues #8/#13, and `make test-acceptance`
+runs both the isolated issue-#23 foundation and the complete no-apply
+pre-cutover command. `make test-affected` composes storage,
 acceptance, request lifecycle, runtime/skill/routing lifecycle, handoff/callsign,
 reporting/privacy, and public-safety
 coverage, and `make test-reporting-privacy` runs issues #22/#25 report, privacy, staged-guide,
@@ -112,7 +113,11 @@ metadata, incident, renderer, pagination, and latency contracts.
 target uses temporary fixtures only. It does not install files, contact GitHub,
 mutate global agent state, or operate live Herdr/tmux sessions.
 
-The repository does not yet own live installation. The currently installed
+The repository now proves a staged-inactive release, exact read-only shadow,
+backup/restore rehearsal, and deterministic proposed-mutation manifest through
+`league acceptance preflight`; that command writes only beneath its explicit
+temporary root and stops at `awaiting_authority`. The repository does not yet
+own or perform live installation. The currently installed
 watcher and rollback process remain owned by `terminal-environment-toolkit`
 until a later migration proves source/installed parity and rollback from this
 repository. See [migration](docs/MIGRATION.md) and

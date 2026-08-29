@@ -82,6 +82,54 @@ def register_runtime_binding(
     return {"binding_id": binding_id, "version": 1, "idempotent": False}
 
 
+def close_runtime_for_cleanup(
+    store: Any,
+    runtime_instance_id: str,
+    endpoint_identity: str,
+    runtime_generation: str,
+    at: str,
+) -> dict[str, Any]:
+    _time(at, "runtime cleanup close time")
+    if not all((runtime_instance_id, endpoint_identity, runtime_generation)):
+        raise StorageRefusal("cleanup_identity_mismatch", "runtime cleanup identity is incomplete")
+    try:
+        with store._transaction():
+            runtime = store.connection.execute(
+                "SELECT endpoint,runtime_generation,status FROM runtime_instances WHERE runtime_instance_id=?",
+                (runtime_instance_id,),
+            ).fetchone()
+            if runtime is None:
+                raise StorageRefusal("cleanup_identity_mismatch", "runtime cleanup identity is missing")
+            if (
+                runtime["endpoint"] != endpoint_identity
+                or runtime["runtime_generation"] != runtime_generation
+            ):
+                raise StorageRefusal("cleanup_identity_mismatch", "runtime cleanup identity changed")
+            if runtime["status"] == "closed":
+                return {
+                    "runtime_instance_id": runtime_instance_id,
+                    "status": "closed",
+                    "idempotent": True,
+                }
+            if runtime["status"] not in {"active", "idle"}:
+                raise StorageRefusal("cleanup_identity_mismatch", "runtime is not cleanup-eligible")
+            store.connection.execute(
+                "UPDATE runtime_instances SET status='closed',last_seen_at=? WHERE runtime_instance_id=?",
+                (at, runtime_instance_id),
+            )
+    except StorageRefusal:
+        raise
+    except sqlite3.DatabaseError as exc:
+        raise store._translate_database_error(
+            exc, "runtime cleanup close conflicted with canonical state"
+        ) from exc
+    return {
+        "runtime_instance_id": runtime_instance_id,
+        "status": "closed",
+        "idempotent": False,
+    }
+
+
 def runtime_binding(store: Any, binding_id: str) -> Optional[dict[str, Any]]:
     value = _row(store.connection.execute("SELECT * FROM runtime_bindings WHERE binding_id=?", (binding_id,)).fetchone())
     if value is not None:

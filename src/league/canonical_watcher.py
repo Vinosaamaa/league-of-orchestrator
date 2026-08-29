@@ -90,6 +90,31 @@ def _scope(store: SQLiteStorage, actor_id: str, callsign: str) -> str:
     return str(row[0]) if row is not None else f"watcher:{callsign}"
 
 
+def _codex_stop_generation(
+    args: argparse.Namespace, payload: dict[str, Any]
+) -> tuple[str, str | None]:
+    """Bind the one-shot Stop guard to Codex's stable turn identity."""
+    if args.shotcaller and not payload:
+        explicit = f"explicit\0{args.shotcaller}"
+        return hashlib.sha256(explicit.encode()).hexdigest(), None
+    session_ref = payload.get("session_id")
+    turn_id = payload.get("turn_id")
+    if (
+        payload.get("hook_event_name") != "Stop"
+        or not isinstance(session_ref, str)
+        or not session_ref
+        or not isinstance(turn_id, str)
+        or not turn_id
+        or not isinstance(payload.get("stop_hook_active"), bool)
+    ):
+        raise StorageRefusal(
+            "stop_hook_invalid",
+            "Codex Stop hook requires its exact event, session, turn, and active flag",
+        )
+    identity = f"codex\0{session_ref}\0{turn_id}"
+    return hashlib.sha256(identity.encode()).hexdigest(), turn_id
+
+
 def _capture_prompt(
     store: SQLiteStorage,
     scope: str | None,
@@ -442,21 +467,32 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 0
         if args.command in {"codex-stop-hook", "cursor-stop-hook"}:
-            terminal = hashlib.sha256(
-                json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
-            ).hexdigest()
+            if args.command == "codex-stop-hook":
+                terminal, turn_id = _codex_stop_generation(args, payload)
+            else:
+                terminal = hashlib.sha256(
+                    json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+                ).hexdigest()
+                turn_id = None
             result = store.stop_decision(
                 scope,
                 actor_id,
                 terminal,
                 datetime.now().astimezone().isoformat(timespec="seconds"),
+                block_on_fresh_terminal=args.command == "codex-stop-hook",
             )
             blocked = result["decision"] == "block"
             if args.command == "cursor-stop-hook":
                 _emit({"followup_message": "League has unresolved obligations."} if blocked else {})
             else:
+                reason = "League has unresolved obligations."
+                if turn_id is not None:
+                    reason = (
+                        "League has unresolved obligations for Codex turn "
+                        f"{turn_id} at wait generation {result['wait_generation']}."
+                    )
                 _emit(
-                    {"decision": "block", "reason": "League has unresolved obligations."}
+                    {"decision": "block", "reason": reason}
                     if blocked
                     else {}
                 )

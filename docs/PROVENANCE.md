@@ -141,6 +141,14 @@ through the already-merged request commands. Transition delivery uses the
 canonical outbox and recipient receipt; no transcript backfill or legacy state
 writer is introduced.
 
+The issue-#23 real-Codex Stop successor deliberately changes only canonical
+Codex Stop compatibility: its one-shot anti-loop key is the exact stable
+session/turn pair from Codex's real payload, rather than a hash of mutable
+payload fields or prompt-intake generation alone. Cursor and the public storage
+Stop command retain their existing wait-generation behavior. Focused installed-
+shape coverage proves first-block, same-turn allow, new-turn reblock, malformed
+payload refusal, and unchanged prompt-quarantine/user-priority semantics.
+
 Tests that require process inspection explicitly inject the single
 `tests/fakes/ps` adapter through `tests/process_adapter.py`; Make targets do not
 alter `PATH` for unrelated tests. This keeps self-process and resource-lifecycle

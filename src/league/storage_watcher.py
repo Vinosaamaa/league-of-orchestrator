@@ -53,4 +53,6 @@ class WatcherStorage(Protocol):
         actor_agent_id: str,
         terminal_generation: str,
         at: str,
+        *,
+        block_on_fresh_terminal: bool = False,
     ) -> dict[str, Any]: ...

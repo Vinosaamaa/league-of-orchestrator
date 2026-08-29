@@ -49,6 +49,15 @@ A byte-identical hook retry changes neither generation. This rearms the bounded
 Stop guard: one Stop blocks, an identical retry may allow to prevent a loop,
 and the next accepted user prompt makes the next Stop block once again.
 
+Codex Stop continuity also binds the terminal generation to the exact
+`session_id` and `turn_id` in the real Stop payload. The first Stop for a new
+Codex turn blocks while obligations remain; a continuation retry for that same
+turn may allow, even when `last_assistant_message` and `stop_hook_active` have
+changed. This is a fallback for temporarily unavailable prompt intake, not a
+replacement for it: prompt capture, quarantine, user-priority wake, and their
+atomic user/wait generation increments remain required. Missing event, session,
+turn, or boolean active fields are refused instead of guessed.
+
 Run the complete foundation with one command after creating task-owned sentinel
 fixtures outside the requested namespace:
 

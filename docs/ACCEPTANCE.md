@@ -305,6 +305,13 @@ Herdr/tmux backend, and address all match; incomplete locators never bootstrap.
 Supervision registers only against one verified runtime owned by the exact
 active Shotcaller, independent of the archived thread identity.
 
+Queued prompt adapters may reuse their raw turn or generation key for distinct
+ordinary messages. The canonical hook source identity therefore binds adapter,
+session, raw key, and exact body hash. Identical retries deduplicate; different
+content or sessions cannot share the stored source key. A residual ownership or
+source conflict is retained in no-wake quarantine and never rejects the user
+message.
+
 The command refuses missing, relative, symbolic-link, or malformed sentinels
 and refuses an existing namespace. It accepts at most 16 byte sentinels so a
 caller cannot create an unbounded preflight workload. The global

@@ -143,6 +143,17 @@ def _codex_stop_generation(
     return hashlib.sha256(identity.encode()).hexdigest(), turn_id
 
 
+def _prompt_identity(
+    adapter_kind: str, session_ref: str, raw_source_event_key: str, body: str
+) -> tuple[str, str]:
+    body_hash = hashlib.sha256(body.encode("utf-8")).hexdigest()
+    identity = (
+        f"{adapter_kind}\0{session_ref}\0{raw_source_event_key}\0{body_hash}"
+    )
+    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+    return f"prompt:hook:{digest}", f"hook:{digest}"
+
+
 def _capture_prompt(
     store: SQLiteStorage,
     scope: str | None,
@@ -155,18 +166,18 @@ def _capture_prompt(
     if adapter_kind == "codex":
         event_name = "UserPromptSubmit"
         session_ref = payload.get("session_id")
-        source_event_key = payload.get("turn_id")
+        raw_source_event_key = payload.get("turn_id")
     else:
         event_name = "beforeSubmitPrompt"
         session_ref = payload.get("conversation_id")
-        source_event_key = payload.get("generation_id")
+        raw_source_event_key = payload.get("generation_id")
     body = payload.get("prompt")
     if (
         payload.get("hook_event_name") != event_name
         or not isinstance(session_ref, str)
         or not session_ref
-        or not isinstance(source_event_key, str)
-        or not source_event_key
+        or not isinstance(raw_source_event_key, str)
+        or not raw_source_event_key
         or not isinstance(body, str)
         or not body
     ):
@@ -174,8 +185,9 @@ def _capture_prompt(
             "prompt_hook_invalid",
             "prompt hook requires its exact event, session, turn/generation, and body",
         )
-    identity = f"{adapter_kind}\0{session_ref}\0{source_event_key}"
-    prompt_id = f"prompt:hook:{hashlib.sha256(identity.encode()).hexdigest()}"
+    prompt_id, source_event_key = _prompt_identity(
+        adapter_kind, session_ref, raw_source_event_key, body
+    )
     now = datetime.now().astimezone().isoformat(timespec="seconds")
     if actor_id is None:
         return store.quarantine_prompt(
@@ -235,11 +247,11 @@ def _capture_prompt(
         quarantined = store.connection.execute(
             "SELECT state FROM prompt_quarantine WHERE prompt_id=?", (prompt_id,)
         ).fetchone()
-        if quarantined is not None:
-            return store.bind_quarantined_prompt(
-                prompt_id, actor_id, runtime_id, now, wake=False
-            )
         try:
+            if quarantined is not None:
+                return store.bind_quarantined_prompt(
+                    prompt_id, actor_id, runtime_id, now, wake=False
+                )
             return store.intake_prompt(
                 prompt_id,
                 actor_id,
@@ -252,7 +264,11 @@ def _capture_prompt(
                 wake=False,
             )
         except StorageRefusal as exc:
-            if exc.code != "runtime_unverified":
+            if exc.code not in {
+                "runtime_unverified",
+                "prompt_source_conflict",
+                "prompt_binding_conflict",
+            }:
                 raise
             return store.quarantine_prompt(
                 prompt_id, adapter_kind, session_ref, source_event_key, body, now
@@ -306,11 +322,11 @@ def _capture_prompt(
     quarantined = store.connection.execute(
         "SELECT state FROM prompt_quarantine WHERE prompt_id=?", (prompt_id,)
     ).fetchone()
-    if quarantined is not None:
-        return store.bind_quarantined_prompt(
-            prompt_id, actor_id, runtime_id, now, wake_scope_id=scope
-        )
     try:
+        if quarantined is not None:
+            return store.bind_quarantined_prompt(
+                prompt_id, actor_id, runtime_id, now, wake_scope_id=scope
+            )
         return store.intake_prompt(
             prompt_id,
             actor_id,
@@ -323,6 +339,10 @@ def _capture_prompt(
             wake_scope_id=scope,
         )
     except StorageRefusal as exc:
+        if exc.code in {"prompt_source_conflict", "prompt_binding_conflict"}:
+            return store.quarantine_prompt(
+                prompt_id, adapter_kind, session_ref, source_event_key, body, now
+            )
         if exc.code != "runtime_unverified":
             raise
         return store.quarantine_prompt(

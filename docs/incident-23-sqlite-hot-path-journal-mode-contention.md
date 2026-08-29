@@ -146,6 +146,8 @@ evidence.
 | SQLite busy | Long-lived supervisor plus prompt or Stop returned bounded `busy`. | Every hot open requested DELETE against established WAL, requiring an exclusive mode-change lock. | Only migration establishes journal mode; hot paths read and validate it without mutation. |
 | Sandbox access | A visible Champion could not open canonical state. | Workspace-write granted only the repository worktree. | Launcher adds only the exact canonical League root as a writable root; generic open errors identify this boundary. |
 | Missing launcher | Legacy launch was correctly fenced but no stable one-command replacement existed. | Assignment phases existed without the real Herdr/Codex adapter composition. | `league assign run` owns reserve, launch, generated UUID observation, verification, activation, context, and failure cleanup. |
+| Installed launch pending | The first installed visible E2E returned `cleanup_pending` and left one exact pre-session pane blocked in `launch_pending`. | The launcher did not pass a narrow trust override for the new worktree, and rollback required `/exit` even though no Codex session existed yet. | The launch supplies exact per-process worktree trust; pre-session rollback verifies routing name, pane, terminal, cwd, and pending state before closing the exact pane without inventing a session. |
+| Context delivery residue | Successful context delivery could leave the assignment-activation outbox pending. | The context receipt and activation outbox were stored by separate mechanisms without an atomic recipient receipt. | Context delivery now atomically records the exact recipient effect and marks only the matching activation outbox delivered; conflicts refuse. |
 | Chatty turn latency | Six serialized triage operations took seconds; a cold command cost roughly two hundred milliseconds locally. | Each semantic item started a new Python process, reopened SQLite, reparsed CLI arguments, and re-ran policy setup. | One `request turn` process spans exact intake, atomic begin, model work, atomic commit, and final boundary. |
 | Benchmark provenance | The prior result called 26 repeated SQLite commands a “legacy” turn. | The benchmark compared command choreography but did not execute the retired JSON watcher. | The reproducible comparison now invokes the preserved JSON command on temporary record pairs and the installed SQLite command on temporary canonical state; it reports median/p95 by phase and command count. |
 | Manual supervise misuse | Active model turns invoked status/supervise polling. | Guidance treated a compatibility watcher process as per-turn choreography. | The source guide prohibits per-turn polling; installed event-driven watcher/direct fallback handles delivery outside the model turn. |
@@ -173,6 +175,7 @@ evidence.
 | Corrected installed comparison | Ten same-workload samples ran the preserved JSON watcher and installed one-process SQLite command. The authoritative phase, median, p95, output, and command counts are in the corrected comparison table; the absent JSON semantic-begin phase is zero, not fabricated. |
 | Guide retirement | The final JSON-era orchestration excerpt was archived with its full source hash; the installable source guide and generated Champion context removed active record-pair and retired-writer instructions. |
 | Documentation gate | The owning incident/design report was expanded to record architecture, failure history, decisions, commands, performance, recovery, acceptance, and remaining limits before release. |
+| First installed lifecycle attempt | Prompt capture and one-process triage passed, but visible launch stopped at `cleanup_pending`. Stable reporting proved the reserved assignment and cleanup obligation; Herdr proved one exact pre-session `launch_pending` pane. The pane was closed before correction. |
 
 ## Technical root cause
 
@@ -255,13 +258,19 @@ Prompt rejected; no capture        Stop safely asks to retry
    task, agent, assignment, and cleanup-obligation state.
 3. A second transaction marks launching before any external effect.
 4. The adapter creates one unfocused visible tab in the exact issue worktree,
-   starts Codex in workspace-write, adds only the canonical state root, observes
+   starts Codex in workspace-write with exact per-process worktree trust, adds only the canonical state root, observes
    the generated thread UUID, and verifies workspace, pane, terminal, cwd,
    routing name, backend kind, and display title.
-5. Activation stores the verified runtime and callsign receipt atomically. A
+5. If startup fails before a Codex session exists, rollback closes only an exact
+   `launch_pending` pane after matching its routing name, terminal, and worktree.
+   A started session still requires exact thread identity and `/exit`.
+6. Bounded context delivery atomically records the matching assignment-activation
+   recipient receipt and settles that outbox, so a successful one-command launch
+   cannot leave a phantom pending delivery.
+7. Activation stores the verified runtime and callsign receipt atomically. A
    bounded SQLite-only context is delivered once and its content/effect hashes
    become an immutable event.
-6. Any post-effect refusal closes only the proven owned endpoint. If closure,
+8. Any post-effect refusal closes only the proven owned endpoint. If closure,
    runtime settlement, or callsign release is unproven, assignment and cleanup
    stay `cleanup_pending` rather than claiming rollback.
 

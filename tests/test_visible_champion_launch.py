@@ -187,6 +187,10 @@ def test_real_adapter_one_command_success_and_retry(root: Path) -> None:
         "sandbox_workspace_write.writable_roots="
         + json.dumps([str(root / "league")], separators=(",", ":"))
     ) in start
+    assert (
+        f"projects.{json.dumps(str(worktree.resolve()))}.trust_level=\"trusted\""
+        in start
+    )
     row = store.connection.execute(
         "SELECT state,version,runtime_instance_id FROM task_assignments WHERE task_assignment_id=?",
         (spec.assignment_id,),
@@ -202,6 +206,71 @@ def test_real_adapter_one_command_success_and_retry(root: Path) -> None:
         "SELECT COUNT(*) FROM events WHERE event_type='assignment_context_delivered' AND aggregate_id=?",
         (spec.assignment_id,),
     ).fetchone()[0] == 1
+    activation_delivery = store.connection.execute(
+        """
+        SELECT o.state,o.last_outcome,r.effect_kind,r.effect_id
+          FROM events e JOIN delivery_outbox o ON o.event_id=e.event_id
+          JOIN recipient_receipts r
+            ON r.event_id=o.event_id AND r.recipient_agent_id=o.recipient_agent_id
+         WHERE e.aggregate_kind='assignment' AND e.aggregate_id=?
+           AND e.event_type='assignment_active'
+        """,
+        (spec.assignment_id,),
+    ).fetchone()
+    assert tuple(activation_delivery[:3]) == (
+        "delivered",
+        "assignment_context_delivered",
+        "assignment_context",
+    )
+    assert activation_delivery["effect_id"] == result["context_delivery"]["effect_sha256"]
+    store.close()
+
+
+class PendingStartFailureRunner(FakeHerdrRunner):
+    def _agent(self) -> dict[str, object]:
+        agent = super()._agent()
+        agent.pop("agent_session", None)
+        agent["launch_pending"] = True
+        agent["agent_status"] = "blocked"
+        return agent
+
+    def run(
+        self, arguments, *, timeout_seconds: int = 30
+    ) -> subprocess.CompletedProcess[str]:
+        command = tuple(arguments)
+        if command[:3] == ("herdr", "agent", "start"):
+            del timeout_seconds
+            self.calls.append(command)
+            self.started = True
+            return subprocess.CompletedProcess(
+                command,
+                1,
+                json.dumps(
+                    {
+                        "error": {
+                            "code": "agent_launch_pending",
+                            "message": "synthetic pending start",
+                        }
+                    }
+                ),
+                "",
+            )
+        return super().run(arguments, timeout_seconds=timeout_seconds)
+
+
+def test_pre_session_launch_failure_closes_exact_pending_pane(root: Path) -> None:
+    store, clock, worktree = _context(root, "pending-start-cleanup")
+    options = _options(root)
+    runner = PendingStartFailureRunner(worktree)
+    service = VisibleChampionLaunchService(store, _adapter(options, runner), options, clock)
+    result = service.launch(_spec(worktree, "pending-start-cleanup"))
+    assert result["state"] == "blocked"
+    assert runner.closed is True
+    assert not any(
+        call[:5] == ("herdr", "agent", "prompt", "lux", "/exit")
+        for call in runner.calls
+    )
+    assert any(call[:3] == ("herdr", "pane", "close") for call in runner.calls)
     store.close()
 
 
@@ -337,6 +406,7 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="league-visible-launch-") as temporary:
         root = Path(temporary)
         test_real_adapter_one_command_success_and_retry(root)
+        test_pre_session_launch_failure_closes_exact_pending_pane(root)
         test_unproven_partial_launch_stays_cleanup_pending(root)
         test_context_failure_records_pending_when_cleanup_is_unproven(root)
         test_context_failure_exact_cleanup_blocks_and_releases(root)

@@ -215,6 +215,7 @@ def intake_prompt(
     at: str,
     *,
     wake_scope_id: str | None = None,
+    wake: bool = True,
 ) -> dict[str, Any]:
     _time(at, "prompt capture time")
     encoded = body.encode("utf-8")
@@ -222,6 +223,8 @@ def intake_prompt(
         raise StorageRefusal("invalid_prompt", "prompt identity fields are required")
     if not encoded or len(encoded) > MAX_PROMPT_BYTES:
         raise StorageRefusal("invalid_prompt", "prompt body must be non-empty and within the bounded size")
+    if not wake and wake_scope_id is not None:
+        raise StorageRefusal("invalid_prompt_wake", "disabled prompt wake cannot name a scope")
     body_hash = hashlib.sha256(encoded).hexdigest()
     try:
         with store._transaction():
@@ -309,7 +312,7 @@ def intake_prompt(
                 "INSERT INTO prompt_payloads(prompt_id,body,body_hash,byte_count,pruned_at) VALUES(?,?,?,?,NULL)",
                 (prompt_id, body, body_hash, len(encoded)),
             )
-            if wake_scope_id is None:
+            if wake and wake_scope_id is None:
                 scope_row = store.connection.execute(
                     "SELECT scope_id FROM watcher_scopes WHERE actor_agent_id=? ORDER BY scope_id LIMIT 1",
                     (intake_actor_id,),
@@ -449,8 +452,11 @@ def bind_quarantined_prompt(
     at: str,
     *,
     wake_scope_id: str | None = None,
+    wake: bool = True,
 ) -> dict[str, Any]:
     _time(at, "prompt binding time")
+    if not wake and wake_scope_id is not None:
+        raise StorageRefusal("invalid_prompt_wake", "disabled prompt wake cannot name a scope")
     try:
         with store._transaction():
             row = store.connection.execute(
@@ -510,7 +516,7 @@ def bind_quarantined_prompt(
             )
             if row["wake_committed"]:
                 wake_scope_id = None
-            elif wake_scope_id is None:
+            elif wake and wake_scope_id is None:
                 scope_row = store.connection.execute(
                     "SELECT scope_id FROM watcher_scopes WHERE actor_agent_id=? ORDER BY scope_id LIMIT 1",
                     (intake_actor_id,),

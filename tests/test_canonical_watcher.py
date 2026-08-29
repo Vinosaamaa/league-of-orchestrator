@@ -67,6 +67,20 @@ def _watcher(
     return json.loads(result.stdout)
 
 
+def _hook_source_event_key(adapter_kind: str, payload: dict[str, str]) -> str:
+    session_ref = payload[
+        "session_id" if adapter_kind == "codex" else "conversation_id"
+    ]
+    raw_key = payload[
+        "turn_id" if adapter_kind == "codex" else "generation_id"
+    ]
+    body_hash = hashlib.sha256(payload["prompt"].encode("utf-8")).hexdigest()
+    digest = hashlib.sha256(
+        f"{adapter_kind}\0{session_ref}\0{raw_key}\0{body_hash}".encode("utf-8")
+    ).hexdigest()
+    return f"hook:{digest}"
+
+
 def _league(state: Path, *arguments: str) -> dict[str, object]:
     return _league_env(state, os.environ, *arguments)
 
@@ -331,10 +345,11 @@ def test_codex_and_cursor_prompt_capture_exactly_once(root: Path) -> None:
             f"{name}.json",
         )
         exported = json.loads((state / f"{name}.json").read_text(encoding="utf-8"))
+        adapter_kind = "codex" if command.startswith("codex-") else "cursor"
         prompts = [
             row
             for row in exported["tables"]["prompts"]
-            if row["source_event_key"] == payload[event_field]
+            if row["source_event_key"] == _hook_source_event_key(adapter_kind, payload)
         ]
         assert len(prompts) == 1
         rows = [
@@ -411,6 +426,137 @@ def test_codex_and_cursor_prompt_capture_exactly_once(root: Path) -> None:
         assert stop["decision"] == "block"
 
 
+def test_queued_prompts_reusing_turn_id_are_unique_and_conflicts_quarantine(
+    root: Path,
+) -> None:
+    _, state, _ = seeded_state(root, "queued-prompt-identity")
+    env = _environment(root / "queued-prompt-identity", state)
+    garen_runtime = _register_garen_runtime(
+        state, "queued-prompt-identity", session_ref=SHOTCALLER_ID
+    )
+    first = {
+        "session_id": SHOTCALLER_ID,
+        "turn_id": "turn:reused-by-queue",
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": "First queued ordinary user prompt.",
+    }
+    second = {
+        **first,
+        "prompt": "Second queued ordinary user prompt with distinct content.",
+    }
+    def generation() -> tuple[int, int]:
+        with SQLiteStorage(state, request_wal=False) as store:
+            return tuple(store.connection.execute(
+                "SELECT user_message_generation,wait_generation FROM watcher_scopes WHERE actor_agent_id=?",
+                (SHOTCALLER_ID,),
+            ).fetchone())
+
+    assert _watcher(env, "codex-user-prompt-hook", payload=first) == {}
+    first_generation = generation()
+    assert _watcher(env, "codex-user-prompt-hook", payload=first) == {}
+    assert generation() == first_generation
+    assert _watcher(env, "codex-user-prompt-hook", payload=second) == {}
+    second_generation = generation()
+    assert second_generation == (
+        first_generation[0] + 1, first_generation[1] + 1
+    )
+    assert _watcher(env, "codex-user-prompt-hook", payload=second) == {}
+    assert generation() == second_generation
+
+    champion = {
+        "session_id": CHAMPION_ID,
+        "turn_id": first["turn_id"],
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": first["prompt"],
+    }
+    assert _watcher(env, "codex-user-prompt-hook", payload=champion) == {}
+    assert _watcher(env, "codex-user-prompt-hook", payload=champion) == {}
+    expected_keys = {
+        _hook_source_event_key("codex", first),
+        _hook_source_event_key("codex", second),
+        _hook_source_event_key("codex", champion),
+    }
+    with SQLiteStorage(state, request_wal=False) as store:
+        captured = store.connection.execute(
+            """
+            SELECT p.source_event_key,p.intake_actor_id,pp.body
+              FROM prompts p JOIN prompt_payloads pp ON pp.prompt_id=p.prompt_id
+             WHERE pp.body IN (?,?,?)
+             ORDER BY p.source_event_key
+            """,
+            (first["prompt"], second["prompt"], champion["prompt"]),
+        ).fetchall()
+        garen_generation = tuple(store.connection.execute(
+            "SELECT user_message_generation,wait_generation FROM watcher_scopes WHERE actor_agent_id=?",
+            (SHOTCALLER_ID,),
+        ).fetchone())
+    assert len(captured) == 3
+    assert {row["source_event_key"] for row in captured} == expected_keys
+    assert {row["intake_actor_id"] for row in captured} == {
+        SHOTCALLER_ID, CHAMPION_ID
+    }
+    assert garen_generation == second_generation
+
+    conflict = {
+        **first,
+        "turn_id": "turn:stale-owner-conflict",
+        "prompt": "Queued prompt with stale conflicting ownership.",
+    }
+    source_key = _hook_source_event_key("codex", conflict)
+    prompt_id = "prompt:" + source_key
+    with SQLiteStorage(state, request_wal=False) as store:
+        champion_runtime = str(store.connection.execute(
+            "SELECT runtime_instance_id FROM runtime_instances WHERE actor_agent_id=?",
+            (CHAMPION_ID,),
+        ).fetchone()[0])
+    encoded = conflict["prompt"].encode("utf-8")
+    with SQLiteStorage(state, request_wal=False) as store:
+        with store._transaction():
+            store.connection.execute(
+                """
+                INSERT INTO prompts
+                  (prompt_id,intake_actor_id,runtime_instance_id,adapter_kind,session_ref,
+                   source_event_key,triage_state,triage_digest,created_at)
+                VALUES(?,?,?,?,?,?,'untriaged',NULL,?)
+                """,
+                (
+                    prompt_id, CHAMPION_ID, champion_runtime, "codex",
+                    SHOTCALLER_ID, source_key, AT2,
+                ),
+            )
+            store.connection.execute(
+                """
+                INSERT INTO prompt_payloads
+                  (prompt_id,body,body_hash,byte_count,pruned_at)
+                VALUES(?,?,?,?,NULL)
+                """,
+                (
+                    prompt_id,
+                    conflict["prompt"],
+                    hashlib.sha256(encoded).hexdigest(),
+                    len(encoded),
+                ),
+            )
+    assert _watcher(env, "codex-user-prompt-hook", payload=conflict) == {}
+    with SQLiteStorage(state, request_wal=False) as store:
+        quarantine = store.connection.execute(
+            """
+            SELECT state,reason,wake_actor_id,wake_scope_id,wake_committed
+              FROM prompt_quarantine WHERE prompt_id=?
+            """,
+            (prompt_id,),
+        ).fetchone()
+        owner = store.connection.execute(
+            "SELECT intake_actor_id,runtime_instance_id FROM prompts WHERE prompt_id=?",
+            (prompt_id,),
+        ).fetchone()
+    assert tuple(quarantine) == (
+        "quarantined", "runtime_unverified", None, None, 0
+    )
+    assert tuple(owner) == (CHAMPION_ID, champion_runtime)
+    assert garen_runtime != champion_runtime
+
+
 def test_missing_identity_quarantines_then_binds_and_triages(root: Path) -> None:
     _, state, _ = seeded_state(root, "missing-identity")
     env = _environment(root / "missing-identity", state)
@@ -438,7 +584,7 @@ def test_missing_identity_quarantines_then_binds_and_triages(root: Path) -> None
     exported = json.loads(exported_path.read_text(encoding="utf-8"))
     quarantined = [
         row for row in exported["tables"]["prompt_quarantine"]
-        if row["source_event_key"] == payload["turn_id"]
+        if row["source_event_key"] == _hook_source_event_key("codex", payload)
     ]
     assert len(quarantined) == 1
     row = quarantined[0]
@@ -512,7 +658,7 @@ def test_unverified_champion_prompt_quarantines_without_shotcaller_wake(root: Pa
             SELECT state,reason,wake_actor_id,wake_scope_id,wake_committed
               FROM prompt_quarantine WHERE source_event_key=?
             """,
-            (payload["turn_id"],),
+            (_hook_source_event_key("codex", payload),),
         ).fetchall()
         champion_scope = store.connection.execute(
             "SELECT user_message_generation,wait_generation FROM watcher_scopes WHERE actor_agent_id=?",
@@ -535,7 +681,7 @@ def test_unverified_champion_prompt_quarantines_without_shotcaller_wake(root: Pa
               FROM prompt_quarantine q JOIN prompts p ON p.prompt_id=q.prompt_id
              WHERE q.source_event_key=?
             """,
-            (payload["turn_id"],),
+            (_hook_source_event_key("codex", payload),),
         ).fetchone()
         champion_scope = store.connection.execute(
             "SELECT COUNT(*) FROM watcher_scopes WHERE actor_agent_id=?",
@@ -575,11 +721,11 @@ def test_verified_champion_prompt_captures_without_shotcaller_wake(root: Path) -
               FROM prompts p JOIN prompt_payloads pp ON pp.prompt_id=p.prompt_id
              WHERE p.source_event_key=?
             """,
-            (payload["turn_id"],),
+            (_hook_source_event_key("codex", payload),),
         ).fetchall()
         quarantined = store.connection.execute(
             "SELECT COUNT(*) FROM prompt_quarantine WHERE source_event_key=?",
-            (payload["turn_id"],),
+            (_hook_source_event_key("codex", payload),),
         ).fetchone()[0]
         runtime = store.connection.execute(
             """
@@ -677,7 +823,7 @@ def test_quarantined_prompt_rearms_one_shot_stop(root: Path) -> None:
         ).fetchone()
         quarantine = store.connection.execute(
             "SELECT state,reason,wake_actor_id,wake_scope_id,wake_committed FROM prompt_quarantine WHERE source_event_key=?",
-            (prompt["turn_id"],),
+            (_hook_source_event_key("codex", prompt),),
         ).fetchone()
     assert tuple(after) == (before[0] + 1, before[1] + 1)
     assert tuple(quarantine) == (
@@ -878,6 +1024,7 @@ def main() -> None:
         test_supervise_wakes_and_stop_allows_after_settlement(root)
         test_supervise_user_priority(root)
         test_codex_and_cursor_prompt_capture_exactly_once(root)
+        test_queued_prompts_reusing_turn_id_are_unique_and_conflicts_quarantine(root)
         test_missing_identity_quarantines_then_binds_and_triages(root)
         test_unverified_champion_prompt_quarantines_without_shotcaller_wake(root)
         test_verified_champion_prompt_captures_without_shotcaller_wake(root)

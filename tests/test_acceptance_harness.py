@@ -493,7 +493,7 @@ def test_schema_and_command_inventory() -> None:
     version = subprocess.run(
         [str(LEAGUE), "--version"], text=True, capture_output=True, check=True, timeout=10
     )
-    assert version.stdout.strip() == "league 0.2.7"
+    assert version.stdout.strip() == "league 0.2.8"
 
 
 def main() -> None:

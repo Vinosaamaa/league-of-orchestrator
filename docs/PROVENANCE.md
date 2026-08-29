@@ -161,6 +161,13 @@ capability. SQLite supervision accepts only one verified runtime owned
 by an active Shotcaller. No legacy file, transcript, or second writer is read
 or changed by this compatibility path.
 
+The queued-prompt successor changes only hook source identity: it adds the
+exact prompt body hash to adapter, session, and raw event identity because one
+Codex turn can submit multiple queued user messages. Exact retries remain one
+prompt; distinct bodies remain distinct prompts. A stale owner/source collision
+is quarantined without wake instead of escaping the hook as an ordinary-input
+failure.
+
 Tests that require process inspection explicitly inject the single
 `tests/fakes/ps` adapter through `tests/process_adapter.py`; Make targets do not
 alter `PATH` for unrelated tests. This keeps self-process and resource-lifecycle

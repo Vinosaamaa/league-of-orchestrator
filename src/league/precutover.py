@@ -87,11 +87,15 @@ LEGACY_RECONCILIATION_SCHEMA = "league.legacy-roster-reconciliation.v1"
 LEGACY_RECONCILIATION_RECEIPT_SCHEMA = (
     "league.legacy-roster-reconciliation-receipt.v1"
 )
+LEGACY_RECONCILIATIONS_RECEIPT_SCHEMA = (
+    "league.legacy-roster-reconciliation-receipts.v1"
+)
 TARGET_ID = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 MAX_PLAN_BYTES = 256 * 1024
 MAX_LIVE_TARGETS = 64
 MAX_LEGACY_BINDINGS = 512
+MAX_LEGACY_RECONCILIATIONS = 16
 MAX_SNAPSHOT_ENTRIES = 20_000
 MAX_SNAPSHOT_BYTES = 64 * 1024 * 1024
 TARGET_KINDS = frozenset(
@@ -290,6 +294,40 @@ def _validate_legacy_reconciliation(
     }
 
 
+def _validate_legacy_reconciliations(
+    value: Any, *, binding_paths: set[str]
+) -> list[dict[str, Any]]:
+    if (
+        not isinstance(value, list)
+        or not value
+        or len(value) > MAX_LEGACY_RECONCILIATIONS
+    ):
+        raise StorageRefusal(
+            "plan_invalid", "legacy reconciliations are missing or exceed the bound"
+        )
+    normalized: list[dict[str, Any]] = []
+    artifact_ids: set[str] = set()
+    artifact_paths: set[str] = set()
+    for item in value:
+        reconciliation = _validate_legacy_reconciliation(
+            item, binding_paths=binding_paths
+        )
+        pair = reconciliation["artifact_pair"]
+        pair_paths = {pair["status"], pair["updates"]}
+        if pair["artifact_id"] in artifact_ids:
+            raise StorageRefusal(
+                "plan_invalid", "legacy reconciliation artifact is duplicated"
+            )
+        if pair_paths & artifact_paths:
+            raise StorageRefusal(
+                "plan_invalid", "legacy reconciliation artifact pairs overlap"
+            )
+        artifact_ids.add(pair["artifact_id"])
+        artifact_paths.update(pair_paths)
+        normalized.append(reconciliation)
+    return normalized
+
+
 def _validate_plan(path: Path) -> dict[str, Any]:
     plan = _decode_json_object(path, label="pre-cutover plan")
     if set(plan) != {"schema", "legacy", "current_targets", "proposed"}:
@@ -300,6 +338,7 @@ def _validate_plan(path: Path) -> dict[str, Any]:
     if not isinstance(legacy, dict) or set(legacy) not in (
         {"manifest", "bindings"},
         {"manifest", "bindings", "reconciliation"},
+        {"manifest", "bindings", "reconciliations"},
     ):
         raise StorageRefusal("plan_invalid", "legacy shadow plan is incomplete")
     manifest = _absolute_path(legacy["manifest"], "legacy.manifest")
@@ -335,9 +374,14 @@ def _validate_plan(path: Path) -> dict[str, Any]:
             {"relative_path": relative_name, "source": str(source)}
         )
     reconciliation = None
+    reconciliations = None
     if "reconciliation" in legacy:
         reconciliation = _validate_legacy_reconciliation(
             legacy["reconciliation"], binding_paths=relative_paths
+        )
+    elif "reconciliations" in legacy:
+        reconciliations = _validate_legacy_reconciliations(
+            legacy["reconciliations"], binding_paths=relative_paths
         )
 
     targets = plan.get("current_targets")
@@ -477,6 +521,8 @@ def _validate_plan(path: Path) -> dict[str, Any]:
     }
     if reconciliation is not None:
         normalized_legacy["reconciliation"] = reconciliation
+    elif reconciliations is not None:
+        normalized_legacy["reconciliations"] = reconciliations
     return {
         "schema": PLAN_SCHEMA,
         "legacy": normalized_legacy,
@@ -910,6 +956,12 @@ def _copy_legacy_snapshot(plan: Mapping[str, Any], destination: Path) -> dict[st
         snapshot["legacy_reconciliation"] = _apply_legacy_reconciliation(
             snapshot, reconciliation
         )
+    reconciliations = plan["legacy"].get("reconciliations")
+    if reconciliations is not None:
+        snapshot["legacy_reconciliations"] = [
+            _apply_legacy_reconciliation(snapshot, item)
+            for item in reconciliations
+        ]
     return snapshot
 
 
@@ -940,7 +992,8 @@ def _read_only_shadow(home: Path, plan: Mapping[str, Any]) -> dict[str, Any]:
     snapshot = _copy_legacy_snapshot(plan, home / "live-shadow" / "source")
     state = home / "live-shadow" / "state"
     reconciliation = snapshot.get("legacy_reconciliation")
-    if reconciliation is not None:
+    reconciliations = snapshot.get("legacy_reconciliations")
+    if reconciliation is not None or reconciliations is not None:
         if state.exists():
             raise StorageRefusal(
                 "reconciliation_post_initialization",
@@ -1001,6 +1054,8 @@ def _read_only_shadow(home: Path, plan: Mapping[str, Any]) -> dict[str, Any]:
     }
     if reconciliation is not None:
         result["legacy_reconciliation"] = reconciliation
+    elif reconciliations is not None:
+        result["legacy_reconciliations"] = reconciliations
     return result
 
 
@@ -2229,11 +2284,23 @@ def run_pre_cutover(
         receipt_path = home / "precutover-receipt.json"
         _write_json(receipt_path, result)
         reconciliation = result["live_migration_shadow"].get("legacy_reconciliation")
-        if reconciliation is not None:
+        reconciliations = result["live_migration_shadow"].get(
+            "legacy_reconciliations"
+        )
+        if reconciliation is not None or reconciliations is not None:
             try:
-                _write_immutable_json(
-                    home / "legacy-reconciliation-receipt.json", reconciliation
-                )
+                if reconciliation is not None:
+                    _write_immutable_json(
+                        home / "legacy-reconciliation-receipt.json", reconciliation
+                    )
+                else:
+                    _write_immutable_json(
+                        home / "legacy-reconciliation-receipts.json",
+                        {
+                            "schema": LEGACY_RECONCILIATIONS_RECEIPT_SCHEMA,
+                            "receipts": reconciliations,
+                        },
+                    )
             except BaseException:
                 receipt_path.unlink(missing_ok=True)
                 raise

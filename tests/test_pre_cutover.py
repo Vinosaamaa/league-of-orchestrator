@@ -22,6 +22,8 @@ from league.acceptance import PROCESS_SENTINEL_SCHEMA, _sha256, _stable_bytes  #
 from league.precutover import (  # noqa: E402
     LEGACY_RECONCILIATION_RECEIPT_SCHEMA,
     LEGACY_RECONCILIATION_SCHEMA,
+    LEGACY_RECONCILIATIONS_RECEIPT_SCHEMA,
+    MAX_LEGACY_RECONCILIATIONS,
     PLAN_SCHEMA,
     RECEIPT_SCHEMA,
     _write_immutable_json,
@@ -188,8 +190,90 @@ def add_shotcaller_initialization_mismatch(fixture: dict[str, Any]) -> dict[str,
     }
 
 
+def add_second_shotcaller_initialization_mismatch(
+    fixture: dict[str, Any],
+) -> dict[str, Any]:
+    """Add an independent sanitized Darius initialization-only mismatch."""
+    status_relative = "rosters/Darius/status.json"
+    updates_relative = "rosters/Darius/updates.jsonl"
+    status_source = fixture["legacy"] / status_relative
+    updates_source = fixture["legacy"] / updates_relative
+    status = json.loads(
+        fixture["legacy"].joinpath("rosters/Garen/status.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    status.update(
+        {
+            "callsign": "Darius",
+            "address": "w1:p9",
+            "thread_id": "77777777-7777-4777-8777-777777777777",
+            "update": "Synthetic Darius initialization is authoritative in status.",
+        }
+    )
+    write_json(status_source, status)
+    write_json(
+        updates_source,
+        {
+            "at": status["updated_at"],
+            "status": status["status"],
+            "update": "Synthetic Darius initialization was recorded by the transition log.",
+        },
+    )
+    manifest = json.loads(
+        fixture["legacy"].joinpath("import-manifest.json").read_text(encoding="utf-8")
+    )
+    manifest["canonical_sources"]["rosters"].append(
+        {
+            "artifact_id": "R1-shotcaller-Darius",
+            "status": status_relative,
+            "updates": updates_relative,
+        }
+    )
+    write_json(fixture["legacy"] / "import-manifest.json", manifest)
+    pool_path = fixture["legacy"] / "league-champions.json"
+    pool = json.loads(pool_path.read_text(encoding="utf-8"))
+    pool["in_use"]["Darius"] = {
+        "role": "shotcaller",
+        "task_id": "synthetic-darius-coordination",
+    }
+    write_json(pool_path, pool)
+    fixture["plan"]["legacy"]["bindings"].extend(
+        [
+            {"relative_path": status_relative, "source": str(status_source)},
+            {"relative_path": updates_relative, "source": str(updates_source)},
+        ]
+    )
+    fixture["plan"]["legacy"]["bindings"].sort(
+        key=lambda item: item["relative_path"]
+    )
+    write_json(fixture["plan_path"], fixture["plan"])
+    return {"status": status_source, "updates": updates_source}
+
+
 def _content_sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def shotcaller_reconciliation(
+    pair: dict[str, Path],
+    *,
+    artifact_id: str,
+    callsign: str,
+    expected_hashes: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    return {
+        "schema": LEGACY_RECONCILIATION_SCHEMA,
+        "artifact_pair": {
+            "artifact_id": artifact_id,
+            "status": f"rosters/{callsign}/status.json",
+            "updates": f"rosters/{callsign}/updates.jsonl",
+        },
+        "expected_source_sha256": expected_hashes
+        or {name: _content_sha256(path) for name, path in pair.items()},
+        "resolution": {"authoritative": "status_snapshot"},
+        "reason": f"Synthetic legacy {callsign} initialization sentences differ.",
+    }
 
 
 def authorize_shotcaller_reconciliation(
@@ -198,21 +282,23 @@ def authorize_shotcaller_reconciliation(
     *,
     expected_hashes: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    authorization = {
-        "schema": LEGACY_RECONCILIATION_SCHEMA,
-        "artifact_pair": {
-            "artifact_id": "R1-shotcaller",
-            "status": "rosters/Garen/status.json",
-            "updates": "rosters/Garen/updates.jsonl",
-        },
-        "expected_source_sha256": expected_hashes
-        or {name: _content_sha256(path) for name, path in pair.items()},
-        "resolution": {"authoritative": "status_snapshot"},
-        "reason": "Synthetic legacy initialization sentences differ.",
-    }
+    authorization = shotcaller_reconciliation(
+        pair,
+        artifact_id="R1-shotcaller",
+        callsign="Garen",
+        expected_hashes=expected_hashes,
+    )
     fixture["plan"]["legacy"]["reconciliation"] = authorization
     write_json(fixture["plan_path"], fixture["plan"])
     return authorization
+
+
+def authorize_shotcaller_reconciliations(
+    fixture: dict[str, Any], authorizations: list[dict[str, Any]]
+) -> None:
+    fixture["plan"]["legacy"].pop("reconciliation", None)
+    fixture["plan"]["legacy"]["reconciliations"] = authorizations
+    write_json(fixture["plan_path"], fixture["plan"])
 
 
 def run_fixture(
@@ -617,6 +703,236 @@ def test_wrong_reconciliation_hash_refuses_without_source_mutation(root: Path) -
     assert before == {name: path.read_bytes() for name, path in pair.items()}
 
 
+def test_two_exact_shotcaller_reconciliations_succeed_in_declared_order(
+    root: Path,
+) -> None:
+    fixture = fixture_plan(root)
+    garen = add_shotcaller_initialization_mismatch(fixture)
+    darius = add_second_shotcaller_initialization_mismatch(fixture)
+    pairs = {"Darius": darius, "Garen": garen}
+    before = {
+        (callsign, name): path.read_bytes()
+        for callsign, pair in pairs.items()
+        for name, path in pair.items()
+    }
+    authorizations = [
+        shotcaller_reconciliation(
+            darius, artifact_id="R1-shotcaller-Darius", callsign="Darius"
+        ),
+        shotcaller_reconciliation(
+            garen, artifact_id="R1-shotcaller", callsign="Garen"
+        ),
+    ]
+    authorize_shotcaller_reconciliations(fixture, authorizations)
+
+    first = run_fixture(fixture, root / "sandbox-one", "two-pair")
+    second = run_fixture(fixture, root / "sandbox-two", "two-pair")
+    assert_receipt(first, fixture)
+    assert_receipt(second, fixture)
+    receipts = first["live_migration_shadow"]["legacy_reconciliations"]
+    assert receipts == second["live_migration_shadow"]["legacy_reconciliations"]
+    assert first["operation"] == second["operation"]
+    assert [item["artifact_pair"]["artifact_id"] for item in receipts] == [
+        "R1-shotcaller-Darius",
+        "R1-shotcaller",
+    ]
+    assert [item["original_source_sha256"] for item in receipts] == [
+        item["expected_source_sha256"] for item in authorizations
+    ]
+    assert all(
+        item["result"]
+        == {
+            "normalized": True,
+            "scope": "temporary_snapshot_only",
+            "live_source_mutated": False,
+        }
+        for item in receipts
+    )
+    envelope = {
+        "schema": LEGACY_RECONCILIATIONS_RECEIPT_SCHEMA,
+        "receipts": receipts,
+    }
+    immutable_path = (
+        root
+        / "sandbox-one/league-two-pair-precutover/legacy-reconciliation-receipts.json"
+    )
+    assert immutable_path.read_bytes() == _stable_bytes(envelope)
+    assert immutable_path.stat().st_mode & 0o777 == 0o600
+    try:
+        _write_immutable_json(immutable_path, {"replacement": True})
+    except FileExistsError:
+        pass
+    else:
+        raise AssertionError("immutable reconciliation receipts were overwritten")
+    assert before == {
+        (callsign, name): path.read_bytes()
+        for callsign, pair in pairs.items()
+        for name, path in pair.items()
+    }
+
+
+def test_partial_shotcaller_reconciliation_list_remains_fail_closed(
+    root: Path,
+) -> None:
+    fixture = fixture_plan(root)
+    garen = add_shotcaller_initialization_mismatch(fixture)
+    darius = add_second_shotcaller_initialization_mismatch(fixture)
+    before = {
+        path: path.read_bytes() for pair in (darius, garen) for path in pair.values()
+    }
+    authorize_shotcaller_reconciliations(
+        fixture,
+        [
+            shotcaller_reconciliation(
+                darius, artifact_id="R1-shotcaller-Darius", callsign="Darius"
+            )
+        ],
+    )
+    refused(
+        lambda: run_fixture(fixture, root / "sandbox", "partial"),
+        "snapshot_event_mismatch",
+    )
+    home = root / "sandbox/league-partial-precutover"
+    assert not (home / "legacy-reconciliation-receipts.json").exists()
+    assert before == {path: path.read_bytes() for path in before}
+
+
+def test_duplicate_and_overlapping_reconciliation_lists_refuse(root: Path) -> None:
+    duplicate = fixture_plan(root / "duplicate")
+    garen = add_shotcaller_initialization_mismatch(duplicate)
+    authorization = shotcaller_reconciliation(
+        garen, artifact_id="R1-shotcaller", callsign="Garen"
+    )
+    authorize_shotcaller_reconciliations(
+        duplicate, [authorization, dict(authorization)]
+    )
+    refused(
+        lambda: run_fixture(
+            duplicate, root / "duplicate-sandbox", "duplicate-list"
+        ),
+        "plan_invalid",
+    )
+
+    overlapping = fixture_plan(root / "overlapping")
+    garen = add_shotcaller_initialization_mismatch(overlapping)
+    authorization = shotcaller_reconciliation(
+        garen, artifact_id="R1-shotcaller", callsign="Garen"
+    )
+    alias = json.loads(json.dumps(authorization))
+    alias["artifact_pair"]["artifact_id"] = "R1-shotcaller-alias"
+    authorize_shotcaller_reconciliations(overlapping, [authorization, alias])
+    refused(
+        lambda: run_fixture(
+            overlapping, root / "overlapping-sandbox", "overlapping-list"
+        ),
+        "plan_invalid",
+    )
+
+    both_forms = fixture_plan(root / "both-forms")
+    garen = add_shotcaller_initialization_mismatch(both_forms)
+    authorization = authorize_shotcaller_reconciliation(both_forms, garen)
+    both_forms["plan"]["legacy"]["reconciliations"] = [authorization]
+    write_json(both_forms["plan_path"], both_forms["plan"])
+    refused(
+        lambda: run_fixture(both_forms, root / "both-forms-sandbox", "both-forms"),
+        "plan_invalid",
+    )
+
+    oversized = fixture_plan(root / "oversized")
+    garen = add_shotcaller_initialization_mismatch(oversized)
+    authorization = shotcaller_reconciliation(
+        garen, artifact_id="R1-shotcaller", callsign="Garen"
+    )
+    authorize_shotcaller_reconciliations(
+        oversized, [authorization] * (MAX_LEGACY_RECONCILIATIONS + 1)
+    )
+    refused(
+        lambda: run_fixture(
+            oversized, root / "oversized-sandbox", "oversized-list"
+        ),
+        "plan_invalid",
+    )
+
+
+def test_stale_member_blocks_entire_reconciliation_list_without_receipt(
+    root: Path,
+) -> None:
+    fixture = fixture_plan(root)
+    garen = add_shotcaller_initialization_mismatch(fixture)
+    darius = add_second_shotcaller_initialization_mismatch(fixture)
+    before = {
+        path: path.read_bytes() for pair in (darius, garen) for path in pair.values()
+    }
+    stale_hashes = {name: _content_sha256(path) for name, path in garen.items()}
+    stale_hashes["status"] = "0" * 64
+    authorize_shotcaller_reconciliations(
+        fixture,
+        [
+            shotcaller_reconciliation(
+                darius, artifact_id="R1-shotcaller-Darius", callsign="Darius"
+            ),
+            shotcaller_reconciliation(
+                garen,
+                artifact_id="R1-shotcaller",
+                callsign="Garen",
+                expected_hashes=stale_hashes,
+            ),
+        ],
+    )
+    refused(
+        lambda: run_fixture(fixture, root / "sandbox", "stale-list"),
+        "reconciliation_stale",
+    )
+    home = root / "sandbox/league-stale-list-precutover"
+    assert not (home / "legacy-reconciliation-receipts.json").exists()
+    assert before == {path: path.read_bytes() for path in before}
+
+
+def test_two_pair_late_failure_emits_no_reconciliation_receipts(root: Path) -> None:
+    fixture = fixture_plan(root)
+    garen = add_shotcaller_initialization_mismatch(fixture)
+    darius = add_second_shotcaller_initialization_mismatch(fixture)
+    before = {
+        path: path.read_bytes() for pair in (darius, garen) for path in pair.values()
+    }
+    authorize_shotcaller_reconciliations(
+        fixture,
+        [
+            shotcaller_reconciliation(
+                darius, artifact_id="R1-shotcaller-Darius", callsign="Darius"
+            ),
+            shotcaller_reconciliation(
+                garen, artifact_id="R1-shotcaller", callsign="Garen"
+            ),
+        ],
+    )
+    temporary_root = root / "sandbox"
+    temporary_root.mkdir()
+
+    def fail(stage: str) -> None:
+        if stage == "after_live_shadow":
+            raise StorageRefusal("synthetic_late_fault", "synthetic late fault")
+
+    refused(
+        lambda: run_pre_cutover(
+            temporary_root,
+            "two-pair-late-fault",
+            plan_path=fixture["plan_path"],
+            sentinel_paths=(fixture["legacy"],),
+            config_sentinel=fixture["hook"],
+            process_sentinel=fixture["processes"],
+            source_root=ROOT,
+            fault=fail,
+        ),
+        "synthetic_late_fault",
+    )
+    home = temporary_root / "league-two-pair-late-fault-precutover"
+    assert not (home / "legacy-reconciliation-receipts.json").exists()
+    assert not (home / "legacy-reconciliation-receipt.json").exists()
+    assert not (home / "precutover-receipt.json").exists()
+    assert before == {path: path.read_bytes() for path in before}
+
+
 def test_late_failure_emits_no_reconciliation_receipt(root: Path) -> None:
     fixture = fixture_plan(root)
     pair = add_shotcaller_initialization_mismatch(fixture)
@@ -806,6 +1122,16 @@ def test_schema_contracts_are_current_and_state_specific() -> None:
     assert receipt["$defs"]["legacyTriple"] == {
         "$ref": f"{shared_reference}legacyTriple"
     }
+    assert plan["properties"]["legacy"]["properties"]["reconciliations"] == {
+        "type": "array",
+        "minItems": 1,
+        "maxItems": MAX_LEGACY_RECONCILIATIONS,
+        "uniqueItems": True,
+        "items": {"$ref": "#/$defs/legacyReconciliation"},
+    }
+    assert receipt["$defs"]["liveShadow"]["properties"][
+        "legacy_reconciliations"
+    ]["maxItems"] == MAX_LEGACY_RECONCILIATIONS
     assert set(shared["$defs"]) == {"sha256", "legacyTriple"}
 
 
@@ -822,6 +1148,21 @@ def main() -> int:
         )
         test_wrong_reconciliation_hash_refuses_without_source_mutation(
             base / "wrong-hash"
+        )
+        test_two_exact_shotcaller_reconciliations_succeed_in_declared_order(
+            base / "two-pair"
+        )
+        test_partial_shotcaller_reconciliation_list_remains_fail_closed(
+            base / "partial-list"
+        )
+        test_duplicate_and_overlapping_reconciliation_lists_refuse(
+            base / "list-guards"
+        )
+        test_stale_member_blocks_entire_reconciliation_list_without_receipt(
+            base / "stale-list"
+        )
+        test_two_pair_late_failure_emits_no_reconciliation_receipts(
+            base / "two-pair-late-failure"
         )
         test_late_failure_emits_no_reconciliation_receipt(base / "late-failure")
         test_reconciliation_scope_and_initialization_guards(base / "guards")

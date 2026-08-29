@@ -64,6 +64,14 @@ hashes, a bounded reason, and either the authoritative status snapshot, the
 authoritative latest transition, or one exact normalized
 `status`/`at`/`update` triple.
 
+For the bounded case where more than one independent initialization pair needs
+the same treatment, `legacy.reconciliations` accepts an ordered list of 1–16 of
+those exact objects. The singular `legacy.reconciliation` form remains
+supported, and a plan may use only one form. Artifact IDs and both artifact
+paths must be unique across the list; duplicates or any path overlap refuse the
+plan before a snapshot is created. Each list item retains its own hashes,
+resolution, and reason, and is applied in declared order.
+
 The exception is initialization-only and snapshot-only. The gate refuses
 missing, stale, duplicate, broad, ambiguous, non-Shotcaller, already-matching,
 or multi-transition authorizations before creating the temporary SQLite state.
@@ -74,6 +82,10 @@ files. A successful normalization creates one owner-only, create-once
 hashes, normalized hash, reason, authoritative triple, and a
 `temporary_snapshot_only` result. The same sanitized inputs yield the same
 receipt and pre-cutover operation history in independent attempts.
+An ordered-list success instead creates one owner-only, create-once
+`legacy-reconciliation-receipts.json` envelope whose ordered entries contain
+the same complete per-pair proofs. No singular or list receipt is emitted when
+any authorization or a later preflight stage refuses.
 
 The receipt `league.pre-cutover-receipt.v1` adds four grouped proofs.
 
@@ -82,8 +94,9 @@ The receipt `league.pre-cutover-receipt.v1` adds four grouped proofs.
 - a consistent explicit-binding copy of the caller's legacy state, strict
   dry-run, isolated import, exact legacy-field and row-count parity, source
   recheck, verified SQLite backup, and restricted rollback export;
-- optional exact-hash Shotcaller initialization reconciliation with an
-  immutable snapshot-only receipt; no authorization leaves parity fail-closed;
+- optional exact-hash Shotcaller initialization reconciliation, singular or as
+  one bounded duplicate-free ordered list, with immutable snapshot-only
+  receipts; missing or partial authorization leaves parity fail-closed;
 - sandbox-only backup and restore of every current target, including exact
   absent-target rollback instructions;
 

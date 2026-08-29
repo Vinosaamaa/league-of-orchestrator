@@ -202,6 +202,12 @@
         "binding_count": {"type": "integer", "minimum": 1},
         "manifest_sha256": {"$ref": "#/$defs/sha256"},
         "legacy_reconciliation": {"$ref": "#/$defs/legacyReconciliationReceipt"},
+        "legacy_reconciliations": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "items": {"$ref": "#/$defs/legacyReconciliationReceipt"}
+        },
         "database_backup": {"$ref": "#/$defs/databaseBackup"},
         "rollback_export": {
           "type": "object",
@@ -214,6 +220,24 @@
           "additionalProperties": false
         }
       },
+      "oneOf": [
+        {
+          "not": {
+            "anyOf": [
+              {"required": ["legacy_reconciliation"]},
+              {"required": ["legacy_reconciliations"]}
+            ]
+          }
+        },
+        {
+          "required": ["legacy_reconciliation"],
+          "not": {"required": ["legacy_reconciliations"]}
+        },
+        {
+          "required": ["legacy_reconciliations"],
+          "not": {"required": ["legacy_reconciliation"]}
+        }
+      ],
       "additionalProperties": false
     },
     "legacyTriple": {"$ref": "league-legacy-reconciliation.schema.json#/$defs/legacyTriple"},

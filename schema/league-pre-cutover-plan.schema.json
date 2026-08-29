@@ -33,8 +33,33 @@
             "additionalProperties": false
           }
         },
-        "reconciliation": {"$ref": "#/$defs/legacyReconciliation"}
+        "reconciliation": {"$ref": "#/$defs/legacyReconciliation"},
+        "reconciliations": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/legacyReconciliation"}
+        }
       },
+      "oneOf": [
+        {
+          "not": {
+            "anyOf": [
+              {"required": ["reconciliation"]},
+              {"required": ["reconciliations"]}
+            ]
+          }
+        },
+        {
+          "required": ["reconciliation"],
+          "not": {"required": ["reconciliations"]}
+        },
+        {
+          "required": ["reconciliations"],
+          "not": {"required": ["reconciliation"]}
+        }
+      ],
       "additionalProperties": false
     },
     "current_targets": {

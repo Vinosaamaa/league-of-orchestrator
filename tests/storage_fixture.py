@@ -102,18 +102,30 @@ def _write_roster_records(
     }
 
 
-def _write_callsign_pools(root: Path) -> None:
+def _write_callsign_pools(root: Path, context: dict[str, Any]) -> None:
+    runtime_root = context["runtime_root"]
     write_json(
         root / "league-champions.json",
         {
             "available": {"shotcaller": [], "champion": ["Lux"]},
             "in_use": {
-                "Garen": {"role": "shotcaller", "task_id": "synthetic-coordination"},
-                "Thresh": {"role": "champion", "task_id": TASK_ID},
+                "Garen": {
+                    "role": "shotcaller",
+                    "task_id": "synthetic-coordination",
+                    "record": str(runtime_root / "rosters/Garen/status.json"),
+                },
+                "Thresh": {
+                    "role": "champion",
+                    "task_id": TASK_ID,
+                    "record": context["champion_record"],
+                },
                 "Pyke": {
                     "role": "champion",
                     "task_id": "synthetic-pending",
                     "pending": True,
+                    "record": str(
+                        runtime_root / "rosters/Garen/champions/Pyke"
+                    ),
                 },
             },
         },
@@ -303,7 +315,7 @@ def write_complete_fixture(
 ) -> dict[str, Any]:
     """Compose every canonical family plus one retained evidence file."""
     context = _write_roster_records(root, runtime_root)
-    _write_callsign_pools(root)
+    _write_callsign_pools(root, context)
     _write_pending_launch(root, context)
     _write_watcher_state(root, context)
     _write_coordination_artifacts(root)

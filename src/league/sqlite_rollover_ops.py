@@ -306,6 +306,32 @@ def rollover_status(store: Any, operation_id: str) -> Optional[dict[str, Any]]:
     }
 
 
+def rollover_cleanup_target(store: Any, operation_id: str) -> Optional[dict[str, Any]]:
+    """Return the exact switched predecessor binding eligible for drain cleanup."""
+
+    row = store.connection.execute(
+        """
+        SELECT operation_id,predecessor_agent_id,successor_agent_id,state,version,
+               owner_event_id,owner_outbox_id,squad_id,successor_runtime_instance_id
+          FROM rollover_operations WHERE operation_id=?
+        """,
+        (operation_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return {
+        "operation_id": row["operation_id"],
+        "predecessor_agent_id": row["predecessor_agent_id"],
+        "successor_agent_id": row["successor_agent_id"],
+        "state": row["state"],
+        "version": int(row["version"]),
+        "owner_event_id": row["owner_event_id"],
+        "owner_outbox_id": row["owner_outbox_id"],
+        "squad_id": row["squad_id"],
+        "successor_runtime_instance_id": row["successor_runtime_instance_id"],
+    }
+
+
 def prepare_rollover(
     store: Any,
     operation_id: str,
@@ -1296,14 +1322,30 @@ def complete_rollover_drain(
                 (operation["predecessor_agent_id"],),
             ).fetchone()
             if assignment is None:
-                raise StorageRefusal("callsign_assignment_missing", "predecessor active callsign is unknown")
-            _release_active_in_transaction(
-                store,
-                assignment,
-                int(assignment["version"]),
-                receipt["callsign_release_receipt_digest"],
-                at,
-            )
+                assignment = store.connection.execute(
+                    """
+                    SELECT * FROM callsign_assignments WHERE agent_id=? AND state='released'
+                     ORDER BY reserved_at DESC LIMIT 1
+                    """,
+                    (operation["predecessor_agent_id"],),
+                ).fetchone()
+                if (
+                    assignment is None
+                    or assignment["release_receipt_digest"]
+                    != receipt["callsign_release_receipt_digest"]
+                ):
+                    raise StorageRefusal(
+                        "callsign_assignment_missing",
+                        "predecessor callsign release is missing or belongs to another cleanup",
+                    )
+            else:
+                _release_active_in_transaction(
+                    store,
+                    assignment,
+                    int(assignment["version"]),
+                    receipt["callsign_release_receipt_digest"],
+                    at,
+                )
             store.connection.execute(
                 """
                 UPDATE shotcaller_intake SET state='closed',version=version+1,updated_at=?

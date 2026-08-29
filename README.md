@@ -41,7 +41,8 @@ Nothing here installs files, changes hooks, or connects to live Roster state.
 - One role-aware bounded Shotcaller Stop decision with ordinary-message
   priority and separate request, dispatch, and watcher leases.
 - Opaque capability-based harness/backend bindings, typed task resources, and
-  recoverable proof-first teardown with immutable per-action receipts.
+  canonical SQLite-backed recoverable teardown with immutable per-action/final
+  receipts, exact shared-lease release, and persistent-resource retention.
 - Assignment-neutral semantic model/effort routing that preserves explicit
   choices and permits one evidence-triggered safe-boundary escalation.
 - A sanitized custom-skill provenance inventory, bounded install-parity audit,
@@ -218,5 +219,5 @@ fake adapters.
 ## Non-goals for this implementation PR
 
 No interactive Roster UI or controller, adapter cutover, global install, hook mutation, live import,
-watcher replacement, daemon, merge, release, deployment, or teardown is
-introduced here.
+watcher replacement, daemon, merge, release, deployment, or live teardown is
+performed here.

@@ -14,7 +14,7 @@ TASK_CLASSES = frozenset({"analysis", "local_git", "pr_ci", "deployed_service"})
 DISPOSITIONS = frozenset({"completed", "rejected", "cancelled", "failed"})
 RESOURCE_LIFETIMES = frozenset({"task_owned", "shared_lease", "persistent_retain"})
 CLEANUP_ADAPTER_KINDS = frozenset(
-    {"archive", "harness", "backend", "git", "callsign", "process"}
+    {"archive", "harness", "backend", "git", "callsign", "process", "lease", "retain"}
 )
 FINAL_ACTION_ADAPTERS = {
     "session_exit": "harness",
@@ -23,6 +23,9 @@ FINAL_ACTION_ADAPTERS = {
     "branch_delete": "git",
     "callsign_release": "callsign",
 }
+RECOVERABLE_EXECUTION_REFUSALS = frozenset(
+    {"cleanup_adapter_failed", "cleanup_verification_failed"}
+)
 
 
 @dataclass(frozen=True)
@@ -66,6 +69,25 @@ POLICY_REQUIREMENTS: dict[str, tuple[str, ...]] = {
 
 def _stable_json(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
+def cleanup_action_digest(action: Mapping[str, Any]) -> str:
+    """Hash only the immutable action plan, never mutable state or receipts."""
+
+    immutable = {
+        key: action.get(key)
+        for key in (
+            "action_id",
+            "operation_id",
+            "ordinal",
+            "action_kind",
+            "adapter_kind",
+            "resource_id",
+            "expected_identity",
+            "intended_state",
+        )
+    }
+    return hashlib.sha256(_stable_json(immutable).encode("utf-8")).hexdigest()
 
 
 def _proof(proof: Mapping[str, Any], dotted: str) -> Any:
@@ -159,8 +181,12 @@ class ResourceRegistration:
             raise StorageRefusal("resource_invalid", "task resource expected identity is missing")
         if value["lifetime"] == "shared_lease" and value["cleanup_action"] != "release_lease":
             raise StorageRefusal("shared_resource_refused", "shared resources permit lease release only")
+        if value["lifetime"] == "shared_lease" and value["adapter_kind"] != "lease":
+            raise StorageRefusal("shared_resource_refused", "shared leases require the exact lease adapter")
         if value["lifetime"] == "persistent_retain" and value["cleanup_action"] != "retain":
             raise StorageRefusal("persistent_resource_refused", "persistent resources must be retained")
+        if value["lifetime"] == "persistent_retain" and value["adapter_kind"] != "retain":
+            raise StorageRefusal("persistent_resource_refused", "persistent resources require retain policy")
         return cls(**{key: value[key] for key in required})
 
     def as_record(self) -> dict[str, Any]:
@@ -200,6 +226,16 @@ class CleanupStorage(Protocol):
         at: str,
     ) -> dict[str, Any]: ...
     def finalize_cleanup(self, operation_id: str, fence: int, at: str) -> dict[str, Any]: ...
+    def block_cleanup_operation(
+        self,
+        operation_id: str,
+        fence: int,
+        action_id: Optional[str],
+        refusal_code: str,
+        receipt: Mapping[str, Any],
+        at: str,
+    ) -> dict[str, Any]: ...
+    def rollover_cleanup_target(self, operation_id: str) -> Optional[dict[str, Any]]: ...
 
 
 class CleanupActionAdapter(Protocol):
@@ -265,9 +301,30 @@ class CleanupPlanner:
             or not identity
         ):
             raise StorageRefusal("cleanup_manifest_invalid", "cleanup task identity is incomplete")
-        if owner.get("role") == "shotcaller" or owner.get("persistent") is True:
-            raise StorageRefusal("cleanup_owner_refused", "Shotcallers and persistent supervisors are ineligible")
-        if owner.get("role") not in {"champion", "hidden-worker", "task"} or owner.get("persistent") is not False:
+        rollover: Optional[dict[str, Any]] = None
+        if owner.get("role") == "shotcaller":
+            requested = manifest.get("rollover")
+            if not isinstance(requested, Mapping) or set(requested) != {
+                "operation_id",
+                "expected_version",
+            }:
+                raise StorageRefusal(
+                    "cleanup_owner_refused",
+                    "Shotcaller cleanup is permitted only for one exact switched rollover predecessor",
+                )
+            observed = self.storage.rollover_cleanup_target(str(requested["operation_id"]))
+            if (
+                observed is None
+                or observed.get("state") != "switched"
+                or observed.get("predecessor_agent_id") != owner.get("id")
+                or observed.get("version") != requested.get("expected_version")
+            ):
+                raise StorageRefusal(
+                    "cleanup_owner_refused",
+                    "Shotcaller cleanup does not match an exact switched rollover predecessor",
+                )
+            rollover = dict(observed)
+        elif owner.get("role") not in {"champion", "hidden-worker", "task"} or owner.get("persistent") is not False:
             raise StorageRefusal("cleanup_owner_refused", "cleanup owner identity is not an eligible task owner")
         if manifest.get("pending_decisions_clear") is not True:
             raise StorageRefusal("pending_decision", "cleanup has a pending owner decision")
@@ -307,16 +364,6 @@ class CleanupPlanner:
             self._validate_resource_adapter(resource)
         manifest_resources = {resource.resource_id: resource for resource in resources}
         for resource in registered:
-            if resource.lifetime == "shared_lease":
-                raise StorageRefusal(
-                    "shared_resource_refused",
-                    "registered shared resource lease blocks task cleanup",
-                )
-            if resource.lifetime == "persistent_retain":
-                raise StorageRefusal(
-                    "persistent_resource_refused",
-                    "registered persistent resource blocks task cleanup",
-                )
             declared = manifest_resources.get(resource.resource_id)
             if declared is None:
                 raise StorageRefusal(
@@ -333,16 +380,6 @@ class CleanupPlanner:
                 raise StorageRefusal("resource_identity_mismatch", "task resource owner or task identity conflicts")
             if not resource.applicable:
                 raise StorageRefusal("resource_not_applicable", "task resource is not applicable to this cleanup")
-            if resource.lifetime == "shared_lease":
-                raise StorageRefusal(
-                    "shared_resource_refused",
-                    "shared resource leases are not exclusively task-owned and refuse cleanup",
-                )
-            if resource.lifetime == "persistent_retain":
-                raise StorageRefusal(
-                    "persistent_resource_refused",
-                    "persistent resources are retained outside task cleanup",
-                )
 
         actions: list[dict[str, Any]] = [
             {
@@ -354,14 +391,21 @@ class CleanupPlanner:
                 "expected_identity": manifest.get("identity", {}),
                 "intended_state": {
                     "archived": True,
+                    "task_id": task_id,
+                    "owner": dict(owner),
                     "identity": manifest.get("identity", {}),
                     "policy": policy,
                     "proof": proof,
+                    "resources": [resource.as_record() for resource in resources],
+                    "pending_decisions_clear": True,
+                    "rollover": rollover,
                 },
             }
         ]
         ordinal = 1
         for resource in sorted(resources, key=lambda item: item.resource_id):
+            if resource.lifetime == "persistent_retain":
+                continue
             actions.append(
                 {
                     "action_id": f"{operation_id}:{ordinal:03d}",
@@ -469,56 +513,89 @@ class CleanupExecutor:
             operation_id, expected_fence, executor_id, leased_until, at
         )
         fence = int(claimed["fence"])
-        operation = self.storage.cleanup_operation(operation_id)
-        if operation is None:
-            raise StorageRefusal("cleanup_operation_unknown", "cleanup operation disappeared")
-        actions = operation.get("actions")
-        if not isinstance(actions, list):
-            raise StorageRefusal("cleanup_operation_invalid", "cleanup action list is invalid")
-        prepared: list[tuple[Mapping[str, Any], CleanupActionAdapter]] = []
-        for action in actions:
-            if action["state"] == "completed":
-                continue
-            adapter = self.adapters.get(str(action["adapter_kind"]))
-            observation = dict(adapter.inspect(action))
-            if not adapter.intended(action, observation) and observation != action["expected_identity"]:
-                raise StorageRefusal(
-                    "cleanup_identity_mismatch",
-                    "cleanup preflight found stale or ambiguous action identity",
-                )
-            prepared.append((action, adapter))
-        for action, adapter in prepared:
-            # Preflight proves the whole plan is initially safe; this second
-            # observation is intentional because earlier effects may change
-            # external reality before a later action runs.
-            before = dict(adapter.inspect(action))
-            if adapter.intended(action, before):
-                outcome = "already_applied"
-                after = before
-                receipt = {"reconciled": True}
-            else:
-                if before != action["expected_identity"]:
-                    raise StorageRefusal("cleanup_identity_mismatch", "cleanup action identity is stale or ambiguous")
-                receipt = dict(adapter.apply(action))
-                if fault is not None:
-                    fault(
-                        CleanupFaultEvent(
-                            phase="after_external_action",
-                            action_kind=str(action["action_kind"]),
+        current_action_id: Optional[str] = None
+        try:
+            operation = self.storage.cleanup_operation(operation_id)
+            if operation is None:
+                raise StorageRefusal("cleanup_operation_unknown", "cleanup operation disappeared")
+            actions = operation.get("actions")
+            if not isinstance(actions, list):
+                raise StorageRefusal("cleanup_operation_invalid", "cleanup action list is invalid")
+            prepared: list[tuple[Mapping[str, Any], CleanupActionAdapter]] = []
+            for action in actions:
+                current_action_id = str(action["action_id"])
+                adapter = self.adapters.get(str(action["adapter_kind"]))
+                observation = dict(adapter.inspect(action))
+                if action["state"] == "completed":
+                    if not adapter.intended(action, observation):
+                        raise StorageRefusal(
+                            "cleanup_completed_action_changed",
+                            "a completed cleanup action no longer has its verified intended state",
                         )
+                    continue
+                if not adapter.intended(action, observation) and observation != action["expected_identity"]:
+                    raise StorageRefusal(
+                        "cleanup_identity_mismatch",
+                        "cleanup preflight found stale or ambiguous action identity",
                     )
-                after = dict(adapter.inspect(action))
-                if not adapter.intended(action, after):
-                    raise StorageRefusal("cleanup_verification_failed", "cleanup action effect was not verified")
-                outcome = "applied"
-            self.storage.record_cleanup_action_receipt(
-                str(action["action_id"]),
-                operation_id,
-                fence,
-                outcome,
-                before,
-                after,
-                receipt,
-                at,
-            )
-        return self.storage.finalize_cleanup(operation_id, fence, at)
+                prepared.append((action, adapter))
+            for action, adapter in prepared:
+                current_action_id = str(action["action_id"])
+                # Preflight proves the whole plan is initially safe; this second
+                # observation is intentional because earlier effects may change
+                # external reality before a later action runs.
+                before = dict(adapter.inspect(action))
+                if adapter.intended(action, before):
+                    outcome = "already_applied"
+                    after = before
+                    receipt = {"reconciled": True}
+                else:
+                    if before != action["expected_identity"]:
+                        raise StorageRefusal("cleanup_identity_mismatch", "cleanup action identity is stale or ambiguous")
+                    receipt = dict(adapter.apply(action))
+                    if fault is not None:
+                        fault(
+                            CleanupFaultEvent(
+                                phase="after_external_action",
+                                action_kind=str(action["action_kind"]),
+                            )
+                        )
+                    after = dict(adapter.inspect(action))
+                    if not adapter.intended(action, after):
+                        raise StorageRefusal("cleanup_verification_failed", "cleanup action effect was not verified")
+                    outcome = "applied"
+                self.storage.record_cleanup_action_receipt(
+                    str(action["action_id"]),
+                    operation_id,
+                    fence,
+                    outcome,
+                    before,
+                    after,
+                    receipt,
+                    at,
+                )
+            current_action_id = None
+            return self.storage.finalize_cleanup(operation_id, fence, at)
+        except StorageRefusal as exc:
+            if exc.retryable:
+                raise
+            if exc.code in RECOVERABLE_EXECUTION_REFUSALS:
+                raise StorageRefusal(
+                    exc.code,
+                    str(exc),
+                    retryable=True,
+                ) from exc
+            else:
+                self.storage.block_cleanup_operation(
+                    operation_id,
+                    fence,
+                    current_action_id,
+                    exc.code,
+                    {
+                        "executor_id": executor_id,
+                        "refusal_code": exc.code,
+                        "retryable": False,
+                    },
+                    at,
+                )
+                raise

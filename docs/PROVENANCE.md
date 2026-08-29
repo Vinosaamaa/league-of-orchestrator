@@ -316,3 +316,21 @@ The deliberate baseline difference is that a declared repository artifact now
 blocks cleanup until its pull request, tested head, and merge receipt are
 recorded. Focused synthetic CLI coverage proves the refusal and release; no
 live repository, runtime, installation, cutover, or teardown is exercised.
+
+## Production cleanup successor provenance
+
+The issue-#11 successor keeps the PR-#30 policy and action tables intact and
+adds one stable `cleanup execute` path over the canonical `Storage` facade. The
+deliberate baseline differences are that an exact task-owned shared lease can
+now be released without touching its shared resource, persistent resources are
+retained without an action, completed actions are reverified on resume, and a
+non-retryable execution failure records a blocked operation/obligation plus one
+immutable final receipt. An exact switched rollover predecessor is the only
+Shotcaller cleanup exception; its drain receipt is derived from the completed
+action receipts.
+
+Focused deterministic tests and one synthetic crash-resume cleanup E2E use
+only explicit temporary roots and fake Herdr/process state. This successor does
+not read or mutate the installed watcher, live SQLite state, a real terminal,
+the global resource registry, an active callsign, or any user worktree, and it
+performs no install, cutover, live teardown, or merge.

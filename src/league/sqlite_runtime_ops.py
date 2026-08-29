@@ -622,9 +622,261 @@ def cleanup_operation(store: Any, operation_id: str) -> Optional[dict[str, Any]]
         action = dict(row)
         action["expected_identity"] = json.loads(action.pop("expected_identity_json"))
         action["intended_state"] = json.loads(action.pop("intended_state_json"))
+        receipt = store.connection.execute(
+            "SELECT outcome,receipt_hash,recorded_at FROM cleanup_action_receipts WHERE action_id=?",
+            (action["action_id"],),
+        ).fetchone()
+        action["receipt"] = None if receipt is None else dict(receipt)
         actions.append(action)
     operation["actions"] = actions
+    final = store.connection.execute(
+        "SELECT receipt_id,policy_version,receipt_hash,completed_at FROM teardown_receipts WHERE operation_id=?",
+        (operation_id,),
+    ).fetchone()
+    operation["final_receipt"] = None if final is None else dict(final)
     return operation
+
+
+def cleanup_execution_context(store: Any, operation_id: str) -> dict[str, Any]:
+    """Load one exact execution context exclusively from canonical SQLite rows."""
+
+    operation = cleanup_operation(store, operation_id)
+    if operation is None:
+        raise StorageRefusal("cleanup_operation_unknown", "cleanup operation does not exist")
+    row = store.connection.execute(
+        """
+        SELECT c.*,t.summary AS task_summary,t.state AS task_state,t.version AS task_version,
+               t.current_owner_agent_id AS task_owner_agent_id,
+               t.current_owner_squad_id AS task_owner_squad_id,
+               a.role AS owner_role,a.task_id AS owner_task_id,a.status AS owner_status,
+               a.retired_at AS owner_retired_at
+          FROM cleanup_operations o
+          JOIN cleanup_obligations c ON c.cleanup_obligation_id=o.cleanup_obligation_id
+          JOIN tasks t ON t.task_id=c.task_id
+          LEFT JOIN agent_instances a ON a.agent_id=c.owner_id
+         WHERE o.operation_id=?
+        """,
+        (operation_id,),
+    ).fetchone()
+    if row is None:
+        raise StorageRefusal("cleanup_operation_invalid", "cleanup operation lost its canonical task")
+    actions = operation["actions"]
+    if not actions or actions[0]["action_kind"] != "archive_identity_evidence":
+        raise StorageRefusal("cleanup_archive_missing", "cleanup plan has no canonical archive action")
+    archive = actions[0]["intended_state"]
+    if not isinstance(archive, dict):
+        raise StorageRefusal("cleanup_operation_invalid", "cleanup archive payload is malformed")
+    from .cleanup import select_cleanup_policy
+
+    expected_policy = select_cleanup_policy(str(row["task_class"]), str(row["disposition"]))
+    owner = archive.get("owner")
+    proof = archive.get("proof")
+    if (
+        archive.get("task_id") != row["task_id"]
+        or archive.get("policy") != expected_policy
+        or archive.get("pending_decisions_clear") is not True
+        or not isinstance(owner, dict)
+        or owner.get("id") != row["owner_id"]
+        or not isinstance(proof, dict)
+    ):
+        raise StorageRefusal(
+            "cleanup_operation_invalid",
+            "cleanup task, policy, owner, decision, or proof no longer matches its canonical obligation",
+        )
+    missing = []
+    for dotted in expected_policy["requirements"]:
+        value: Any = proof
+        for component in dotted.split("."):
+            if not isinstance(value, dict) or component not in value:
+                value = None
+                break
+            value = value[component]
+        if value is not True:
+            missing.append(dotted)
+    if missing:
+        raise StorageRefusal("cleanup_proof_missing", "canonical cleanup proof is incomplete")
+    if owner.get("role") == "shotcaller":
+        rollover = archive.get("rollover")
+        if (
+            not isinstance(rollover, dict)
+            or row["owner_role"] != "shotcaller"
+            or row["task_owner_agent_id"] != row["owner_id"]
+        ):
+            raise StorageRefusal("cleanup_owner_refused", "Shotcaller cleanup lost its rollover binding")
+        observed_rollover = store.rollover_cleanup_target(str(rollover.get("operation_id", "")))
+        if observed_rollover != rollover:
+            raise StorageRefusal("cleanup_owner_refused", "rollover predecessor cleanup identity changed")
+    else:
+        terminal_task_states = {
+            "completed": {"completed", "complete", "ready_to_land"},
+            "rejected": {"rejected", "blocked", "cancelled", "canceled"},
+            "cancelled": {"cancelled", "canceled"},
+            "failed": {"failed", "blocked"},
+        }
+        if (
+            row["owner_role"] != owner.get("role")
+            or row["owner_task_id"] != row["task_id"]
+            or (
+                row["owner_retired_at"] is not None
+                and operation["state"] != "completed"
+            )
+            or row["task_state"] not in terminal_task_states.get(str(row["disposition"]), set())
+        ):
+            raise StorageRefusal("cleanup_owner_refused", "cleanup owner is not the exact terminal task owner")
+    resources = []
+    for resource in store.connection.execute(
+        "SELECT * FROM task_resources WHERE task_id=? ORDER BY resource_id",
+        (row["task_id"],),
+    ):
+        value = dict(resource)
+        value["expected_identity"] = json.loads(value.pop("expected_identity_json"))
+        value["applicable"] = bool(value["applicable"])
+        resources.append(value)
+    archived_resources = archive.get("resources")
+    if not isinstance(archived_resources, list) or any(
+        not isinstance(resource, dict) for resource in archived_resources
+    ):
+        raise StorageRefusal(
+            "cleanup_operation_invalid",
+            "cleanup plan has no immutable registered-resource snapshot",
+        )
+    resource_fields = {
+        "resource_id",
+        "task_id",
+        "owner_id",
+        "owner_role",
+        "resource_type",
+        "lifetime",
+        "expected_identity",
+        "cleanup_action",
+        "adapter_kind",
+        "applicable",
+        "applicability_reason",
+    }
+    canonical_resources = {
+        resource["resource_id"]: {
+            key: resource[key]
+            for key in resource_fields
+        }
+        for resource in resources
+    }
+    canonical_resource_states = {
+        resource["resource_id"]: resource["state"] for resource in resources
+    }
+    archived_by_id = {
+        resource.get("resource_id"): resource for resource in archived_resources
+    }
+    if (
+        len(archived_by_id) != len(archived_resources)
+        or set(canonical_resources) != set(archived_by_id)
+        or any(
+            set(archived) != resource_fields
+            or canonical_resources[resource_id] != archived
+            for resource_id, archived in archived_by_id.items()
+        )
+    ):
+        raise StorageRefusal(
+            "cleanup_resource_changed",
+            "registered cleanup resources changed after the immutable plan was created",
+        )
+    resource_actions: dict[str, list[dict[str, Any]]] = {
+        resource_id: [] for resource_id in canonical_resources
+    }
+    for action in actions:
+        resource_id = action.get("resource_id")
+        if resource_id is not None:
+            if resource_id not in resource_actions:
+                raise StorageRefusal(
+                    "cleanup_resource_changed",
+                    "cleanup action refers to an unregistered task resource",
+                )
+            resource_actions[resource_id].append(action)
+    for resource_id, resource in canonical_resources.items():
+        expected_count = 0 if resource["lifetime"] == "persistent_retain" else 1
+        matching = resource_actions[resource_id]
+        if (
+            len(matching) != expected_count
+            or resource["applicable"] is not True
+            or canonical_resource_states[resource_id] == "stale"
+            or any(
+                action["action_kind"] != resource["cleanup_action"]
+                or action["adapter_kind"] != resource["adapter_kind"]
+                or action["expected_identity"] != resource["expected_identity"]
+                for action in matching
+            )
+        ):
+            raise StorageRefusal(
+                "cleanup_resource_changed",
+                "cleanup resource action, applicability, or identity changed",
+            )
+    immutable_actions = [
+        {
+            key: action[key]
+            for key in (
+                "action_id",
+                "ordinal",
+                "action_kind",
+                "adapter_kind",
+                "resource_id",
+                "expected_identity",
+                "intended_state",
+            )
+        }
+        for action in actions
+    ]
+    expected_plan_digest = hashlib.sha256(
+        _json({"policy": expected_policy, "actions": immutable_actions}).encode("utf-8")
+    ).hexdigest()
+    if operation["plan_digest"] != expected_plan_digest:
+        raise StorageRefusal(
+            "cleanup_operation_invalid",
+            "cleanup action plan no longer matches its immutable digest",
+        )
+    runtime_bindings = [
+        {
+            **dict(runtime),
+            "capabilities": json.loads(runtime["capabilities_json"]),
+        }
+        for runtime in store.connection.execute(
+            "SELECT * FROM runtime_bindings WHERE task_id=? ORDER BY binding_id",
+            (row["task_id"],),
+        )
+    ]
+    runtime_instances = [
+        dict(runtime)
+        for runtime in store.connection.execute(
+            "SELECT * FROM runtime_instances WHERE actor_agent_id=? ORDER BY runtime_instance_id",
+            (row["owner_id"],),
+        )
+    ]
+    return {
+        "operation": operation,
+        "obligation": dict(row),
+        "task_identity": {
+            "task_id": row["task_id"],
+            "summary": row["task_summary"],
+            "state": row["task_state"],
+            "version": int(row["task_version"]),
+            "owner_id": row["owner_id"],
+            "owner_role": owner.get("role"),
+            "owner_agent_id": row["task_owner_agent_id"],
+            "owner_squad_id": row["task_owner_squad_id"],
+        },
+        "disposition": row["disposition"],
+        "proof": proof,
+        "resources": resources,
+        "runtime_bindings": runtime_bindings,
+        "runtime_instances": runtime_instances,
+        "adapter_policy": [
+            {
+                "action_id": action["action_id"],
+                "action_kind": action["action_kind"],
+                "adapter_kind": action["adapter_kind"],
+            }
+            for action in actions
+        ],
+        "rollover": archive.get("rollover"),
+    }
 
 
 def claim_cleanup_operation(
@@ -642,6 +894,8 @@ def claim_cleanup_operation(
                 raise StorageRefusal("cleanup_fence_conflict", "cleanup operation fence changed")
             if current["state"] == "completed":
                 return {"operation_id": operation_id, "fence": expected_fence, "state": "completed", "idempotent": True}
+            if current["state"] == "blocked":
+                raise StorageRefusal("cleanup_blocked", "cleanup operation is durably blocked")
             lease_expiry = _time(leased_until, "cleanup lease expiry")
             if lease_expiry <= claim_time:
                 raise StorageRefusal("cleanup_lease_invalid", "cleanup lease expiry must be after claim time")
@@ -728,6 +982,141 @@ def record_cleanup_action_receipt(
     except sqlite3.DatabaseError as exc:
         raise store._translate_database_error(exc, "cleanup action receipt failed") from exc
     return {"action_id": action_id, "receipt_hash": digest, "idempotent": False}
+
+
+def release_resource_lease_for_cleanup(
+    store: Any, expected: Mapping[str, Any]
+) -> dict[str, Any]:
+    required = {
+        "resource_id",
+        "task_id",
+        "owner_agent_id",
+        "kind",
+        "endpoint",
+        "generation",
+    }
+    if set(expected) != required or any(
+        not isinstance(expected.get(key), str) or not expected[key]
+        for key in required
+    ):
+        raise StorageRefusal("cleanup_identity_mismatch", "shared lease identity is incomplete")
+    try:
+        with store._transaction():
+            row = store.connection.execute(
+                "SELECT * FROM resource_leases WHERE resource_id=?",
+                (expected["resource_id"],),
+            ).fetchone()
+            if row is None or any(row[key] != expected[key] for key in required):
+                raise StorageRefusal("cleanup_identity_mismatch", "shared lease identity changed")
+            if row["state"] == "released":
+                return {"resource_id": row["resource_id"], "state": "released", "idempotent": True}
+            if row["state"] != "active":
+                raise StorageRefusal("cleanup_identity_mismatch", "shared lease is not exactly active")
+            store.connection.execute(
+                "UPDATE resource_leases SET state='released' WHERE resource_id=? AND state='active'",
+                (row["resource_id"],),
+            )
+    except StorageRefusal:
+        raise
+    except sqlite3.DatabaseError as exc:
+        raise store._translate_database_error(exc, "shared lease release conflicted") from exc
+    return {"resource_id": expected["resource_id"], "state": "released", "idempotent": False}
+
+
+def resource_lease_for_cleanup(
+    store: Any, resource_id: str
+) -> Optional[dict[str, Any]]:
+    row = store.connection.execute(
+        "SELECT * FROM resource_leases WHERE resource_id=?", (resource_id,)
+    ).fetchone()
+    return None if row is None else dict(row)
+
+
+def block_cleanup_operation(
+    store: Any,
+    operation_id: str,
+    fence: int,
+    action_id: Optional[str],
+    refusal_code: str,
+    receipt: Mapping[str, Any],
+    at: str,
+) -> dict[str, Any]:
+    payload = {
+        "operation_id": operation_id,
+        "fence": fence,
+        "action_id": action_id,
+        "outcome": "blocked",
+        "refusal_code": refusal_code,
+        "receipt": dict(receipt),
+    }
+    digest = hashlib.sha256(_json(payload).encode("utf-8")).hexdigest()
+    try:
+        with store._transaction():
+            operation = store.connection.execute(
+                """
+                SELECT o.*,c.task_id,c.version AS cleanup_version
+                  FROM cleanup_operations o JOIN cleanup_obligations c
+                    ON c.cleanup_obligation_id=o.cleanup_obligation_id
+                 WHERE o.operation_id=?
+                """,
+                (operation_id,),
+            ).fetchone()
+            if operation is None or int(operation["fence"]) != fence:
+                raise StorageRefusal("cleanup_fence_conflict", "cleanup block receipt has a stale fence")
+            existing = store.connection.execute(
+                "SELECT receipt_hash FROM teardown_receipts WHERE operation_id=?",
+                (operation_id,),
+            ).fetchone()
+            if operation["state"] == "blocked":
+                if existing is None or existing["receipt_hash"] != digest:
+                    raise StorageRefusal("cleanup_receipt_conflict", "cleanup block receipt changed")
+                return {"operation_id": operation_id, "state": "blocked", "receipt_hash": digest, "idempotent": True}
+            if operation["state"] != "executing":
+                raise StorageRefusal("cleanup_fence_conflict", "cleanup operation is not blockable")
+            if action_id is not None:
+                action = store.connection.execute(
+                    "SELECT state FROM cleanup_actions WHERE action_id=? AND operation_id=?",
+                    (action_id, operation_id),
+                ).fetchone()
+                if action is None:
+                    raise StorageRefusal("cleanup_action_conflict", "blocked cleanup action is unknown")
+                if action["state"] in {"planned", "executing"}:
+                    store.connection.execute(
+                        "UPDATE cleanup_actions SET state='blocked' WHERE action_id=?",
+                        (action_id,),
+                    )
+            store.connection.execute(
+                "UPDATE cleanup_operations SET state='blocked',leased_until=NULL,updated_at=? WHERE operation_id=?",
+                (at, operation_id),
+            )
+            store.connection.execute(
+                """
+                UPDATE cleanup_obligations
+                   SET cleanup_state='blocked',next_action=?,version=version+1,updated_at=?
+                 WHERE cleanup_obligation_id=?
+                """,
+                (f"Resolve cleanup refusal: {refusal_code}", at, operation["cleanup_obligation_id"]),
+            )
+            store.connection.execute(
+                """
+                INSERT INTO teardown_receipts
+                  (receipt_id,operation_id,task_id,policy_version,receipt_hash,completed_at)
+                VALUES(?,?,?,?,?,?)
+                """,
+                (
+                    f"cleanup-final:{operation_id}",
+                    operation_id,
+                    operation["task_id"],
+                    f"blocked:{refusal_code}",
+                    digest,
+                    at,
+                ),
+            )
+    except StorageRefusal:
+        raise
+    except sqlite3.DatabaseError as exc:
+        raise store._translate_database_error(exc, "cleanup block receipt failed") from exc
+    return {"operation_id": operation_id, "state": "blocked", "receipt_hash": digest, "idempotent": False}
 
 
 def finalize_cleanup(store: Any, operation_id: str, fence: int, at: str) -> dict[str, Any]:

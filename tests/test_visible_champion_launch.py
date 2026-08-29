@@ -302,6 +302,9 @@ def test_generated_thread_mismatch_closes_owned_tab_and_blocks(root: Path) -> No
         store, _adapter(options, runner), options, clock
     ).launch(_spec(worktree, "wrong-thread"))
     assert result["state"] == "blocked"
+    assert result["failure_class"] == "launch_identity_unverified"
+    assert result["cleanup_required"] is True
+    assert result["cleanup_proven"] is True
     assert runner.closed is True
     assert store.connection.execute(
         "SELECT state FROM callsign_queue WHERE callsign='Lux'"
@@ -323,6 +326,7 @@ def test_post_launch_activation_refusal_closes_owned_tab_and_blocks(root: Path) 
         store, _adapter(options, runner), options, clock
     ).launch(_spec(worktree, "activation-refusal"))
     assert result["state"] == "blocked"
+    assert result["failure_class"] == "launch_busy"
     assert store.connection.execute(
         "SELECT failure_class FROM task_assignments WHERE task_assignment_id='assignment:activation-refusal'"
     ).fetchone()[0] == "launch_busy"

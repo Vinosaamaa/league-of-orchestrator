@@ -116,6 +116,7 @@
           <tr><td>SQLite contention</td><td>Long-lived WAL supervisor caused prompt/Stop <code>busy</code></td><td>Journal mode is migration-only; hot connections read/validate it</td></tr>
           <tr><td>Champion runtime</td><td>Canonical root inaccessible and no one-command launcher existed</td><td>Exact extra writable root plus <code>assign run</code> with verified external-effect cleanup</td></tr>
           <tr><td>Performance</td><td>Six prompts created seconds of serialized process startup</td><td>One request-turn PID covers exact intake, begin, work, commit, and final boundary</td></tr>
+          <tr><td>Benchmark provenance</td><td>The 26-command SQLite choreography was mislabeled as the legacy path</td><td>The corrected benchmark executes the retired JSON watcher and installed SQLite command on temporary same-workload fixtures, with median/p95 and command count</td></tr>
           <tr><td>Manual supervise</td><td>Active turns polled compatibility status/supervise</td><td>Event-driven watcher/direct fallback runs outside the model turn</td></tr>
         </tbody>
       </table>
@@ -155,6 +156,8 @@
         <article class="event"><div class="time">Performance gate</div><div><h3>Process choreography measured</h3><p>Cold CLI cost about two hundred milliseconds locally. Six prompts expanded to 26 League process launches.</p></div></article>
         <article class="event"><div class="time">Owner correction</div><div><h3>No prompt injection</h3><p>The hook remained exact capture-and-wake only. The model—not the adapter—continued to author semantic decisions.</p></div></article>
         <article class="event"><div class="time">One-process successor</div><div><h3>Whole turn stays on one PID</h3><p>One process now spans intake, atomic begin, model work, atomic commit, delivery effects, and final Stop-equivalent boundary.</p></div></article>
+        <article class="event"><div class="time">Owner latency review</div><div><h3>Legacy label corrected</h3><p>The prior 26-command sample was SQLite, not JSON. A new ten-sample run used the preserved JSON watcher and installed SQLite command on temporary six-item fixtures.</p></div></article>
+        <article class="event"><div class="time">Guide retirement</div><div><h3>History separated from active instructions</h3><p>The final JSON-era orchestration contract was archived with its source hash. The installable guide and generated Champion context now contain SQLite-native instructions only.</p></div></article>
       </div>
     </section>
 
@@ -282,7 +285,23 @@
         <article class="notice good"><span class="tag">Layer 3</span><h3>Garen semantic reasoning</h3><p>Excluded and variable. Triage is part of the same normal Garen reasoning pass—never a separate model invocation. Garen supplies semantics; the adapter supplies only IDs, tokens, times, hashes, locators, JSON, and arguments.</p></article>
         <article class="notice"><span class="tag">Release gate</span><h3>Installed combined path</h3><p>Measured separately in the installed E2E. It does not add mock, candidate, or model numbers. Multi-second handoffs fail and require an in-process adapter.</p></article>
       </div>
-      <p>The reproducible candidate benchmark uses synthetic temporary state and identical direct work. It measures command/storage overhead only—never vanilla versus orchestrated model quality.</p>
+      <p>The earlier “legacy chatty turn” label was incorrect because its 26 commands all used SQLite. The corrected ten-sample comparison executes the preserved JSON watcher on temporary record pairs and the installed one-process SQLite command on temporary canonical state with the same six summaries and outcomes. JSON had no durable semantic-begin operation, so its begin phase is reported as zero rather than fabricated; that omission favors JSON and is not feature parity.</p>
+      <table>
+        <thead><tr><th>Corrected path / phase</th><th>Commands</th><th>Median</th><th>p95</th></tr></thead>
+        <tbody>
+          <tr><td>Retired JSON process startup</td><td>7</td><td>17.673 ms</td><td>19.317 ms</td></tr>
+          <tr><td>Retired JSON intake</td><td>same turn</td><td>197.936 ms</td><td>238.892 ms</td></tr>
+          <tr><td>Retired JSON begin</td><td>unsupported</td><td>0.000 ms</td><td>0.000 ms</td></tr>
+          <tr><td>Retired JSON commit</td><td>6 transitions</td><td>1,213.282 ms</td><td>1,260.159 ms</td></tr>
+          <tr><td>Retired JSON total</td><td>7</td><td>1,435.357 ms</td><td>1,504.255 ms</td></tr>
+          <tr><td>Installed SQLite process startup</td><td>1</td><td>2.526 ms</td><td>2.860 ms</td></tr>
+          <tr><td>Installed SQLite intake</td><td>same process</td><td>169.672 ms</td><td>192.753 ms</td></tr>
+          <tr><td>Installed SQLite begin</td><td>same process</td><td>3.587 ms</td><td>3.949 ms</td></tr>
+          <tr><td>Installed SQLite commit/boundary/exit</td><td>same process</td><td>21.614 ms</td><td>31.996 ms</td></tr>
+          <tr><td>Installed SQLite total</td><td>1</td><td>198.795 ms</td><td>220.493 ms</td></tr>
+        </tbody>
+      </table>
+      <p>Process startup is parent-side child-process creation overhead; interpreter and CLI initialization remain in intake or commit and the total. The one-process path performed zero per-prompt status, unresolved, supervise, triage, claim, dispatch, or answer shell-outs. Its largest phase output was 8,854 bytes under the 1,100,000-byte bound. Phase medians are independently computed and are not mechanically added.</p>
       <table>
         <thead><tr><th>Measurement</th><th>Launches</th><th>Exact result</th></tr></thead>
         <tbody>
@@ -312,7 +331,7 @@
           <tr><td>Cleanup plan/execute/status/reconcile</td><td>Proof-gated teardown and crash resume</td><td>Disposable reconcile remains narrowly scoped</td></tr>
           <tr><td>Rollover prepare/bindings/acknowledge/commit/abort/drain/status</td><td>Explicit Shotcaller replacement</td><td>Separate reliability workflow</td></tr>
           <tr><td>Storage migrate/backup/import/integrity/export</td><td>Explicit maintenance</td><td>Only migrate changes journal mode; import defaults no-apply</td></tr>
-          <tr><td>Legacy watcher writers and mutable JSON/JSONL</td><td>None</td><td>Fenced/retired; archive is read-only</td></tr>
+          <tr><td>Retired writer surfaces</td><td>None</td><td>The historical guide artifact is non-installable and read-only</td></tr>
         </tbody>
       </table>
     </section>
@@ -396,12 +415,12 @@
           <tr><td>P0</td><td>Add long-lived supervisor with concurrent prompt/Stop regression</td><td>Issue #23 implementer</td><td><span class="pill pass">Candidate complete</span></td></tr>
           <tr><td>P0</td><td>Add one-process exact intake, atomic semantic begin, atomic outcome commit, and full boundary without injection</td><td>Issue #23 implementer</td><td><span class="pill pass">Candidate complete</span></td></tr>
           <tr><td>P0</td><td>Add adapter-backed <code>league assign run</code> with narrow canonical-root access</td><td>Issue #23 implementer</td><td><span class="pill pass">Candidate complete</span></td></tr>
-          <tr><td>P0</td><td>Replace legacy-writer guide from exact merged source bytes</td><td>Issue #23 implementer</td><td><span class="pill pending">Install pending</span></td></tr>
+          <tr><td>P0</td><td>Archive the retired JSON guide contract and install only SQLite-native guidance from exact merged source bytes</td><td>Issue #23 implementer</td><td><span class="pill pending">Install pending</span></td></tr>
           <tr><td>P0</td><td>Publish sanitized Markdown and HTML incident artifacts</td><td>Issue #23 implementer</td><td><span class="pill pass">Candidate complete</span></td></tr>
           <tr><td>P0</td><td>Run focused tests, public safety, and exact-head CI</td><td>Issue #23 implementer</td><td><span class="pill pending">Local pass; CI pending</span></td></tr>
           <tr><td>P0</td><td>Install exact tested release with rollback retained</td><td>Release owner</td><td><span class="pill pending">Pending</span></td></tr>
           <tr><td>P0</td><td>Run one installed disposable capture-to-cleanup E2E</td><td>Issue #23 implementer</td><td><span class="pill pending">Required</span></td></tr>
-          <tr><td>P0</td><td>Measure installed intake, begin, commit, and combined infrastructure separately</td><td>Issue #23 implementer</td><td><span class="pill pending">Required</span></td></tr>
+          <tr><td>P0</td><td>Measure retired JSON versus installed SQLite startup, intake, begin, commit, total, p95, and command count</td><td>Issue #23 implementer</td><td><span class="pill pass">Installed comparison passed</span></td></tr>
           <tr><td>P0</td><td>Re-enable UserPromptSubmit only after installed disposable acceptance</td><td>Owner</td><td><span class="pill pending">Required</span></td></tr>
           <tr><td>P1</td><td>Keep journal-mode changes maintenance-only</td><td>League maintainers</td><td><span class="pill pass">Invariant</span></td></tr>
         </tbody>

@@ -22,7 +22,8 @@ REQUEST_LIFECYCLE_TESTS := \
 	tests/test_transition_delivery.py \
 	tests/test_shotcaller_stop.py \
 	tests/test_canonical_watcher.py \
-	tests/test_request_lifecycle_cli.py
+	tests/test_request_lifecycle_cli.py \
+	tests/test_request_turn_benchmark.py
 
 RUNTIME_LIFECYCLE_TESTS := \
 	tests/test_runtime_adapters.py \

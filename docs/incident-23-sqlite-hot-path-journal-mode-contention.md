@@ -3,7 +3,7 @@
 **Issue:** [#23](https://github.com/Vinosaamaa/league-of-orchestrator/issues/23)  
 **Date:** 2026-08-29  
 **Severity:** P0  
-**Status:** Journal-mode defect corrected in the installed release; successor runtime gate pending
+**Status:** Journal mode and owner-visible turn latency accepted; final installed lifecycle gate pending
 
 **Scope:** Local League prompt intake, Stop handling, supervision, visible Champion launch, and cleanup
 
@@ -44,6 +44,17 @@ routing, stays open without holding a transaction, accepts final answers or
 results, returns the full obligation boundary, and exits. UserPromptSubmit
 still only captures exact bytes and wakes the Shotcaller; it does not alter the
 body, inject instructions, choose a semantic split, or start the turn process.
+
+A later performance review found that the earlier “legacy chatty turn” label
+was inaccurate: it measured repeated SQLite commands, not the preserved JSON
+runtime. The corrected ten-sample benchmark runs the exact retired JSON watcher
+against synthetic record pairs and the installed one-process SQLite command
+against the same six summaries and outcomes. Installed SQLite measured one
+process/command, 198.795 ms median and 220.493 ms p95 total. Retired JSON needed
+seven processes/commands, 1,435.357 ms median and 1,504.255 ms p95 total even
+though its missing durable semantic-begin phase was counted as zero in its
+favor. The active source guide now contains only SQLite instructions; the
+retired record contract is preserved as a non-installable historical artifact.
 
 This report does **not** declare issue #23 resolved. Resolution requires the
 exact installed disposable flow from capture and explicit triage through launch,
@@ -138,6 +149,7 @@ evidence.
 | Sandbox access | A visible Champion could not open canonical state. | Workspace-write granted only the repository worktree. | Launcher adds only the exact canonical League root as a writable root; generic open errors identify this boundary. |
 | Missing launcher | Legacy launch was correctly fenced but no stable one-command replacement existed. | Assignment phases existed without the real Herdr/Codex adapter composition. | `league assign run` owns reserve, launch, generated UUID observation, verification, activation, context, and failure cleanup. |
 | Chatty turn latency | Six serialized triage operations took seconds; a cold command cost roughly two hundred milliseconds locally. | Each semantic item started a new Python process, reopened SQLite, reparsed CLI arguments, and re-ran policy setup. | One `request turn` process spans exact intake, atomic begin, model work, atomic commit, and final boundary. |
+| Benchmark provenance | The prior result called 26 repeated SQLite commands a “legacy” turn. | The benchmark compared command choreography but did not execute the retired JSON watcher. | The reproducible comparison now invokes the preserved JSON command on temporary record pairs and the installed SQLite command on temporary canonical state; it reports median/p95 by phase and command count. |
 | Manual supervise misuse | Active model turns invoked status/supervise polling. | Guidance treated a compatibility watcher process as per-turn choreography. | The source guide prohibits per-turn polling; installed event-driven watcher/direct fallback handles delivery outside the model turn. |
 
 ## Chronological timeline
@@ -160,6 +172,8 @@ evidence.
 | Performance evidence | Cold CLI calls still cost about two hundred milliseconds each and the first exact-body design required one process per prompt/action. |
 | Owner correction | The prompt hook remained capture-and-wake only; no control text could be inserted into the owner body. Semantic decisions remained model output. |
 | One-process candidate | `league request turn` now keeps one PID and one connection through exact intake, atomic triage/claim/routing, model work, atomic answer/result/delivery commit, and the final full obligation boundary. |
+| Corrected installed comparison | Ten same-workload samples measured retired JSON at 7 commands and 1,435.357/1,504.255 ms median/p95 versus installed SQLite at 1 command and 198.795/220.493 ms. The absent JSON semantic-begin phase was reported explicitly as zero, not fabricated. |
+| Guide retirement | The final JSON-era orchestration excerpt was archived with its full source hash; the installable source guide and generated Champion context removed active record-pair and retired-writer instructions. |
 | Documentation gate | The owning incident/design report was expanded to record architecture, failure history, decisions, commands, performance, recovery, acceptance, and remaining limits before release. |
 
 ## Technical root cause
@@ -467,7 +481,35 @@ The evidence has three deliberately separate layers:
 
 `scripts/benchmark_request_turn.py` uses synthetic temporary state and measures
 command/storage overhead only; it does not compare model quality or vanilla
-versus orchestrated chat.
+versus orchestrated chat. The retired JSON path has no durable semantic
+triage/claim begin operation, so that phase is reported as zero rather than
+invented. This omission favors JSON and means the benchmark compares the
+closest preserved six-item lifecycle, not feature parity.
+
+The corrected installed comparison uses ten samples. Process startup is the
+parent-side child-process creation overhead; interpreter and CLI initialization
+remain inside the following intake or commit phase and the observed total.
+Intake, begin, and commit exclude model reasoning. Per-phase medians do not
+mechanically sum to the median total because each statistic is computed
+independently.
+
+| Corrected path/phase | Commands per turn | Median | p95 |
+| --- | ---: | ---: | ---: |
+| Retired JSON process startup | 7 | 17.673 ms | 19.317 ms |
+| Retired JSON intake | same 7-command turn | 197.936 ms | 238.892 ms |
+| Retired JSON begin | unsupported; no fabricated write | 0.000 ms | 0.000 ms |
+| Retired JSON commit | 6 per-item transition commands | 1,213.282 ms | 1,260.159 ms |
+| Retired JSON total | 7 | 1,435.357 ms | 1,504.255 ms |
+| Installed one-process SQLite startup | 1 | 2.526 ms | 2.860 ms |
+| Installed one-process SQLite intake | same process | 169.672 ms | 192.753 ms |
+| Installed one-process SQLite begin | same process | 3.587 ms | 3.949 ms |
+| Installed one-process SQLite commit/boundary/exit | same process | 21.614 ms | 31.996 ms |
+| Installed one-process SQLite total | 1 | 198.795 ms | 220.493 ms |
+
+The largest observed SQLite phase output was 8,854 bytes under a 1,100,000-byte
+bound. The normal-turn budget is exactly one `request turn` process and zero
+per-prompt status, unresolved, supervise, triage, claim, dispatch, or answer
+shell-outs.
 
 | Measurement | Process launches | Exact local result |
 | --- | ---: | ---: |
@@ -583,12 +625,12 @@ The final installed gate must bind rather than narrate each effect:
 | P0 | Add long-lived supervisor plus concurrent prompt/Stop regression | Issue #23 implementer | Issue #23 | Installed and accepted |
 | P0 | Add one-process exact-body intake, atomic semantic begin, atomic answer/result commit, and full obligation boundary without prompt injection | Issue #23 implementer | Issue #23 | Candidate complete |
 | P0 | Add adapter-backed `league assign run` with narrow canonical-root access | Issue #23 implementer | Issue #23 | Candidate complete |
-| P0 | Replace the installed legacy-writer guide from exact merged source bytes | Issue #23 implementer | Issue #23 | Candidate complete; install pending |
+| P0 | Archive the retired JSON-era guide contract and install only SQLite-native guidance from exact merged source bytes | Issue #23 implementer | Issue #23 | Candidate complete; install pending |
 | P0 | Publish Markdown and self-contained HTML incident artifacts | Issue #23 implementer | Issue #23 | Candidate complete |
 | P0 | Run focused tests, public-safety scan, and exact-head CI | Issue #23 implementer | Issue #23 | Local tests passed; CI pending |
 | P0 | Install the exact tested release with rollback retained | Release owner | Issue #23 | Pending |
 | P0 | Run one installed disposable capture-to-cleanup E2E and prove zero residue/integrity | Issue #23 implementer | Issue #23 | Pending |
-| P0 | Publish exact command-level timing and one-process launch-count evidence | Issue #23 implementer | Issue #23 | Candidate complete; installed timing pending |
+| P0 | Publish corrected retired-JSON versus installed one-process median/p95 and command-count evidence | Issue #23 implementer | Issue #23 | Installed comparison passed; final E2E timing pending |
 | P0 | Re-enable UserPromptSubmit only after the installed disposable gate | Owner | Issue #23 | Pending |
 | P1 | Keep journal-mode mutation restricted to explicit maintenance commands | League maintainers | Storage contract | Ongoing invariant |
 

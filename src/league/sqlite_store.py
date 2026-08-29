@@ -73,6 +73,7 @@ from .sqlite_rollover_ops import complete_rollover_drain as complete_rollover_dr
 from .sqlite_rollover_ops import prepare_rollover as prepare_rollover_operation
 from .sqlite_rollover_ops import rollover_bindings as rollover_bindings_operation
 from .sqlite_rollover_ops import rollover_status as rollover_status_operation
+from .sqlite_rollover_ops import rollover_cleanup_target as rollover_cleanup_target_operation
 from .sqlite_roster_ops import roster_snapshot as roster_snapshot_operation
 from .sqlite_report_ops import generate_report as generate_report_operation
 from .sqlite_report_ops import record_activity_evidence as record_activity_evidence_operation
@@ -2061,6 +2062,9 @@ class SQLiteStorage(SQLiteTransactionCore):
     def rollover_status(self, operation_id: str) -> Optional[dict[str, Any]]:
         return rollover_status_operation(self, operation_id)
 
+    def rollover_cleanup_target(self, operation_id: str) -> Optional[dict[str, Any]]:
+        return rollover_cleanup_target_operation(self, operation_id)
+
     def claim_delivery(
         self,
         event_id: str,
@@ -2855,6 +2859,9 @@ class SQLiteStorage(SQLiteTransactionCore):
     def cleanup_operation(self, operation_id: str) -> Optional[dict[str, Any]]:
         return sqlite_runtime_ops.cleanup_operation(self, operation_id)
 
+    def cleanup_execution_context(self, operation_id: str) -> dict[str, Any]:
+        return sqlite_runtime_ops.cleanup_execution_context(self, operation_id)
+
     def claim_cleanup_operation(
         self,
         operation_id: str,
@@ -2892,3 +2899,26 @@ class SQLiteStorage(SQLiteTransactionCore):
 
     def finalize_cleanup(self, operation_id: str, fence: int, at: str) -> dict[str, Any]:
         return sqlite_runtime_ops.finalize_cleanup(self, operation_id, fence, at)
+
+    def block_cleanup_operation(
+        self,
+        operation_id: str,
+        fence: int,
+        action_id: Optional[str],
+        refusal_code: str,
+        receipt: dict[str, Any],
+        at: str,
+    ) -> dict[str, Any]:
+        return sqlite_runtime_ops.block_cleanup_operation(
+            self, operation_id, fence, action_id, refusal_code, receipt, at
+        )
+
+    def release_resource_lease_for_cleanup(
+        self, expected: dict[str, Any]
+    ) -> dict[str, Any]:
+        return sqlite_runtime_ops.release_resource_lease_for_cleanup(self, expected)
+
+    def resource_lease_for_cleanup(
+        self, resource_id: str
+    ) -> Optional[dict[str, Any]]:
+        return sqlite_runtime_ops.resource_lease_for_cleanup(self, resource_id)

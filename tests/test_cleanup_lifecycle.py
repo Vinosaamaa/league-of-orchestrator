@@ -54,7 +54,11 @@ def resource(resource_id: str, lifetime: str, action: str) -> dict:
         "lifetime": lifetime,
         "expected_identity": {"resource_id": resource_id, "generation": "exact"},
         "cleanup_action": action,
-        "adapter_kind": "process",
+        "adapter_kind": {
+            "task_owned": "process",
+            "shared_lease": "lease",
+            "persistent_retain": "retain",
+        }[lifetime],
         "applicable": True,
         "applicability_reason": "Synthetic task-scoped cleanup contract.",
     }
@@ -256,13 +260,23 @@ def test_resource_registration_refusals(root: Path) -> None:
     _, state, _ = seeded_state(root, "resource-refusals")
     with SQLiteStorage(state) as store:
         planner = CleanupPlanner(store)
-        for item, code in (
-            (resource("shared-stop", "shared_lease", "release_lease"), "shared_resource_refused"),
-            (resource("persistent-stop", "persistent_retain", "retain"), "persistent_resource_refused"),
-        ):
-            value = manifest(with_resources=False)
-            value["resources"] = [item]
-            assert_plan_refused(planner, value, f"operation:{item['resource_id']}", code)
+        shared = resource("shared-release", "shared_lease", "release_lease")
+        persistent = resource("persistent-retain", "persistent_retain", "retain")
+        value = manifest(with_resources=False)
+        value["resources"] = [shared, persistent]
+        planned = planner.plan(value, operation_id="operation:mixed-lifetimes", at=AT3)
+        operation = store.cleanup_operation(planned["operation_id"])
+        assert operation is not None
+        assert [
+            action["action_kind"]
+            for action in operation["actions"]
+            if action["resource_id"] == shared["resource_id"]
+        ] == ["release_lease"]
+        assert [
+            action["action_kind"]
+            for action in operation["actions"]
+            if action["resource_id"] == persistent["resource_id"]
+        ] == []
 
         for item, code in (
             (resource("shared-invalid", "shared_lease", "terminate"), "shared_resource_refused"),
@@ -330,7 +344,7 @@ def test_registered_resources_cannot_be_hidden(root: Path) -> None:
             planner,
             manifest(with_resources=False),
             "operation:hidden-shared",
-            "shared_resource_refused",
+            "resource_proof_missing",
         )
 
 
@@ -507,6 +521,9 @@ def test_already_closed_or_missing_exact_resources_and_stale_identity(root: Path
     else:
         raise AssertionError("stale resource identity was cleaned")
     assert effects == [], "cleanup changed state before all action identities passed preflight"
+    blocked = store.cleanup_operation(operation["operation_id"])
+    assert blocked is not None and blocked["state"] == "blocked"
+    assert blocked["final_receipt"]["policy_version"] == "blocked:cleanup_identity_mismatch"
     try:
         executor.execute(
             operation["operation_id"],
@@ -516,9 +533,9 @@ def test_already_closed_or_missing_exact_resources_and_stale_identity(root: Path
             at=AT3,
         )
     except StorageRefusal as exc:
-        assert exc.code == "cleanup_busy" and exc.retryable is True
+        assert exc.code == "cleanup_blocked" and exc.retryable is False
     else:
-        raise AssertionError("cleanup executor stole an unexpired lease")
+        raise AssertionError("cleanup executor resumed a durably blocked operation")
     store.close()
 
 
@@ -529,6 +546,7 @@ def test_public_candidate_has_no_private_paths() -> None:
         ROOT / "src/league/runtime.py",
         ROOT / "src/league/routing.py",
         ROOT / "src/league/cleanup.py",
+        ROOT / "src/league/production_cleanup.py",
         ROOT / "src/league/sqlite_runtime_ops.py",
     ]
     forbidden = (

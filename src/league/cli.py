@@ -616,6 +616,15 @@ def _add_cleanup_commands(groups: argparse._SubParsersAction) -> None:
     plan.add_argument("--at", required=True)
     status = commands.add_parser("status", help="Read one cleanup operation and ordered action state.")
     status.add_argument("--operation-id", required=True)
+    execute = commands.add_parser(
+        "execute",
+        help="Execute one canonical SQLite cleanup plan through supported production adapters.",
+    )
+    execute.add_argument("--operation-id", required=True)
+    execute.add_argument("--expected-fence", type=int, required=True)
+    execute.add_argument("--executor-id", required=True)
+    execute.add_argument("--leased-until", required=True)
+    execute.add_argument("--at", required=True)
     reconcile = commands.add_parser(
         "reconcile",
         help="Plan and automatically execute one exact disposable-canary cleanup.",
@@ -1561,6 +1570,18 @@ def _cleanup_status(store: Storage, args: argparse.Namespace) -> CommandResult:
     return {"found": value is not None, "operation": value}, None
 
 
+def _cleanup_execute(store: Storage, args: argparse.Namespace) -> CommandResult:
+    from .production_cleanup import ProductionCleanup
+
+    return ProductionCleanup(store).execute(
+        args.operation_id,
+        expected_fence=args.expected_fence,
+        executor_id=args.executor_id,
+        leased_until=args.leased_until,
+        at=args.at,
+    ), None
+
+
 def _cleanup_reconcile(store: Storage, args: argparse.Namespace) -> CommandResult:
     from .real_cleanup import canary_cleanup_registry
 
@@ -2083,6 +2104,7 @@ HANDLERS: dict[str, CommandHandler] = {
     "artifact.status": _artifact_status,
     "resource.register": _resource_register,
     "cleanup.plan": _cleanup_plan,
+    "cleanup.execute": _cleanup_execute,
     "cleanup.reconcile": _cleanup_reconcile,
     "cleanup.status": _cleanup_status,
     "request.intake": _request_intake,

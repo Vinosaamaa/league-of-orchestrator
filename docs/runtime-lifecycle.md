@@ -49,9 +49,10 @@ See [skill capabilities](skill-capabilities.md).
 
 Each task resource declares owner, type, lifetime, expected identity, cleanup
 action, adapter, and applicability. `task_owned` resources may perform their
-exact cleanup action. `shared_lease` and `persistent_retain` resources remain
-representable in the registry, with only `release_lease` and `retain`
-respectively, but refuse task teardown because they are not exclusively owned.
+exact cleanup action. A `shared_lease` permits only the `lease` adapter to
+release the exact task/owner/endpoint/generation row; it never stops or restarts
+the shared resource. A `persistent_retain` registration is validated but has no
+cleanup action and remains active after the task completes.
 
 The planner selects one versioned policy:
 
@@ -83,9 +84,29 @@ preflighted read-only before the first effect, each action is inspected again
 before use, verified afterwards, and receives one immutable receipt. A crash after the
 effect but before the receipt is recovered by inspection: an already-observed
 intended state records `already_applied` instead of repeating the effect. A
-fence prevents a stale executor from writing receipts. Cleanup becomes
+fence prevents a stale executor from writing receipts. A resumed attempt also
+reverifies every previously completed action. A non-retryable stale identity,
+unsupported policy, or failed verification atomically records `blocked`, fixes
+the action when applicable, advances the obligation revision, and writes one
+immutable final refusal receipt. Cleanup becomes
 `cleanup_completed` only after every action receipt and the final teardown
 receipt exist.
+
+`league cleanup execute` is the production command boundary. It accepts only an
+existing operation ID, expected fence, executor identity, lease expiry, and
+timestamp. Before claiming the fence, it reconstructs the exact obligation and
+revision, task/disposition, owner, registered resources, runtime rows, adapter
+policy, and proof from canonical SQLite through the `Storage` interface. It
+does not accept a manifest or adapter-config path. The current production
+driver supports verified Codex+Herdr, exact registered Git/callsign/process
+actions, and exact shared-lease release; another harness/backend policy refuses
+clearly before effects.
+
+Automatic Champion cleanup and post-switch predecessor Shotcaller drain share
+this executor. Shotcaller cleanup is accepted only when the archived plan still
+matches the exact switched rollover predecessor and version. Completion derives
+the rollover drain receipt from immutable cleanup action receipts; retries reuse
+the same cleanup operation and rollover receipt.
 
 Runtime exit uses the same recoverable shape: it atomically claims a binding
 version and monotonically increasing exit fence before sending exit or close,
@@ -127,5 +148,7 @@ make test-all
 
 The fault suite crashes after every planned external action, resumes without a
 duplicate effect, retries completed teardown idempotently, and covers stale
-identity, already-closed/missing exact resources, shared/persistent refusal,
-policy classes, rejected/cancelled/failed work, and public-path exclusions.
+identity, already-closed/missing exact resources, exact shared-lease release,
+persistent retention, policy classes, rejected/cancelled/failed work, and
+public-path exclusions. The production slice adds one synthetic cleanup E2E;
+it does not perform a live teardown.

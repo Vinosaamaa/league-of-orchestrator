@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Mapping, Optional, Protocol, Sequence
 
 from .acceptance import _atomic_write, _stable_bytes
-from .cleanup import CleanupAdapterRegistry
+from .cleanup import CleanupAdapterRegistry, cleanup_action_digest
 from .sqlite_runtime_ops import runtime_cleanup_identity
 from .sqlite_store import SQLiteStorage
 from .storage import StorageRefusal
@@ -589,7 +589,7 @@ class CallsignAdapter(_BaseAdapter):
                 "cleanup_identity_mismatch", "callsign assignment identity changed"
             )
         if assignment["state"] == "released":
-            expected_digest = hashlib.sha256(_stable_bytes(action)).hexdigest()
+            expected_digest = cleanup_action_digest(action)
             if (
                 assignment["version"] != self.identity["expected_version"] + 1
                 or assignment["release_receipt_digest"] != expected_digest
@@ -608,7 +608,7 @@ class CallsignAdapter(_BaseAdapter):
         return observed
 
     def apply(self, action: Mapping[str, Any]) -> Mapping[str, Any]:
-        digest = hashlib.sha256(_stable_bytes(action)).hexdigest()
+        digest = cleanup_action_digest(action)
         result = self.store.release_callsign(
             self.identity["assignment_id"],
             self.identity["expected_version"],

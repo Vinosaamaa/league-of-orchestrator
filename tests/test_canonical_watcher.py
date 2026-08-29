@@ -56,7 +56,7 @@ def _watcher(
         env=env,
         check=False,
     )
-    assert result.returncode == 0, result.stderr
+    assert result.returncode == 0, result.stdout + result.stderr
     return json.loads(result.stdout)
 
 
@@ -354,6 +354,84 @@ def test_codex_and_cursor_prompt_capture_exactly_once(root: Path) -> None:
         assert stop["decision"] == "block"
 
 
+def test_missing_identity_quarantines_then_binds_and_triages(root: Path) -> None:
+    _, state, _ = seeded_state(root, "missing-identity")
+    env = _environment(root / "missing-identity", state)
+    session = "session:missing-identity"
+    payload = {
+        "session_id": session,
+        "turn_id": "turn:missing-identity",
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": "Complete prompt retained before runtime identity exists.",
+    }
+    started = time.monotonic()
+    assert _watcher(env, "codex-user-prompt-hook", payload=payload) == {}
+    assert time.monotonic() - started < 1.0
+    assert _watcher(env, "codex-user-prompt-hook", payload=payload) == {}
+    exported_path = state / "missing-identity.json"
+    _league(
+        state,
+        "storage",
+        "export",
+        "--purpose",
+        "rollback",
+        "--output-name",
+        exported_path.name,
+    )
+    exported = json.loads(exported_path.read_text(encoding="utf-8"))
+    quarantined = [
+        row for row in exported["tables"]["prompt_quarantine"]
+        if row["source_event_key"] == payload["turn_id"]
+    ]
+    assert len(quarantined) == 1
+    row = quarantined[0]
+    encoded = payload["prompt"].encode("utf-8")
+    assert row["state"] == "quarantined"
+    assert row["reason"] == "runtime_unverified"
+    assert row["body"] == payload["prompt"]
+    assert row["body_hash"] == hashlib.sha256(encoded).hexdigest()
+    assert row["byte_count"] == len(encoded)
+
+    runtime_id = _register_garen_runtime(
+        state, "later-binding", session_ref=session
+    )
+    bound = _league(
+        state,
+        "request",
+        "bind-prompt",
+        "--prompt-id",
+        row["prompt_id"],
+        "--intake-actor-id",
+        SHOTCALLER_ID,
+        "--runtime-instance-id",
+        runtime_id,
+        "--at",
+        AT2,
+    )["result"]
+    assert bound["triage_state"] == "untriaged" and not bound["idempotent"]
+    triaged = _league(
+        state,
+        "request",
+        "triage",
+        "--prompt-id",
+        row["prompt_id"],
+        "--items-json",
+        json.dumps(
+            [{
+                "prompt_item_id": "item:missing-identity:1",
+                "ordinal": 1,
+                "summary": "Later-bound prompt acknowledged",
+                "disposition": "acknowledgement",
+                "request_id": None,
+            }],
+            separators=(",", ":"),
+        ),
+        "--at",
+        AT2,
+    )["result"]
+    assert triaged["triage_state"] == "complete"
+
+
 def test_material_delivery_watcher_direct_dedup_and_unavailable(root: Path) -> None:
     _, watcher_state, _ = seeded_state(root, "watcher-delivery")
     watcher_env = _environment(root / "watcher-delivery", watcher_state)
@@ -479,6 +557,7 @@ def main() -> None:
         test_supervise_wakes_and_stop_allows_after_settlement(root)
         test_supervise_user_priority(root)
         test_codex_and_cursor_prompt_capture_exactly_once(root)
+        test_missing_identity_quarantines_then_binds_and_triages(root)
         test_material_delivery_watcher_direct_dedup_and_unavailable(root)
     print("PASS: installed SQLite Stop/supervise plus watcher/direct exact-once delivery and pending fallback")
 

@@ -109,7 +109,7 @@ from .sqlite_routing_policy_schema import STATEMENTS as ROUTING_POLICY_MIGRATION
 
 
 WAL_MINIMUM = (3, 51, 3)
-CURRENT_SCHEMA_VERSION = 9
+CURRENT_SCHEMA_VERSION = 10
 DATABASE_NAME = "league.sqlite3"
 DEFAULT_BUSY_TIMEOUT_MS = 500
 MAX_BUSY_TIMEOUT_MS = 10_000
@@ -1069,6 +1069,31 @@ MIGRATIONS = (
             "CREATE INDEX ix_repository_artifacts_task ON repository_artifacts(task_id,state,artifact_id)",
         ),
     ),
+    Migration(
+        10,
+        "prompt-runtime-quarantine",
+        (
+            """
+            CREATE TABLE prompt_quarantine (
+              prompt_id TEXT PRIMARY KEY,
+              adapter_kind TEXT NOT NULL,
+              session_ref TEXT NOT NULL,
+              source_event_key TEXT NOT NULL,
+              body TEXT NOT NULL,
+              body_hash TEXT NOT NULL,
+              byte_count INTEGER NOT NULL CHECK (byte_count > 0),
+              state TEXT NOT NULL CHECK (state IN ('quarantined','bound')),
+              reason TEXT NOT NULL CHECK (reason='runtime_unverified'),
+              bound_actor_id TEXT REFERENCES agent_instances(agent_id),
+              bound_runtime_instance_id TEXT REFERENCES runtime_instances(runtime_instance_id),
+              created_at TEXT NOT NULL,
+              bound_at TEXT,
+              UNIQUE (adapter_kind,session_ref,source_event_key)
+            )
+            """,
+            "CREATE INDEX ix_prompt_quarantine_state ON prompt_quarantine(state,created_at,prompt_id)",
+        ),
+    ),
 )
 
 
@@ -1252,6 +1277,7 @@ _EXPORT_TABLES = (
     "import_runs",
     "imported_artifacts",
     "runtime_instances",
+    "prompt_quarantine",
     "prompts",
     "prompt_payloads",
     "prompt_items",
@@ -1321,6 +1347,7 @@ _EXPORT_ORDER = {
     "import_runs": "run_id",
     "imported_artifacts": "source_order,artifact_id",
     "runtime_instances": "runtime_instance_id",
+    "prompt_quarantine": "created_at,prompt_id",
     "prompts": "created_at,prompt_id",
     "prompt_payloads": "prompt_id",
     "prompt_items": "prompt_id,ordinal,prompt_item_id",
@@ -1386,6 +1413,7 @@ _INSPECTION_REDACTIONS = {
     "runtime_reconciliation": {"evidence_json"},
     "resource_leases": {"endpoint", "process_pid", "process_start", "metadata_json"},
     "runtime_instances": {"session_ref", "endpoint", "runtime_generation"},
+    "prompt_quarantine": {"session_ref", "body"},
     "prompt_payloads": {"body"},
     "prompt_items": {"summary"},
     "requests": {"summary", "resolution_summary"},
@@ -2295,6 +2323,41 @@ class SQLiteStorage(SQLiteTransactionCore):
         self, prompt_id: str, items: list[dict[str, Any]], at: str
     ) -> dict[str, Any]:
         return triage_prompt_operation(self, prompt_id, items, at)
+
+    def quarantine_prompt(
+        self,
+        prompt_id: str,
+        adapter_kind: str,
+        session_ref: str,
+        source_event_key: str,
+        body: str,
+        at: str,
+    ) -> dict[str, Any]:
+        from .sqlite_request_ops import quarantine_prompt
+
+        return quarantine_prompt(
+            self, prompt_id, adapter_kind, session_ref, source_event_key, body, at
+        )
+
+    def bind_quarantined_prompt(
+        self,
+        prompt_id: str,
+        intake_actor_id: str,
+        runtime_instance_id: str,
+        at: str,
+        *,
+        wake_scope_id: Optional[str] = None,
+    ) -> dict[str, Any]:
+        from .sqlite_request_ops import bind_quarantined_prompt
+
+        return bind_quarantined_prompt(
+            self,
+            prompt_id,
+            intake_actor_id,
+            runtime_instance_id,
+            at,
+            wake_scope_id=wake_scope_id,
+        )
 
     def claim_request(
         self,

@@ -748,6 +748,14 @@ def test_schema_contracts_are_current_and_state_specific() -> None:
     receipt = json.loads(
         (ROOT / "schema/league-pre-cutover-receipt.schema.json").read_text(encoding="utf-8")
     )
+    plan = json.loads(
+        (ROOT / "schema/league-pre-cutover-plan.schema.json").read_text(encoding="utf-8")
+    )
+    shared = json.loads(
+        (ROOT / "schema/league-legacy-reconciliation.schema.json").read_text(
+            encoding="utf-8"
+        )
+    )
     migration = acceptance["$defs"]["migrationReceipt"]
     assert migration["properties"]["to_version"] == {"const": CURRENT_SCHEMA_VERSION}
     assert migration["properties"]["applied"]["maxItems"] == CURRENT_SCHEMA_VERSION
@@ -759,6 +767,15 @@ def test_schema_contracts_are_current_and_state_specific() -> None:
     }
     assert all(item["additionalProperties"] is False for item in operation["oneOf"])
     assert "slice" not in receipt["$defs"]
+    shared_reference = "league-legacy-reconciliation.schema.json#/$defs/"
+    assert plan["$defs"]["legacyResolution"]["oneOf"][1]["properties"]["triple"] == {
+        "$ref": f"{shared_reference}legacyTriple"
+    }
+    assert receipt["$defs"]["sha256"] == {"$ref": f"{shared_reference}sha256"}
+    assert receipt["$defs"]["legacyTriple"] == {
+        "$ref": f"{shared_reference}legacyTriple"
+    }
+    assert set(shared["$defs"]) == {"sha256", "legacyTriple"}
 
 
 def main() -> int:

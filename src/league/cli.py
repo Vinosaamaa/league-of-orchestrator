@@ -2087,6 +2087,7 @@ SCHEMA_INVENTORY = (
     "league-import-report.schema.json",
     "league-export.schema.json",
     "league-acceptance-receipt.schema.json",
+    "league-legacy-reconciliation.schema.json",
     "league-pre-cutover-plan.schema.json",
     "league-pre-cutover-receipt.schema.json",
     "league-cleanup-canary-adapters.schema.json",

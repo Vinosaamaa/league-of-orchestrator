@@ -96,17 +96,6 @@
       "pattern": "^[^/\\u0000]+(?:/[^/\\u0000]+)*$",
       "not": {"pattern": "(^|/)\\.\\.?(/|$)"}
     },
-    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-    "legacyTriple": {
-      "type": "object",
-      "required": ["status", "at", "update"],
-      "properties": {
-        "status": {"type": "string", "minLength": 1},
-        "at": {"type": "string", "format": "date-time"},
-        "update": {"type": "string", "minLength": 1}
-      },
-      "additionalProperties": false
-    },
     "legacyResolution": {
       "oneOf": [
         {
@@ -120,7 +109,7 @@
           "required": ["authoritative", "triple"],
           "properties": {
             "authoritative": {"const": "normalized_triple"},
-            "triple": {"$ref": "#/$defs/legacyTriple"}
+            "triple": {"$ref": "league-legacy-reconciliation.schema.json#/$defs/legacyTriple"}
           },
           "additionalProperties": false
         }
@@ -144,7 +133,10 @@
         "expected_source_sha256": {
           "type": "object",
           "required": ["status", "updates"],
-          "properties": {"status": {"$ref": "#/$defs/sha256"}, "updates": {"$ref": "#/$defs/sha256"}},
+          "properties": {
+            "status": {"$ref": "league-legacy-reconciliation.schema.json#/$defs/sha256"},
+            "updates": {"$ref": "league-legacy-reconciliation.schema.json#/$defs/sha256"}
+          },
           "additionalProperties": false
         },
         "resolution": {"$ref": "#/$defs/legacyResolution"},

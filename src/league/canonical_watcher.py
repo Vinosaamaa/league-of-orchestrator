@@ -154,7 +154,8 @@ def _capture_prompt(
             or not actor["address"]
         ):
             return store.quarantine_prompt(
-                prompt_id, adapter_kind, session_ref, source_event_key, body, now
+                prompt_id, adapter_kind, session_ref, source_event_key, body, now,
+                wake_actor_id=actor_id, wake_scope_id=scope,
             )
         runtime_digest = hashlib.sha256(
             f"{adapter_kind}\0{session_ref}\0{actor['backend']}\0{actor['address']}".encode()
@@ -178,7 +179,8 @@ def _capture_prompt(
         runtimes = [{"runtime_instance_id": runtime_id}]
     if len(runtimes) != 1:
         return store.quarantine_prompt(
-            prompt_id, adapter_kind, session_ref, source_event_key, body, now
+            prompt_id, adapter_kind, session_ref, source_event_key, body, now,
+            wake_actor_id=actor_id, wake_scope_id=scope,
         )
     runtime_id = str(runtimes[0]["runtime_instance_id"])
     quarantined = store.connection.execute(
@@ -204,7 +206,8 @@ def _capture_prompt(
         if exc.code != "runtime_unverified":
             raise
         return store.quarantine_prompt(
-            prompt_id, adapter_kind, session_ref, source_event_key, body, now
+            prompt_id, adapter_kind, session_ref, source_event_key, body, now,
+            wake_actor_id=actor_id, wake_scope_id=scope,
         )
 
 

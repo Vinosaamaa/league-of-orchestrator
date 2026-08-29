@@ -109,7 +109,7 @@ from .sqlite_routing_policy_schema import STATEMENTS as ROUTING_POLICY_MIGRATION
 
 
 WAL_MINIMUM = (3, 51, 3)
-CURRENT_SCHEMA_VERSION = 10
+CURRENT_SCHEMA_VERSION = 11
 DATABASE_NAME = "league.sqlite3"
 DEFAULT_BUSY_TIMEOUT_MS = 500
 MAX_BUSY_TIMEOUT_MS = 10_000
@@ -1092,6 +1092,15 @@ MIGRATIONS = (
             )
             """,
             "CREATE INDEX ix_prompt_quarantine_state ON prompt_quarantine(state,created_at,prompt_id)",
+        ),
+    ),
+    Migration(
+        11,
+        "prompt-quarantine-watcher-generation",
+        (
+            "ALTER TABLE prompt_quarantine ADD COLUMN wake_actor_id TEXT REFERENCES agent_instances(agent_id)",
+            "ALTER TABLE prompt_quarantine ADD COLUMN wake_scope_id TEXT",
+            "ALTER TABLE prompt_quarantine ADD COLUMN wake_committed INTEGER NOT NULL DEFAULT 0 CHECK (wake_committed IN (0,1))",
         ),
     ),
 )
@@ -2332,11 +2341,15 @@ class SQLiteStorage(SQLiteTransactionCore):
         source_event_key: str,
         body: str,
         at: str,
+        *,
+        wake_actor_id: Optional[str] = None,
+        wake_scope_id: Optional[str] = None,
     ) -> dict[str, Any]:
         from .sqlite_request_ops import quarantine_prompt
 
         return quarantine_prompt(
-            self, prompt_id, adapter_kind, session_ref, source_event_key, body, at
+            self, prompt_id, adapter_kind, session_ref, source_event_key, body, at,
+            wake_actor_id=wake_actor_id, wake_scope_id=wake_scope_id,
         )
 
     def bind_quarantined_prompt(

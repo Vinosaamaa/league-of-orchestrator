@@ -103,8 +103,9 @@ cleanup while publication is pending, and then records the actual PR #41
 tested head and squash-merge receipt. Exact tested/merge tree and report-byte
 parity make that isolated branch eligible for cleanup without performing any
 hosted mutation. The command also proves that the terminal transition creates
-exactly one durable cleanup obligation, event, and outbox row; the same Shotcaller Stop decision
-blocks both wait and end while cleanup alone is pending; and complete stored
+exactly one durable cleanup obligation, event, and outbox row; the same
+Shotcaller Stop decision blocks both wait and end while cleanup alone is
+pending; and complete stored
 authority starts adapter-backed cleanup without a reminder. Cleanup archives
 identity/evidence first, exits only the exact Codex session, closes only its
 Herdr pane and runtime binding, removes only the clean registered worktree and

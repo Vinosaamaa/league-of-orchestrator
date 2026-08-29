@@ -29,6 +29,30 @@ def _time(value: str, label: str, code: str = "cleanup_lease_invalid") -> dateti
     return parsed
 
 
+def runtime_cleanup_identity(
+    store: Any,
+    runtime_instance_id: str,
+    endpoint_identity: str,
+    runtime_generation: str,
+) -> dict[str, Any]:
+    """Return one exact runtime row or refuse a stale cleanup identity."""
+
+    if not all((runtime_instance_id, endpoint_identity, runtime_generation)):
+        raise StorageRefusal("cleanup_identity_mismatch", "runtime cleanup identity is incomplete")
+    runtime = store.connection.execute(
+        "SELECT endpoint,runtime_generation,status FROM runtime_instances WHERE runtime_instance_id=?",
+        (runtime_instance_id,),
+    ).fetchone()
+    if runtime is None:
+        raise StorageRefusal("cleanup_identity_mismatch", "runtime cleanup identity is missing")
+    if (
+        runtime["endpoint"] != endpoint_identity
+        or runtime["runtime_generation"] != runtime_generation
+    ):
+        raise StorageRefusal("cleanup_identity_mismatch", "runtime cleanup identity changed")
+    return dict(runtime)
+
+
 def register_runtime_binding(
     store: Any,
     binding_id: str,
@@ -90,21 +114,11 @@ def close_runtime_for_cleanup(
     at: str,
 ) -> dict[str, Any]:
     _time(at, "runtime cleanup close time")
-    if not all((runtime_instance_id, endpoint_identity, runtime_generation)):
-        raise StorageRefusal("cleanup_identity_mismatch", "runtime cleanup identity is incomplete")
     try:
         with store._transaction():
-            runtime = store.connection.execute(
-                "SELECT endpoint,runtime_generation,status FROM runtime_instances WHERE runtime_instance_id=?",
-                (runtime_instance_id,),
-            ).fetchone()
-            if runtime is None:
-                raise StorageRefusal("cleanup_identity_mismatch", "runtime cleanup identity is missing")
-            if (
-                runtime["endpoint"] != endpoint_identity
-                or runtime["runtime_generation"] != runtime_generation
-            ):
-                raise StorageRefusal("cleanup_identity_mismatch", "runtime cleanup identity changed")
+            runtime = runtime_cleanup_identity(
+                store, runtime_instance_id, endpoint_identity, runtime_generation
+            )
             if runtime["status"] == "closed":
                 return {
                     "runtime_instance_id": runtime_instance_id,

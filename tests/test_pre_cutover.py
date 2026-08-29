@@ -226,7 +226,12 @@ def assert_receipt_operation(result: dict[str, Any]) -> None:
         "awaiting_authority",
     ]
     assert result["sentinels"]["unchanged"] is True
-    assert result["live_targets"]["unchanged"] is True
+    live_targets = result["live_targets"]
+    assert live_targets["unchanged"] is True
+    assert live_targets["observation_scope"] == "before_after_snapshot_parity"
+    assert live_targets["continuous_external_stability_proven"] is False
+    assert live_targets["preflight_write_count"] == 0
+    assert live_targets["target_count"] > 0
 
 
 def assert_receipt_migration_and_install(result: dict[str, Any]) -> None:
@@ -308,6 +313,14 @@ def assert_receipt_mutation_and_claims(
         if item["operation"] == "backup_current_target"
     }
     assert backup_targets == expected_targets
+    backup_operations = [
+        item for item in manifest["operations"] if item["operation"] == "backup_current_target"
+    ]
+    assert all(item["after"]["verification_required"] for item in backup_operations)
+    assert all(
+        item["rollback"]["source_created_by_operation"] == "backup_current_target"
+        for item in backup_operations
+    )
     assert all(value is False for value in result["public_claims"].values())
 
 
@@ -399,6 +412,28 @@ def test_invalid_plan_and_root_overlap_refuse_before_home(root: Path) -> None:
         "plan_invalid",
     )
     assert not (temporary_root / "league-dotted-precutover").exists()
+
+    reserved = dict(fixture["plan"])
+    reserved["legacy"] = dict(reserved["legacy"])
+    reserved["legacy"]["bindings"] = [
+        dict(item) for item in reserved["legacy"]["bindings"]
+    ]
+    reserved["legacy"]["bindings"][0]["relative_path"] = "import-manifest.json"
+    reserved_path = fixture["live"] / "reserved-binding-plan.json"
+    write_json(reserved_path, reserved)
+    refused(
+        lambda: run_pre_cutover(
+            temporary_root,
+            "reserved",
+            plan_path=reserved_path,
+            sentinel_paths=(fixture["legacy"],),
+            config_sentinel=fixture["hook"],
+            process_sentinel=fixture["processes"],
+            source_root=ROOT,
+        ),
+        "plan_invalid",
+    )
+    assert not (temporary_root / "league-reserved-precutover").exists()
 
 
 def test_backup_fault_blocks_resumably_without_live_change(root: Path) -> None:

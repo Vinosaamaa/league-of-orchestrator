@@ -48,6 +48,11 @@ archive, and hook targets. Every proposed destination must have one exact
 current-target precondition. The command refuses a temporary root that overlaps
 any planned target and never scans a home directory.
 
+The live-target `unchanged` result is explicitly scoped to exact before/after
+snapshot parity plus zero preflight writes. It does not claim continuous
+external stability; a separately authorized cutover must quiesce and lock live
+writers before relying on those preconditions.
+
 The receipt `league.pre-cutover-receipt.v1` adds these proofs to the foundation:
 
 - a consistent explicit-binding copy of the caller's legacy state, strict
@@ -85,9 +90,9 @@ and explicit cutover authority.
 
 ## Real disposable cleanup canary
 
-The cleanup gate has one deliberately real runtime command. It makes a local,
-no-hardlink clone beneath the explicit temporary root, creates an isolated
-worktree at the exact tested head of the repository-owned issue-#39 report,
+The cleanup gate has one deliberately real runtime command. It fetches only the
+two required report commits into a new repository beneath the explicit
+temporary root, creates an isolated worktree at the exact tested head,
 opens one no-focus Herdr pane, launches one Codex Champion routed as
 `gpt-5.6-sol high`, and stores the lifecycle in the canary's real SQLite state:
 

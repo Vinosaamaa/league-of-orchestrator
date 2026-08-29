@@ -26,13 +26,10 @@ from league.real_cleanup import (  # noqa: E402
 )
 from league.real_canary import (  # noqa: E402
     LIFECYCLE_TASK_ID,
-    REPORT_MERGE_COMMIT,
-    REPORT_TESTED_HEAD,
     SHOTCALLER_ID,
     _cleanup_files,
     _codex_session_id,
     _create_git_canary,
-    _create_repository_artifact_canary,
     _settle_transition_and_request,
     _setup_sqlite,
 )
@@ -107,6 +104,70 @@ def git_fixture(root: Path) -> dict[str, Any]:
     }
 
 
+def squash_git_fixture(root: Path) -> dict[str, Any]:
+    root.mkdir(parents=True)
+    repository = root / "repository"
+    worktree = root / "worktree"
+    run(("git", "init", "-b", "main", str(repository)))
+    run(("git", "-C", str(repository), "config", "user.name", "League Canary"))
+    run(
+        (
+            "git",
+            "-C",
+            str(repository),
+            "config",
+            "user.email",
+            "12794431+Vinosaamaa@users.noreply.github.com",
+        )
+    )
+    (repository / "README.md").write_text("base\n", encoding="utf-8")
+    run(("git", "-C", str(repository), "add", "README.md"))
+    run(("git", "-C", str(repository), "commit", "-m", "Seed base"))
+    base = run(("git", "-C", str(repository), "rev-parse", "HEAD"))
+    run(("git", "-C", str(repository), "switch", "-c", "canary-squash"))
+    (repository / "REPORT.md").write_text("repository artifact\n", encoding="utf-8")
+    run(("git", "-C", str(repository), "add", "REPORT.md"))
+    run(("git", "-C", str(repository), "commit", "-m", "Produce report"))
+    head = run(("git", "-C", str(repository), "rev-parse", "HEAD"))
+    tree = run(("git", "-C", str(repository), "rev-parse", "HEAD^{tree}"))
+    merge_commit = run(
+        (
+            "git",
+            "-C",
+            str(repository),
+            "commit-tree",
+            tree,
+            "-p",
+            base,
+            "-m",
+            "Squash report",
+        )
+    )
+    run(("git", "-C", str(repository), "update-ref", "refs/heads/main", merge_commit))
+    run(("git", "-C", str(repository), "switch", "main"))
+    run(
+        (
+            "git",
+            "-C",
+            str(repository),
+            "worktree",
+            "add",
+            str(worktree),
+            "canary-squash",
+        )
+    )
+    return {
+        "repository": str(repository),
+        "worktree": str(worktree),
+        "branch": "canary-squash",
+        "head": head,
+        "base_ref": merge_commit,
+        "merge_commit": merge_commit,
+        "tested_tree": tree,
+        "merge_tree": tree,
+    }
+
+
 def active_callsign(store: SQLiteStorage) -> dict[str, Any]:
     store.reconcile_callsign_pool(
         "champion",
@@ -149,6 +210,7 @@ class FakeHerdrRunner:
     def __init__(self) -> None:
         self.agent = True
         self.pane = True
+        self.fail_close_once = False
         self.calls: list[tuple[str, ...]] = []
 
     def run(
@@ -181,6 +243,11 @@ class FakeHerdrRunner:
             )
             output = json.dumps({"result": {"panes": panes}})
         elif args[1:3] == ("pane", "close"):
+            if self.fail_close_once:
+                self.fail_close_once = False
+                raise StorageRefusal(
+                    "cleanup_adapter_failed", "synthetic pane close failed"
+                )
             self.pane = False
             output = json.dumps({"result": {"closed": True}})
         else:
@@ -216,6 +283,11 @@ def test_archive_git_and_scope(root: Path) -> None:
     invalid = dict(config)
     invalid["archive_path"] = "/tmp/outside-canary.json"
     refused(lambda: validate_canary_config(invalid), "cleanup_adapter_scope_refused")
+    linked_root = root.parent / f"{root.name}-link"
+    linked_root.symlink_to(root, target_is_directory=True)
+    linked = dict(config)
+    linked["temporary_root"] = str(linked_root)
+    refused(lambda: validate_canary_config(linked), "cleanup_adapter_scope_refused")
 
     archive_action = {
         "expected_identity": {"task_id": "task:canary"},
@@ -327,10 +399,8 @@ def test_herdr_and_callsign_exact_cleanup(root: Path) -> None:
 
 
 def test_repository_artifact_squash_tree_is_cleanup_eligible(root: Path) -> None:
-    root.mkdir(parents=True)
-    git = _create_repository_artifact_canary(root, ROOT)
-    assert git["head"] == REPORT_TESTED_HEAD
-    assert git["merge_commit"] == REPORT_MERGE_COMMIT
+    git = squash_git_fixture(root)
+    assert git["head"] != git["merge_commit"]
     assert git["tested_tree"] == git["merge_tree"]
     adapter = GitAdapter(git, SubprocessRunner())
     worktree_action = {
@@ -355,6 +425,45 @@ def test_repository_artifact_squash_tree_is_cleanup_eligible(root: Path) -> None
     assert receipt["deletion_proof"] == "squash-tree-equivalent"
     assert adapter.inspect(branch_action) == branch_action["intended_state"]
     assert Path(git["repository"]).is_dir()
+
+
+def test_backend_close_resumes_after_external_failure(root: Path) -> None:
+    root.mkdir(parents=True)
+    state, _ = migrated_state(root, "sqlite")
+    runner = FakeHerdrRunner()
+    runner.fail_close_once = True
+    identity = {
+        "agent_name": "cleanupcanary",
+        "workspace_id": "w-test",
+        "pane_id": "w-test:p-canary",
+        "terminal_id": "terminal-canary",
+        "session_id": "canary-session",
+        "runtime_instance_id": "runtime:canary",
+        "runtime_generation": "generation:canary",
+    }
+    action = {
+        "expected_identity": {
+            key: identity[key]
+            for key in (
+                "pane_id",
+                "terminal_id",
+                "runtime_instance_id",
+                "runtime_generation",
+            )
+        },
+        "intended_state": {"completed": True, "action": "endpoint_close"},
+    }
+    with SQLiteStorage(state) as store:
+        active_callsign(store)
+        backend = HerdrBackendAdapter(store, identity, runner, AT3)
+        refused(lambda: backend.apply(action), "cleanup_adapter_failed")
+        assert runner.pane is True
+        assert store.connection.execute(
+            "SELECT status FROM runtime_instances WHERE runtime_instance_id='runtime:canary'"
+        ).fetchone()[0] == "closed"
+        receipt = backend.apply(action)
+        assert receipt["runtime"]["idempotent"] is True
+        assert backend.inspect(action) == action["intended_state"]
 
 
 def test_real_canary_sqlite_setup_uses_explicit_root(root: Path) -> None:
@@ -592,6 +701,16 @@ def test_session_title_fallback_and_strict_canary_schemas() -> None:
     session_id = "01234567-89ab-cdef-0123-456789abcdef"
     assert _codex_session_id({"terminal_title_stripped": f"{session_id} | codex"}) == session_id
     assert _codex_session_id({"terminal_title_stripped": "unrelated"}) is None
+    refused(
+        lambda: SubprocessRunner().run(
+            (
+                sys.executable,
+                "-c",
+                "import sys; sys.stdout.write('x' * (1024 * 1024 + 1))",
+            )
+        ),
+        "cleanup_adapter_output_too_large",
+    )
     for name in (
         "league-cleanup-canary-adapters.schema.json",
         "league-real-cleanup-canary-receipt.schema.json",
@@ -619,6 +738,7 @@ def main() -> None:
         test_archive_git_and_scope(root / "git")
         test_herdr_and_callsign_exact_cleanup(root / "runtime")
         test_repository_artifact_squash_tree_is_cleanup_eligible(root / "artifact")
+        test_backend_close_resumes_after_external_failure(root / "backend-retry")
         test_real_canary_sqlite_setup_uses_explicit_root(root / "canary-setup")
         test_cleanup_reconcile_resumes_in_a_new_process(root / "true-restart")
     test_session_title_fallback_and_strict_canary_schemas()

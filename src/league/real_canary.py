@@ -30,6 +30,10 @@ from .precutover import (
 )
 from .request_services import AssignmentService, AssignmentSpec, DeliveryService
 from .sqlite_store import SQLiteStorage
+from .supervision_policy import (
+    CONSECUTIVE_OBSERVATIONS,
+    READINESS_WAIT_MILLISECONDS,
+)
 from .storage import (
     AnswerRequestCommand,
     DispatchRequestCommand,
@@ -46,8 +50,7 @@ INTERRUPT_AT = "2026-01-01T01:02:00Z"
 INTERRUPT_LEASE = "2026-01-01T01:03:00Z"
 RESUME_AT = "2026-01-01T01:04:00Z"
 RESUME_LEASE = "2026-01-01T01:14:00Z"
-READINESS_WAIT_MILLISECONDS = 30_000
-READINESS_MAX_OBSERVATIONS = 2
+READINESS_MAX_OBSERVATIONS = CONSECUTIVE_OBSERVATIONS
 REPORT_ARTIFACT_ID = "artifact:issue-39-overnight-report"
 REPORT_REPOSITORY = "https://github.com/Vinosaamaa/league-of-orchestrator"
 REPORT_ISSUE = 39
@@ -220,19 +223,22 @@ def _create_repository_artifact_canary(
             "real_canary_repository_mismatch",
             "source root is not the repository bound to the artifact receipt",
         )
-    _run(
-        (
-            "git",
-            "clone",
-            "--local",
-            "--no-hardlinks",
-            "--no-checkout",
-            str(source_root),
-            str(repository),
-        ),
-        cwd=home,
-        env=environment,
-    )
+    _run(("git", "init", str(repository)), cwd=home, env=environment)
+    for commit in (REPORT_TESTED_HEAD, REPORT_MERGE_COMMIT):
+        _run(
+            (
+                "git",
+                "-C",
+                str(repository),
+                "fetch",
+                "--no-tags",
+                "--depth=1",
+                str(source_root),
+                commit,
+            ),
+            cwd=home,
+            env=environment,
+        )
     tested_tree = _run(
         ("git", "-C", str(repository), "rev-parse", f"{REPORT_TESTED_HEAD}^{{tree}}"),
         cwd=home,
@@ -952,12 +958,9 @@ def _final_verification(
         }
 
 
-def run_real_cleanup_canary(
-    temporary_root: Path,
-    namespace: str,
-    *,
-    source_root: Path | None = None,
-) -> dict[str, Any]:
+def _real_canary_paths(
+    temporary_root: Path, namespace: str, source_root: Path | None
+) -> tuple[Path, Path, Path]:
     root = Path(temporary_root)
     if (
         not root.is_absolute()
@@ -974,31 +977,42 @@ def run_real_cleanup_canary(
         or not (source / "tests/storage_fixture.py").is_file()
     ):
         raise StorageRefusal("invalid_source_root", "real canary source root is incomplete")
-    home = (root.resolve() / f"league-real-canary-{namespace}")
+    home = root.resolve() / f"league-real-canary-{namespace}"
     try:
         home.mkdir(mode=0o700)
     except FileExistsError as exc:
         raise StorageRefusal("namespace_collision", "real canary namespace already exists") from exc
+    return root.resolve(), source, home
 
+
+def _prepare_real_canary(home: Path, source: Path, namespace: str) -> dict[str, Any]:
     git = _create_repository_artifact_canary(home, source)
     herdr = _create_herdr_canary(home, Path(git["worktree"]), namespace)
     _write_json(home / "setup-receipt.json", {"git": git, "herdr": herdr})
     setup = _setup_sqlite(home, source, git, herdr)
-    state = home / "league/state"
-    artifact_declaration, artifact_publication = _artifact_files(home, git)
+    declaration, publication = _artifact_files(home, git)
+    return {
+        "git": git,
+        "herdr": herdr,
+        "setup": setup,
+        "state": home / "league/state",
+        "artifact_declaration": declaration,
+        "artifact_publication": publication,
+    }
+
+
+def _complete_real_canary_task(
+    home: Path, source: Path, prepared: Mapping[str, Any]
+) -> dict[str, Any]:
+    state = Path(prepared["state"])
+    herdr = prepared["herdr"]
     _, declared_envelope = _league(
         source,
         home,
         (
-            "--state-root",
-            str(state),
-            "--no-wal",
-            "artifact",
-            "declare",
-            "--input",
-            str(artifact_declaration),
-            "--at",
-            "2026-01-01T01:00:30Z",
+            "--state-root", str(state), "--no-wal", "artifact", "declare",
+            "--input", str(prepared["artifact_declaration"]),
+            "--at", "2026-01-01T01:00:30Z",
         ),
     )
     declared = declared_envelope.get("result", {})
@@ -1011,72 +1025,58 @@ def run_real_cleanup_canary(
         source,
         home,
         (
-            "--state-root",
-            str(state),
-            "--no-wal",
-            "task",
-            "transition",
-            "--task-id",
-            LIFECYCLE_TASK_ID,
-            "--runtime-instance-id",
-            herdr["runtime_instance_id"],
-            "--expected-version",
-            "3",
-            "--state",
-            "completed",
-            "--update",
-            "Real disposable Champion completed",
-            "--next-action",
-            "Automatically execute exact cleanup",
-            "--transition-id",
-            "transition:real-cleanup-canary",
-            "--transition-key",
-            "transition-key:real-cleanup-canary",
-            "--event-id",
-            "event:real-cleanup-canary-completed",
-            "--outbox-id",
-            "outbox:real-cleanup-canary-completed",
-            "--recipient-agent-id",
-            SHOTCALLER_ID,
-            "--at",
-            TRANSITION_AT,
+            "--state-root", str(state), "--no-wal", "task", "transition",
+            "--task-id", LIFECYCLE_TASK_ID,
+            "--runtime-instance-id", herdr["runtime_instance_id"],
+            "--expected-version", "3", "--state", "completed",
+            "--update", "Real disposable Champion completed",
+            "--next-action", "Automatically execute exact cleanup",
+            "--transition-id", "transition:real-cleanup-canary",
+            "--transition-key", "transition-key:real-cleanup-canary",
+            "--event-id", "event:real-cleanup-canary-completed",
+            "--outbox-id", "outbox:real-cleanup-canary-completed",
+            "--recipient-agent-id", SHOTCALLER_ID, "--at", TRANSITION_AT,
         ),
     )
     if transition_envelope.get("ok") is not True:
         raise StorageRefusal("real_canary_transition_failed", "terminal CLI transition failed")
-    transition = transition_envelope["result"]
-    before = _settle_transition_and_request(state, transition, setup["dispatch"])
-    assignment = setup["assignment"]
-    callsign_assignment_id = f"callsign-assignment:{assignment['assignment_id']}"
+    before = _settle_transition_and_request(
+        state, transition_envelope["result"], prepared["setup"]["dispatch"]
+    )
+    assignment = prepared["setup"]["assignment"]
     manifest_path, adapter_path = _cleanup_files(
         home,
-        git,
+        prepared["git"],
         herdr,
-        callsign_assignment_id,
+        f"callsign-assignment:{assignment['assignment_id']}",
         "Lux",
     )
-    operation_id = "operation:real-cleanup-canary"
+    return {
+        "declared": declared,
+        "before": before,
+        "manifest_path": manifest_path,
+        "adapter_path": adapter_path,
+    }
+
+
+def _publish_real_canary_artifact(
+    home: Path,
+    source: Path,
+    prepared: Mapping[str, Any],
+    task: Mapping[str, Any],
+    operation_id: str,
+) -> dict[str, Any]:
+    state = Path(prepared["state"])
     pending_code, pending_cleanup = _league(
         source,
         home,
         (
-            "--state-root",
-            str(state),
-            "--no-wal",
-            "cleanup",
-            "reconcile",
-            "--manifest",
-            str(manifest_path),
-            "--operation-id",
-            operation_id,
-            "--adapter-config",
-            str(adapter_path),
-            "--executor-id",
-            "executor:real-cleanup-canary:publication-pending",
-            "--leased-until",
-            "2026-01-01T01:02:00Z",
-            "--at",
-            "2026-01-01T01:01:30Z",
+            "--state-root", str(state), "--no-wal", "cleanup", "reconcile",
+            "--manifest", str(task["manifest_path"]), "--operation-id", operation_id,
+            "--adapter-config", str(task["adapter_path"]),
+            "--executor-id", "executor:real-cleanup-canary:publication-pending",
+            "--leased-until", "2026-01-01T01:02:00Z",
+            "--at", "2026-01-01T01:01:30Z",
         ),
         allowed=frozenset({2}),
     )
@@ -1093,19 +1093,10 @@ def run_real_cleanup_canary(
         source,
         home,
         (
-            "--state-root",
-            str(state),
-            "--no-wal",
-            "artifact",
-            "publish",
-            "--artifact-id",
-            REPORT_ARTIFACT_ID,
-            "--expected-version",
-            "1",
-            "--receipt",
-            str(artifact_publication),
-            "--at",
-            "2026-01-01T01:01:45Z",
+            "--state-root", str(state), "--no-wal", "artifact", "publish",
+            "--artifact-id", REPORT_ARTIFACT_ID, "--expected-version", "1",
+            "--receipt", str(prepared["artifact_publication"]),
+            "--at", "2026-01-01T01:01:45Z",
         ),
     )
     published = published_envelope.get("result", {})
@@ -1118,27 +1109,26 @@ def run_real_cleanup_canary(
             "real_canary_artifact_publication_failed",
             "exact repository publication receipt was not stored",
         )
+    return {"pending_cleanup": pending_cleanup, "published": published}
+
+
+def _execute_real_canary_cleanup(
+    home: Path,
+    source: Path,
+    prepared: Mapping[str, Any],
+    task: Mapping[str, Any],
+    operation_id: str,
+) -> dict[str, Any]:
+    state = Path(prepared["state"])
     first_code, first = _league(
         source,
         home,
         (
-            "--state-root",
-            str(state),
-            "--no-wal",
-            "cleanup",
-            "reconcile",
-            "--manifest",
-            str(manifest_path),
-            "--operation-id",
-            operation_id,
-            "--adapter-config",
-            str(adapter_path),
-            "--executor-id",
-            "executor:real-cleanup-canary:first",
-            "--leased-until",
-            INTERRUPT_LEASE,
-            "--at",
-            INTERRUPT_AT,
+            "--state-root", str(state), "--no-wal", "cleanup", "reconcile",
+            "--manifest", str(task["manifest_path"]), "--operation-id", operation_id,
+            "--adapter-config", str(task["adapter_path"]),
+            "--executor-id", "executor:real-cleanup-canary:first",
+            "--leased-until", INTERRUPT_LEASE, "--at", INTERRUPT_AT,
             "--simulate-interruption-after-archive",
         ),
         allowed=frozenset({3}),
@@ -1147,7 +1137,8 @@ def run_real_cleanup_canary(
     with SQLiteStorage(state, request_wal=False) as store:
         interrupted = store.cleanup_operation(operation_id)
         interrupted_receipts = store.connection.execute(
-            "SELECT COUNT(*) FROM cleanup_action_receipts WHERE operation_id=?", (operation_id,)
+            "SELECT COUNT(*) FROM cleanup_action_receipts WHERE operation_id=?",
+            (operation_id,),
         ).fetchone()[0]
     if (
         first_code != 3
@@ -1163,23 +1154,11 @@ def run_real_cleanup_canary(
         source,
         home,
         (
-            "--state-root",
-            str(state),
-            "--no-wal",
-            "cleanup",
-            "reconcile",
-            "--manifest",
-            str(manifest_path),
-            "--operation-id",
-            operation_id,
-            "--adapter-config",
-            str(adapter_path),
-            "--executor-id",
-            "executor:real-cleanup-canary:resume",
-            "--leased-until",
-            RESUME_LEASE,
-            "--at",
-            RESUME_AT,
+            "--state-root", str(state), "--no-wal", "cleanup", "reconcile",
+            "--manifest", str(task["manifest_path"]), "--operation-id", operation_id,
+            "--adapter-config", str(task["adapter_path"]),
+            "--executor-id", "executor:real-cleanup-canary:resume",
+            "--leased-until", RESUME_LEASE, "--at", RESUME_AT,
         ),
     )
     execution = resumed.get("result", {})
@@ -1189,12 +1168,37 @@ def run_real_cleanup_canary(
         or execution.get("execution", {}).get("state") != "cleanup_completed"
     ):
         raise StorageRefusal("real_canary_resume_failed", "automatic cleanup resume did not complete")
-    final = _final_verification(state, home, git, herdr, operation_id)
+    return {
+        "first_code": first_code,
+        "first": first,
+        "interrupted": interrupted,
+        "interrupted_receipts": interrupted_receipts,
+        "final": _final_verification(
+            state, home, prepared["git"], prepared["herdr"], operation_id
+        ),
+    }
+
+
+def _build_real_canary_receipt(
+    root: Path,
+    home: Path,
+    namespace: str,
+    prepared: Mapping[str, Any],
+    task: Mapping[str, Any],
+    publication: Mapping[str, Any],
+    cleanup: Mapping[str, Any],
+    operation_id: str,
+) -> dict[str, Any]:
+    git = prepared["git"]
+    herdr = prepared["herdr"]
+    before = task["before"]
+    final = cleanup["final"]
+    first = cleanup["first"]
     receipt = {
         "schema": RECEIPT_SCHEMA,
         "namespace": namespace,
         "mode": "real-disposable",
-        "temporary_root": str(root.resolve()),
+        "temporary_root": str(root),
         "completed_at": RESUME_AT,
         "runtime": {
             "harness": "codex",
@@ -1225,9 +1229,9 @@ def run_real_cleanup_canary(
             "merge_tree": git["merge_tree"],
             "tree_parity": git["tested_tree"] == git["merge_tree"],
             "artifact_sha256": git["artifact_sha256"],
-            "declaration_state": declared["state"],
-            "prepublication_cleanup_refusal": pending_cleanup["error"]["code"],
-            "publication_state": published["state"],
+            "declaration_state": task["declared"]["state"],
+            "prepublication_cleanup_refusal": publication["pending_cleanup"]["error"]["code"],
+            "publication_state": publication["published"]["state"],
             "publication_gate_cleared": True,
             "hosted_mutation_performed": False,
         },
@@ -1240,10 +1244,10 @@ def run_real_cleanup_canary(
         },
         "interruption": {
             "operation_id": operation_id,
-            "first_exit": first_code,
+            "first_exit": cleanup["first_code"],
             "error_code": first["error"]["code"],
-            "durable_fence": interrupted["fence"],
-            "action_receipts_before_restart": interrupted_receipts,
+            "durable_fence": cleanup["interrupted"]["fence"],
+            "action_receipts_before_restart": cleanup["interrupted_receipts"],
             "archive_external_effect_present": True,
             "store_reopened": True,
         },
@@ -1273,3 +1277,20 @@ def run_real_cleanup_canary(
     receipt["receipt_sha256"] = _sha256(_stable_bytes(receipt))
     _write_json(home / "real-cleanup-canary-receipt.json", receipt)
     return receipt
+
+
+def run_real_cleanup_canary(
+    temporary_root: Path,
+    namespace: str,
+    *,
+    source_root: Path | None = None,
+) -> dict[str, Any]:
+    root, source, home = _real_canary_paths(temporary_root, namespace, source_root)
+    prepared = _prepare_real_canary(home, source, namespace)
+    task = _complete_real_canary_task(home, source, prepared)
+    operation_id = "operation:real-cleanup-canary"
+    publication = _publish_real_canary_artifact(home, source, prepared, task, operation_id)
+    cleanup = _execute_real_canary_cleanup(home, source, prepared, task, operation_id)
+    return _build_real_canary_receipt(
+        root, home, namespace, prepared, task, publication, cleanup, operation_id
+    )

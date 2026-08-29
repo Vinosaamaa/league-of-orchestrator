@@ -6,11 +6,13 @@ import hashlib
 import json
 import re
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any, Mapping, Optional, Protocol, Sequence
 
 from .acceptance import _atomic_write, _stable_bytes
 from .cleanup import CleanupAdapterRegistry
+from .sqlite_runtime_ops import runtime_cleanup_identity
 from .sqlite_store import SQLiteStorage
 from .storage import StorageRefusal
 
@@ -21,6 +23,7 @@ SAFE_BRANCH = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$")
 CODEX_SESSION_TITLE = re.compile(
     r"^(?P<session>[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}) \| codex$"
 )
+MAX_COMMAND_OUTPUT_BYTES = 1024 * 1024
 
 
 class CommandRunner(Protocol):
@@ -32,13 +35,31 @@ class SubprocessRunner:
         self, arguments: Sequence[str], *, allow_failure: bool = False
     ) -> subprocess.CompletedProcess[str]:
         try:
-            completed = subprocess.run(
-                list(arguments),
-                text=True,
-                capture_output=True,
-                timeout=30,
-                check=False,
-            )
+            with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
+                process = subprocess.run(
+                    list(arguments),
+                    stdout=stdout,
+                    stderr=stderr,
+                    timeout=30,
+                    check=False,
+                )
+                outputs: list[str] = []
+                for stream in (stdout, stderr):
+                    size = stream.tell()
+                    if size > MAX_COMMAND_OUTPUT_BYTES:
+                        raise StorageRefusal(
+                            "cleanup_adapter_output_too_large",
+                            "cleanup adapter command output exceeded its bound",
+                        )
+                    stream.seek(0)
+                    outputs.append(stream.read().decode("utf-8"))
+                completed = subprocess.CompletedProcess(
+                    list(arguments), process.returncode, outputs[0], outputs[1]
+                )
+        except UnicodeDecodeError as exc:
+            raise StorageRefusal(
+                "cleanup_adapter_failed", "cleanup adapter command output is not UTF-8"
+            ) from exc
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise StorageRefusal(
                 "cleanup_adapter_failed", "cleanup adapter command could not complete"
@@ -79,21 +100,14 @@ def _beneath(path: Path, root: Path, label: str) -> Path:
     return path
 
 
-def validate_canary_config(value: Mapping[str, Any]) -> dict[str, Any]:
-    if not isinstance(value, Mapping) or set(value) != {
-        "schema",
-        "scope",
-        "temporary_root",
-        "archive_path",
-        "herdr",
-        "git",
-        "callsign",
-    }:
-        raise StorageRefusal("cleanup_adapter_config_invalid", "canary adapter config is incomplete")
-    if value.get("schema") != CONFIG_SCHEMA or value.get("scope") != "disposable-canary":
-        raise StorageRefusal("cleanup_adapter_scope_refused", "only disposable canary cleanup is supported")
-    root = _canonical(_absolute(value["temporary_root"], "temporary_root"))
-    if not root.is_dir() or root.is_symlink():
+def _validate_scope(value: Mapping[str, Any]) -> tuple[Path, Path]:
+    supplied_root = _absolute(value["temporary_root"], "temporary_root")
+    if supplied_root.is_symlink():
+        raise StorageRefusal(
+            "cleanup_adapter_scope_refused", "disposable root must be an existing non-symlink directory"
+        )
+    root = _canonical(supplied_root)
+    if not root.is_dir():
         raise StorageRefusal(
             "cleanup_adapter_scope_refused", "disposable root must be an existing non-symlink directory"
         )
@@ -102,8 +116,11 @@ def validate_canary_config(value: Mapping[str, Any]) -> dict[str, Any]:
         root,
         "archive_path",
     )
+    return root, archive
 
-    herdr = value.get("herdr")
+
+def _validate_herdr(value: Any) -> dict[str, Any]:
+    herdr = value
     if not isinstance(herdr, Mapping) or set(herdr) != {
         "agent_name",
         "workspace_id",
@@ -128,8 +145,11 @@ def validate_canary_config(value: Mapping[str, Any]) -> dict[str, Any]:
             raise StorageRefusal("cleanup_adapter_config_invalid", "Herdr identity value is invalid")
     if not str(herdr["pane_id"]).startswith(f"{herdr['workspace_id']}:"):
         raise StorageRefusal("cleanup_adapter_config_invalid", "Herdr pane and workspace disagree")
+    return dict(herdr)
 
-    git = value.get("git")
+
+def _validate_git(value: Any, root: Path) -> dict[str, Any]:
+    git = value
     if not isinstance(git, Mapping) or set(git) != {
         "repository",
         "worktree",
@@ -139,13 +159,21 @@ def validate_canary_config(value: Mapping[str, Any]) -> dict[str, Any]:
         "merge_commit",
     }:
         raise StorageRefusal("cleanup_adapter_config_invalid", "Git identity is incomplete")
+    supplied_repository = _absolute(git["repository"], "git.repository")
+    supplied_worktree = _absolute(git["worktree"], "git.worktree")
+    if supplied_repository.is_symlink() or (
+        supplied_worktree.exists() and supplied_worktree.is_symlink()
+    ):
+        raise StorageRefusal(
+            "cleanup_adapter_scope_refused", "Git canary paths must not be symlinks"
+        )
     repository = _beneath(
-        _canonical(_absolute(git["repository"], "git.repository")),
+        _canonical(supplied_repository),
         root,
         "repository",
     )
     worktree = _beneath(
-        _canonical(_absolute(git["worktree"], "git.worktree")),
+        _canonical(supplied_worktree),
         root,
         "worktree",
     )
@@ -167,8 +195,11 @@ def validate_canary_config(value: Mapping[str, Any]) -> dict[str, Any]:
         r"[0-9a-f]{40}", git["merge_commit"]
     ):
         raise StorageRefusal("cleanup_adapter_config_invalid", "Git merge commit is invalid")
+    return {**dict(git), "repository": str(repository), "worktree": str(worktree)}
 
-    callsign = value.get("callsign")
+
+def _validate_callsign(value: Any) -> dict[str, Any]:
+    callsign = value
     if not isinstance(callsign, Mapping) or set(callsign) != {
         "assignment_id",
         "callsign",
@@ -182,14 +213,34 @@ def validate_canary_config(value: Mapping[str, Any]) -> dict[str, Any]:
         for field in ("assignment_id", "callsign")
     ) or callsign["expected_version"] != 2:
         raise StorageRefusal("cleanup_adapter_config_invalid", "callsign identity is invalid")
+    return dict(callsign)
+
+
+def validate_canary_config(value: Mapping[str, Any]) -> dict[str, Any]:
+    if not isinstance(value, Mapping) or set(value) != {
+        "schema",
+        "scope",
+        "temporary_root",
+        "archive_path",
+        "herdr",
+        "git",
+        "callsign",
+    }:
+        raise StorageRefusal("cleanup_adapter_config_invalid", "canary adapter config is incomplete")
+    if value.get("schema") != CONFIG_SCHEMA or value.get("scope") != "disposable-canary":
+        raise StorageRefusal("cleanup_adapter_scope_refused", "only disposable canary cleanup is supported")
+    root, archive = _validate_scope(value)
+    herdr = _validate_herdr(value.get("herdr"))
+    git = _validate_git(value.get("git"), root)
+    callsign = _validate_callsign(value.get("callsign"))
     return {
         "schema": CONFIG_SCHEMA,
         "scope": "disposable-canary",
         "temporary_root": str(root),
         "archive_path": str(archive),
-        "herdr": dict(herdr),
-        "git": {**dict(git), "repository": str(repository), "worktree": str(worktree)},
-        "callsign": dict(callsign),
+        "herdr": herdr,
+        "git": git,
+        "callsign": callsign,
     }
 
 
@@ -330,19 +381,16 @@ class HerdrBackendAdapter(_BaseAdapter):
         return next((item for item in panes if item.get("pane_id") == self.identity["pane_id"]), None)
 
     def _runtime(self) -> Mapping[str, Any]:
-        row = self.store.connection.execute(
-            "SELECT endpoint,runtime_generation,status FROM runtime_instances WHERE runtime_instance_id=?",
-            (self.identity["runtime_instance_id"],),
-        ).fetchone()
-        if row is None:
-            raise StorageRefusal("cleanup_identity_mismatch", "runtime identity disappeared")
-        return dict(row)
+        return runtime_cleanup_identity(
+            self.store,
+            self.identity["runtime_instance_id"],
+            self.identity["pane_id"],
+            self.identity["runtime_generation"],
+        )
 
     def inspect(self, action: Mapping[str, Any]) -> Mapping[str, Any]:
         pane = self._pane()
         runtime = self._runtime()
-        if runtime["endpoint"] != self.identity["pane_id"] or runtime["runtime_generation"] != self.identity["runtime_generation"]:
-            raise StorageRefusal("cleanup_identity_mismatch", "runtime endpoint identity changed")
         if pane is None and runtime["status"] == "closed":
             return dict(action["intended_state"])
         if pane is not None and pane.get("terminal_id") != self.identity["terminal_id"]:
@@ -350,14 +398,14 @@ class HerdrBackendAdapter(_BaseAdapter):
         return dict(action["expected_identity"])
 
     def apply(self, action: Mapping[str, Any]) -> Mapping[str, Any]:
-        if self._pane() is not None:
-            self.runner.run(("herdr", "pane", "close", self.identity["pane_id"]))
         closed = self.store.close_runtime_for_cleanup(
             self.identity["runtime_instance_id"],
             self.identity["pane_id"],
             self.identity["runtime_generation"],
             self.at,
         )
+        if self._pane() is not None:
+            self.runner.run(("herdr", "pane", "close", self.identity["pane_id"]))
         return {"exact_pane": True, "runtime": closed}
 
 

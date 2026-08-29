@@ -23,7 +23,10 @@
                 "type": "string",
                 "minLength": 1,
                 "pattern": "^[^/\\u0000]+(?:/[^/\\u0000]+)*$",
-                "not": {"pattern": "(^|/)\\.\\.?(/|$)"}
+                "allOf": [
+                  {"not": {"pattern": "(^|/)\\.\\.?(/|$)"}},
+                  {"not": {"const": "import-manifest.json"}}
+                ]
               },
               "source": {"$ref": "#/$defs/absolutePath"}
             },

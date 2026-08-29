@@ -1545,9 +1545,6 @@ def _cleanup_reconcile(store: Storage, args: argparse.Namespace) -> CommandResul
     planned = CleanupPlanner(store).plan(
         manifest, operation_id=args.operation_id, at=args.at
     )
-    operation = store.cleanup_operation(args.operation_id)
-    if operation is None:
-        raise StorageRefusal("cleanup_operation_unknown", "cleanup operation disappeared")
     adapters = canary_cleanup_registry(
         store,
         _read_json_object(args.adapter_config),
@@ -1567,7 +1564,7 @@ def _cleanup_reconcile(store: Storage, args: argparse.Namespace) -> CommandResul
 
     executed = CleanupExecutor(store, adapters).execute(
         args.operation_id,
-        expected_fence=int(operation["fence"]),
+        expected_fence=int(planned["fence"]),
         executor_id=args.executor_id,
         leased_until=args.leased_until,
         at=args.at,

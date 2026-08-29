@@ -195,9 +195,9 @@ It deliberately crashes after the archive external effect and resumes through a
 new CLI process, proving durable operation fencing and observation-based
 idempotency before exact endpoint, worktree, branch, and callsign release. This
 does not generalize into a production executor or prove any other harness or
-backend. After merged issue #40, the final disposable gate binds the actual
-issue-#39 report, PR #41 tested head, and squash-merge receipt to an isolated
-clone/worktree before that exact teardown; it performs no hosted mutation.
+backend. The repository-artifact and exact-evidence contract for the final
+disposable gate is versioned in [`docs/ACCEPTANCE.md`](ACCEPTANCE.md); the gate
+performs no hosted mutation.
 
 ## Portability boundary
 

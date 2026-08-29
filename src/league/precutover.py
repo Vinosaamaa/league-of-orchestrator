@@ -15,6 +15,7 @@ import queue
 import re
 import resource
 import stat
+import tempfile
 import threading
 import time
 from dataclasses import dataclass
@@ -65,6 +66,10 @@ from .request_services import (
 )
 from .runtime import RuntimeCreateSpec, RuntimeLifecycle
 from .sqlite_store import CURRENT_SCHEMA_VERSION, SQLiteStorage
+from .supervision_policy import (
+    CONSECUTIVE_OBSERVATIONS,
+    RECONCILIATION_INTERVAL_SECONDS,
+)
 from .storage import (
     AnswerRequestCommand,
     DispatchRequestCommand,
@@ -191,6 +196,10 @@ def _validate_plan(path: Path) -> dict[str, Any]:
         if not source.is_file() or source.is_symlink():
             raise StorageRefusal("plan_invalid", "legacy binding source must be a regular file")
         relative_name = relative.as_posix()
+        if relative_name == "import-manifest.json":
+            raise StorageRefusal(
+                "plan_invalid", "legacy binding may not overwrite the snapshot manifest"
+            )
         if relative_name in relative_paths or source in source_paths:
             raise StorageRefusal("plan_invalid", "legacy binding identity is duplicated")
         relative_paths.add(relative_name)
@@ -347,23 +356,36 @@ def _node_records(path: Path) -> tuple[str, list[dict[str, Any]], int]:
                     raise StorageRefusal(
                         "snapshot_too_large", "current target exceeds the byte bound"
                     )
-                chunks: list[bytes] = []
+                digest = hashlib.sha256()
+                size = 0
                 while True:
                     chunk = os.read(descriptor, 64 * 1024)
                     if not chunk:
                         break
-                    chunks.append(chunk)
+                    digest.update(chunk)
+                    size += len(chunk)
                 after = os.fstat(descriptor)
             finally:
                 os.close(descriptor)
-            payload = b"".join(chunks)
             if (
-                (before.st_dev, before.st_ino, before.st_size)
-                != (after.st_dev, after.st_ino, after.st_size)
-                or len(payload) != after.st_size
+                (
+                    before.st_dev,
+                    before.st_ino,
+                    before.st_size,
+                    before.st_mtime_ns,
+                    before.st_ctime_ns,
+                )
+                != (
+                    after.st_dev,
+                    after.st_ino,
+                    after.st_size,
+                    after.st_mtime_ns,
+                    after.st_ctime_ns,
+                )
+                or size != after.st_size
             ):
                 raise StorageRefusal("source_changed", "current target changed while read")
-            byte_count += len(payload)
+            byte_count += size
             if byte_count > MAX_SNAPSHOT_BYTES:
                 raise StorageRefusal("snapshot_too_large", "current target exceeds the byte bound")
             records.append(
@@ -371,8 +393,8 @@ def _node_records(path: Path) -> tuple[str, list[dict[str, Any]], int]:
                     "path": relative,
                     "kind": "file",
                     "mode": mode,
-                    "bytes": len(payload),
-                    "sha256": _sha256(payload),
+                    "bytes": size,
+                    "sha256": digest.hexdigest(),
                 }
             )
             return
@@ -407,32 +429,68 @@ def _regular_content_sha256(path: Path) -> str:
     return str(records[0]["sha256"])
 
 
-def _copy_regular_stable(source: Path, destination: Path, *, mode: Optional[int] = None) -> None:
+def _copy_regular_stable(
+    source: Path, destination: Path, *, mode: Optional[int] = None
+) -> dict[str, Any]:
     no_follow = getattr(os, "O_NOFOLLOW", 0)
     descriptor = os.open(source, os.O_RDONLY | no_follow)
+    temporary_descriptor = -1
+    temporary_name: Optional[str] = None
     try:
         before = os.fstat(descriptor)
         if not stat.S_ISREG(before.st_mode) or before.st_size > MAX_SNAPSHOT_BYTES:
             raise StorageRefusal("target_unsupported", "backup source must be a bounded regular file")
-        chunks: list[bytes] = []
+        destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        temporary_descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{destination.name}.", dir=destination.parent
+        )
+        digest = hashlib.sha256()
+        size = 0
         while True:
             chunk = os.read(descriptor, 64 * 1024)
             if not chunk:
                 break
-            chunks.append(chunk)
+            digest.update(chunk)
+            size += len(chunk)
+            view = memoryview(chunk)
+            while view:
+                view = view[os.write(temporary_descriptor, view) :]
         after = os.fstat(descriptor)
+        if (
+            (
+                before.st_dev,
+                before.st_ino,
+                before.st_size,
+                before.st_mtime_ns,
+                before.st_ctime_ns,
+            )
+            != (
+                after.st_dev,
+                after.st_ino,
+                after.st_size,
+                after.st_mtime_ns,
+                after.st_ctime_ns,
+            )
+            or size != after.st_size
+        ):
+            raise StorageRefusal("source_changed", "backup source changed while read")
+        selected_mode = mode if mode is not None else stat.S_IMODE(after.st_mode)
+        os.fchmod(temporary_descriptor, selected_mode)
+        os.fsync(temporary_descriptor)
+        os.close(temporary_descriptor)
+        temporary_descriptor = -1
+        os.replace(temporary_name, destination)
+        temporary_name = None
+        return {"bytes": size, "sha256": digest.hexdigest(), "mode": selected_mode}
     finally:
         os.close(descriptor)
-    payload = b"".join(chunks)
-    if (
-        (before.st_dev, before.st_ino, before.st_size)
-        != (after.st_dev, after.st_ino, after.st_size)
-        or len(payload) != after.st_size
-    ):
-        raise StorageRefusal("source_changed", "backup source changed while read")
-    from .acceptance import _atomic_write
-
-    _atomic_write(destination, payload, mode=mode if mode is not None else stat.S_IMODE(after.st_mode))
+        if temporary_descriptor >= 0:
+            os.close(temporary_descriptor)
+        if temporary_name is not None:
+            try:
+                os.unlink(temporary_name)
+            except FileNotFoundError:
+                pass
 
 
 def _copy_node(source: Path, destination: Path) -> None:
@@ -504,28 +562,25 @@ def _copy_legacy_snapshot(plan: Mapping[str, Any], destination: Path) -> dict[st
     destination.mkdir(parents=True, mode=0o700)
     manifest_source = Path(plan["legacy"]["manifest"])
     manifest_target = destination / "import-manifest.json"
-    _copy_regular_stable(manifest_source, manifest_target, mode=0o600)
+    manifest_copy = _copy_regular_stable(manifest_source, manifest_target, mode=0o600)
     bindings: list[dict[str, Any]] = []
     for item in plan["legacy"]["bindings"]:
         source = Path(item["source"])
         target = destination / item["relative_path"]
-        before = _snapshot(source)
-        content_sha256 = _regular_content_sha256(source)
-        _copy_regular_stable(source, target, mode=0o600)
-        after = _snapshot(source)
-        if before != after or _regular_content_sha256(target) != content_sha256:
+        copied = _copy_regular_stable(source, target, mode=0o600)
+        if _regular_content_sha256(target) != copied["sha256"]:
             raise StorageRefusal("source_changed", "legacy source changed during read-only snapshot")
         bindings.append(
             {
                 "relative_path": item["relative_path"],
-                "bytes": before["bytes"],
-                "sha256": content_sha256,
+                "bytes": copied["bytes"],
+                "sha256": copied["sha256"],
             }
         )
     return {
         "root": destination,
         "manifest": manifest_target,
-        "manifest_sha256": _regular_content_sha256(manifest_source),
+        "manifest_sha256": manifest_copy["sha256"],
         "bindings": bindings,
     }
 
@@ -1275,9 +1330,11 @@ def _supervision_benchmark(home: Path) -> dict[str, Any]:
         },
         "missed_wake_reconciliation": {
             "simulation": True,
-            "interval_seconds": 30,
-            "consecutive_observations": 2,
-            "earliest_fallback_seconds": 60,
+            "interval_seconds": RECONCILIATION_INTERVAL_SECONDS,
+            "consecutive_observations": CONSECUTIVE_OBSERVATIONS,
+            "earliest_fallback_seconds": (
+                RECONCILIATION_INTERVAL_SECONDS * CONSECUTIVE_OBSERVATIONS
+            ),
             "separate_15_second_policy": False,
         },
         "resources": {
@@ -1299,8 +1356,8 @@ def _supervision_benchmark(home: Path) -> dict[str, Any]:
         "listener_terminated": True,
         "proposal": {
             "decision": "retain_compatibility_default",
-            "reconciliation_interval_seconds": 30,
-            "consecutive_observations": 2,
+            "reconciliation_interval_seconds": RECONCILIATION_INTERVAL_SECONDS,
+            "consecutive_observations": CONSECUTIVE_OBSERVATIONS,
             "requires_cutover_authority": True,
         },
     }
@@ -1319,8 +1376,8 @@ def _staged_supervision_check(staged: Mapping[str, Any], home: Path) -> dict[str
     )
     source_text = source.read_text(encoding="utf-8")
     required_source = (
-        'default=30.0, help="Runtime snapshot interval; zero disables reconciliation."',
-        'default=2, help="Identical mismatch observations required before champion_stalled."',
+        f'default={float(RECONCILIATION_INTERVAL_SECONDS)}, help="Runtime snapshot interval; zero disables reconciliation."',
+        f'default={CONSECUTIVE_OBSERVATIONS}, help="Identical mismatch observations required before champion_stalled."',
         "Liveness is deliberately silent.",
     )
     if (
@@ -1335,8 +1392,8 @@ def _staged_supervision_check(staged: Mapping[str, Any], home: Path) -> dict[str
     return {
         "launcher_help_checked": True,
         "source_contract_checked": True,
-        "reconciliation_interval_seconds": 30,
-        "consecutive_observations": 2,
+        "reconciliation_interval_seconds": RECONCILIATION_INTERVAL_SECONDS,
+        "consecutive_observations": CONSECUTIVE_OBSERVATIONS,
         "unchanged_output": "silent",
         "separate_15_second_policy": False,
     }
@@ -1417,6 +1474,21 @@ def _mutation_manifest(
             }
         )
 
+    def rollback_from_backup(target: Mapping[str, Any]) -> dict[str, Any]:
+        observed = backup_by_id[target["target_id"]]
+        receipt = {
+            "action": observed["rollback"],
+            "source_created_by_operation": "backup_current_target",
+        }
+        if observed["exists"]:
+            receipt.update(
+                {
+                    "source": str(backup_root / "targets" / target["target_id"]),
+                    "expected_sha256": observed["sha256"],
+                }
+            )
+        return receipt
+
     guarded = [
         item["target_id"]
         for item in plan["current_targets"]
@@ -1436,8 +1508,12 @@ def _mutation_manifest(
             "backup_current_target",
             target["path"],
             precondition={"sha256": observed["sha256"], "exists": observed["exists"]},
-            after={"backup_target": rollback_target, "verified": True},
-            rollback={"action": observed["rollback"], "source": rollback_target},
+            after={
+                "backup_target": rollback_target,
+                "verification_required": True,
+                "expected_sha256": observed["sha256"],
+            },
+            rollback=rollback_from_backup(target),
         )
     release_target = str(Path(proposed["release_prefix"]) / "releases" / __version__)
     add(
@@ -1469,10 +1545,7 @@ def _mutation_manifest(
         proposed["stable_launcher"],
         precondition={"sha256": backup_by_id[launcher_target["target_id"]]["sha256"]},
         after={"target": f"{release_target}/bin/league", "version": __version__},
-        rollback={
-            "action": backup_by_id[launcher_target["target_id"]]["rollback"],
-            "source": str(backup_root / "targets" / launcher_target["target_id"]),
-        },
+        rollback=rollback_from_backup(launcher_target),
     )
     watcher_launcher_target = _target_for_path(plan, proposed["watcher_launcher"])
     add(
@@ -1482,12 +1555,7 @@ def _mutation_manifest(
             "sha256": backup_by_id[watcher_launcher_target["target_id"]]["sha256"]
         },
         after={"target": f"{release_target}/bin/agent-watcher", "version": __version__},
-        rollback={
-            "action": backup_by_id[watcher_launcher_target["target_id"]]["rollback"],
-            "source": str(
-                backup_root / "targets" / watcher_launcher_target["target_id"]
-            ),
-        },
+        rollback=rollback_from_backup(watcher_launcher_target),
     )
     for hook in sorted(proposed["hooks"], key=lambda item: item["harness"]):
         target = _target_for_path(plan, hook["target"])
@@ -1503,10 +1571,7 @@ def _mutation_manifest(
             hook["target"],
             precondition={"sha256": backup_by_id[target["target_id"]]["sha256"]},
             after={"plan_sha256": _sha256(_stable_bytes(hook_plan)), **hook_plan},
-            rollback={
-                "action": backup_by_id[target["target_id"]]["rollback"],
-                "source": str(backup_root / "targets" / target["target_id"]),
-            },
+            rollback=rollback_from_backup(target),
         )
     pointer_target = _target_for_path(plan, proposed["writer_pointer"])
     add(
@@ -1517,10 +1582,7 @@ def _mutation_manifest(
             "active_writer_count": 0,
         },
         after={"pointer": pointer, "sha256": _sha256(_stable_bytes(pointer))},
-        rollback={
-            "action": backup_by_id[pointer_target["target_id"]]["rollback"],
-            "source": str(backup_root / "targets" / pointer_target["target_id"]),
-        },
+        rollback=rollback_from_backup(pointer_target),
     )
     add(
         "activate_sqlite_writer",
@@ -1570,18 +1632,20 @@ def _mutation_manifest(
             "unchanged_output": "silent",
             "reconciliation": {
                 "purpose": "missed_wake_and_lease_recovery_only",
-                "interval_seconds": 30,
-                "consecutive_observations": 2,
-                "earliest_fallback_seconds": 60,
+                "interval_seconds": RECONCILIATION_INTERVAL_SECONDS,
+                "consecutive_observations": CONSECUTIVE_OBSERVATIONS,
+                "earliest_fallback_seconds": (
+                    RECONCILIATION_INTERVAL_SECONDS * CONSECUTIVE_OBSERVATIONS
+                ),
                 "separate_15_second_policy": False,
             },
             "installed_default_command": [
                 proposed["watcher_launcher"],
                 "supervise",
                 "--reconcile-seconds",
-                "30",
+                str(RECONCILIATION_INTERVAL_SECONDS),
                 "--reconcile-consecutive",
-                "2",
+                str(CONSECUTIVE_OBSERVATIONS),
             ],
             "override_arguments": [
                 "--reconcile-seconds",
@@ -1613,6 +1677,114 @@ def _write_operation(
         operation["mutation_manifest_sha256"] = extra["mutation_manifest_sha256"]
         operation["authority"] = "separate_explicit_live_cutover"
     _write_json(path, operation)
+
+
+def _target_snapshots(plan: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+    return {
+        item["target_id"]: _snapshot(Path(item["path"]))
+        for item in plan["current_targets"]
+    }
+
+
+def _migration_and_install_phase(
+    home: Path,
+    source: Path,
+    plan: Mapping[str, Any],
+    *,
+    fault: Optional[Any],
+) -> dict[str, Any]:
+    backups = _backup_rehearsal(home, plan["current_targets"], fault=fault)
+    fixture_home = home / "fixture-shadow"
+    fixture_home.mkdir(mode=0o700)
+    fixture_shadow = _migration_shadow(fixture_home, source)
+    live_shadow = _read_only_shadow(home, plan)
+    staged = _staged_install(home / "staged", source)
+    staged["inactive_after_checks"] = staged["rollback"]["completed"]
+    staged["global_install_performed"] = False
+    staged["supervision"] = _staged_supervision_check(staged, home)
+    return {
+        "backups": backups,
+        "fixture_shadow": fixture_shadow,
+        "live_shadow": live_shadow,
+        "staged": staged,
+        "manifest_checks": _manifest_checks(plan, backups, staged),
+    }
+
+
+def _sandbox_acceptance_phase(
+    home: Path, source: Path, context: DeterministicContext
+) -> dict[str, Any]:
+    cutover = _cutover_matrix(home / "cutover-faults", context)
+    canary = _canary(home / "fake-canary", context, _fake_adapters(context))
+    return {
+        "cutover": cutover,
+        "canary": canary,
+        "lifecycle": _integrated_lifecycle(home, source),
+        "runtime_canaries": _runtime_canaries(home, source),
+        "supervision_benchmark": _supervision_benchmark(home),
+    }
+
+
+def _verify_preflight_boundaries(
+    plan: Mapping[str, Any],
+    before_targets: Mapping[str, Any],
+    sentinels: SentinelSet,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    sentinels_receipt = sentinels.verify()
+    after_targets = _target_snapshots(plan)
+    if before_targets != after_targets:
+        raise StorageRefusal("sentinel_changed", "a planned live target changed during preflight")
+    return sentinels_receipt, after_targets
+
+
+def _build_pre_cutover_receipt(
+    *,
+    namespace: str,
+    home: Path,
+    operation: Mapping[str, Any],
+    context: DeterministicContext,
+    sentinels_receipt: Mapping[str, Any],
+    before_targets: Mapping[str, Any],
+    migration: Mapping[str, Any],
+    sandbox: Mapping[str, Any],
+    mutation_manifest: Mapping[str, Any],
+) -> dict[str, Any]:
+    return {
+        "schema": RECEIPT_SCHEMA,
+        "version": __version__,
+        "namespace": namespace,
+        "home": str(home),
+        "operation": operation,
+        "determinism": {"clock": context.at, "ids_allocated": context.sequence},
+        "sentinels": sentinels_receipt,
+        "live_targets": {
+            "unchanged": True,
+            "observation_scope": "before_after_snapshot_parity",
+            "continuous_external_stability_proven": False,
+            "preflight_write_count": 0,
+            "target_count": len(before_targets),
+            "aggregate_sha256": _sha256(_stable_bytes(before_targets)),
+        },
+        "fixture_migration_shadow": migration["fixture_shadow"],
+        "live_migration_shadow": migration["live_shadow"],
+        "backup_rollback_rehearsal": migration["backups"],
+        "staged_inactive_install": migration["staged"],
+        "manifest_checks": migration["manifest_checks"],
+        "integrated_lifecycle": sandbox["lifecycle"],
+        "runtime_contract_canaries": sandbox["runtime_canaries"],
+        "supervision_benchmark": sandbox["supervision_benchmark"],
+        "cutover_fault_matrix": sandbox["cutover"],
+        "fake_resource_canary": sandbox["canary"],
+        "mutation_manifest": mutation_manifest,
+        "public_claims": {
+            "global_install": False,
+            "live_import": False,
+            "hook_or_watcher_mutation": False,
+            "canonical_cutover": False,
+            "live_delivery": False,
+            "real_runtime_support": False,
+        },
+    }
 
 
 def run_pre_cutover(
@@ -1680,39 +1852,20 @@ def run_pre_cutover(
     _write_operation(operation_path, operation, "planned", context)
     _write_operation(operation_path, operation, "executing", context)
     try:
-        before_targets = {
-            item["target_id"]: _snapshot(Path(item["path"]))
-            for item in plan["current_targets"]
-        }
-        backups = _backup_rehearsal(home, plan["current_targets"], fault=fault)
-        fixture_home = home / "fixture-shadow"
-        fixture_home.mkdir(mode=0o700)
-        fixture_shadow = _migration_shadow(fixture_home, source)
-        live_shadow = _read_only_shadow(home, plan)
-        staged = _staged_install(home / "staged", source)
-        staged["inactive_after_checks"] = staged["rollback"]["completed"]
-        staged["global_install_performed"] = False
-        staged["supervision"] = _staged_supervision_check(staged, home)
-        manifest_checks = _manifest_checks(plan, backups, staged)
-        cutover = _cutover_matrix(home / "cutover-faults", context)
-        adapters = _fake_adapters(context)
-        canary = _canary(home / "fake-canary", context, adapters)
-        lifecycle = _integrated_lifecycle(home, source)
-        runtime_canaries = _runtime_canaries(home, source)
-        supervision_benchmark = _supervision_benchmark(home)
-        sentinels_receipt = sentinels.verify()
-        after_targets = {
-            item["target_id"]: _snapshot(Path(item["path"]))
-            for item in plan["current_targets"]
-        }
-        if before_targets != after_targets:
-            raise StorageRefusal("sentinel_changed", "a planned live target changed during preflight")
+        before_targets = _target_snapshots(plan)
+        migration = _migration_and_install_phase(
+            home, source, plan, fault=fault
+        )
+        sandbox = _sandbox_acceptance_phase(home, source, context)
+        sentinels_receipt, _ = _verify_preflight_boundaries(
+            plan, before_targets, sentinels
+        )
         mutation_manifest = _mutation_manifest(
             plan,
-            backups,
-            live_shadow,
-            staged,
-            supervision_benchmark,
+            migration["backups"],
+            migration["live_shadow"],
+            migration["staged"],
+            sandbox["supervision_benchmark"],
         )
         _write_json(home / "cutover-mutation-manifest.json", mutation_manifest)
         _write_operation(
@@ -1722,39 +1875,17 @@ def run_pre_cutover(
             context,
             mutation_manifest_sha256=mutation_manifest["manifest_sha256"],
         )
-        result = {
-            "schema": RECEIPT_SCHEMA,
-            "version": __version__,
-            "namespace": namespace,
-            "home": str(home),
-            "operation": operation,
-            "determinism": {"clock": context.at, "ids_allocated": context.sequence},
-            "sentinels": sentinels_receipt,
-            "live_targets": {
-                "unchanged": True,
-                "target_count": len(before_targets),
-                "aggregate_sha256": _sha256(_stable_bytes(before_targets)),
-            },
-            "fixture_migration_shadow": fixture_shadow,
-            "live_migration_shadow": live_shadow,
-            "backup_rollback_rehearsal": backups,
-            "staged_inactive_install": staged,
-            "manifest_checks": manifest_checks,
-            "integrated_lifecycle": lifecycle,
-            "runtime_contract_canaries": runtime_canaries,
-            "supervision_benchmark": supervision_benchmark,
-            "cutover_fault_matrix": cutover,
-            "fake_resource_canary": canary,
-            "mutation_manifest": mutation_manifest,
-            "public_claims": {
-                "global_install": False,
-                "live_import": False,
-                "hook_or_watcher_mutation": False,
-                "canonical_cutover": False,
-                "live_delivery": False,
-                "real_runtime_support": False,
-            },
-        }
+        result = _build_pre_cutover_receipt(
+            namespace=namespace,
+            home=home,
+            operation=operation,
+            context=context,
+            sentinels_receipt=sentinels_receipt,
+            before_targets=before_targets,
+            migration=migration,
+            sandbox=sandbox,
+            mutation_manifest=mutation_manifest,
+        )
         _write_json(home / "precutover-receipt.json", result)
         return result
     except BaseException as exc:

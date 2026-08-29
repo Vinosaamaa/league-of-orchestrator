@@ -309,6 +309,20 @@ def intake_prompt(
                 "INSERT INTO prompt_payloads(prompt_id,body,body_hash,byte_count,pruned_at) VALUES(?,?,?,?,NULL)",
                 (prompt_id, body, body_hash, len(encoded)),
             )
+            if wake_scope_id is None:
+                scope_row = store.connection.execute(
+                    "SELECT scope_id FROM watcher_scopes WHERE actor_agent_id=? ORDER BY scope_id LIMIT 1",
+                    (intake_actor_id,),
+                ).fetchone()
+                if scope_row is not None:
+                    wake_scope_id = str(scope_row["scope_id"])
+                else:
+                    actor = store.connection.execute(
+                        "SELECT callsign FROM agent_instances WHERE agent_id=? AND retired_at IS NULL",
+                        (intake_actor_id,),
+                    ).fetchone()
+                    if actor is not None:
+                        wake_scope_id = f"watcher:{actor['callsign']}"
             if wake_scope_id is not None:
                 from .sqlite_watcher_ops import ensure_watcher_scope
 
@@ -328,6 +342,165 @@ def intake_prompt(
         raise
     except sqlite3.DatabaseError as exc:
         raise store._translate_database_error(exc, "prompt intake conflicted with canonical state") from exc
+    return {"prompt_id": prompt_id, "triage_state": "untriaged", "idempotent": False}
+
+
+def quarantine_prompt(
+    store: Any,
+    prompt_id: str,
+    adapter_kind: str,
+    session_ref: str,
+    source_event_key: str,
+    body: str,
+    at: str,
+) -> dict[str, Any]:
+    _time(at, "prompt quarantine time")
+    encoded = body.encode("utf-8")
+    if not all((prompt_id, adapter_kind, session_ref, source_event_key)):
+        raise StorageRefusal("invalid_prompt", "quarantined prompt identity fields are required")
+    if not encoded or len(encoded) > MAX_PROMPT_BYTES:
+        raise StorageRefusal("invalid_prompt", "prompt body must be non-empty and within the bounded size")
+    body_hash = hashlib.sha256(encoded).hexdigest()
+    try:
+        with store._transaction():
+            existing = store.connection.execute(
+                """
+                SELECT * FROM prompt_quarantine
+                 WHERE adapter_kind=? AND session_ref=? AND source_event_key=?
+                """,
+                (adapter_kind, session_ref, source_event_key),
+            ).fetchone()
+            if existing is not None:
+                if existing["body_hash"] != body_hash or int(existing["byte_count"]) != len(encoded):
+                    raise StorageRefusal(
+                        "prompt_source_conflict",
+                        "prompt source identity was already quarantined with different bytes",
+                    )
+                return {
+                    "prompt_id": existing["prompt_id"],
+                    "state": existing["state"],
+                    "reason": existing["reason"],
+                    "idempotent": True,
+                }
+            store.connection.execute(
+                """
+                INSERT INTO prompt_quarantine
+                  (prompt_id,adapter_kind,session_ref,source_event_key,body,body_hash,
+                   byte_count,state,reason,bound_actor_id,bound_runtime_instance_id,created_at,bound_at)
+                VALUES(?,?,?,?,?,?,?,'quarantined','runtime_unverified',NULL,NULL,?,NULL)
+                """,
+                (prompt_id, adapter_kind, session_ref, source_event_key, body, body_hash, len(encoded), at),
+            )
+    except StorageRefusal:
+        raise
+    except sqlite3.DatabaseError as exc:
+        raise store._translate_database_error(exc, "prompt quarantine conflicted with canonical state") from exc
+    return {
+        "prompt_id": prompt_id,
+        "state": "quarantined",
+        "reason": "runtime_unverified",
+        "idempotent": False,
+    }
+
+
+def bind_quarantined_prompt(
+    store: Any,
+    prompt_id: str,
+    intake_actor_id: str,
+    runtime_instance_id: str,
+    at: str,
+    *,
+    wake_scope_id: str | None = None,
+) -> dict[str, Any]:
+    _time(at, "prompt binding time")
+    try:
+        with store._transaction():
+            row = store.connection.execute(
+                "SELECT * FROM prompt_quarantine WHERE prompt_id=?", (prompt_id,)
+            ).fetchone()
+            if row is None:
+                raise StorageRefusal("prompt_unknown", "quarantined prompt does not exist")
+            if row["state"] == "bound":
+                exact = (
+                    row["bound_actor_id"] == intake_actor_id
+                    and row["bound_runtime_instance_id"] == runtime_instance_id
+                )
+                if not exact:
+                    raise StorageRefusal("prompt_binding_conflict", "prompt was bound to a different runtime")
+                return {"prompt_id": prompt_id, "triage_state": "untriaged", "idempotent": True}
+            runtime = store.connection.execute(
+                """
+                SELECT actor_agent_id,status,verified,session_ref
+                  FROM runtime_instances WHERE runtime_instance_id=?
+                """,
+                (runtime_instance_id,),
+            ).fetchone()
+            if (
+                runtime is None
+                or runtime["actor_agent_id"] != intake_actor_id
+                or runtime["session_ref"] != row["session_ref"]
+                or runtime["status"] not in {"active", "idle"}
+                or not runtime["verified"]
+            ):
+                raise StorageRefusal("runtime_unverified", "binding requires the exact verified hook runtime")
+            store.connection.execute(
+                """
+                INSERT INTO prompts
+                  (prompt_id,intake_actor_id,runtime_instance_id,adapter_kind,session_ref,
+                   source_event_key,triage_state,triage_digest,created_at)
+                VALUES(?,?,?,?,?,?,'untriaged',NULL,?)
+                """,
+                (
+                    prompt_id, intake_actor_id, runtime_instance_id, row["adapter_kind"],
+                    row["session_ref"], row["source_event_key"], row["created_at"],
+                ),
+            )
+            store.connection.execute(
+                """
+                INSERT INTO prompt_payloads(prompt_id,body,body_hash,byte_count,pruned_at)
+                VALUES(?,?,?,?,NULL)
+                """,
+                (prompt_id, row["body"], row["body_hash"], row["byte_count"]),
+            )
+            store.connection.execute(
+                """
+                UPDATE prompt_quarantine
+                   SET state='bound',bound_actor_id=?,bound_runtime_instance_id=?,bound_at=?
+                 WHERE prompt_id=? AND state='quarantined'
+                """,
+                (intake_actor_id, runtime_instance_id, at, prompt_id),
+            )
+            if wake_scope_id is None:
+                scope_row = store.connection.execute(
+                    "SELECT scope_id FROM watcher_scopes WHERE actor_agent_id=? ORDER BY scope_id LIMIT 1",
+                    (intake_actor_id,),
+                ).fetchone()
+                if scope_row is not None:
+                    wake_scope_id = str(scope_row["scope_id"])
+                else:
+                    actor = store.connection.execute(
+                        "SELECT callsign FROM agent_instances WHERE agent_id=? AND retired_at IS NULL",
+                        (intake_actor_id,),
+                    ).fetchone()
+                    if actor is not None:
+                        wake_scope_id = f"watcher:{actor['callsign']}"
+            if wake_scope_id is not None:
+                from .sqlite_watcher_ops import ensure_watcher_scope
+
+                ensure_watcher_scope(store, wake_scope_id, intake_actor_id, block_on_obligations=None)
+                store.connection.execute(
+                    """
+                    UPDATE watcher_scopes
+                       SET user_message_generation=user_message_generation+1,
+                           wait_generation=wait_generation+1,stop_blocked=0,wait_active=0
+                     WHERE scope_id=?
+                    """,
+                    (wake_scope_id,),
+                )
+    except StorageRefusal:
+        raise
+    except sqlite3.DatabaseError as exc:
+        raise store._translate_database_error(exc, "prompt binding conflicted with canonical state") from exc
     return {"prompt_id": prompt_id, "triage_state": "untriaged", "idempotent": False}
 
 

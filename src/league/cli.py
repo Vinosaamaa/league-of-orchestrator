@@ -654,6 +654,11 @@ def _add_request_commands(groups: argparse._SubParsersAction) -> None:
     triage.add_argument("--prompt-id", required=True)
     triage.add_argument("--items-json", required=True, help="JSON array of bounded prompt items.")
     triage.add_argument("--at", required=True)
+    bind_prompt = commands.add_parser(
+        "bind-prompt", help="Bind one quarantined prompt to an exact verified runtime."
+    )
+    for name in ("prompt-id", "intake-actor-id", "runtime-instance-id", "at"):
+        bind_prompt.add_argument(f"--{name}", required=True)
     claim = commands.add_parser("claim", help="Acquire or recover one request mutation claim.")
     for name in ("request-id", "runtime-instance-id", "claim-token", "leased-until", "at"):
         claim.add_argument(f"--{name}", required=True)
@@ -1633,6 +1638,12 @@ def _request_triage(store: Storage, args: argparse.Namespace) -> CommandResult:
     return store.triage_prompt(args.prompt_id, items, args.at), None
 
 
+def _request_bind_prompt(store: Storage, args: argparse.Namespace) -> CommandResult:
+    return store.bind_quarantined_prompt(
+        args.prompt_id, args.intake_actor_id, args.runtime_instance_id, args.at
+    ), None
+
+
 def _request_claim(store: Storage, args: argparse.Namespace) -> CommandResult:
     return store.claim_request(
         args.request_id,
@@ -2076,6 +2087,7 @@ HANDLERS: dict[str, CommandHandler] = {
     "cleanup.status": _cleanup_status,
     "request.intake": _request_intake,
     "request.triage": _request_triage,
+    "request.bind-prompt": _request_bind_prompt,
     "request.claim": _request_claim,
     "request.accept": _request_claim,
     "request.release": _request_release,

@@ -36,6 +36,13 @@ An active SQLite supervisor owns delivery; without one, the dispatcher uses one
 verified Herdr endpoint. Receipt uniqueness makes a duplicate retry inert, and
 an unavailable endpoint leaves the row pending.
 
+Prompt submission is availability-critical. When a valid hook payload has no
+exact verified runtime identity, the hook stores its complete bytes once in the
+canonical quarantine with a `runtime_unverified` obligation and returns success
+so the local prompt proceeds. `league request bind-prompt` later requires one
+exact actor/runtime/session match, promotes the same prompt without changing its
+identity or bytes, and wakes the bound Shotcaller for model-authored triage.
+
 Run the complete foundation with one command after creating task-owned sentinel
 fixtures outside the requested namespace:
 

@@ -92,8 +92,8 @@ def _scope(store: SQLiteStorage, actor_id: str, callsign: str) -> str:
 
 def _capture_prompt(
     store: SQLiteStorage,
-    scope: str,
-    actor_id: str,
+    scope: str | None,
+    actor_id: str | None,
     payload: dict[str, Any],
     *,
     adapter_kind: str,
@@ -119,6 +119,13 @@ def _capture_prompt(
         raise StorageRefusal(
             "prompt_hook_invalid",
             "prompt hook requires its exact event, session, turn/generation, and body",
+        )
+    identity = f"{adapter_kind}\0{session_ref}\0{source_event_key}"
+    prompt_id = f"prompt:hook:{hashlib.sha256(identity.encode()).hexdigest()}"
+    now = datetime.now().astimezone().isoformat(timespec="seconds")
+    if actor_id is None:
+        return store.quarantine_prompt(
+            prompt_id, adapter_kind, session_ref, source_event_key, body, now
         )
     runtimes = store.connection.execute(
         """
@@ -146,9 +153,8 @@ def _capture_prompt(
             or actor["backend"] not in {"herdr", "tmux"}
             or not actor["address"]
         ):
-            raise StorageRefusal(
-                "runtime_unverified",
-                "prompt hook session has no exact stored runtime identity",
+            return store.quarantine_prompt(
+                prompt_id, adapter_kind, session_ref, source_event_key, body, now
             )
         runtime_digest = hashlib.sha256(
             f"{adapter_kind}\0{session_ref}\0{actor['backend']}\0{actor['address']}".encode()
@@ -171,23 +177,35 @@ def _capture_prompt(
         )
         runtimes = [{"runtime_instance_id": runtime_id}]
     if len(runtimes) != 1:
-        raise StorageRefusal(
-            "runtime_unverified",
-            "prompt hook session does not resolve to one verified actor runtime",
+        return store.quarantine_prompt(
+            prompt_id, adapter_kind, session_ref, source_event_key, body, now
         )
-    identity = f"{adapter_kind}\0{session_ref}\0{source_event_key}"
-    prompt_id = f"prompt:hook:{hashlib.sha256(identity.encode()).hexdigest()}"
-    return store.intake_prompt(
-        prompt_id,
-        actor_id,
-        str(runtimes[0]["runtime_instance_id"]),
-        adapter_kind,
-        session_ref,
-        source_event_key,
-        body,
-        datetime.now().astimezone().isoformat(timespec="seconds"),
-        wake_scope_id=scope,
-    )
+    runtime_id = str(runtimes[0]["runtime_instance_id"])
+    quarantined = store.connection.execute(
+        "SELECT state FROM prompt_quarantine WHERE prompt_id=?", (prompt_id,)
+    ).fetchone()
+    if quarantined is not None:
+        return store.bind_quarantined_prompt(
+            prompt_id, actor_id, runtime_id, now, wake_scope_id=scope
+        )
+    try:
+        return store.intake_prompt(
+            prompt_id,
+            actor_id,
+            runtime_id,
+            adapter_kind,
+            session_ref,
+            source_event_key,
+            body,
+            now,
+            wake_scope_id=scope,
+        )
+    except StorageRefusal as exc:
+        if exc.code != "runtime_unverified":
+            raise
+        return store.quarantine_prompt(
+            prompt_id, adapter_kind, session_ref, source_event_key, body, now
+        )
 
 
 def _supervision_snapshot(
@@ -373,11 +391,25 @@ def main(argv: list[str] | None = None) -> int:
     payload = _payload() if args.command.endswith("-hook") else {}
     with SQLiteStorage(_state_root(), request_wal=False) as store:
         actor = _actor(store, args, payload)
+        actor_id = None if actor is None else str(actor[0])
+        callsign = None if actor is None else str(actor[1])
+        scope = None if actor is None else _scope(store, actor_id, callsign)
+        if args.command in {"codex-user-prompt-hook", "cursor-before-submit-hook"}:
+            _capture_prompt(
+                store,
+                scope,
+                actor_id,
+                payload,
+                adapter_kind=(
+                    "codex" if args.command == "codex-user-prompt-hook" else "cursor"
+                ),
+            )
+            _emit({})
+            return 0
         if actor is None:
             _emit({})
             return 0
-        actor_id, callsign = str(actor[0]), str(actor[1])
-        scope = _scope(store, actor_id, callsign)
+        assert actor_id is not None and callsign is not None and scope is not None
         if args.command == "supervise":
             _emit(_supervise(store, scope, actor_id, callsign, args.poll_seconds))
             return 0
@@ -405,18 +437,6 @@ def main(argv: list[str] | None = None) -> int:
                     at=datetime.now().astimezone().isoformat(timespec="seconds"),
                 )
             )
-            return 0
-        if args.command in {"codex-user-prompt-hook", "cursor-before-submit-hook"}:
-            _capture_prompt(
-                store,
-                scope,
-                actor_id,
-                payload,
-                adapter_kind=(
-                    "codex" if args.command == "codex-user-prompt-hook" else "cursor"
-                ),
-            )
-            _emit({})
             return 0
         if args.command in {"codex-stop-hook", "cursor-stop-hook"}:
             terminal = hashlib.sha256(

@@ -22,7 +22,9 @@ REQUEST_LIFECYCLE_TESTS := \
 	tests/test_transition_delivery.py \
 	tests/test_shotcaller_stop.py \
 	tests/test_canonical_watcher.py \
-	tests/test_request_lifecycle_cli.py \
+	tests/test_request_lifecycle_cli.py
+
+BENCHMARK_TESTS := \
 	tests/test_request_turn_benchmark.py
 
 RUNTIME_LIFECYCLE_TESTS := \
@@ -57,7 +59,7 @@ REPORTING_PRIVACY_TESTS := \
 	tests/test_reporting.py \
 	tests/test_reporting_performance.py
 
-.PHONY: test test-baseline test-storage test-project-roster test-acceptance test-request-lifecycle test-runtime-lifecycle test-routing-policy test-skill-contracts test-handoff-callsigns test-reporting-privacy test-public-safety test-affected test-all
+.PHONY: test test-baseline test-storage test-project-roster test-acceptance test-request-lifecycle test-turn-benchmark test-runtime-lifecycle test-routing-policy test-skill-contracts test-handoff-callsigns test-reporting-privacy test-public-safety test-affected test-all
 test:
 	@$(MAKE) --no-print-directory test-baseline
 
@@ -76,6 +78,11 @@ test-project-roster:
 
 test-request-lifecycle:
 	@set -eu; for test in $(REQUEST_LIFECYCLE_TESTS); do \
+		PYTHONDONTWRITEBYTECODE=1 $(PYTHON) $$test; \
+	done
+
+test-turn-benchmark:
+	@set -eu; for test in $(BENCHMARK_TESTS); do \
 		PYTHONDONTWRITEBYTECODE=1 $(PYTHON) $$test; \
 	done
 

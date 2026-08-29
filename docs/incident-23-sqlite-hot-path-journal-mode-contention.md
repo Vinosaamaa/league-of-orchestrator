@@ -48,13 +48,11 @@ body, inject instructions, choose a semantic split, or start the turn process.
 A later performance review found that the earlier “legacy chatty turn” label
 was inaccurate: it measured repeated SQLite commands, not the preserved JSON
 runtime. The corrected ten-sample benchmark runs the exact retired JSON watcher
-against synthetic record pairs and the installed one-process SQLite command
-against the same six summaries and outcomes. Installed SQLite measured one
-process/command, 198.795 ms median and 220.493 ms p95 total. Retired JSON needed
-seven processes/commands, 1,435.357 ms median and 1,504.255 ms p95 total even
-though its missing durable semantic-begin phase was counted as zero in its
-favor. The active source guide now contains only SQLite instructions; the
-retired record contract is preserved as a non-installable historical artifact.
+and installed one-process SQLite command on temporary six-item fixtures. The
+authoritative median, p95, phase, output, and command-count results are recorded
+once in the corrected comparison table below. The active source guide now
+contains only SQLite instructions; the retired record contract is preserved as
+a non-installable historical artifact.
 
 This report does **not** declare issue #23 resolved. Resolution requires the
 exact installed disposable flow from capture and explicit triage through launch,
@@ -172,7 +170,7 @@ evidence.
 | Performance evidence | Cold CLI calls still cost about two hundred milliseconds each and the first exact-body design required one process per prompt/action. |
 | Owner correction | The prompt hook remained capture-and-wake only; no control text could be inserted into the owner body. Semantic decisions remained model output. |
 | One-process candidate | `league request turn` now keeps one PID and one connection through exact intake, atomic triage/claim/routing, model work, atomic answer/result/delivery commit, and the final full obligation boundary. |
-| Corrected installed comparison | Ten same-workload samples measured retired JSON at 7 commands and 1,435.357/1,504.255 ms median/p95 versus installed SQLite at 1 command and 198.795/220.493 ms. The absent JSON semantic-begin phase was reported explicitly as zero, not fabricated. |
+| Corrected installed comparison | Ten same-workload samples ran the preserved JSON watcher and installed one-process SQLite command. The authoritative phase, median, p95, output, and command counts are in the corrected comparison table; the absent JSON semantic-begin phase is zero, not fabricated. |
 | Guide retirement | The final JSON-era orchestration excerpt was archived with its full source hash; the installable source guide and generated Champion context removed active record-pair and retired-writer instructions. |
 | Documentation gate | The owning incident/design report was expanded to record architecture, failure history, decisions, commands, performance, recovery, acceptance, and remaining limits before release. |
 
@@ -495,16 +493,16 @@ independently.
 
 | Corrected path/phase | Commands per turn | Median | p95 |
 | --- | ---: | ---: | ---: |
-| Retired JSON process startup | 7 | 17.673 ms | 19.317 ms |
-| Retired JSON intake | same 7-command turn | 197.936 ms | 238.892 ms |
+| Retired JSON process startup | 7 | 18.382 ms | 19.158 ms |
+| Retired JSON intake | same 7-command turn | 231.913 ms | 297.328 ms |
 | Retired JSON begin | unsupported; no fabricated write | 0.000 ms | 0.000 ms |
-| Retired JSON commit | 6 per-item transition commands | 1,213.282 ms | 1,260.159 ms |
-| Retired JSON total | 7 | 1,435.357 ms | 1,504.255 ms |
-| Installed one-process SQLite startup | 1 | 2.526 ms | 2.860 ms |
-| Installed one-process SQLite intake | same process | 169.672 ms | 192.753 ms |
-| Installed one-process SQLite begin | same process | 3.587 ms | 3.949 ms |
-| Installed one-process SQLite commit/boundary/exit | same process | 21.614 ms | 31.996 ms |
-| Installed one-process SQLite total | 1 | 198.795 ms | 220.493 ms |
+| Retired JSON commit | 6 per-item transition commands | 1,413.908 ms | 1,467.716 ms |
+| Retired JSON total | 7 | 1,673.611 ms | 1,790.575 ms |
+| Installed one-process SQLite startup | 1 | 2.989 ms | 3.463 ms |
+| Installed one-process SQLite intake | same process | 177.761 ms | 196.571 ms |
+| Installed one-process SQLite begin | same process | 3.762 ms | 4.017 ms |
+| Installed one-process SQLite commit/boundary/exit | same process | 22.049 ms | 22.961 ms |
+| Installed one-process SQLite total | 1 | 207.009 ms | 225.106 ms |
 
 The largest observed SQLite phase output was 8,854 bytes under a 1,100,000-byte
 bound. The normal-turn budget is exactly one `request turn` process and zero

@@ -149,21 +149,26 @@ def _prepare_legacy(root: Path) -> tuple[Path, Path]:
 def _invoke(
     command: list[str], environment: dict[str, str]
 ) -> tuple[float, float, bytes]:
-    started = time.perf_counter()
-    process = subprocess.Popen(
-        command,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        env=environment,
-    )
-    spawned = time.perf_counter()
-    stdout, stderr = process.communicate(timeout=30)
-    completed = time.perf_counter()
+    with tempfile.TemporaryFile() as stdout_file, tempfile.TemporaryFile() as stderr_file:
+        started = time.perf_counter()
+        process = subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=stdout_file,
+            stderr=stderr_file,
+            env=environment,
+        )
+        spawned = time.perf_counter()
+        process.wait(timeout=30)
+        completed = time.perf_counter()
+        for stream in (stdout_file, stderr_file):
+            if stream.tell() > MAX_PHASE_OUTPUT_BYTES:
+                raise RuntimeError("benchmark command output exceeded its bound")
+            stream.seek(0)
+        stdout = stdout_file.read()
+        stderr = stderr_file.read()
     if process.returncode != 0:
         raise RuntimeError((stdout or stderr).decode("utf-8", errors="replace"))
-    if len(stdout) > MAX_PHASE_OUTPUT_BYTES:
-        raise RuntimeError("benchmark command output exceeded its bound")
     return (spawned - started) * 1000, (completed - spawned) * 1000, stdout
 
 
@@ -245,43 +250,48 @@ def _sqlite_turn(
     ]
     environment = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
     started = time.perf_counter()
-    process = subprocess.Popen(
-        command,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        env=environment,
-    )
-    spawned = time.perf_counter()
-    if process.stdin is None or process.stdout is None:
-        raise RuntimeError("one-process turn pipes are unavailable")
-    intake_line = process.stdout.readline(MAX_PHASE_OUTPUT_BYTES + 1)
-    intake_at = time.perf_counter()
-    intake = json.loads(intake_line)
-    if intake["result"]["returned_count"] != PROMPT_COUNT:
-        raise RuntimeError("one-process intake count mismatch")
-    begin = {
-        "decisions": [_semantic_decision(item) for item in range(1, PROMPT_COUNT + 1)],
-        "plans": [_semantic_plan() for _ in range(PROMPT_COUNT)],
-    }
-    process.stdin.write(json.dumps(begin, separators=(",", ":")).encode() + b"\n")
-    process.stdin.flush()
-    begun_line = process.stdout.readline(MAX_PHASE_OUTPUT_BYTES + 1)
-    begun_at = time.perf_counter()
-    begun = json.loads(begun_line)
-    if begun["result"]["phase"] != "begun" or process.poll() is not None:
-        raise RuntimeError("one-process begin failed or exited early")
-    commit = {
-        "actions": [_semantic_answer(item) for item in range(1, PROMPT_COUNT + 1)]
-    }
-    process.stdin.write(json.dumps(commit, separators=(",", ":")).encode() + b"\n")
-    process.stdin.flush()
-    committed_line = process.stdout.readline(MAX_PHASE_OUTPUT_BYTES + 1)
-    committed = json.loads(committed_line)
-    if process.wait(timeout=30) != 0 or committed["result"]["phase"] != "committed":
-        error = process.stderr.read() if process.stderr is not None else b""
+    with tempfile.TemporaryFile() as errors:
+        process = subprocess.Popen(
+            command,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=errors,
+            env=environment,
+        )
+        spawned = time.perf_counter()
+        if process.stdin is None or process.stdout is None:
+            raise RuntimeError("one-process turn pipes are unavailable")
+        intake_line = process.stdout.readline(MAX_PHASE_OUTPUT_BYTES + 1)
+        intake_at = time.perf_counter()
+        intake = json.loads(intake_line)
+        if intake["result"]["returned_count"] != PROMPT_COUNT:
+            raise RuntimeError("one-process intake count mismatch")
+        begin = {
+            "decisions": [_semantic_decision(item) for item in range(1, PROMPT_COUNT + 1)],
+            "plans": [_semantic_plan() for _ in range(PROMPT_COUNT)],
+        }
+        process.stdin.write(json.dumps(begin, separators=(",", ":")).encode() + b"\n")
+        process.stdin.flush()
+        begun_line = process.stdout.readline(MAX_PHASE_OUTPUT_BYTES + 1)
+        begun_at = time.perf_counter()
+        begun = json.loads(begun_line)
+        if begun["result"]["phase"] != "begun" or process.poll() is not None:
+            raise RuntimeError("one-process begin failed or exited early")
+        commit = {
+            "actions": [_semantic_answer(item) for item in range(1, PROMPT_COUNT + 1)]
+        }
+        process.stdin.write(json.dumps(commit, separators=(",", ":")).encode() + b"\n")
+        process.stdin.flush()
+        committed_line = process.stdout.readline(MAX_PHASE_OUTPUT_BYTES + 1)
+        committed = json.loads(committed_line)
+        returncode = process.wait(timeout=30)
+        completed = time.perf_counter()
+        if errors.tell() > MAX_PHASE_OUTPUT_BYTES:
+            raise RuntimeError("one-process turn error output exceeded its bound")
+        errors.seek(0)
+        error = errors.read()
+    if returncode != 0 or committed["result"]["phase"] != "committed":
         raise RuntimeError(error.decode("utf-8", errors="replace"))
-    completed = time.perf_counter()
     maximum = max(len(intake_line), len(begun_line), len(committed_line))
     if maximum > MAX_PHASE_OUTPUT_BYTES:
         raise RuntimeError("one-process turn output exceeded its bound")

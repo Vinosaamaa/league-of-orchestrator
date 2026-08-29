@@ -100,8 +100,9 @@ adapter tests are original League work for issue #23. The command exercises one
 disposable Codex/Herdr runtime and real SQLite state while keeping all Git and
 filesystem artifacts beneath its explicit temporary root. Its receipt is scoped
 to that runtime and does not claim support for Cursor, Pi, tmux, or live League
-state. The repository-owned artifact extension is intentionally deferred until
-issue #40 is merged.
+state. Its final integrated gate composes the repository-owned artifact lifecycle
+landed by issue #40 with the real report and merge receipts from issue #39/PR
+#41; it does not duplicate that implementation.
 
 Tests that require process inspection explicitly inject the single
 `tests/fakes/ps` adapter through `tests/process_adapter.py`; Make targets do not

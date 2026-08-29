@@ -93,7 +93,7 @@ rollback, integrates the merged lifecycle through fake adapters, stages both
 launchers inactive, and emits only an unapplied mutation manifest. These are
 pre-cutover mechanics, not authority or real-adapter proof.
 
-The repository-local schema is now contiguous `[1,2,3,4,5,6,7,8]`. Versions 1
+The repository-local schema is now contiguous `[1,2,3,4,5,6,7,8,9]`. Versions 1
 and 2 remain the issue-#19 store, version 3 is the request lifecycle, version 4
 is the runtime lifecycle, and v5 is
 `advisory-project-catalog-and-roster-indexes`. Canonical v6 is
@@ -111,7 +111,11 @@ assignment, rollover, or callsign authority.
 
 Version 8 is `bounded-routing-policy-and-request-progress`, checksum
 `593e2cf05d0200463800b6be7cbf5918a9b5fc3304f793d2ec3fad30b538e80c`.
-The strict acceptance migration schema names all eight contiguous versions; an
+Version 9 is `repository-owned-artifact-publication`, checksum
+`9231da781de45a8e912cd7193034a0b1b56f3a13e5e737e5681f18f6c6e3c852`.
+It records declarations and exact merged-publication receipts for repository-
+owned artifacts and blocks cleanup while any declaration is unresolved. The
+strict acceptance migration schema names all nine contiguous versions; an
 older receipt contract cannot silently accept a partial current migration.
 
 Dry-run import plans bind `target_schema_version` into their digest. A plan

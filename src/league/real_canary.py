@@ -48,6 +48,16 @@ RESUME_AT = "2026-01-01T01:04:00Z"
 RESUME_LEASE = "2026-01-01T01:14:00Z"
 READINESS_WAIT_MILLISECONDS = 30_000
 READINESS_MAX_OBSERVATIONS = 2
+REPORT_ARTIFACT_ID = "artifact:issue-39-overnight-report"
+REPORT_REPOSITORY = "https://github.com/Vinosaamaa/league-of-orchestrator"
+REPORT_ISSUE = 39
+REPORT_PULL_REQUEST = 41
+REPORT_PULL_REQUEST_URL = f"{REPORT_REPOSITORY}/pull/{REPORT_PULL_REQUEST}"
+REPORT_TESTED_HEAD = "509e00b7476a8a449f690a04250fe9d49bfbaca3"
+REPORT_MERGE_COMMIT = "3c517535b6cf4423bd6704b06d30f2e3cc299784"
+REPORT_MERGED_AT = "2026-08-29T02:49:40Z"
+REPORT_BRANCH = "agent/braum/39-overnight-report"
+REPORT_PATH = "docs/reports/2026-08-28-overnight-delivery-report.md"
 CODEX_SESSION_TITLE = re.compile(
     r"^(?P<session>[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}) \| codex$"
 )
@@ -182,6 +192,109 @@ def _create_git_canary(home: Path) -> dict[str, str]:
         "branch": branch,
         "head": head,
         "base_ref": "main",
+        "merge_commit": head,
+    }
+
+
+def _create_repository_artifact_canary(
+    home: Path, source_root: Path
+) -> dict[str, str]:
+    repository = (home / "git/repository").resolve(strict=False)
+    worktree = (home / "git/worktree").resolve(strict=False)
+    repository.parent.mkdir(parents=True, mode=0o700)
+    process_home = home / "process-home"
+    process_home.mkdir(mode=0o700)
+    environment = {
+        **os.environ,
+        "HOME": str(process_home),
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+    }
+    remote = _run(
+        ("git", "-C", str(source_root), "remote", "get-url", "origin"),
+        cwd=home,
+        env=environment,
+    ).stdout.strip()
+    if remote.removesuffix(".git") != REPORT_REPOSITORY:
+        raise StorageRefusal(
+            "real_canary_repository_mismatch",
+            "source root is not the repository bound to the artifact receipt",
+        )
+    _run(
+        (
+            "git",
+            "clone",
+            "--local",
+            "--no-hardlinks",
+            "--no-checkout",
+            str(source_root),
+            str(repository),
+        ),
+        cwd=home,
+        env=environment,
+    )
+    tested_tree = _run(
+        ("git", "-C", str(repository), "rev-parse", f"{REPORT_TESTED_HEAD}^{{tree}}"),
+        cwd=home,
+        env=environment,
+    ).stdout.strip()
+    merge_tree = _run(
+        ("git", "-C", str(repository), "rev-parse", f"{REPORT_MERGE_COMMIT}^{{tree}}"),
+        cwd=home,
+        env=environment,
+    ).stdout.strip()
+    if tested_tree != merge_tree:
+        raise StorageRefusal(
+            "real_canary_merge_mismatch",
+            "repository artifact tested and squash-merge trees differ",
+        )
+    _run(
+        (
+            "git",
+            "-C",
+            str(repository),
+            "worktree",
+            "add",
+            "-b",
+            REPORT_BRANCH,
+            str(worktree),
+            REPORT_TESTED_HEAD,
+        ),
+        cwd=home,
+        env=environment,
+    )
+    report = worktree / REPORT_PATH
+    if not report.is_file() or report.is_symlink():
+        raise StorageRefusal(
+            "real_canary_artifact_missing", "repository-owned report is missing"
+        )
+    tested_bytes = report.read_bytes()
+    merged_bytes = _run(
+        (
+            "git",
+            "-C",
+            str(repository),
+            "show",
+            f"{REPORT_MERGE_COMMIT}:{REPORT_PATH}",
+        ),
+        cwd=home,
+        env=environment,
+    ).stdout.encode("utf-8")
+    if tested_bytes != merged_bytes:
+        raise StorageRefusal(
+            "real_canary_artifact_mismatch",
+            "repository-owned report bytes differ after merge",
+        )
+    return {
+        "repository": str(repository),
+        "worktree": str(worktree),
+        "branch": REPORT_BRANCH,
+        "head": REPORT_TESTED_HEAD,
+        "base_ref": REPORT_MERGE_COMMIT,
+        "merge_commit": REPORT_MERGE_COMMIT,
+        "tested_tree": tested_tree,
+        "merge_tree": merge_tree,
+        "artifact_sha256": _sha256(tested_bytes),
     }
 
 
@@ -220,6 +333,11 @@ def _create_herdr_canary(home: Path, worktree: Path, namespace: str) -> dict[str
             pane_id,
             "--timeout",
             "120000",
+            "--",
+            "--model",
+            "gpt-5.6-sol",
+            "--config",
+            'model_reasoning_effort="high"',
         ),
         home,
         timeout=150,
@@ -273,11 +391,24 @@ def _create_herdr_canary(home: Path, worktree: Path, namespace: str) -> dict[str
         break
     if observed is None:
         raise StorageRefusal("real_canary_readiness_unproven", "Codex readiness was not observed")
-    if (
-        "LEAGUE23_CANARY_READY" not in observed.stdout
-        or "gpt-5.6-sol high" not in observed.stdout
-        or "No changes" not in observed.stdout
-    ):
+    clean = _run(
+        ("git", "-C", str(worktree), "status", "--porcelain"), cwd=home
+    ).stdout == ""
+    head = _run(
+        ("git", "-C", str(worktree), "rev-parse", "HEAD"), cwd=home
+    ).stdout.strip()
+    branch = _run(
+        ("git", "-C", str(worktree), "branch", "--show-current"), cwd=home
+    ).stdout.strip()
+    readiness = {
+        "token_observed": "LEAGUE23_CANARY_READY" in observed.stdout,
+        "route_observed": "gpt-5.6-sol high" in observed.stdout,
+        "worktree_clean": clean,
+        "head_exact": head == REPORT_TESTED_HEAD,
+        "branch_exact": branch == REPORT_BRANCH,
+    }
+    _write_json(home / "readiness-receipt.json", readiness)
+    if not all(readiness.values()):
         raise StorageRefusal(
             "real_canary_readiness_unproven",
             "Codex readiness, requested route, or clean state was not observed",
@@ -441,8 +572,16 @@ def _setup_sqlite(
         )
         if assignment.get("state") != "active":
             raise StorageRefusal("real_canary_assignment_failed", "real Codex assignment did not activate")
+        available_at = store.connection.execute(
+            "SELECT available_at FROM delivery_outbox WHERE outbox_id=?",
+            (assignment["outbox_id"],),
+        ).fetchone()[0]
         DeliveryService(
-            store, delivery, clock, ids, dispatcher_id="dispatcher:real-cleanup-canary"
+            store,
+            delivery,
+            _Clock(str(available_at)),
+            ids,
+            dispatcher_id="dispatcher:real-cleanup-canary",
         ).dispatch_source(assignment["outbox_id"], assignment["event_id"], CHAMPION_ID)
         return {"dispatch": dispatch, "assignment": assignment}
     finally:
@@ -454,10 +593,14 @@ def _settle_transition_and_request(
     transition: Mapping[str, Any],
     dispatch: Mapping[str, Any],
 ) -> dict[str, Any]:
-    clock = _Clock(TRANSITION_AT)
     ids = _Ids()
     delivery = _DeliveryDouble()
     with SQLiteStorage(state, request_wal=False) as store:
+        available_at = store.connection.execute(
+            "SELECT available_at FROM delivery_outbox WHERE outbox_id=?",
+            (transition["outbox_id"],),
+        ).fetchone()[0]
+        clock = _Clock(str(available_at))
         DeliveryService(
             store, delivery, clock, ids, dispatcher_id="dispatcher:real-transition"
         ).dispatch_source(
@@ -626,7 +769,14 @@ def _cleanup_files(
                 "action_kind": "branch_delete",
                 "adapter_kind": "git",
                 "expected_identity": {
-                    key: git[key] for key in ("repository", "branch", "head", "base_ref")
+                    key: git[key]
+                    for key in (
+                        "repository",
+                        "branch",
+                        "head",
+                        "base_ref",
+                        "merge_commit",
+                    )
                 },
                 "intended_state": {"completed": True, "action": "branch_delete"},
             },
@@ -648,7 +798,17 @@ def _cleanup_files(
         "temporary_root": str(home),
         "archive_path": str(home / "archive/identity-evidence.json"),
         "herdr": dict(herdr),
-        "git": dict(git),
+        "git": {
+            key: git[key]
+            for key in (
+                "repository",
+                "worktree",
+                "branch",
+                "head",
+                "base_ref",
+                "merge_commit",
+            )
+        },
         "callsign": {
             "assignment_id": assignment_id,
             "callsign": callsign,
@@ -660,6 +820,35 @@ def _cleanup_files(
     _write_json(manifest_path, manifest)
     _write_json(adapter_path, adapter)
     return manifest_path, adapter_path
+
+
+def _artifact_files(home: Path, git: Mapping[str, str]) -> tuple[Path, Path]:
+    declaration = {
+        "artifact_id": REPORT_ARTIFACT_ID,
+        "task_id": LIFECYCLE_TASK_ID,
+        "name": "2026-08-28 overnight League delivery report",
+        "classification": "repository_owned",
+        "repository": REPORT_REPOSITORY,
+        "issue": REPORT_ISSUE,
+        "worktree": git["worktree"],
+        "branch": git["branch"],
+        "repository_path": REPORT_PATH,
+    }
+    publication = {
+        "pull_request_number": REPORT_PULL_REQUEST,
+        "pull_request_url": REPORT_PULL_REQUEST_URL,
+        "tested_head": REPORT_TESTED_HEAD,
+        "merge_receipt": {
+            "commit": REPORT_MERGE_COMMIT,
+            "url": f"{REPORT_REPOSITORY}/commit/{REPORT_MERGE_COMMIT}",
+            "merged_at": REPORT_MERGED_AT,
+        },
+    }
+    declaration_path = home / "repository-artifact-declaration.json"
+    publication_path = home / "repository-artifact-publication.json"
+    _write_json(declaration_path, declaration)
+    _write_json(publication_path, publication)
+    return declaration_path, publication_path
 
 
 def _final_verification(
@@ -690,6 +879,10 @@ def _final_verification(
             "SELECT state FROM callsign_assignments WHERE callsign_assignment_id=?",
             ("callsign-assignment:assignment:real-cleanup-canary",),
         ).fetchone()
+        artifact = store.connection.execute(
+            "SELECT state,tested_head,merge_commit FROM repository_artifacts WHERE artifact_id=?",
+            (REPORT_ARTIFACT_ID,),
+        ).fetchone()
         after = store.stop_decision(
             "scope:real-cleanup-canary",
             SHOTCALLER_ID,
@@ -715,6 +908,9 @@ def _final_verification(
             or obligation["cleanup_state"] != "cleanup_completed"
             or callsign is None
             or callsign["state"] != "released"
+            or artifact is None
+            or tuple(artifact)
+            != ("published", REPORT_TESTED_HEAD, REPORT_MERGE_COMMIT)
             or after.get("decision") != "allow"
             or any(after.get("obligations", {}).values())
             or wait.get("safe_to_finish") is not True
@@ -784,11 +980,33 @@ def run_real_cleanup_canary(
     except FileExistsError as exc:
         raise StorageRefusal("namespace_collision", "real canary namespace already exists") from exc
 
-    git = _create_git_canary(home)
+    git = _create_repository_artifact_canary(home, source)
     herdr = _create_herdr_canary(home, Path(git["worktree"]), namespace)
     _write_json(home / "setup-receipt.json", {"git": git, "herdr": herdr})
     setup = _setup_sqlite(home, source, git, herdr)
     state = home / "league/state"
+    artifact_declaration, artifact_publication = _artifact_files(home, git)
+    _, declared_envelope = _league(
+        source,
+        home,
+        (
+            "--state-root",
+            str(state),
+            "--no-wal",
+            "artifact",
+            "declare",
+            "--input",
+            str(artifact_declaration),
+            "--at",
+            "2026-01-01T01:00:30Z",
+        ),
+    )
+    declared = declared_envelope.get("result", {})
+    if declared.get("state") != "pending":
+        raise StorageRefusal(
+            "real_canary_artifact_declaration_failed",
+            "repository-owned report declaration did not become pending",
+        )
     _, transition_envelope = _league(
         source,
         home,
@@ -838,6 +1056,68 @@ def run_real_cleanup_canary(
         "Lux",
     )
     operation_id = "operation:real-cleanup-canary"
+    pending_code, pending_cleanup = _league(
+        source,
+        home,
+        (
+            "--state-root",
+            str(state),
+            "--no-wal",
+            "cleanup",
+            "reconcile",
+            "--manifest",
+            str(manifest_path),
+            "--operation-id",
+            operation_id,
+            "--adapter-config",
+            str(adapter_path),
+            "--executor-id",
+            "executor:real-cleanup-canary:publication-pending",
+            "--leased-until",
+            "2026-01-01T01:02:00Z",
+            "--at",
+            "2026-01-01T01:01:30Z",
+        ),
+        allowed=frozenset({2}),
+    )
+    if (
+        pending_code != 2
+        or pending_cleanup.get("error", {}).get("code")
+        != "repository_publication_unresolved"
+    ):
+        raise StorageRefusal(
+            "real_canary_artifact_gate_failed",
+            "cleanup did not refuse the pending repository publication",
+        )
+    _, published_envelope = _league(
+        source,
+        home,
+        (
+            "--state-root",
+            str(state),
+            "--no-wal",
+            "artifact",
+            "publish",
+            "--artifact-id",
+            REPORT_ARTIFACT_ID,
+            "--expected-version",
+            "1",
+            "--receipt",
+            str(artifact_publication),
+            "--at",
+            "2026-01-01T01:01:45Z",
+        ),
+    )
+    published = published_envelope.get("result", {})
+    if (
+        published.get("state") != "published"
+        or published.get("tested_head") != REPORT_TESTED_HEAD
+        or published.get("merge_commit") != REPORT_MERGE_COMMIT
+    ):
+        raise StorageRefusal(
+            "real_canary_artifact_publication_failed",
+            "exact repository publication receipt was not stored",
+        )
     first_code, first = _league(
         source,
         home,
@@ -932,6 +1212,25 @@ def run_real_cleanup_canary(
             "periodic_unchanged_messages": 0,
             "separate_15_second_policy": False,
         },
+        "repository_artifact": {
+            "artifact_id": REPORT_ARTIFACT_ID,
+            "classification": "repository_owned",
+            "issue": REPORT_ISSUE,
+            "repository_path": REPORT_PATH,
+            "pull_request_number": REPORT_PULL_REQUEST,
+            "pull_request_url": REPORT_PULL_REQUEST_URL,
+            "tested_head": REPORT_TESTED_HEAD,
+            "merge_commit": REPORT_MERGE_COMMIT,
+            "tested_tree": git["tested_tree"],
+            "merge_tree": git["merge_tree"],
+            "tree_parity": git["tested_tree"] == git["merge_tree"],
+            "artifact_sha256": git["artifact_sha256"],
+            "declaration_state": declared["state"],
+            "prepublication_cleanup_refusal": pending_cleanup["error"]["code"],
+            "publication_state": published["state"],
+            "publication_gate_cleared": True,
+            "hosted_mutation_performed": False,
+        },
         "transition": before,
         "stop_before": {
             "decision": before["hook_decision"],
@@ -968,6 +1267,7 @@ def run_real_cleanup_canary(
             "eligible_branch_only": True,
             "canonical_league_state_touched": False,
             "global_install_performed": False,
+            "hosted_mutation_performed": False,
         },
     }
     receipt["receipt_sha256"] = _sha256(_stable_bytes(receipt))

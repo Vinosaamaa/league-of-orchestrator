@@ -4,7 +4,7 @@
   "title": "League real disposable cleanup canary receipt",
   "type": "object",
   "required": [
-    "schema", "namespace", "mode", "temporary_root", "completed_at", "runtime", "supervision",
+    "schema", "namespace", "mode", "temporary_root", "completed_at", "runtime", "supervision", "repository_artifact",
     "transition", "stop_before", "interruption", "cleanup", "stop_after", "scope",
     "receipt_sha256"
   ],
@@ -37,6 +37,30 @@
         "maximum_observations": {"const": 2},
         "periodic_unchanged_messages": {"const": 0},
         "separate_15_second_policy": {"const": false}
+      },
+      "additionalProperties": false
+    },
+    "repository_artifact": {
+      "type": "object",
+      "required": ["artifact_id", "classification", "issue", "repository_path", "pull_request_number", "pull_request_url", "tested_head", "merge_commit", "tested_tree", "merge_tree", "tree_parity", "artifact_sha256", "declaration_state", "prepublication_cleanup_refusal", "publication_state", "publication_gate_cleared", "hosted_mutation_performed"],
+      "properties": {
+        "artifact_id": {"const": "artifact:issue-39-overnight-report"},
+        "classification": {"const": "repository_owned"},
+        "issue": {"const": 39},
+        "repository_path": {"const": "docs/reports/2026-08-28-overnight-delivery-report.md"},
+        "pull_request_number": {"const": 41},
+        "pull_request_url": {"const": "https://github.com/Vinosaamaa/league-of-orchestrator/pull/41"},
+        "tested_head": {"const": "509e00b7476a8a449f690a04250fe9d49bfbaca3"},
+        "merge_commit": {"const": "3c517535b6cf4423bd6704b06d30f2e3cc299784"},
+        "tested_tree": {"$ref": "#/$defs/gitObject"},
+        "merge_tree": {"$ref": "#/$defs/gitObject"},
+        "tree_parity": {"const": true},
+        "artifact_sha256": {"$ref": "#/$defs/digest"},
+        "declaration_state": {"const": "pending"},
+        "prepublication_cleanup_refusal": {"const": "repository_publication_unresolved"},
+        "publication_state": {"const": "published"},
+        "publication_gate_cleared": {"const": true},
+        "hosted_mutation_performed": {"const": false}
       },
       "additionalProperties": false
     },
@@ -116,7 +140,7 @@
     },
     "scope": {
       "type": "object",
-      "required": ["archive_first", "callsign_last", "exact_endpoint_only", "clean_worktree_only", "eligible_branch_only", "canonical_league_state_touched", "global_install_performed"],
+      "required": ["archive_first", "callsign_last", "exact_endpoint_only", "clean_worktree_only", "eligible_branch_only", "canonical_league_state_touched", "global_install_performed", "hosted_mutation_performed"],
       "properties": {
         "archive_first": {"const": true},
         "callsign_last": {"const": true},
@@ -124,7 +148,8 @@
         "clean_worktree_only": {"const": true},
         "eligible_branch_only": {"const": true},
         "canonical_league_state_touched": {"const": false},
-        "global_install_performed": {"const": false}
+        "global_install_performed": {"const": false},
+        "hosted_mutation_performed": {"const": false}
       },
       "additionalProperties": false
     },
@@ -133,6 +158,7 @@
   "$defs": {
     "absolutePath": {"type": "string", "pattern": "^/[^\\u0000]+$"},
     "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "gitObject": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
     "soleCleanupObligation": {
       "type": "object",
       "required": ["active_champions", "pending_assignments", "unresolved_requests", "pending_deliveries", "cleanup_obligations"],

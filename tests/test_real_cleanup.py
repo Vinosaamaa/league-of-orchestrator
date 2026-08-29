@@ -26,10 +26,13 @@ from league.real_cleanup import (  # noqa: E402
 )
 from league.real_canary import (  # noqa: E402
     LIFECYCLE_TASK_ID,
+    REPORT_MERGE_COMMIT,
+    REPORT_TESTED_HEAD,
     SHOTCALLER_ID,
     _cleanup_files,
     _codex_session_id,
     _create_git_canary,
+    _create_repository_artifact_canary,
     _settle_transition_and_request,
     _setup_sqlite,
 )
@@ -100,6 +103,7 @@ def git_fixture(root: Path) -> dict[str, Any]:
         "branch": "canary-cleanup",
         "head": head,
         "base_ref": "main",
+        "merge_commit": head,
     }
 
 
@@ -244,6 +248,7 @@ def test_archive_git_and_scope(root: Path) -> None:
             "branch": git["branch"],
             "head": git["head"],
             "base_ref": git["base_ref"],
+            "merge_commit": git["merge_commit"],
         },
         "intended_state": {"completed": True, "action": "branch_delete"},
     }
@@ -321,6 +326,37 @@ def test_herdr_and_callsign_exact_cleanup(root: Path) -> None:
         refused(lambda: callsign.inspect(callsign_action), "cleanup_identity_mismatch")
 
 
+def test_repository_artifact_squash_tree_is_cleanup_eligible(root: Path) -> None:
+    root.mkdir(parents=True)
+    git = _create_repository_artifact_canary(root, ROOT)
+    assert git["head"] == REPORT_TESTED_HEAD
+    assert git["merge_commit"] == REPORT_MERGE_COMMIT
+    assert git["tested_tree"] == git["merge_tree"]
+    adapter = GitAdapter(git, SubprocessRunner())
+    worktree_action = {
+        "action_kind": "worktree_remove",
+        "expected_identity": {
+            key: git[key] for key in ("repository", "worktree", "branch", "head")
+        },
+        "intended_state": {"completed": True, "action": "worktree_remove"},
+    }
+    adapter.apply(worktree_action)
+    assert adapter.inspect(worktree_action) == worktree_action["intended_state"]
+    branch_action = {
+        "action_kind": "branch_delete",
+        "expected_identity": {
+            key: git[key]
+            for key in ("repository", "branch", "head", "base_ref", "merge_commit")
+        },
+        "intended_state": {"completed": True, "action": "branch_delete"},
+    }
+    assert adapter.inspect(branch_action) == branch_action["expected_identity"]
+    receipt = adapter.apply(branch_action)
+    assert receipt["deletion_proof"] == "squash-tree-equivalent"
+    assert adapter.inspect(branch_action) == branch_action["intended_state"]
+    assert Path(git["repository"]).is_dir()
+
+
 def test_real_canary_sqlite_setup_uses_explicit_root(root: Path) -> None:
     root.mkdir(parents=True)
     git = _create_git_canary(root)
@@ -334,6 +370,29 @@ def test_real_canary_sqlite_setup_uses_explicit_root(root: Path) -> None:
         "runtime_generation": "generation:canary",
     }
     setup = _setup_sqlite(root, ROOT, git, herdr)
+    extended_git = {
+        **git,
+        "tested_tree": git["head"],
+        "merge_tree": git["head"],
+        "artifact_sha256": "a" * 64,
+    }
+    _, adapter_path = _cleanup_files(
+        root,
+        extended_git,
+        herdr,
+        f"callsign-assignment:{setup['assignment']['assignment_id']}",
+        "Lux",
+    )
+    adapter = json.loads(adapter_path.read_text(encoding="utf-8"))
+    assert set(adapter["git"]) == {
+        "repository",
+        "worktree",
+        "branch",
+        "head",
+        "base_ref",
+        "merge_commit",
+    }
+    assert validate_canary_config(adapter)["git"]["head"] == git["head"]
     assert setup["assignment"]["state"] == "active"
     state = root / "league/state"
     with SQLiteStorage(state, request_wal=False) as store:
@@ -559,6 +618,7 @@ def main() -> None:
         root = Path(directory)
         test_archive_git_and_scope(root / "git")
         test_herdr_and_callsign_exact_cleanup(root / "runtime")
+        test_repository_artifact_squash_tree_is_cleanup_eligible(root / "artifact")
         test_real_canary_sqlite_setup_uses_explicit_root(root / "canary-setup")
         test_cleanup_reconcile_resumes_in_a_new_process(root / "true-restart")
     test_session_title_fallback_and_strict_canary_schemas()

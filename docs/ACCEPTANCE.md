@@ -85,9 +85,10 @@ and explicit cutover authority.
 
 ## Real disposable cleanup canary
 
-The cleanup gate has one deliberately real runtime command. It creates a new
-Git repository and issue worktree beneath the explicit temporary root, opens
-one no-focus Herdr pane, launches one Codex Champion routed as
+The cleanup gate has one deliberately real runtime command. It makes a local,
+no-hardlink clone beneath the explicit temporary root, creates an isolated
+worktree at the exact tested head of the repository-owned issue-#39 report,
+opens one no-focus Herdr pane, launches one Codex Champion routed as
 `gpt-5.6-sol high`, and stores the lifecycle in the canary's real SQLite state:
 
 ```sh
@@ -97,8 +98,12 @@ one no-focus Herdr pane, launches one Codex Champion routed as
   --source-root /absolute/path/to/league-of-orchestrator
 ```
 
-The command proves that the terminal transition creates exactly one durable
-cleanup obligation, event, and outbox row; the same Shotcaller Stop decision
+The command declares that report before the terminal transition, refuses
+cleanup while publication is pending, and then records the actual PR #41
+tested head and squash-merge receipt. Exact tested/merge tree and report-byte
+parity make that isolated branch eligible for cleanup without performing any
+hosted mutation. The command also proves that the terminal transition creates
+exactly one durable cleanup obligation, event, and outbox row; the same Shotcaller Stop decision
 blocks both wait and end while cleanup alone is pending; and complete stored
 authority starts adapter-backed cleanup without a reminder. Cleanup archives
 identity/evidence first, exits only the exact Codex session, closes only its
@@ -115,12 +120,12 @@ home directory, canonical League state, or a global install. It is a real
 Codex/Herdr canary only; it is not evidence for Cursor, Pi, another harness,
 tmux, a live repository, or the final cutover.
 
-Final issue-#23 acceptance remains gated on merged issue #40. After that merge,
-this branch must be rebased on current `main` and add the repository-owned
-artifact lifecycle gate: produce report, create its isolated issue worktree and
-PR, record the exact merge receipt, clear the artifact and cleanup obligations,
-and complete teardown. Until that gate passes, no pre-cutover receipt is a
-recommendation or authority for global mutation.
+Issue #40's repository-artifact lifecycle is merged and integrated here. A
+green receipt from this command is the final disposable E2E evidence for the
+pre-cutover candidate; it remains neither authority nor a command for global
+installation, canonical import, hook/watcher mutation, live delivery, or the
+live writer switch. Those exact proposed mutations remain separately gated by
+the no-apply preflight receipt and explicit cutover authority.
 
 The command refuses missing, relative, symbolic-link, or malformed sentinels
 and refuses an existing namespace. It accepts at most 16 byte sentinels so a
@@ -173,9 +178,11 @@ make test-affected
 ```
 
 The staged migration assertion and strict receipt schema follow
-`CURRENT_SCHEMA_VERSION`; the current contiguous sequence is `[1,2,3,4,5,6,7,8]`.
-Version 8 adds the provider-neutral routing and orchestration policy without
-changing the acceptance operation or sentinel contract.
+`CURRENT_SCHEMA_VERSION`; the current contiguous sequence is
+`[1,2,3,4,5,6,7,8,9]`. Version 8 adds the provider-neutral routing and
+orchestration policy. Version 9 adds repository-owned artifact declarations and
+exact merged-publication receipts without changing the acceptance operation or
+sentinel contract.
 
 The skill-contract suite uses only synthetic temporary custom roots and fake
 capability profiles. The current machine inventory was audited separately in a
@@ -193,5 +200,4 @@ instructions.
 The generation switch in these harnesses is a model exercised beneath the
 disposable namespace. It is not a global cutover command. Canonical cutover,
 live import, real hook mutation, watcher replacement, installation, delivery,
-and real-runtime canaries still require merged prerequisites plus separate
-explicit authority.
+and any live-runtime smoke still require the separately authorized cutover.

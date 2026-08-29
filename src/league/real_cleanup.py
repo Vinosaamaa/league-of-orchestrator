@@ -136,6 +136,7 @@ def validate_canary_config(value: Mapping[str, Any]) -> dict[str, Any]:
         "branch",
         "head",
         "base_ref",
+        "merge_commit",
     }:
         raise StorageRefusal("cleanup_adapter_config_invalid", "Git identity is incomplete")
     repository = _beneath(
@@ -162,6 +163,10 @@ def validate_canary_config(value: Mapping[str, Any]) -> dict[str, Any]:
         raise StorageRefusal("cleanup_adapter_config_invalid", "Git base ref is invalid")
     if not isinstance(git["head"], str) or not re.fullmatch(r"[0-9a-f]{40}", git["head"]):
         raise StorageRefusal("cleanup_adapter_config_invalid", "Git head is invalid")
+    if not isinstance(git["merge_commit"], str) or not re.fullmatch(
+        r"[0-9a-f]{40}", git["merge_commit"]
+    ):
+        raise StorageRefusal("cleanup_adapter_config_invalid", "Git merge commit is invalid")
 
     callsign = value.get("callsign")
     if not isinstance(callsign, Mapping) or set(callsign) != {
@@ -371,9 +376,57 @@ class GitAdapter(_BaseAdapter):
         expected = f"worktree {self.identity['worktree']}"
         return any(block.splitlines() and block.splitlines()[0] == expected for block in blocks)
 
+    def _branch_deletion_mode(self) -> str:
+        merged = self.runner.run(
+            (
+                "git",
+                "-C",
+                self.identity["repository"],
+                "merge-base",
+                "--is-ancestor",
+                self.identity["head"],
+                self.identity["base_ref"],
+            ),
+            allow_failure=True,
+        )
+        if merged.returncode == 0:
+            return "merged-ancestor"
+        head_tree = self.runner.run(
+            (
+                "git",
+                "-C",
+                self.identity["repository"],
+                "rev-parse",
+                f"{self.identity['head']}^{{tree}}",
+            )
+        ).stdout.strip()
+        merge_tree = self.runner.run(
+            (
+                "git",
+                "-C",
+                self.identity["repository"],
+                "rev-parse",
+                f"{self.identity['merge_commit']}^{{tree}}",
+            )
+        ).stdout.strip()
+        if not head_tree or head_tree != merge_tree:
+            raise StorageRefusal(
+                "cleanup_identity_mismatch",
+                "Git branch is neither merged nor squash-tree equivalent",
+            )
+        return "squash-tree-equivalent"
+
     def inspect(self, action: Mapping[str, Any]) -> Mapping[str, Any]:
         kind = action["action_kind"]
         if kind == "worktree_remove":
+            expected = {
+                key: self.identity[key]
+                for key in ("repository", "worktree", "branch", "head")
+            }
+            if action["expected_identity"] != expected:
+                raise StorageRefusal(
+                    "cleanup_identity_mismatch", "Git worktree plan and adapter disagree"
+                )
             exists = Path(self.identity["worktree"]).exists()
             registered = self._worktree_registered()
             if not exists and not registered:
@@ -392,6 +445,14 @@ class GitAdapter(_BaseAdapter):
             if status or head != self.identity["head"] or branch != self.identity["branch"]:
                 raise StorageRefusal("cleanup_identity_mismatch", "Git worktree proof changed")
         elif kind == "branch_delete":
+            expected = {
+                key: self.identity[key]
+                for key in ("repository", "branch", "head", "base_ref", "merge_commit")
+            }
+            if action["expected_identity"] != expected:
+                raise StorageRefusal(
+                    "cleanup_identity_mismatch", "Git branch plan and adapter disagree"
+                )
             ref = self.runner.run(
                 (
                     "git",
@@ -407,20 +468,7 @@ class GitAdapter(_BaseAdapter):
                 return dict(action["intended_state"])
             if references != [self.identity["head"]]:
                 raise StorageRefusal("cleanup_identity_mismatch", "Git branch head changed")
-            merged = self.runner.run(
-                (
-                    "git",
-                    "-C",
-                    self.identity["repository"],
-                    "merge-base",
-                    "--is-ancestor",
-                    self.identity["head"],
-                    self.identity["base_ref"],
-                ),
-                allow_failure=True,
-            )
-            if merged.returncode != 0:
-                raise StorageRefusal("cleanup_identity_mismatch", "Git branch is not deletion-eligible")
+            self._branch_deletion_mode()
         else:
             raise StorageRefusal("cleanup_action_unsupported", "Git cleanup action is unsupported")
         return dict(action["expected_identity"])
@@ -438,16 +486,35 @@ class GitAdapter(_BaseAdapter):
                 )
             )
         elif action["action_kind"] == "branch_delete":
-            self.runner.run(
-                (
-                    "git",
-                    "-C",
-                    self.identity["repository"],
-                    "branch",
-                    "-d",
-                    self.identity["branch"],
+            mode = self._branch_deletion_mode()
+            if mode == "merged-ancestor":
+                self.runner.run(
+                    (
+                        "git",
+                        "-C",
+                        self.identity["repository"],
+                        "branch",
+                        "-d",
+                        self.identity["branch"],
+                    )
                 )
-            )
+            else:
+                self.runner.run(
+                    (
+                        "git",
+                        "-C",
+                        self.identity["repository"],
+                        "update-ref",
+                        "-d",
+                        f"refs/heads/{self.identity['branch']}",
+                        self.identity["head"],
+                    )
+                )
+            return {
+                "exact_git_target": True,
+                "action": action["action_kind"],
+                "deletion_proof": mode,
+            }
         return {"exact_git_target": True, "action": action["action_kind"]}
 
 

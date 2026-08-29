@@ -25,13 +25,14 @@
     },
     "git": {
       "type": "object",
-      "required": ["repository", "worktree", "branch", "head", "base_ref"],
+      "required": ["repository", "worktree", "branch", "head", "base_ref", "merge_commit"],
       "properties": {
         "repository": {"$ref": "#/$defs/absolutePath"},
         "worktree": {"$ref": "#/$defs/absolutePath"},
         "branch": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$"},
         "head": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
-        "base_ref": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$"}
+        "base_ref": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$"},
+        "merge_commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"}
       },
       "additionalProperties": false
     },

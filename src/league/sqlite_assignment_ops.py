@@ -1142,7 +1142,14 @@ def block_assignment(
         raise
     except sqlite3.DatabaseError as exc:
         raise store._translate_database_error(exc, "assignment failure conflicted with canonical state") from exc
-    return {"assignment_id": assignment_id, "state": state, "version": next_version}
+    return {
+        "assignment_id": assignment_id,
+        "state": state,
+        "version": next_version,
+        "failure_class": failure_class,
+        "cleanup_required": cleanup_required,
+        "cleanup_proven": cleanup_proven,
+    }
 
 
 def assignment_launch_context(store: Any, assignment_id: str) -> dict[str, Any]:

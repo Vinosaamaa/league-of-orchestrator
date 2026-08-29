@@ -20,6 +20,7 @@ from league.importer import AUDIT_COVERAGE, build_import_plan  # noqa: E402
 from league.sqlite_store import CURRENT_SCHEMA_VERSION, SQLiteStorage  # noqa: E402
 from league.storage import StorageRefusal  # noqa: E402
 from storage_fixture import (  # noqa: E402
+    AT1,
     AT2,
     CHAMPION_ID,
     REPOSITORY,
@@ -362,6 +363,190 @@ def test_visible_assignment_record_malformed_and_stale_refusals(root: Path) -> N
     )
 
 
+def test_pending_launch_field_aliases(root: Path) -> None:
+    resume_thread = "99999999-9999-4999-8999-999999999999"
+    task_summary = "Preserve the exact synthetic pending task."
+
+    canonical = root / "pending-canonical"
+    canonical.mkdir()
+    canonical_fixture = write_complete_fixture(canonical)
+    canonical_path = canonical / "pending-launches/synthetic-pending.json"
+    canonical_value = json.loads(canonical_path.read_text(encoding="utf-8"))
+    canonical_value["resume_thread"] = resume_thread
+    canonical_value["task"] = task_summary
+    canonical_path.write_text(stable_json(canonical_value) + "\n", encoding="utf-8")
+    canonical_bytes = canonical_path.read_bytes()
+    canonical_plan = build_import_plan(canonical, canonical_fixture["manifest"])
+    canonical_launch = canonical_plan["rows"]["launch_attempts"][0]
+    assert canonical_launch["started_at"] == AT1
+    assert canonical_launch["phase"] == "started"
+    assert json.loads(canonical_launch["metadata_json"])["resume_thread"] == resume_thread
+    assert next(
+        row for row in canonical_plan["rows"]["tasks"] if row["task_id"] == "synthetic-pending"
+    )["summary"] == task_summary
+    assert next(
+        item for item in canonical_plan["artifacts"] if item["artifact_id"] == "L1-pending"
+    )["digest"] == hashlib.sha256(canonical_bytes).hexdigest()
+    assert canonical_path.read_bytes() == canonical_bytes
+
+    legacy = root / "pending-legacy"
+    legacy.mkdir()
+    legacy_fixture = write_complete_fixture(legacy)
+    legacy_path = legacy / "pending-launches/synthetic-pending.json"
+    legacy_value = json.loads(legacy_path.read_text(encoding="utf-8"))
+    created_at = legacy_value.pop("started_at")
+    legacy_value["created_at"] = created_at
+    legacy_value["resume_thread_id"] = resume_thread
+    legacy_value["observed_runtime_generation"] = legacy_value.pop(
+        "runtime_generation"
+    )
+    legacy_value["task"] = task_summary
+    legacy_path.write_text(stable_json(legacy_value) + "\n", encoding="utf-8")
+    legacy_bytes = legacy_path.read_bytes()
+    legacy_plan = build_import_plan(legacy, legacy_fixture["manifest"])
+    legacy_launch = legacy_plan["rows"]["launch_attempts"][0]
+    assert {
+        key: legacy_launch[key]
+        for key in (
+            "attempt_id",
+            "task_id",
+            "callsign",
+            "phase",
+            "routing_name",
+            "display_agent",
+            "address",
+            "pool",
+            "runtime_generation",
+            "started_at",
+            "metadata_json",
+        )
+    } == {
+        key: canonical_launch[key]
+        for key in (
+            "attempt_id",
+            "task_id",
+            "callsign",
+            "phase",
+            "routing_name",
+            "display_agent",
+            "address",
+            "pool",
+            "runtime_generation",
+            "started_at",
+            "metadata_json",
+        )
+    }
+    assert next(
+        row for row in legacy_plan["rows"]["tasks"] if row["task_id"] == "synthetic-pending"
+    )["summary"] == task_summary
+    assert next(
+        item for item in legacy_plan["artifacts"] if item["artifact_id"] == "L1-pending"
+    )["digest"] == hashlib.sha256(legacy_bytes).hexdigest()
+
+    state, _ = migrated_state(root, "pending-alias-state")
+    with SQLiteStorage(state) as store:
+        store.apply_import(legacy_plan, legacy_plan["report_digest"])
+        rollback = json.loads(
+            store.export_bytes(format_name="json", purpose="rollback", max_records=1000)
+        )
+        stored_launch = rollback["tables"]["launch_attempts"][0]
+        assert stored_launch["started_at"] == created_at
+        assert json.loads(stored_launch["metadata_json"])["resume_thread"] == resume_thread
+    assert legacy_path.read_bytes() == legacy_bytes
+
+    null_resume = root / "pending-null-resume"
+    null_resume.mkdir()
+    null_fixture = write_complete_fixture(null_resume)
+    null_path = null_resume / "pending-launches/synthetic-pending.json"
+    null_value = json.loads(null_path.read_text(encoding="utf-8"))
+    null_value["created_at"] = null_value.pop("started_at")
+    null_value["resume_thread_id"] = None
+    null_path.write_text(stable_json(null_value) + "\n", encoding="utf-8")
+    null_plan = build_import_plan(null_resume, null_fixture["manifest"])
+    assert "resume_thread" not in json.loads(
+        null_plan["rows"]["launch_attempts"][0]["metadata_json"]
+    )
+
+    equivalent_timestamp = root / "pending-equivalent-timestamp-aliases"
+    equivalent_timestamp.mkdir()
+    equivalent_fixture = write_complete_fixture(equivalent_timestamp)
+    equivalent_path = equivalent_timestamp / "pending-launches/synthetic-pending.json"
+    equivalent_value = json.loads(equivalent_path.read_text(encoding="utf-8"))
+    equivalent_value["created_at"] = "2025-12-31T19:00:00-05:00"
+    equivalent_path.write_text(
+        stable_json(equivalent_value) + "\n", encoding="utf-8"
+    )
+    equivalent_plan = build_import_plan(
+        equivalent_timestamp, equivalent_fixture["manifest"]
+    )
+    assert equivalent_plan["rows"]["launch_attempts"][0]["started_at"] == AT1
+
+    for name, mutate in (
+        (
+            "timestamp-conflict",
+            lambda value: value.update({"created_at": "2026-01-01T00:03:00Z"}),
+        ),
+        (
+            "thread-conflict",
+            lambda value: value.update(
+                {
+                    "resume_thread": resume_thread,
+                    "resume_thread_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                }
+            ),
+        ),
+        (
+            "thread-null-conflict",
+            lambda value: value.update(
+                {"resume_thread": resume_thread, "resume_thread_id": None}
+            ),
+        ),
+        (
+            "runtime-generation-conflict",
+            lambda value: value.update(
+                {"observed_runtime_generation": "different-generation"}
+            ),
+        ),
+    ):
+        conflict = root / f"pending-{name}"
+        conflict.mkdir()
+        conflict_fixture = write_complete_fixture(conflict)
+        conflict_path = conflict / "pending-launches/synthetic-pending.json"
+        conflict_value = json.loads(conflict_path.read_text(encoding="utf-8"))
+        mutate(conflict_value)
+        conflict_path.write_text(stable_json(conflict_value) + "\n", encoding="utf-8")
+        refused(
+            lambda conflict=conflict, fixture=conflict_fixture: build_import_plan(
+                conflict, fixture["manifest"]
+            ),
+            "identity_collision",
+        )
+
+    missing = root / "pending-missing-timestamp"
+    missing.mkdir()
+    missing_fixture = write_complete_fixture(missing)
+    missing_path = missing / "pending-launches/synthetic-pending.json"
+    missing_value = json.loads(missing_path.read_text(encoding="utf-8"))
+    missing_value.pop("started_at")
+    missing_path.write_text(stable_json(missing_value) + "\n", encoding="utf-8")
+    refused(
+        lambda: build_import_plan(missing, missing_fixture["manifest"]),
+        "malformed_input",
+    )
+
+    null_task = root / "pending-null-task"
+    null_task.mkdir()
+    null_task_fixture = write_complete_fixture(null_task)
+    null_task_path = null_task / "pending-launches/synthetic-pending.json"
+    null_task_value = json.loads(null_task_path.read_text(encoding="utf-8"))
+    null_task_value["task"] = None
+    null_task_path.write_text(stable_json(null_task_value) + "\n", encoding="utf-8")
+    refused(
+        lambda: build_import_plan(null_task, null_task_fixture["manifest"]),
+        "malformed_input",
+    )
+
+
 def test_retired_watcher_cursor_classification(root: Path) -> None:
     source = root / "retired-cursor"
     source.mkdir()
@@ -604,6 +789,7 @@ def main() -> None:
         test_complete_dry_run_apply_and_round_trip(root)
         test_malformed_duplicate_unknown_and_foreign_key_refusals(root)
         test_visible_assignment_record_malformed_and_stale_refusals(root)
+        test_pending_launch_field_aliases(root)
         test_retired_watcher_cursor_classification(root)
         test_import_crash_atomicity_and_plan_tamper(root)
         test_descriptor_bound_read_survives_path_replacement(root)

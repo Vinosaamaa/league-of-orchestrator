@@ -110,6 +110,13 @@ watcher metadata while no agent, event, cursor, seen row, or delivery is
 invented. Unclassified or ambiguous consumers remain fail-closed; the
 canonical contract remains in [`docs/ACCEPTANCE.md`](ACCEPTANCE.md).
 
+The issue-#23 pending-launch successor adds original League migration-only
+aliases for the retained `created_at`, `resume_thread_id`, and `task` fields.
+The deliberate difference is limited to exact, conflict-checked normalization
+into the existing start-time, resume-thread, and task-summary model; original
+artifact bytes remain authoritative and ordinary parsing stays fail-closed.
+The canonical contract remains in [`docs/ACCEPTANCE.md`](ACCEPTANCE.md).
+
 The real cleanup canary, its strict adapter/receipt schemas, and focused fake
 adapter tests are original League work for issue #23. The issue-#40 artifact
 lifecycle and issue-#39/PR-#41 report receipts are composed inputs, not

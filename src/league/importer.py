@@ -123,6 +123,10 @@ def _timestamp(value: Any, label: str) -> str:
     return value
 
 
+def _timestamp_instant(value: str) -> datetime:
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
 def _text(value: Any, label: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise StorageRefusal("malformed_input", f"{label} must be a non-empty string")
@@ -736,7 +740,8 @@ class ImportPlanner:
         allowed = {
             "schema", "task_id", "callsign", "routing_name", "display_agent", "address", "pool", "record",
             "herdr_session", "attempt_id", "phase", "repository", "issue", "branch", "worktree",
-            "resume_thread", "started_at", "runtime_generation", "observed_runtime_generation",
+            "resume_thread", "resume_thread_id", "started_at", "created_at", "task",
+            "runtime_generation", "observed_runtime_generation",
         }
         if set(value) - allowed or value.get("schema") != 1:
             raise StorageRefusal("malformed_input", "pending launch schema or fields are unsupported")
@@ -748,12 +753,56 @@ class ImportPlanner:
         phase = _text(value.get("phase"), "pending phase")
         if phase not in {"reserved", "started"}:
             raise StorageRefusal("malformed_input", "pending launch phase is unsupported")
+        started_at = self._pending_alias(
+            value,
+            "started_at",
+            "created_at",
+            "pending launch start timestamp",
+            _timestamp,
+            comparison_key=_timestamp_instant,
+        )
+        if started_at is None:
+            raise StorageRefusal(
+                "malformed_input", "pending launch start timestamp is required"
+            )
+        resume_thread = self._pending_alias(
+            value,
+            "resume_thread",
+            "resume_thread_id",
+            "pending resume thread",
+            _text,
+            allow_none=True,
+        )
+        if resume_thread is not None and not THREAD_ID.fullmatch(resume_thread):
+            raise StorageRefusal(
+                "identity_collision", "pending resume thread is not an exact UUID"
+            )
+        runtime_generation = self._pending_alias(
+            value,
+            "runtime_generation",
+            "observed_runtime_generation",
+            "pending runtime generation",
+            _text,
+            allow_none=True,
+        )
+        task_summary = (
+            _text(value["task"], "pending task") if "task" in value else task_id
+        )
         repository = value.get("repository")
         project_id = None
         if repository is not None:
             repository = _text(repository, "pending repository")
             project_id = self._ensure_project(repository, self.manifest["captured_at"])
-        self._ensure_task(task_id, self.manifest["captured_at"], project_id=project_id, summary=task_id)
+        task_row = self._ensure_task(
+            task_id,
+            self.manifest["captured_at"],
+            project_id=project_id,
+            summary=task_summary,
+        )
+        if "task" in value and task_row["summary"] != task_summary:
+            raise StorageRefusal(
+                "identity_collision", "pending task summary conflicts with imported task"
+            )
         callsign_row = self.callsigns.get(callsign)
         if callsign_row is None:
             raise StorageRefusal("identity_collision", "pending launch callsign is not in the visible pool")
@@ -767,9 +816,18 @@ class ImportPlanner:
             "address": _text(value.get("address"), "pending address"),
             "pool": _text(value.get("pool"), "pending pool"),
             "record_locator": _text(value.get("record"), "pending record"),
-            "runtime_generation": value.get("runtime_generation") or value.get("observed_runtime_generation"),
-            "started_at": value.get("started_at"),
-            "metadata_json": _stable_json({key: item for key, item in value.items() if key not in allowed - {"herdr_session", "resume_thread"}}),
+            "runtime_generation": runtime_generation,
+            "started_at": started_at,
+            "metadata_json": _stable_json(
+                {
+                    key: item
+                    for key, item in {
+                        "herdr_session": value.get("herdr_session"),
+                        "resume_thread": resume_thread,
+                    }.items()
+                    if item is not None
+                }
+            ),
         }
         if row["routing_name"] != callsign.lower():
             raise StorageRefusal("identity_collision", "pending routing_name must equal the lowercase callsign")
@@ -780,9 +838,49 @@ class ImportPlanner:
             "callsign": callsign,
             "agent_id": None,
             "launch_attempt_id": attempt_id,
-            "reserved_at": value.get("started_at") or self.manifest["captured_at"],
+            "reserved_at": started_at,
         }
         self._register_artifact(artifact_id, "pending_launch", data, 1)
+
+    def _pending_alias(
+        self,
+        value: dict[str, Any],
+        canonical: str,
+        legacy: str,
+        label: str,
+        validator: Any,
+        *,
+        allow_none: bool = False,
+        comparison_key: Any = None,
+    ) -> Optional[str]:
+        canonical_present = canonical in value
+        legacy_present = legacy in value
+
+        def normalized(field: str) -> Optional[str]:
+            raw = value[field]
+            if raw is None and allow_none:
+                return None
+            return validator(raw, label)
+
+        canonical_value = normalized(canonical) if canonical_present else None
+        legacy_value = normalized(legacy) if legacy_present else None
+        if canonical_present and legacy_present:
+            canonical_comparison = (
+                comparison_key(canonical_value)
+                if comparison_key is not None and canonical_value is not None
+                else canonical_value
+            )
+            legacy_comparison = (
+                comparison_key(legacy_value)
+                if comparison_key is not None and legacy_value is not None
+                else legacy_value
+            )
+            if canonical_comparison != legacy_comparison:
+                raise StorageRefusal(
+                    "identity_collision", f"{label} aliases disagree"
+                )
+            return canonical_value
+        return canonical_value if canonical_present else legacy_value
 
     def _event_for_candidate(self, scope_id: str, candidate: dict[str, Any]) -> str:
         event_id = _text(candidate.get("event_id"), "watcher candidate event_id")

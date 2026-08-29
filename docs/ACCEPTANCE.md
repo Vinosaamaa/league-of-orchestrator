@@ -117,6 +117,25 @@ Two watcher scopes may cite the same retired source. The same source and offset
 must bind the same artifact pair and hashes; distinct offsets may bind distinct
 archived incarnations. Divergent evidence for one source/offset refuses.
 
+### Issue 23 pending-launch field aliases
+
+Pending-launch import normalizes only these bounded source fields:
+
+- `created_at` aliases canonical `started_at`, which is required and validated;
+- `resume_thread_id` aliases canonical `resume_thread`; a non-null value must
+  be an exact UUID, while explicit null means no resume identity;
+- `observed_runtime_generation` aliases canonical `runtime_generation`; and
+- legacy `task` text becomes the task summary while `task_id` remains the sole
+  task identity.
+
+If both forms of an alias are present, their strings must match exactly or
+import refuses.
+
+Alias normalization changes only the temporary import plan. The original
+pending-launch bytes and SHA-256 remain in artifact evidence. The importer does
+not synthesize a timestamp, task identity, resume thread, phase, or launch
+outcome, and it continues to reject unknown fields and unsupported phases.
+
 The receipt `league.pre-cutover-receipt.v1` adds four grouped proofs.
 
 ### Migration and rollback proof

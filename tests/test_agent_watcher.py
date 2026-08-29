@@ -242,6 +242,9 @@ def main():
     with tempfile.TemporaryDirectory(prefix="agent-watcher-test.") as directory:
         temporary = Path(directory)
         environment = fake_process_environment(temporary)
+        environment["LEAGUE_WRITER_POINTER"] = str(
+            temporary / "absent-writer-pointer.json"
+        )
         root = temporary / "records"
         state = temporary / "state"
         test_controls_and_stop_hook(root, state, environment)

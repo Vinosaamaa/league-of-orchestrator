@@ -155,7 +155,9 @@ hook session through its one live verified runtime generation before consulting
 the imported legacy thread identity. Runtime ambiguity remains a refusal.
 Non-Shotcaller prompts bind once to their exact verified runtime without a wake
 actor or watcher generation; missing or unverified runtime identity remains a
-no-wake quarantine. SQLite supervision accepts only one verified runtime owned
+no-wake quarantine. An exact thread/backend/address match may bootstrap only a
+`prompt.capture` runtime for that Champion; it grants no Stop or supervision
+capability. SQLite supervision accepts only one verified runtime owned
 by an active Shotcaller. No legacy file, transcript, or second writer is read
 or changed by this compatibility path.
 

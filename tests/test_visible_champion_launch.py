@@ -176,7 +176,7 @@ def test_real_adapter_one_command_success_and_retry(root: Path) -> None:
     assert len(runner.contexts) == 1
     context = runner.contexts[0]
     assert "Use only the stable League SQLite commands" in context
-    assert "status.json" in context and "updates.jsonl" in context
+    assert "status.json" not in context and "updates.jsonl" not in context
     tab_index = next(i for i, call in enumerate(runner.calls) if call[:3] == ("herdr", "tab", "create"))
     start_index = next(i for i, call in enumerate(runner.calls) if call[:3] == ("herdr", "agent", "start"))
     context_index = max(i for i, call in enumerate(runner.calls) if call[:3] == ("herdr", "agent", "prompt"))

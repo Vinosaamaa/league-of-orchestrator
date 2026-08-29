@@ -15,8 +15,7 @@ $HOME/.local/bin/league --state-root "$HOME/.local/state/league"
 ```
 
 - Canonical writes -> use stable `league` domain commands only; never read or write the database with `sqlite3` or direct SQL.
-- Legacy records -> never create, edit, or depend on `status.json`, `updates.jsonl`, a legacy Roster directory, or the retired callsign JSON pool.
-- Compatibility watcher -> `agent-watcher` is allowed only for installed SQLite `status`, `supervise`, prompt-hook, Stop-hook, and delivery compatibility; legacy `launch`, `transition`, teardown, and other writer commands remain fenced.
+- Compatibility watcher -> `agent-watcher` is an installed SQLite adapter for `status`, `supervise`, prompt-hook, Stop-hook, and delivery only.
 - State root -> use the exact canonical root above; a launched Champion receives only that root as an additional Codex workspace-write root.
 - Storage refusal -> preserve state and report the exact error code; never bypass a guard or hand-edit canonical state.
 - Installed parity -> before a release claim, verify the tested source revision, installed release revision, executable hashes, migration receipt, smoke receipt, and rollback receipt.
@@ -59,7 +58,7 @@ $HOME/.local/bin/league --state-root "$HOME/.local/state/league" request turn \
 
 - User asks for one Champion -> create exactly one visible Herdr/Codex Champion; do not also spawn a hidden coordination agent.
 - Dispatch first -> triage the prompt, claim its request, and record Champion execution mode before launch.
-- Launch -> use the one recoverable production command `league assign run`; do not call `agent-watcher launch` or manually chain prepare, launching, and activate.
+- Launch -> use the one recoverable production command `league assign run`; do not manually chain prepare, launching, and activate.
 - Exact command inputs -> supply the request and claim, task identity and summary, Shotcaller agent ID, repository URL, issue, branch, absolute issue worktree, one-or-two-word display task, requested model and effort, and any required capabilities.
 - Generated IDs -> omit assignment and Champion agent IDs when deterministic League IDs are sufficient; an explicit retry must reuse every identity-bearing input.
 - Backend boundary -> launch only from the current Herdr session. League reserves a callsign, marks launch intent, creates one unfocused tab at the exact worktree, starts Codex, observes its generated thread UUID, verifies routing name, display kind, pane, terminal, workspace, cwd, and title, then atomically activates the assignment.
@@ -98,7 +97,7 @@ $HOME/.local/bin/league --state-root "$HOME/.local/state/league" assign run \
 - Cleanup plan -> use the stable `league cleanup plan` or the narrowly scoped supported reconciliation command with an exact manifest; missing or conflicting identity fails closed.
 - Cleanup execute -> close only the verified Champion process and pane/tab, verify exit, settle the runtime, archive required durable evidence, release the exact callsign, and remove only the explicit clean accepted worktree and eligible local branch.
 - Preserve -> remote branches, primary/shared/other-issue worktrees, dirty or unpublished work, uncertain resources, Shotcallers, persistent supervisors, and unrelated panes are never removed automatically.
-- Failure -> keep the canonical cleanup obligation pending with its first exact blocker; never hand-edit SQLite or legacy files.
+- Failure -> keep the canonical cleanup obligation pending with its first exact blocker; never hand-edit canonical or retired storage.
 
 # Issues, worktrees, and lanes
 
@@ -112,7 +111,7 @@ $HOME/.local/bin/league --state-root "$HOME/.local/state/league" assign run \
 # Engineering and verification
 
 - Design -> prefer the smallest complete module behind the existing stable interface; avoid parallel state, wrappers without a concrete need, and speculative redesign.
-- Storage -> SQLite is canonical; JSON/JSONL may exist only as immutable migration input, backup, or bounded export, never as a second writer.
+- Storage -> SQLite is canonical; migration inputs, backups, and bounded exports are evidence only, never a second writer.
 - Tests -> use synthetic temporary roots and fake adapters; never point tests at live League state, a live multiplexer, or a real repository worktree.
 - Real acceptance -> use one explicitly authorized disposable identity and exact owner-source checks; API success or a synthetic subprocess alone does not prove visible behavior.
 - Local baseline -> run only the focused affected tests in Fast lane unless a stricter repository gate requires more.
@@ -128,4 +127,4 @@ $HOME/.local/bin/league --state-root "$HOME/.local/state/league" assign run \
 - Source -> this file owns the installed global League workflow; edit it in the issue-owned repository branch, never hand-edit the installed copy.
 - Style -> one trigger, action, and boundary per bullet; keep commands exact and rationale in repository docs.
 - Release -> install exact merged source bytes only after the release gate, with a backup, byte-parity receipt, and tested rollback.
-- Contradiction -> re-read the affected guide after editing and resolve any retained legacy-writer instruction before installation.
+- Contradiction -> re-read the affected guide after editing and resolve any retained retired-writer instruction before installation.

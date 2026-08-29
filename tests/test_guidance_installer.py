@@ -24,8 +24,21 @@ def main() -> None:
     assert b"one Shotcaller League process total" in original
     assert b"never rewrite the body, inject control text" in original
     assert b"league assign run" in original
-    assert b"never create, edit, or depend on `status.json`, `updates.jsonl`" in original
-    assert b"agent-watcher transition" not in original
+    for retired_instruction in (
+        b"status.json",
+        b"updates.jsonl",
+        b"legacy writer",
+        b"legacy-writer",
+        b"Legacy records",
+        b"agent-watcher transition",
+        b"agent-watcher launch",
+    ):
+        assert retired_instruction not in original
+    historical = ROOT / "docs" / "archive" / "issue-23-retired-json-guide-contract.md"
+    archived = historical.read_bytes()
+    assert b"Historical reference only" in archived
+    assert b"9b68c3b9d77bd431c36729bc000af323e56ea9d7e96637ed67e9be0e15ba44ad" in archived
+    assert b"agent-watcher transition" in archived
     with tempfile.TemporaryDirectory(prefix="league-guidance-stage-") as temporary:
         root = Path(temporary)
         for harness in sorted(SUPPORTED_HARNESSES):

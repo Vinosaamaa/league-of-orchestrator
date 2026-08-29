@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Vinosaamaa/league-of-orchestrator/schema/league-pre-cutover-plan.schema.json",
+  "title": "League no-apply pre-cutover plan",
+  "type": "object",
+  "required": ["schema", "legacy", "current_targets", "proposed"],
+  "properties": {
+    "schema": {"const": "league.pre-cutover-plan.v1"},
+    "legacy": {
+      "type": "object",
+      "required": ["manifest", "bindings"],
+      "properties": {
+        "manifest": {"$ref": "#/$defs/absolutePath"},
+        "bindings": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 512,
+          "items": {
+            "type": "object",
+            "required": ["relative_path", "source"],
+            "properties": {
+              "relative_path": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[^/\\u0000]+(?:/[^/\\u0000]+)*$",
+                "allOf": [
+                  {"not": {"pattern": "(^|/)\\.\\.?(/|$)"}},
+                  {"not": {"const": "import-manifest.json"}}
+                ]
+              },
+              "source": {"$ref": "#/$defs/absolutePath"}
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "current_targets": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "required": ["target_id", "kind", "path", "required"],
+        "properties": {
+          "target_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"},
+          "kind": {
+            "enum": [
+              "legacy_state", "installed_bundle", "stable_launcher", "watcher_launcher", "hook_config",
+              "watcher_state", "writer_pointer", "configuration", "archive_metadata",
+              "backup_root", "release_prefix", "sqlite_state", "archive_root"
+            ]
+          },
+          "path": {"$ref": "#/$defs/absolutePath"},
+          "required": {"type": "boolean"}
+        },
+        "additionalProperties": false
+      }
+    },
+    "proposed": {
+      "type": "object",
+      "required": ["backup_root", "release_prefix", "stable_launcher", "watcher_launcher", "state_root", "writer_pointer", "archive_root", "hooks"],
+      "properties": {
+        "backup_root": {"$ref": "#/$defs/absolutePath"},
+        "release_prefix": {"$ref": "#/$defs/absolutePath"},
+        "stable_launcher": {"$ref": "#/$defs/absolutePath"},
+        "watcher_launcher": {"$ref": "#/$defs/absolutePath"},
+        "state_root": {"$ref": "#/$defs/absolutePath"},
+        "writer_pointer": {"$ref": "#/$defs/absolutePath"},
+        "archive_root": {"$ref": "#/$defs/absolutePath"},
+        "hooks": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 3,
+          "items": {
+            "type": "object",
+            "required": ["harness", "target"],
+            "properties": {
+              "harness": {"enum": ["codex", "cursor", "pi"]},
+              "target": {"$ref": "#/$defs/absolutePath"}
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "$defs": {
+    "absolutePath": {"type": "string", "pattern": "^/[^\\u0000]+$"}
+  },
+  "additionalProperties": false
+}

@@ -80,18 +80,20 @@ atomic pointer switch, rollback orchestration, and post-switch smoke. This
 repository still performs no global install, hook edit, live import, watcher
 replacement, or cutover.
 
-The issue-#23 foundation is exercised through `league acceptance run` as
-documented in `docs/ACCEPTANCE.md`. It creates only a namespaced disposable home
+The issue-#23 foundation is exercised through `league acceptance run`, and its
+complete no-apply continuation is exercised through `league acceptance
+preflight`, as documented in `docs/ACCEPTANCE.md`. Both create only a
+namespaced disposable home
 beneath an explicit temporary root, validates caller-specified byte/config/fake
 process sentinels, imports the complete synthetic legacy fixture, stages and
 rolls back the exact repository release beneath its own prefix, and fault-tests
-the generation pointer under its own lock. These are pre-cutover mechanics, not
-authority or a claim that any pending acceptance-receipt extension or real
-adapter passes. The grouped request-lifecycle implementation remains inert and
-is verified separately with fake adapters against the same explicit-root
-storage boundary.
+the generation pointer under its own lock. Preflight additionally copies only
+explicitly bound legacy files into an isolated shadow, proves exact parity and
+rollback, integrates the merged lifecycle through fake adapters, stages both
+launchers inactive, and emits only an unapplied mutation manifest. These are
+pre-cutover mechanics, not authority or real-adapter proof.
 
-The repository-local schema is now contiguous `[1,2,3,4,5,6,7]`. Versions 1
+The repository-local schema is now contiguous `[1,2,3,4,5,6,7,8,9]`. Versions 1
 and 2 remain the issue-#19 store, version 3 is the request lifecycle, version 4
 is the runtime lifecycle, and v5 is
 `advisory-project-catalog-and-roster-indexes`. Canonical v6 is
@@ -106,6 +108,14 @@ Version 7 is `bounded-reporting-and-outbound-privacy`, checksum
 reporting indexes, immutable activity evidence, and report specifications. It
 does not duplicate source evidence or create parallel request, outbox, runtime,
 assignment, rollover, or callsign authority.
+
+Version 8 adds bounded routing policy and requester progress. Version 9 adds
+repository-owned artifact declarations and exact merged-publication receipts,
+and blocks cleanup while any declaration is unresolved. Canonical migration
+names and checksums live in the routing and repository-artifact sections of
+[`docs/PROVENANCE.md`](PROVENANCE.md). The strict acceptance migration schema
+names all nine contiguous versions; an older receipt contract cannot silently
+accept a partial current migration.
 
 Dry-run import plans bind `target_schema_version` into their digest. A plan
 created for an earlier schema is refused as `import_plan_incompatible` before

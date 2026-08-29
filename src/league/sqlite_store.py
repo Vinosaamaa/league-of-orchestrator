@@ -2740,6 +2740,21 @@ class SQLiteStorage(SQLiteTransactionCore):
             self, binding_id, expected_version, fence, at, receipt
         )
 
+    def close_runtime_for_cleanup(
+        self,
+        runtime_instance_id: str,
+        endpoint_identity: str,
+        runtime_generation: str,
+        at: str,
+    ) -> dict[str, Any]:
+        return sqlite_runtime_ops.close_runtime_for_cleanup(
+            self,
+            runtime_instance_id,
+            endpoint_identity,
+            runtime_generation,
+            at,
+        )
+
     def record_routing_decision(self, decision: dict[str, Any]) -> dict[str, Any]:
         return sqlite_runtime_ops.record_routing_decision(self, decision)
 

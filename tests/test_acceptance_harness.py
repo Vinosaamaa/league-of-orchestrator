@@ -13,7 +13,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 LEAGUE = ROOT / "bin/league"
-EXPECTED_MIGRATION_REPORT = "d7c8447f647dd155e39cccbc566c56a9e29d32430395f507742f54c9b6c22058"
+EXPECTED_MIGRATION_REPORT = "5b8ba8e6880f5af8fca3387fc60bde6e537e12751f11f46013c9be68fe42e569"
 EXPECTED_MIGRATION_SOURCE = "806faab68ed085731b9ec5b45cc1fc6fec622b461a25eb3063ce2406eacbd450"
 EXPECTED_MIGRATION_PARITY = "60ab7509f1989a4e9b2ae5d7d72a4293549fd39f2ad1bc013b53fbf0a50f285a"
 sys.path.insert(0, str(ROOT / "src"))
@@ -465,6 +465,27 @@ def test_schema_and_command_inventory() -> None:
             "adapters",
         )
     )
+    for name in (
+        "league-pre-cutover-plan.schema.json",
+        "league-pre-cutover-receipt.schema.json",
+        "league-cleanup-canary-adapters.schema.json",
+        "league-real-cleanup-artifact-profile.schema.json",
+        "league-real-cleanup-canary-receipt.schema.json",
+    ):
+        added = json.loads((ROOT / "schema" / name).read_text(encoding="utf-8"))
+        assert added["$schema"] == "https://json-schema.org/draft/2020-12/schema"
+        assert added["additionalProperties"] is False
+    inventory = subprocess.run(
+        [str(LEAGUE), "help", "inventory"],
+        text=True,
+        capture_output=True,
+        check=True,
+        timeout=10,
+    )
+    inventory_value = json.loads(inventory.stdout)["result"]
+    assert "acceptance.cleanup-canary" in inventory_value["commands"]
+    assert "league-real-cleanup-artifact-profile.schema.json" in inventory_value["schemas"]
+    assert "league-real-cleanup-canary-receipt.schema.json" in inventory_value["schemas"]
     help_result = subprocess.run(
         [str(LEAGUE), "--help"], text=True, capture_output=True, check=True, timeout=10
     )
@@ -472,7 +493,7 @@ def test_schema_and_command_inventory() -> None:
     version = subprocess.run(
         [str(LEAGUE), "--version"], text=True, capture_output=True, check=True, timeout=10
     )
-    assert version.stdout.strip() == "league 0.1.0"
+    assert version.stdout.strip() == "league 0.2.0"
 
 
 def main() -> None:

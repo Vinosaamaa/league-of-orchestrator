@@ -1,0 +1,547 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Vinosaamaa/league-of-orchestrator/schema/league-pre-cutover-receipt.schema.json",
+  "title": "League complete no-apply pre-cutover receipt",
+  "type": "object",
+  "required": [
+    "schema", "version", "namespace", "home", "operation", "determinism",
+    "sentinels", "live_targets", "fixture_migration_shadow", "live_migration_shadow",
+    "backup_rollback_rehearsal", "staged_inactive_install", "manifest_checks", "integrated_lifecycle",
+    "runtime_contract_canaries", "supervision_benchmark", "cutover_fault_matrix", "fake_resource_canary",
+    "mutation_manifest", "public_claims"
+  ],
+  "properties": {
+    "schema": {"const": "league.pre-cutover-receipt.v1"},
+    "version": {"type": "string", "minLength": 1},
+    "namespace": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"},
+    "home": {"$ref": "#/$defs/absolutePath"},
+    "operation": {"$ref": "#/$defs/operation"},
+    "determinism": {
+      "type": "object",
+      "required": ["clock", "ids_allocated"],
+      "properties": {
+        "clock": {"type": "string", "format": "date-time"},
+        "ids_allocated": {"type": "integer", "minimum": 1}
+      },
+      "additionalProperties": false
+    },
+    "sentinels": {"$ref": "league-acceptance-receipt.schema.json#/properties/sentinels"},
+    "live_targets": {
+      "type": "object",
+      "required": ["unchanged", "observation_scope", "continuous_external_stability_proven", "preflight_write_count", "target_count", "aggregate_sha256"],
+      "properties": {
+        "unchanged": {"const": true},
+        "observation_scope": {"const": "before_after_snapshot_parity"},
+        "continuous_external_stability_proven": {"const": false},
+        "preflight_write_count": {"const": 0},
+        "target_count": {"type": "integer", "minimum": 1, "maximum": 64},
+        "aggregate_sha256": {"$ref": "#/$defs/sha256"}
+      },
+      "additionalProperties": false
+    },
+    "fixture_migration_shadow": {"$ref": "league-acceptance-receipt.schema.json#/properties/migration_shadow"},
+    "live_migration_shadow": {"$ref": "#/$defs/liveShadow"},
+    "backup_rollback_rehearsal": {"$ref": "#/$defs/backupRehearsal"},
+    "staged_inactive_install": {"$ref": "#/$defs/stagedInstall"},
+    "manifest_checks": {"$ref": "#/$defs/manifestChecks"},
+    "integrated_lifecycle": {"$ref": "#/$defs/integratedLifecycle"},
+    "runtime_contract_canaries": {"$ref": "#/$defs/runtimeCanaries"},
+    "supervision_benchmark": {"$ref": "#/$defs/supervisionBenchmark"},
+    "cutover_fault_matrix": {"$ref": "league-acceptance-receipt.schema.json#/properties/cutover"},
+    "fake_resource_canary": {"$ref": "league-acceptance-receipt.schema.json#/properties/canary"},
+    "mutation_manifest": {"$ref": "#/$defs/mutationManifest"},
+    "public_claims": {
+      "type": "object",
+      "required": ["global_install", "live_import", "hook_or_watcher_mutation", "canonical_cutover", "live_delivery", "real_runtime_support"],
+      "properties": {
+        "global_install": {"const": false},
+        "live_import": {"const": false},
+        "hook_or_watcher_mutation": {"const": false},
+        "canonical_cutover": {"const": false},
+        "live_delivery": {"const": false},
+        "real_runtime_support": {"const": false}
+      },
+      "additionalProperties": false
+    }
+  },
+  "$defs": {
+    "absolutePath": {"type": "string", "pattern": "^/[^\\u0000]+$"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "countMap": {
+      "type": "object",
+      "maxProperties": 512,
+      "additionalProperties": {"type": "integer", "minimum": 0}
+    },
+    "databaseBackup": {
+      "type": "object",
+      "required": ["schema", "sha256", "database_schema_version", "integrity", "foreign_key_violations", "policy"],
+      "properties": {
+        "schema": {"const": "league.backup.v1"},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "database_schema_version": {"const": 9},
+        "integrity": {"const": "ok"},
+        "foreign_key_violations": {"const": 0},
+        "policy": {"$ref": "league-acceptance-receipt.schema.json#/$defs/connectionPolicy"}
+      },
+      "additionalProperties": false
+    },
+    "operation": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["schema", "namespace", "state", "history", "mutation_manifest_sha256", "authority"],
+          "properties": {
+            "schema": {"const": "league.pre-cutover-operation.v1"},
+            "namespace": {"type": "string", "minLength": 1},
+            "state": {"const": "awaiting_authority"},
+            "history": {"$ref": "#/$defs/awaitingHistory"},
+            "mutation_manifest_sha256": {"$ref": "#/$defs/sha256"},
+            "authority": {"const": "separate_explicit_live_cutover"}
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["schema", "namespace", "state", "history", "error_code", "resumable"],
+          "properties": {
+            "schema": {"const": "league.pre-cutover-operation.v1"},
+            "namespace": {"type": "string", "minLength": 1},
+            "state": {"const": "blocked"},
+            "history": {"$ref": "#/$defs/blockedHistory"},
+            "error_code": {"type": "string", "minLength": 1},
+            "resumable": {"const": true}
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "awaitingHistory": {
+      "type": "array",
+      "prefixItems": [
+        {
+          "type": "object",
+          "required": ["state", "at"],
+          "properties": {"state": {"const": "planned"}, "at": {"type": "string", "format": "date-time"}},
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["state", "at"],
+          "properties": {"state": {"const": "executing"}, "at": {"type": "string", "format": "date-time"}},
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["state", "at", "mutation_manifest_sha256"],
+          "properties": {
+            "state": {"const": "awaiting_authority"},
+            "at": {"type": "string", "format": "date-time"},
+            "mutation_manifest_sha256": {"$ref": "#/$defs/sha256"}
+          },
+          "additionalProperties": false
+        }
+      ],
+      "minItems": 3,
+      "maxItems": 3
+    },
+    "blockedHistory": {
+      "type": "array",
+      "prefixItems": [
+        {
+          "type": "object",
+          "required": ["state", "at"],
+          "properties": {"state": {"const": "planned"}, "at": {"type": "string", "format": "date-time"}},
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["state", "at"],
+          "properties": {"state": {"const": "executing"}, "at": {"type": "string", "format": "date-time"}},
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["state", "at", "error_code"],
+          "properties": {
+            "state": {"const": "blocked"},
+            "at": {"type": "string", "format": "date-time"},
+            "error_code": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"}
+          },
+          "additionalProperties": false
+        }
+      ],
+      "minItems": 3,
+      "maxItems": 3
+    },
+    "liveShadow": {
+      "type": "object",
+      "required": ["migration", "dry_run", "apply", "exact_parity", "parity_sha256", "source_unchanged", "binding_count", "manifest_sha256", "database_backup", "rollback_export"],
+      "properties": {
+        "migration": {"$ref": "league-acceptance-receipt.schema.json#/$defs/migrationReceipt"},
+        "dry_run": {
+          "type": "object",
+          "required": ["eligible", "report_digest", "source_digest", "artifact_counts", "row_counts"],
+          "properties": {
+            "eligible": {"const": true},
+            "report_digest": {"$ref": "#/$defs/sha256"},
+            "source_digest": {"$ref": "#/$defs/sha256"},
+            "artifact_counts": {"$ref": "#/$defs/countMap"},
+            "row_counts": {"$ref": "#/$defs/countMap"}
+          },
+          "additionalProperties": false
+        },
+        "apply": {
+          "type": "object",
+          "required": ["applied"],
+          "properties": {"applied": {"const": true}},
+          "additionalProperties": false
+        },
+        "exact_parity": {"const": true},
+        "parity_sha256": {"$ref": "#/$defs/sha256"},
+        "source_unchanged": {"const": true},
+        "binding_count": {"type": "integer", "minimum": 1},
+        "manifest_sha256": {"$ref": "#/$defs/sha256"},
+        "database_backup": {"$ref": "#/$defs/databaseBackup"},
+        "rollback_export": {
+          "type": "object",
+          "required": ["sha256", "bytes", "restricted"],
+          "properties": {
+            "sha256": {"$ref": "#/$defs/sha256"},
+            "bytes": {"type": "integer", "minimum": 1},
+            "restricted": {"const": true}
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "backupRehearsal": {
+      "type": "object",
+      "required": ["targets", "target_count", "restore_parity", "sandbox_only", "aggregate_sha256"],
+      "properties": {
+        "targets": {"type": "array", "minItems": 1, "maxItems": 64, "items": {"$ref": "#/$defs/backupTarget"}},
+        "target_count": {"type": "integer", "minimum": 1, "maximum": 64},
+        "restore_parity": {"const": true},
+        "sandbox_only": {"const": true},
+        "aggregate_sha256": {"$ref": "#/$defs/sha256"}
+      },
+      "additionalProperties": false
+    },
+    "backupTarget": {
+      "type": "object",
+      "required": ["target_id", "kind", "exists", "node_kind", "bytes", "sha256", "rollback"],
+      "properties": {
+        "target_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"},
+        "kind": {"type": "string", "minLength": 1},
+        "exists": {"type": "boolean"},
+        "node_kind": {"enum": ["absent", "file", "directory", "symlink"]},
+        "bytes": {"type": "integer", "minimum": 0},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "rollback": {"enum": ["restore_exact_backup", "remove_created_target"]}
+      },
+      "additionalProperties": false
+    },
+    "stagedInstall": {
+      "type": "object",
+      "required": ["prefix", "version", "source_release_staged_parity", "source_manifest_sha256", "release_manifest_sha256", "staged_manifest_sha256", "file_count", "launcher_resolution", "help_checked", "schemas_checked", "schema_migration", "hook_fixtures", "permissions_checked", "path_leaks", "rollback", "inactive_after_checks", "global_install_performed", "supervision"],
+      "properties": {
+        "prefix": {"type": "string"}, "version": {"type": "string"},
+        "source_release_staged_parity": {"const": true},
+        "source_manifest_sha256": {"$ref": "#/$defs/sha256"},
+        "release_manifest_sha256": {"$ref": "#/$defs/sha256"},
+        "staged_manifest_sha256": {"$ref": "#/$defs/sha256"},
+        "file_count": {"type": "integer", "minimum": 1},
+        "launcher_resolution": {"const": true}, "help_checked": {"const": true},
+        "schemas_checked": {"type": "integer", "minimum": 1},
+        "schema_migration": {"$ref": "#/$defs/stagedMigration"},
+        "hook_fixtures": {"type": "array", "minItems": 3, "maxItems": 3, "items": {"$ref": "league-acceptance-receipt.schema.json#/$defs/hookFixture"}},
+        "permissions_checked": {"const": true}, "path_leaks": {"const": false},
+        "rollback": {"$ref": "#/$defs/stagedRollback"}, "inactive_after_checks": {"const": true},
+        "global_install_performed": {"const": false},
+        "supervision": {"$ref": "#/$defs/stagedSupervision"}
+      },
+      "additionalProperties": false
+    },
+    "stagedMigration": {
+      "type": "object",
+      "required": ["to_version", "journal_mode", "integrity"],
+      "properties": {
+        "to_version": {"const": 9},
+        "journal_mode": {"const": "DELETE"},
+        "integrity": {"const": true}
+      },
+      "additionalProperties": false
+    },
+    "stagedRollback": {
+      "type": "object",
+      "required": ["completed", "restored_target", "observed_version"],
+      "properties": {
+        "completed": {"const": true},
+        "restored_target": {"type": "string", "minLength": 1},
+        "observed_version": {"const": "0.0.0-legacy"}
+      },
+      "additionalProperties": false
+    },
+    "stagedSupervision": {
+      "type": "object",
+      "required": ["launcher_help_checked", "source_contract_checked", "reconciliation_interval_seconds", "consecutive_observations", "unchanged_output", "separate_15_second_policy"],
+      "properties": {
+        "launcher_help_checked": {"const": true},
+        "source_contract_checked": {"const": true},
+        "reconciliation_interval_seconds": {"const": 30},
+        "consecutive_observations": {"const": 2},
+        "unchanged_output": {"const": "silent"},
+        "separate_15_second_policy": {"const": false}
+      },
+      "additionalProperties": false
+    },
+    "manifestChecks": {
+      "type": "object",
+      "required": ["source_version", "staged_installed_version", "version_parity", "source_manifest_sha256", "release_manifest_sha256", "staged_installed_manifest_sha256", "source_release_staged_parity", "current_installed_target_count", "current_installed_aggregate_sha256", "current_installed_role", "current_installed_unchanged"],
+      "properties": {
+        "source_version": {"type": "string", "minLength": 1},
+        "staged_installed_version": {"type": "string", "minLength": 1},
+        "version_parity": {"const": true},
+        "source_manifest_sha256": {"$ref": "#/$defs/sha256"},
+        "release_manifest_sha256": {"$ref": "#/$defs/sha256"},
+        "staged_installed_manifest_sha256": {"$ref": "#/$defs/sha256"},
+        "source_release_staged_parity": {"const": true},
+        "current_installed_target_count": {"type": "integer", "minimum": 1},
+        "current_installed_aggregate_sha256": {"$ref": "#/$defs/sha256"},
+        "current_installed_role": {"const": "legacy_rollback_source"},
+        "current_installed_unchanged": {"const": true}
+      },
+      "additionalProperties": false
+    },
+    "requestSlice": {
+      "type": "object",
+      "required": ["status", "state", "safe_to_finish"],
+      "properties": {"status": {"const": "passed"}, "state": {"const": "answered"}, "safe_to_finish": {"const": true}},
+      "additionalProperties": false
+    },
+    "assignmentSlice": {
+      "type": "object",
+      "required": ["status", "state", "exact_receipt"],
+      "properties": {"status": {"const": "passed"}, "state": {"const": "active"}, "exact_receipt": {"const": true}},
+      "additionalProperties": false
+    },
+    "watcherSlice": {
+      "type": "object",
+      "required": ["status", "delivery_state", "recipient_effect_count"],
+      "properties": {"status": {"const": "passed"}, "delivery_state": {"const": "delivered"}, "recipient_effect_count": {"const": 1}},
+      "additionalProperties": false
+    },
+    "stopSlice": {
+      "type": "object",
+      "required": ["status", "before", "after"],
+      "properties": {"status": {"const": "passed"}, "before": {"const": "block"}, "after": {"const": "allow"}},
+      "additionalProperties": false
+    },
+    "teardownSlice": {
+      "type": "object",
+      "required": ["status", "state", "action_count", "fake_effects_only"],
+      "properties": {"status": {"const": "passed"}, "state": {"const": "cleanup_completed"}, "action_count": {"type": "integer", "minimum": 1}, "fake_effects_only": {"const": true}},
+      "additionalProperties": false
+    },
+    "integratedLifecycle": {
+      "type": "object",
+      "required": ["request", "assignment", "watcher", "stop", "teardown", "schema_version", "delivery_adapter_calls"],
+      "properties": {
+        "request": {"$ref": "#/$defs/requestSlice"}, "assignment": {"$ref": "#/$defs/assignmentSlice"},
+        "watcher": {"$ref": "#/$defs/watcherSlice"}, "stop": {"$ref": "#/$defs/stopSlice"},
+        "teardown": {"$ref": "#/$defs/teardownSlice"},
+        "schema_version": {"type": "integer", "minimum": 1},
+        "delivery_adapter_calls": {"type": "integer", "minimum": 1}
+      },
+      "additionalProperties": false
+    },
+    "runtimeCanaries": {
+      "type": "object",
+      "required": ["canaries", "all_supported_contract_canaries_passed", "real_runtime_proven", "unverified"],
+      "properties": {
+        "canaries": {"type": "array", "minItems": 3, "maxItems": 3, "items": {"$ref": "#/$defs/runtimeCanary"}},
+        "all_supported_contract_canaries_passed": {"const": true},
+        "real_runtime_proven": {"const": false},
+        "unverified": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"$ref": "#/$defs/unverifiedRuntime"}}
+      },
+      "additionalProperties": false
+    },
+    "runtimeCanary": {
+      "type": "object",
+      "required": ["harness", "backend", "mode", "status", "evidence", "operations", "real_runtime_proven", "binding_id"],
+      "properties": {
+        "harness": {"enum": ["codex", "pi"]},
+        "backend": {"enum": ["herdr", "tmux"]},
+        "mode": {"enum": ["created", "attached"]},
+        "status": {"const": "passed"},
+        "evidence": {"const": "isolated-double"},
+        "operations": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+        "real_runtime_proven": {"const": false},
+        "binding_id": {"type": "string", "minLength": 1}
+      },
+      "additionalProperties": false
+    },
+    "unverifiedRuntime": {
+      "type": "object",
+      "required": ["runtime", "reason"],
+      "properties": {
+        "runtime": {"enum": ["cursor", "real-herdr-tmux"]},
+        "reason": {"type": "string", "minLength": 1}
+      },
+      "additionalProperties": false
+    },
+    "supervisionBenchmark": {
+      "type": "object",
+      "required": ["status", "environment", "event_wake", "missed_wake_reconciliation", "resources", "presentation", "permanent_daemon_created", "transcript_polling_used", "listener_terminated", "proposal"],
+      "properties": {
+        "status": {"const": "passed"},
+        "environment": {"const": "isolated-python-test-double"},
+        "event_wake": {"$ref": "#/$defs/eventWakeBenchmark"},
+        "missed_wake_reconciliation": {"$ref": "#/$defs/reconciliationBenchmark"},
+        "resources": {"$ref": "#/$defs/resourceBenchmark"},
+        "presentation": {"$ref": "#/$defs/presentationBenchmark"},
+        "permanent_daemon_created": {"const": false},
+        "transcript_polling_used": {"const": false},
+        "listener_terminated": {"const": true},
+        "proposal": {"$ref": "#/$defs/reconciliationProposal"}
+      },
+      "additionalProperties": false
+    },
+    "eventWakeBenchmark": {
+      "type": "object",
+      "required": ["samples", "p50_ms", "p95_ms", "max_ms", "prompt_and_transition_bypass_reconciliation"],
+      "properties": {
+        "samples": {"const": 32},
+        "p50_ms": {"type": "number", "minimum": 0},
+        "p95_ms": {"type": "number", "minimum": 0},
+        "max_ms": {"type": "number", "minimum": 0},
+        "prompt_and_transition_bypass_reconciliation": {"const": true}
+      },
+      "additionalProperties": false
+    },
+    "reconciliationBenchmark": {
+      "type": "object",
+      "required": ["simulation", "interval_seconds", "consecutive_observations", "earliest_fallback_seconds", "separate_15_second_policy"],
+      "properties": {
+        "simulation": {"const": true},
+        "interval_seconds": {"const": 30},
+        "consecutive_observations": {"const": 2},
+        "earliest_fallback_seconds": {"const": 60},
+        "separate_15_second_policy": {"const": false}
+      },
+      "additionalProperties": false
+    },
+    "resourceBenchmark": {
+      "type": "object",
+      "required": ["process_cpu_ms", "idle_observation_ms", "idle_cpu_ms", "peak_rss_before", "peak_rss_after", "snapshot_scaling"],
+      "properties": {
+        "process_cpu_ms": {"type": "number", "minimum": 0},
+        "idle_observation_ms": {"const": 25},
+        "idle_cpu_ms": {"type": "number", "minimum": 0},
+        "peak_rss_before": {"type": "integer", "minimum": 0},
+        "peak_rss_after": {"type": "integer", "minimum": 0},
+        "snapshot_scaling": {"type": "array", "minItems": 3, "maxItems": 3, "items": {"$ref": "#/$defs/snapshotScale"}}
+      },
+      "additionalProperties": false
+    },
+    "snapshotScale": {
+      "type": "object",
+      "required": ["champions", "iterations", "total_ms", "per_snapshot_ms"],
+      "properties": {
+        "champions": {"enum": [1, 8, 32]},
+        "iterations": {"const": 100},
+        "total_ms": {"type": "number", "minimum": 0},
+        "per_snapshot_ms": {"type": "number", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "presentationBenchmark": {
+      "type": "object",
+      "required": ["initial_messages", "material_messages", "unchanged_messages", "silent_lease_maintenance"],
+      "properties": {
+        "initial_messages": {"const": 1},
+        "material_messages": {"const": 32},
+        "unchanged_messages": {"const": 0},
+        "silent_lease_maintenance": {"const": true}
+      },
+      "additionalProperties": false
+    },
+    "reconciliationProposal": {
+      "type": "object",
+      "required": ["decision", "reconciliation_interval_seconds", "consecutive_observations", "requires_cutover_authority"],
+      "properties": {
+        "decision": {"const": "retain_compatibility_default"},
+        "reconciliation_interval_seconds": {"const": 30},
+        "consecutive_observations": {"const": 2},
+        "requires_cutover_authority": {"const": true}
+      },
+      "additionalProperties": false
+    },
+    "manifestSupervision": {
+      "type": "object",
+      "required": ["normal_wake", "user_prompt_wake", "unchanged_output", "reconciliation", "installed_default_command", "override_arguments", "benchmark_decision", "requires_cutover_authority"],
+      "properties": {
+        "normal_wake": {"const": "event_driven_registered_listener"},
+        "user_prompt_wake": {"const": "event_driven_registered_listener"},
+        "unchanged_output": {"const": "silent"},
+        "reconciliation": {
+          "type": "object",
+          "required": ["purpose", "interval_seconds", "consecutive_observations", "earliest_fallback_seconds", "separate_15_second_policy"],
+          "properties": {
+            "purpose": {"const": "missed_wake_and_lease_recovery_only"},
+            "interval_seconds": {"const": 30},
+            "consecutive_observations": {"const": 2},
+            "earliest_fallback_seconds": {"const": 60},
+            "separate_15_second_policy": {"const": false}
+          },
+          "additionalProperties": false
+        },
+        "installed_default_command": {"type": "array", "minItems": 6, "maxItems": 6, "items": {"type": "string", "minLength": 1}},
+        "override_arguments": {
+          "type": "array",
+          "prefixItems": [
+            {"const": "--reconcile-seconds"}, {"const": "<accepted-seconds>"},
+            {"const": "--reconcile-consecutive"}, {"const": "<accepted-observations>"}
+          ],
+          "minItems": 4,
+          "maxItems": 4
+        },
+        "benchmark_decision": {"const": "retain_compatibility_default"},
+        "requires_cutover_authority": {"const": true}
+      },
+      "additionalProperties": false
+    },
+    "mutationManifest": {
+      "type": "object",
+      "required": ["schema", "applied", "authority_required", "writer_generation", "source_version", "operations", "rollback_sequence", "backup_root", "archive_root", "supervision", "manifest_sha256"],
+      "properties": {
+        "schema": {"const": "league.cutover-mutation-manifest.v1"},
+        "applied": {"const": false}, "authority_required": {"const": true},
+        "writer_generation": {"type": "string", "pattern": "^sqlite-[0-9a-f]{20}$"},
+        "source_version": {"type": "string", "minLength": 1},
+        "operations": {
+          "type": "array", "minItems": 10, "maxItems": 128,
+          "items": {
+            "type": "object",
+            "required": ["ordinal", "operation", "target", "precondition", "after", "rollback", "applied"],
+            "properties": {
+              "ordinal": {"type": "integer", "minimum": 1},
+              "operation": {"type": "string", "minLength": 1},
+              "target": {"type": "string", "minLength": 1},
+              "precondition": {"type": "object"}, "after": {"type": "object"},
+              "rollback": {"type": "object"}, "applied": {"const": false}
+            },
+            "additionalProperties": false
+          }
+        },
+        "rollback_sequence": {"type": "array", "minItems": 9, "maxItems": 9, "items": {"type": "string"}},
+        "backup_root": {"$ref": "#/$defs/absolutePath"},
+        "archive_root": {"$ref": "#/$defs/absolutePath"},
+        "supervision": {"$ref": "#/$defs/manifestSupervision"},
+        "manifest_sha256": {"$ref": "#/$defs/sha256"}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

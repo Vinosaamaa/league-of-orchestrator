@@ -64,6 +64,23 @@ def register_runtime(
                 )
                 if not immutable:
                     raise StorageRefusal("runtime_conflict", "runtime retry changed immutable identity")
+                cleanup_closed = existing["status"] == "closed" and not bool(
+                    existing["verified"]
+                )
+                if cleanup_closed:
+                    if status != "closed":
+                        raise StorageRefusal(
+                            "runtime_closed",
+                            "a cleanup-closed runtime cannot be reopened by a stale observation",
+                        )
+                    return {
+                        "runtime_instance_id": runtime_instance_id,
+                        "actor_agent_id": actor_agent_id,
+                        "status": "closed",
+                        "verified": False,
+                        "capabilities": sorted(json.loads(existing["capabilities_json"])),
+                        "idempotent": True,
+                    }
                 if capabilities_json is None:
                     store.connection.execute(
                         "UPDATE runtime_instances SET status=?,verified=?,last_seen_at=? WHERE runtime_instance_id=?",

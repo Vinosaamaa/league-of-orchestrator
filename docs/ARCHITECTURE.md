@@ -177,10 +177,27 @@ explicit-root sentinels, deterministic fake adapters, fixture migration parity,
 staged release/rollback proof, a sandbox-only generation pointer and cutover
 lock, fault-injected operation receipts, and exact fake canary cleanup. It has
 no global path defaults and exposes no canonical cutover operation. The
-request, assignment, watcher, Stop, and teardown acceptance-receipt extensions
-remain pending. All seven are implemented and tested separately in this
-repository-local candidate; they are not wired into a cutover receipt or live
-runtime by this slice.
+original foundation receipt keeps its request, assignment, watcher, Stop, and
+teardown extension points pending for compatibility.
+
+`src/league/precutover.py` composes those merged repository-local slices in a
+separate strict receipt. It copies only explicitly bound legacy files into an
+isolated shadow, checks exact imported legacy fields and counts, stages both
+League launchers inactive, rehearses exact backup/restore, measures an
+event-driven test listener, and emits an unapplied mutation/rollback manifest.
+Its runtime canaries are deterministic contract doubles, never real-runtime
+proof. Its terminal operation is `awaiting_authority`; it has no apply path.
+
+`src/league/real_canary.py` is the narrow exception to double-only runtime
+coverage. Under one explicit temporary root it composes a real Herdr/Codex
+Champion, real SQLite lifecycle state, and the adapter-backed cleanup executor.
+It deliberately crashes after the archive external effect and resumes through a
+new CLI process, proving durable operation fencing and observation-based
+idempotency before exact endpoint, worktree, branch, and callsign release. This
+does not generalize into a production executor or prove any other harness or
+backend. The repository-artifact and exact-evidence contract for the final
+disposable gate is versioned in [`docs/ACCEPTANCE.md`](ACCEPTANCE.md); the gate
+performs no hosted mutation.
 
 ## Portability boundary
 

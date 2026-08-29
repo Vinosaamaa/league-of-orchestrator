@@ -1,0 +1,153 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Vinosaamaa/league-of-orchestrator/schema/league-real-cleanup-canary-receipt.schema.json",
+  "title": "League real disposable cleanup canary receipt",
+  "type": "object",
+  "required": [
+    "schema", "namespace", "mode", "temporary_root", "completed_at", "runtime", "supervision", "repository_artifact",
+    "transition", "stop_before", "interruption", "cleanup", "stop_after", "scope",
+    "receipt_sha256"
+  ],
+  "properties": {
+    "schema": {"const": "league.real-cleanup-canary-receipt.v1"},
+    "namespace": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"},
+    "mode": {"const": "real-disposable"},
+    "temporary_root": {"$ref": "#/$defs/absolutePath"},
+    "completed_at": {"type": "string", "format": "date-time"},
+    "runtime": {
+      "type": "object",
+      "required": ["harness", "backend", "real_runtime", "agent_name", "session_id", "pane_id", "terminal_id"],
+      "properties": {
+        "harness": {"const": "codex"},
+        "backend": {"const": "herdr"},
+        "real_runtime": {"const": true},
+        "agent_name": {"type": "string", "minLength": 1},
+        "session_id": {"type": "string", "minLength": 1},
+        "pane_id": {"type": "string", "minLength": 1},
+        "terminal_id": {"type": "string", "minLength": 1}
+      },
+      "additionalProperties": false
+    },
+    "supervision": {
+      "type": "object",
+      "required": ["normal_wake", "readiness_wait_milliseconds", "maximum_observations", "periodic_unchanged_messages", "separate_15_second_policy"],
+      "properties": {
+        "normal_wake": {"const": "event_driven"},
+        "readiness_wait_milliseconds": {"const": 30000},
+        "maximum_observations": {"const": 2},
+        "periodic_unchanged_messages": {"const": 0},
+        "separate_15_second_policy": {"const": false}
+      },
+      "additionalProperties": false
+    },
+    "repository_artifact": {"$ref": "league-real-cleanup-artifact-profile.schema.json"},
+    "transition": {
+      "type": "object",
+      "required": ["cleanup_state", "cleanup_obligation_id", "event_count", "outbox_count", "hook_decision", "obligations", "wait_safe", "end_safe"],
+      "properties": {
+        "cleanup_state": {"const": "pending"},
+        "cleanup_obligation_id": {"type": "string", "minLength": 1},
+        "event_count": {"const": 1},
+        "outbox_count": {"const": 1},
+        "hook_decision": {"const": "block"},
+        "obligations": {"$ref": "#/$defs/soleCleanupObligation"},
+        "wait_safe": {"const": false},
+        "end_safe": {"const": false}
+      },
+      "additionalProperties": false
+    },
+    "stop_before": {
+      "type": "object",
+      "required": ["decision", "wait_safe", "end_safe", "cleanup_only"],
+      "properties": {
+        "decision": {"const": "block"},
+        "wait_safe": {"const": false},
+        "end_safe": {"const": false},
+        "cleanup_only": {"const": true}
+      },
+      "additionalProperties": false
+    },
+    "interruption": {
+      "type": "object",
+      "required": ["operation_id", "first_exit", "error_code", "durable_fence", "action_receipts_before_restart", "archive_external_effect_present", "store_reopened"],
+      "properties": {
+        "operation_id": {"type": "string", "minLength": 1},
+        "first_exit": {"const": 3},
+        "error_code": {"const": "cleanup_interrupted"},
+        "durable_fence": {"const": 1},
+        "action_receipts_before_restart": {"const": 0},
+        "archive_external_effect_present": {"const": true},
+        "store_reopened": {"const": true}
+      },
+      "additionalProperties": false
+    },
+    "cleanup": {
+      "type": "object",
+      "required": ["operation_id", "automatic_after_proof", "same_operation_resumed", "cleanup_state", "action_order", "action_receipt_count", "action_receipt_hashes", "teardown_receipt_hash", "callsign_state", "worktree_removed", "branch_removed", "repository_preserved", "exact_endpoint_closed", "hook_decision", "wait_safe", "end_safe"],
+      "properties": {
+        "operation_id": {"type": "string", "minLength": 1},
+        "automatic_after_proof": {"const": true},
+        "same_operation_resumed": {"const": true},
+        "cleanup_state": {"const": "cleanup_completed"},
+        "action_order": {"const": ["archive_identity_evidence", "session_exit", "endpoint_close", "worktree_remove", "branch_delete", "callsign_release"]},
+        "action_receipt_count": {"const": 6},
+        "action_receipt_hashes": {"type": "array", "minItems": 6, "maxItems": 6, "items": {"$ref": "#/$defs/digest"}},
+        "teardown_receipt_hash": {"$ref": "#/$defs/digest"},
+        "callsign_state": {"const": "released"},
+        "worktree_removed": {"const": true},
+        "branch_removed": {"const": true},
+        "repository_preserved": {"const": true},
+        "exact_endpoint_closed": {"const": true},
+        "hook_decision": {"const": "allow"},
+        "wait_safe": {"const": true},
+        "end_safe": {"const": true}
+      },
+      "additionalProperties": false
+    },
+    "stop_after": {
+      "type": "object",
+      "required": ["decision", "wait_safe", "end_safe", "allowed_only_after_cleanup_completed"],
+      "properties": {
+        "decision": {"const": "allow"},
+        "wait_safe": {"const": true},
+        "end_safe": {"const": true},
+        "allowed_only_after_cleanup_completed": {"const": true}
+      },
+      "additionalProperties": false
+    },
+    "scope": {
+      "type": "object",
+      "required": ["archive_first", "callsign_last", "exact_endpoint_only", "clean_worktree_only", "eligible_branch_only", "canonical_league_state_touched", "global_install_performed", "hosted_mutation_performed"],
+      "properties": {
+        "archive_first": {"const": true},
+        "callsign_last": {"const": true},
+        "exact_endpoint_only": {"const": true},
+        "clean_worktree_only": {"const": true},
+        "eligible_branch_only": {"const": true},
+        "canonical_league_state_touched": {"const": false},
+        "global_install_performed": {"const": false},
+        "hosted_mutation_performed": {"const": false}
+      },
+      "additionalProperties": false
+    },
+    "receipt_sha256": {"$ref": "#/$defs/digest"}
+  },
+  "$defs": {
+    "absolutePath": {"type": "string", "pattern": "^/[^\\u0000]+$"},
+    "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "gitObject": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "soleCleanupObligation": {
+      "type": "object",
+      "required": ["active_champions", "pending_assignments", "unresolved_requests", "pending_deliveries", "cleanup_obligations"],
+      "properties": {
+        "active_champions": {"const": 0},
+        "pending_assignments": {"const": 0},
+        "unresolved_requests": {"const": 0},
+        "pending_deliveries": {"const": 0},
+        "cleanup_obligations": {"const": 1}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

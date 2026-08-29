@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Vinosaamaa/league-of-orchestrator/schema/league-real-cleanup-artifact-profile.schema.json",
+  "title": "League real cleanup repository artifact profile",
+  "type": "object",
+  "required": ["artifact_id", "classification", "issue", "repository_path", "pull_request_number", "pull_request_url", "tested_head", "merge_commit", "tested_tree", "merge_tree", "tree_parity", "artifact_sha256", "declaration_state", "prepublication_cleanup_refusal", "publication_state", "publication_gate_cleared", "hosted_mutation_performed"],
+  "properties": {
+    "artifact_id": {"const": "artifact:issue-39-overnight-report"},
+    "classification": {"const": "repository_owned"},
+    "issue": {"const": 39},
+    "repository_path": {"const": "docs/reports/2026-08-28-overnight-delivery-report.md"},
+    "pull_request_number": {"const": 41},
+    "pull_request_url": {"const": "https://github.com/Vinosaamaa/league-of-orchestrator/pull/41"},
+    "tested_head": {"const": "509e00b7476a8a449f690a04250fe9d49bfbaca3"},
+    "merge_commit": {"const": "3c517535b6cf4423bd6704b06d30f2e3cc299784"},
+    "tested_tree": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "merge_tree": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "tree_parity": {"const": true},
+    "artifact_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "declaration_state": {"const": "pending"},
+    "prepublication_cleanup_refusal": {"const": "repository_publication_unresolved"},
+    "publication_state": {"const": "published"},
+    "publication_gate_cleared": {"const": true},
+    "hosted_mutation_performed": {"const": false}
+  },
+  "additionalProperties": false
+}

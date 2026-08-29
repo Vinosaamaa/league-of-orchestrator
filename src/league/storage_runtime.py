@@ -51,8 +51,19 @@ class RuntimeBindingStorage(Protocol):
         receipt: Mapping[str, Any],
     ) -> dict[str, Any]: ...
 
+class RuntimeCleanupStorage(Protocol):
+    """Runtime mutation needed only by proof-gated cleanup execution."""
 
-class RuntimeLifecycleStorage(RuntimeBindingStorage, Protocol):
+    def close_runtime_for_cleanup(
+        self,
+        runtime_instance_id: str,
+        endpoint_identity: str,
+        runtime_generation: str,
+        at: str,
+    ) -> dict[str, Any]: ...
+
+
+class RuntimeLifecycleStorage(RuntimeBindingStorage, RuntimeCleanupStorage, Protocol):
     """Composite protocol exposed by the SQLite facade."""
 
     def record_routing_decision(self, decision: Mapping[str, Any]) -> dict[str, Any]: ...

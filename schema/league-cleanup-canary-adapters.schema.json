@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Vinosaamaa/league-of-orchestrator/schema/league-cleanup-canary-adapters.schema.json",
+  "title": "League disposable cleanup canary adapters",
+  "type": "object",
+  "required": ["schema", "scope", "temporary_root", "archive_path", "herdr", "git", "callsign"],
+  "properties": {
+    "schema": {"const": "league.cleanup-canary-adapters.v1"},
+    "scope": {"const": "disposable-canary"},
+    "temporary_root": {"$ref": "#/$defs/absolutePath"},
+    "archive_path": {"$ref": "#/$defs/absolutePath"},
+    "herdr": {
+      "type": "object",
+      "required": ["agent_name", "workspace_id", "pane_id", "terminal_id", "session_id", "runtime_instance_id", "runtime_generation"],
+      "properties": {
+        "agent_name": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,31}$"},
+        "workspace_id": {"type": "string", "minLength": 1},
+        "pane_id": {"type": "string", "minLength": 1},
+        "terminal_id": {"type": "string", "minLength": 1},
+        "session_id": {"type": "string", "minLength": 1},
+        "runtime_instance_id": {"type": "string", "minLength": 1},
+        "runtime_generation": {"type": "string", "minLength": 1}
+      },
+      "additionalProperties": false
+    },
+    "git": {
+      "type": "object",
+      "required": ["repository", "worktree", "branch", "head", "base_ref", "merge_commit"],
+      "properties": {
+        "repository": {"$ref": "#/$defs/absolutePath"},
+        "worktree": {"$ref": "#/$defs/absolutePath"},
+        "branch": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$"},
+        "head": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "base_ref": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$"},
+        "merge_commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"}
+      },
+      "additionalProperties": false
+    },
+    "callsign": {
+      "type": "object",
+      "required": ["assignment_id", "callsign", "expected_version"],
+      "properties": {
+        "assignment_id": {"type": "string", "minLength": 1},
+        "callsign": {"type": "string", "minLength": 1},
+        "expected_version": {"const": 2}
+      },
+      "additionalProperties": false
+    }
+  },
+  "$defs": {
+    "absolutePath": {"type": "string", "pattern": "^/[^\\u0000]+$"}
+  },
+  "additionalProperties": false
+}

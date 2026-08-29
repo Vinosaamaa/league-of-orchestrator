@@ -87,6 +87,19 @@ League work. The canonical behavior, safety boundaries, and verification
 contract live in [`docs/ACCEPTANCE.md`](ACCEPTANCE.md); this file records source
 origin and ownership only.
 
+The issue-#23 continuation adds `src/league/precutover.py`, the strict
+pre-cutover plan/receipt schemas, and `tests/test_pre_cutover.py` as original
+League work. Its deliberate provenance difference is adding the already
+imported `bin/agent-watcher` and `src/agent_watcher.py` to the staged manifest;
+the behavior and verification contract remain canonical in
+[`docs/ACCEPTANCE.md`](ACCEPTANCE.md).
+
+The real cleanup canary, its strict adapter/receipt schemas, and focused fake
+adapter tests are original League work for issue #23. The issue-#40 artifact
+lifecycle and issue-#39/PR-#41 report receipts are composed inputs, not
+reimplemented here; the cleanup-canary contract and runtime scope remain
+canonical in [`docs/ACCEPTANCE.md`](ACCEPTANCE.md).
+
 Tests that require process inspection explicitly inject the single
 `tests/fakes/ps` adapter through `tests/process_adapter.py`; Make targets do not
 alter `PATH` for unrelated tests. This keeps self-process and resource-lifecycle

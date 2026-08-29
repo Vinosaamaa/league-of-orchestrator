@@ -429,9 +429,11 @@ def test_crash_after_every_external_action_and_duplicate(root: Path) -> None:
         # can mask a duplicate effect or receipt-recovery defect.
         store, executor, operation, _, effects = planned_execution(root, f"crash-{index}")
 
-        def crash(point: str, target: str = action_kind) -> None:
-            if point == f"after_external_action:{target}":
-                raise RuntimeError(point)
+        def crash(event: object, target: str = action_kind) -> None:
+            if getattr(event, "phase", None) == "after_external_action" and getattr(
+                event, "action_kind", None
+            ) == target:
+                raise RuntimeError(target)
 
         try:
             executor.execute(

@@ -29,6 +29,30 @@ def _time(value: str, label: str, code: str = "cleanup_lease_invalid") -> dateti
     return parsed
 
 
+def runtime_cleanup_identity(
+    store: Any,
+    runtime_instance_id: str,
+    endpoint_identity: str,
+    runtime_generation: str,
+) -> dict[str, Any]:
+    """Return one exact runtime row or refuse a stale cleanup identity."""
+
+    if not all((runtime_instance_id, endpoint_identity, runtime_generation)):
+        raise StorageRefusal("cleanup_identity_mismatch", "runtime cleanup identity is incomplete")
+    runtime = store.connection.execute(
+        "SELECT endpoint,runtime_generation,status,verified FROM runtime_instances WHERE runtime_instance_id=?",
+        (runtime_instance_id,),
+    ).fetchone()
+    if runtime is None:
+        raise StorageRefusal("cleanup_identity_mismatch", "runtime cleanup identity is missing")
+    if (
+        runtime["endpoint"] != endpoint_identity
+        or runtime["runtime_generation"] != runtime_generation
+    ):
+        raise StorageRefusal("cleanup_identity_mismatch", "runtime cleanup identity changed")
+    return dict(runtime)
+
+
 def register_runtime_binding(
     store: Any,
     binding_id: str,
@@ -80,6 +104,44 @@ def register_runtime_binding(
     except sqlite3.DatabaseError as exc:
         raise store._translate_database_error(exc, "runtime binding conflicted with canonical state") from exc
     return {"binding_id": binding_id, "version": 1, "idempotent": False}
+
+
+def close_runtime_for_cleanup(
+    store: Any,
+    runtime_instance_id: str,
+    endpoint_identity: str,
+    runtime_generation: str,
+    at: str,
+) -> dict[str, Any]:
+    _time(at, "runtime cleanup close time")
+    try:
+        with store._transaction():
+            runtime = runtime_cleanup_identity(
+                store, runtime_instance_id, endpoint_identity, runtime_generation
+            )
+            if runtime["status"] == "closed" and not bool(runtime["verified"]):
+                return {
+                    "runtime_instance_id": runtime_instance_id,
+                    "status": "closed",
+                    "idempotent": True,
+                }
+            if runtime["status"] not in {"active", "idle", "closed"}:
+                raise StorageRefusal("cleanup_identity_mismatch", "runtime is not cleanup-eligible")
+            store.connection.execute(
+                "UPDATE runtime_instances SET status='closed',verified=0,last_seen_at=? WHERE runtime_instance_id=?",
+                (at, runtime_instance_id),
+            )
+    except StorageRefusal:
+        raise
+    except sqlite3.DatabaseError as exc:
+        raise store._translate_database_error(
+            exc, "runtime cleanup close conflicted with canonical state"
+        ) from exc
+    return {
+        "runtime_instance_id": runtime_instance_id,
+        "status": "closed",
+        "idempotent": False,
+    }
 
 
 def runtime_binding(store: Any, binding_id: str) -> Optional[dict[str, Any]]:

@@ -27,6 +27,7 @@ RUNTIME_LIFECYCLE_TESTS := \
 	tests/test_runtime_adapters.py \
 	tests/test_cleanup_lifecycle.py \
 	tests/test_repository_artifacts.py \
+	tests/test_real_cleanup.py \
 	tests/test_model_routing.py
 
 ROUTING_POLICY_TESTS := \
@@ -43,7 +44,8 @@ HANDOFF_CALLSIGN_TESTS := \
 	tests/test_shotcaller_rollover.py
 
 ACCEPTANCE_TESTS := \
-	tests/test_acceptance_harness.py
+	tests/test_acceptance_harness.py \
+	tests/test_pre_cutover.py
 
 REPORTING_PRIVACY_TESTS := \
 	tests/test_privacy.py \

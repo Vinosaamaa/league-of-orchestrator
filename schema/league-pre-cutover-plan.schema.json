@@ -32,7 +32,8 @@
             },
             "additionalProperties": false
           }
-        }
+        },
+        "reconciliation": {"$ref": "#/$defs/legacyReconciliation"}
       },
       "additionalProperties": false
     },
@@ -88,7 +89,61 @@
     }
   },
   "$defs": {
-    "absolutePath": {"type": "string", "pattern": "^/[^\\u0000]+$"}
+    "absolutePath": {"type": "string", "pattern": "^/[^\\u0000]+$"},
+    "relativePath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[^/\\u0000]+(?:/[^/\\u0000]+)*$",
+      "not": {"pattern": "(^|/)\\.\\.?(/|$)"}
+    },
+    "legacyResolution": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["authoritative"],
+          "properties": {"authoritative": {"enum": ["status_snapshot", "latest_transition"]}},
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["authoritative", "triple"],
+          "properties": {
+            "authoritative": {"const": "normalized_triple"},
+            "triple": {"$ref": "league-legacy-reconciliation.schema.json#/$defs/legacyTriple"}
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "legacyReconciliation": {
+      "type": "object",
+      "required": ["schema", "artifact_pair", "expected_source_sha256", "resolution", "reason"],
+      "properties": {
+        "schema": {"const": "league.legacy-roster-reconciliation.v1"},
+        "artifact_pair": {
+          "type": "object",
+          "required": ["artifact_id", "status", "updates"],
+          "properties": {
+            "artifact_id": {"type": "string", "minLength": 1, "maxLength": 128},
+            "status": {"$ref": "#/$defs/relativePath"},
+            "updates": {"$ref": "#/$defs/relativePath"}
+          },
+          "additionalProperties": false
+        },
+        "expected_source_sha256": {
+          "type": "object",
+          "required": ["status", "updates"],
+          "properties": {
+            "status": {"$ref": "league-legacy-reconciliation.schema.json#/$defs/sha256"},
+            "updates": {"$ref": "league-legacy-reconciliation.schema.json#/$defs/sha256"}
+          },
+          "additionalProperties": false
+        },
+        "resolution": {"$ref": "#/$defs/legacyResolution"},
+        "reason": {"type": "string", "minLength": 1, "maxLength": 512}
+      },
+      "additionalProperties": false
+    }
   },
   "additionalProperties": false
 }

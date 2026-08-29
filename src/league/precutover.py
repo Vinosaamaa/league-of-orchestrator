@@ -83,7 +83,12 @@ PLAN_SCHEMA = "league.pre-cutover-plan.v1"
 RECEIPT_SCHEMA = "league.pre-cutover-receipt.v1"
 MUTATION_SCHEMA = "league.cutover-mutation-manifest.v1"
 OPERATION_SCHEMA = "league.pre-cutover-operation.v1"
+LEGACY_RECONCILIATION_SCHEMA = "league.legacy-roster-reconciliation.v1"
+LEGACY_RECONCILIATION_RECEIPT_SCHEMA = (
+    "league.legacy-roster-reconciliation-receipt.v1"
+)
 TARGET_ID = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 MAX_PLAN_BYTES = 256 * 1024
 MAX_LIVE_TARGETS = 64
 MAX_LEGACY_BINDINGS = 512
@@ -166,6 +171,125 @@ def _relative_path(value: Any, label: str) -> Path:
     return path
 
 
+def _normalized_legacy_triple(value: Any, label: str) -> dict[str, str]:
+    if not isinstance(value, dict) or set(value) != {"status", "at", "update"}:
+        raise StorageRefusal("plan_invalid", f"{label} must be one exact triple")
+    status = value.get("status")
+    at = value.get("at")
+    update = value.get("update")
+    if (
+        not isinstance(status, str)
+        or not status
+        or status != status.lower()
+        or status.strip() != status
+        or not isinstance(at, str)
+        or not at
+        or at.strip() != at
+        or not isinstance(update, str)
+        or not update
+        or update.strip() != update
+    ):
+        raise StorageRefusal("plan_invalid", f"{label} values are invalid")
+    try:
+        parsed = datetime.fromisoformat(at.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise StorageRefusal("plan_invalid", f"{label} time is invalid") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise StorageRefusal("plan_invalid", f"{label} time must include an offset")
+    return {"status": status, "at": at, "update": update}
+
+
+def _validate_legacy_reconciliation(
+    value: Any, *, binding_paths: set[str]
+) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != {
+        "schema",
+        "artifact_pair",
+        "expected_source_sha256",
+        "resolution",
+        "reason",
+    }:
+        raise StorageRefusal(
+            "plan_invalid", "legacy reconciliation must bind one exact artifact pair"
+        )
+    if value.get("schema") != LEGACY_RECONCILIATION_SCHEMA:
+        raise StorageRefusal("plan_invalid", "legacy reconciliation schema is unsupported")
+    pair = value.get("artifact_pair")
+    if not isinstance(pair, dict) or set(pair) != {
+        "artifact_id",
+        "status",
+        "updates",
+    }:
+        raise StorageRefusal("plan_invalid", "legacy reconciliation pair is incomplete")
+    artifact_id = pair.get("artifact_id")
+    if (
+        not isinstance(artifact_id, str)
+        or not artifact_id
+        or artifact_id.strip() != artifact_id
+        or len(artifact_id) > 128
+    ):
+        raise StorageRefusal("plan_invalid", "legacy reconciliation artifact id is invalid")
+    status = _relative_path(pair.get("status"), "legacy reconciliation status path").as_posix()
+    updates = _relative_path(
+        pair.get("updates"), "legacy reconciliation updates path"
+    ).as_posix()
+    if status == updates or {status, updates} - binding_paths:
+        raise StorageRefusal(
+            "reconciliation_missing", "legacy reconciliation pair is not fully bound"
+        )
+    hashes = value.get("expected_source_sha256")
+    if not isinstance(hashes, dict) or set(hashes) != {"status", "updates"}:
+        raise StorageRefusal("plan_invalid", "legacy reconciliation source hashes are incomplete")
+    if any(
+        not isinstance(item, str) or not SHA256_PATTERN.fullmatch(item)
+        for item in hashes.values()
+    ):
+        raise StorageRefusal("plan_invalid", "legacy reconciliation source hash is invalid")
+    reason = value.get("reason")
+    if (
+        not isinstance(reason, str)
+        or not reason
+        or reason.strip() != reason
+        or len(reason) > 512
+    ):
+        raise StorageRefusal("plan_invalid", "legacy reconciliation reason is invalid")
+    resolution = value.get("resolution")
+    if not isinstance(resolution, dict):
+        raise StorageRefusal("plan_invalid", "legacy reconciliation resolution is invalid")
+    authoritative = resolution.get("authoritative")
+    if authoritative in {"status_snapshot", "latest_transition"}:
+        if set(resolution) != {"authoritative"}:
+            raise StorageRefusal(
+                "plan_invalid", "authoritative legacy source may not include a normalized triple"
+            )
+        normalized_resolution: dict[str, Any] = {"authoritative": authoritative}
+    elif authoritative == "normalized_triple":
+        if set(resolution) != {"authoritative", "triple"}:
+            raise StorageRefusal("plan_invalid", "normalized legacy resolution is incomplete")
+        normalized_resolution = {
+            "authoritative": authoritative,
+            "triple": _normalized_legacy_triple(
+                resolution.get("triple"), "legacy reconciliation normalized triple"
+            ),
+        }
+    else:
+        raise StorageRefusal("plan_invalid", "legacy reconciliation authority is unsupported")
+    return {
+        "schema": LEGACY_RECONCILIATION_SCHEMA,
+        "artifact_pair": {
+            "artifact_id": artifact_id,
+            "status": status,
+            "updates": updates,
+        },
+        "expected_source_sha256": {
+            "status": hashes["status"],
+            "updates": hashes["updates"],
+        },
+        "resolution": normalized_resolution,
+        "reason": reason,
+    }
+
+
 def _validate_plan(path: Path) -> dict[str, Any]:
     plan = _decode_json_object(path, label="pre-cutover plan")
     if set(plan) != {"schema", "legacy", "current_targets", "proposed"}:
@@ -173,7 +297,10 @@ def _validate_plan(path: Path) -> dict[str, Any]:
     if plan.get("schema") != PLAN_SCHEMA:
         raise StorageRefusal("plan_invalid", "pre-cutover plan schema is unsupported")
     legacy = plan.get("legacy")
-    if not isinstance(legacy, dict) or set(legacy) != {"manifest", "bindings"}:
+    if not isinstance(legacy, dict) or set(legacy) not in (
+        {"manifest", "bindings"},
+        {"manifest", "bindings", "reconciliation"},
+    ):
         raise StorageRefusal("plan_invalid", "legacy shadow plan is incomplete")
     manifest = _absolute_path(legacy["manifest"], "legacy.manifest")
     if not manifest.is_file() or manifest.is_symlink():
@@ -206,6 +333,11 @@ def _validate_plan(path: Path) -> dict[str, Any]:
         source_paths.add(source)
         normalized_bindings.append(
             {"relative_path": relative_name, "source": str(source)}
+        )
+    reconciliation = None
+    if "reconciliation" in legacy:
+        reconciliation = _validate_legacy_reconciliation(
+            legacy["reconciliation"], binding_paths=relative_paths
         )
 
     targets = plan.get("current_targets")
@@ -339,12 +471,15 @@ def _validate_plan(path: Path) -> dict[str, Any]:
         raise StorageRefusal("plan_invalid", "one legacy-state target is required")
     if not any(item["kind"] == "installed_bundle" for item in normalized_targets):
         raise StorageRefusal("plan_invalid", "one installed-bundle target is required")
+    normalized_legacy: dict[str, Any] = {
+        "manifest": str(manifest),
+        "bindings": sorted(normalized_bindings, key=lambda item: item["relative_path"]),
+    }
+    if reconciliation is not None:
+        normalized_legacy["reconciliation"] = reconciliation
     return {
         "schema": PLAN_SCHEMA,
-        "legacy": {
-            "manifest": str(manifest),
-            "bindings": sorted(normalized_bindings, key=lambda item: item["relative_path"]),
-        },
+        "legacy": normalized_legacy,
         "current_targets": sorted(normalized_targets, key=lambda item: item["target_id"]),
         "proposed": normalized_proposed,
     }
@@ -517,6 +652,169 @@ def _copy_regular_stable(
                 pass
 
 
+def _write_immutable_json(path: Path, value: Any) -> None:
+    payload = _stable_bytes(value)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(path, 0o600)
+    except BaseException:
+        path.unlink(missing_ok=True)
+        raise
+
+
+def _decode_snapshot_bytes(payload: bytes, label: str) -> dict[str, Any]:
+    def reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, item in pairs:
+            if key in result:
+                raise StorageRefusal("duplicate_key", f"{label} contains a duplicate key")
+            result[key] = item
+        return result
+
+    try:
+        value = json.loads(payload, object_pairs_hook=reject_duplicates)
+    except StorageRefusal:
+        raise
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise StorageRefusal("reconciliation_malformed", f"{label} is malformed") from exc
+    if not isinstance(value, dict):
+        raise StorageRefusal("reconciliation_malformed", f"{label} must be an object")
+    return value
+
+
+def _decode_snapshot_object(path: Path, label: str) -> dict[str, Any]:
+    try:
+        payload = path.read_bytes()
+    except OSError as exc:
+        raise StorageRefusal("reconciliation_missing", f"{label} is unreadable") from exc
+    return _decode_snapshot_bytes(payload, label)
+
+
+def _snapshot_triple(value: Mapping[str, Any], *, status_time_key: str) -> dict[str, str]:
+    return _normalized_legacy_triple(
+        {
+            "status": value.get("status"),
+            "at": value.get(status_time_key),
+            "update": value.get("update"),
+        },
+        "legacy source triple",
+    )
+
+
+def _apply_legacy_reconciliation(
+    snapshot: Mapping[str, Any], authorization: Mapping[str, Any]
+) -> dict[str, Any]:
+    pair = authorization["artifact_pair"]
+    manifest = _decode_snapshot_object(Path(snapshot["manifest"]), "legacy manifest snapshot")
+    canonical = manifest.get("canonical_sources")
+    rosters = canonical.get("rosters") if isinstance(canonical, dict) else None
+    if not isinstance(rosters, list):
+        raise StorageRefusal("reconciliation_missing", "legacy roster manifest is missing")
+    exact_matches = [
+        item
+        for item in rosters
+        if isinstance(item, dict)
+        and item.get("artifact_id") == pair["artifact_id"]
+        and item.get("status") == pair["status"]
+        and item.get("updates") == pair["updates"]
+    ]
+    path_uses = [
+        item
+        for item in rosters
+        if isinstance(item, dict)
+        and (item.get("status") == pair["status"] or item.get("updates") == pair["updates"])
+    ]
+    if not exact_matches:
+        raise StorageRefusal("reconciliation_missing", "exact legacy artifact pair is missing")
+    if len(exact_matches) != 1 or len(path_uses) != 1:
+        raise StorageRefusal("reconciliation_ambiguous", "legacy artifact pair is ambiguous")
+    binding_by_path = {item["relative_path"]: item for item in snapshot["bindings"]}
+    if pair["status"] not in binding_by_path or pair["updates"] not in binding_by_path:
+        raise StorageRefusal("reconciliation_missing", "legacy artifact pair was not copied")
+    observed_hashes = {
+        "status": binding_by_path[pair["status"]]["sha256"],
+        "updates": binding_by_path[pair["updates"]]["sha256"],
+    }
+    if observed_hashes != authorization["expected_source_sha256"]:
+        raise StorageRefusal("reconciliation_stale", "legacy artifact pair hashes changed")
+    status_path = Path(snapshot["root"]) / pair["status"]
+    updates_path = Path(snapshot["root"]) / pair["updates"]
+    status_value = _decode_snapshot_object(status_path, "legacy status snapshot")
+    if status_value.get("role") != "shotcaller":
+        raise StorageRefusal(
+            "reconciliation_non_shotcaller", "legacy reconciliation is Shotcaller-only"
+        )
+    try:
+        updates_data = updates_path.read_bytes()
+    except OSError as exc:
+        raise StorageRefusal(
+            "reconciliation_missing", "legacy transition log is unreadable"
+        ) from exc
+    if not updates_data.endswith(b"\n"):
+        raise StorageRefusal("reconciliation_malformed", "legacy transition log is truncated")
+    if updates_data.count(b"\n") != 1:
+        raise StorageRefusal(
+            "reconciliation_post_initialization",
+            "legacy reconciliation requires exactly one initialization transition",
+        )
+    transition_value = _decode_snapshot_bytes(
+        updates_data[:-1], "legacy initialization transition"
+    )
+    status_triple = _snapshot_triple(status_value, status_time_key="updated_at")
+    transition_triple = _snapshot_triple(transition_value, status_time_key="at")
+    if status_triple == transition_triple:
+        raise StorageRefusal(
+            "reconciliation_not_required", "legacy artifact pair already has exact parity"
+        )
+    resolution = authorization["resolution"]
+    authoritative = resolution["authoritative"]
+    if authoritative == "status_snapshot":
+        normalized_triple = status_triple
+    elif authoritative == "latest_transition":
+        normalized_triple = transition_triple
+    else:
+        normalized_triple = resolution["triple"]
+    normalized_status = dict(status_value)
+    normalized_status.update(
+        {
+            "status": normalized_triple["status"],
+            "updated_at": normalized_triple["at"],
+            "update": normalized_triple["update"],
+        }
+    )
+    normalized_transition = dict(transition_value)
+    normalized_transition.update(normalized_triple)
+    _write_json(status_path, normalized_status)
+    _write_json(updates_path, normalized_transition)
+    normalized_hashes = {
+        "status": _regular_content_sha256(status_path),
+        "updates": _regular_content_sha256(updates_path),
+    }
+    return {
+        "schema": LEGACY_RECONCILIATION_RECEIPT_SCHEMA,
+        "artifact_pair": dict(pair),
+        "original_source_sha256": observed_hashes,
+        "original_pair_sha256": _sha256(_stable_bytes(observed_hashes)),
+        "normalized_snapshot_sha256": normalized_hashes,
+        "normalized_sha256": _sha256(_stable_bytes(normalized_hashes)),
+        "reason": authorization["reason"],
+        "resolution": {
+            "authoritative": authoritative,
+            "normalized_triple": normalized_triple,
+        },
+        "result": {
+            "normalized": True,
+            "scope": "temporary_snapshot_only",
+            "live_source_mutated": False,
+        },
+    }
+
+
 def _copy_node(source: Path, destination: Path) -> None:
     details = source.lstat()
     mode = stat.S_IMODE(details.st_mode)
@@ -601,12 +899,18 @@ def _copy_legacy_snapshot(plan: Mapping[str, Any], destination: Path) -> dict[st
                 "sha256": copied["sha256"],
             }
         )
-    return {
+    snapshot: dict[str, Any] = {
         "root": destination,
         "manifest": manifest_target,
         "manifest_sha256": manifest_copy["sha256"],
         "bindings": bindings,
     }
+    reconciliation = plan["legacy"].get("reconciliation")
+    if reconciliation is not None:
+        snapshot["legacy_reconciliation"] = _apply_legacy_reconciliation(
+            snapshot, reconciliation
+        )
+    return snapshot
 
 
 def _exact_rows(plan: Mapping[str, Any], exported: Mapping[str, Any]) -> str:
@@ -635,6 +939,13 @@ def _exact_rows(plan: Mapping[str, Any], exported: Mapping[str, Any]) -> str:
 def _read_only_shadow(home: Path, plan: Mapping[str, Any]) -> dict[str, Any]:
     snapshot = _copy_legacy_snapshot(plan, home / "live-shadow" / "source")
     state = home / "live-shadow" / "state"
+    reconciliation = snapshot.get("legacy_reconciliation")
+    if reconciliation is not None:
+        if state.exists():
+            raise StorageRefusal(
+                "reconciliation_post_initialization",
+                "legacy reconciliation cannot run after SQLite initialization",
+            )
     state.mkdir(mode=0o700)
     with SQLiteStorage.for_migration(state, request_wal=False) as store:
         migration = store.migrate()
@@ -666,7 +977,7 @@ def _read_only_shadow(home: Path, plan: Mapping[str, Any]) -> dict[str, Any]:
             raise StorageRefusal("source_changed", "legacy source changed after shadow import")
     if _regular_content_sha256(Path(plan["legacy"]["manifest"])) != snapshot["manifest_sha256"]:
         raise StorageRefusal("source_changed", "legacy manifest changed after shadow import")
-    return {
+    result = {
         "migration": migration,
         "dry_run": {
             "eligible": True,
@@ -688,6 +999,9 @@ def _read_only_shadow(home: Path, plan: Mapping[str, Any]) -> dict[str, Any]:
             "restricted": True,
         },
     }
+    if reconciliation is not None:
+        result["legacy_reconciliation"] = reconciliation
+    return result
 
 
 @dataclass
@@ -1722,6 +2036,8 @@ def _migration_and_install_phase(
     fixture_home.mkdir(mode=0o700)
     fixture_shadow = _migration_shadow(fixture_home, source)
     live_shadow = _read_only_shadow(home, plan)
+    if fault is not None:
+        fault("after_live_shadow")
     staged = _staged_install(home / "staged", source)
     staged["inactive_after_checks"] = staged["rollback"]["completed"]
     staged["global_install_performed"] = False
@@ -1910,7 +2226,17 @@ def run_pre_cutover(
             sandbox=sandbox,
             mutation_manifest=mutation_manifest,
         )
-        _write_json(home / "precutover-receipt.json", result)
+        receipt_path = home / "precutover-receipt.json"
+        _write_json(receipt_path, result)
+        reconciliation = result["live_migration_shadow"].get("legacy_reconciliation")
+        if reconciliation is not None:
+            try:
+                _write_immutable_json(
+                    home / "legacy-reconciliation-receipt.json", reconciliation
+                )
+            except BaseException:
+                receipt_path.unlink(missing_ok=True)
+                raise
         return result
     except BaseException as exc:
         code = exc.code if isinstance(exc, StorageRefusal) else "precutover_failed"

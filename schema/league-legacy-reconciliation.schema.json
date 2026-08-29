@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Vinosaamaa/league-of-orchestrator/schema/league-legacy-reconciliation.schema.json",
+  "title": "League legacy reconciliation shared definitions",
+  "type": "object",
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "legacyTriple": {
+      "type": "object",
+      "required": ["status", "at", "update"],
+      "properties": {
+        "status": {"type": "string", "minLength": 1},
+        "at": {"type": "string", "format": "date-time"},
+        "update": {"type": "string", "minLength": 1}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

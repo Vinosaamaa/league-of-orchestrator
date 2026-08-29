@@ -94,6 +94,14 @@ imported `bin/agent-watcher` and `src/agent_watcher.py` to the staged manifest;
 the behavior and verification contract remain canonical in
 [`docs/ACCEPTANCE.md`](ACCEPTANCE.md).
 
+The issue-#23 legacy-pair successor adds one original League-only exception to
+the no-apply pre-cutover snapshot: an exact-hash, single-pair Shotcaller
+initialization reconciliation. The general legacy importer remains unchanged
+and fail-closed. Focused synthetic coverage proves that the exception rewrites
+only the temporary snapshot, emits a create-once receipt, and rejects every
+unbound or post-initialization use; its canonical contract remains in
+[`docs/ACCEPTANCE.md`](ACCEPTANCE.md).
+
 The real cleanup canary, its strict adapter/receipt schemas, and focused fake
 adapter tests are original League work for issue #23. The issue-#40 artifact
 lifecycle and issue-#39/PR-#41 report receipts are composed inputs, not

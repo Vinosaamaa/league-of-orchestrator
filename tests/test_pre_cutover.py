@@ -617,6 +617,37 @@ def test_wrong_reconciliation_hash_refuses_without_source_mutation(root: Path) -
     assert before == {name: path.read_bytes() for name, path in pair.items()}
 
 
+def test_late_failure_emits_no_reconciliation_receipt(root: Path) -> None:
+    fixture = fixture_plan(root)
+    pair = add_shotcaller_initialization_mismatch(fixture)
+    authorize_shotcaller_reconciliation(fixture, pair)
+    before = {name: path.read_bytes() for name, path in pair.items()}
+    temporary_root = root / "sandbox"
+    temporary_root.mkdir()
+
+    def fail(stage: str) -> None:
+        if stage == "after_live_shadow":
+            raise StorageRefusal("synthetic_late_fault", "synthetic late fault")
+
+    refused(
+        lambda: run_pre_cutover(
+            temporary_root,
+            "late-fault",
+            plan_path=fixture["plan_path"],
+            sentinel_paths=(fixture["legacy"],),
+            config_sentinel=fixture["hook"],
+            process_sentinel=fixture["processes"],
+            source_root=ROOT,
+            fault=fail,
+        ),
+        "synthetic_late_fault",
+    )
+    home = temporary_root / "league-late-fault-precutover"
+    assert not (home / "legacy-reconciliation-receipt.json").exists()
+    assert not (home / "precutover-receipt.json").exists()
+    assert before == {name: path.read_bytes() for name, path in pair.items()}
+
+
 def test_reconciliation_scope_and_initialization_guards(root: Path) -> None:
     missing = fixture_plan(root / "missing")
     pair = add_shotcaller_initialization_mismatch(missing)
@@ -792,6 +823,7 @@ def main() -> int:
         test_wrong_reconciliation_hash_refuses_without_source_mutation(
             base / "wrong-hash"
         )
+        test_late_failure_emits_no_reconciliation_receipt(base / "late-failure")
         test_reconciliation_scope_and_initialization_guards(base / "guards")
         test_backup_fault_blocks_resumably_without_live_change(base / "fault")
     test_schema_contracts_are_current_and_state_specific()

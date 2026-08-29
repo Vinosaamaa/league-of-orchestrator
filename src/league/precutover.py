@@ -757,14 +757,13 @@ def _apply_legacy_reconciliation(
         ) from exc
     if not updates_data.endswith(b"\n"):
         raise StorageRefusal("reconciliation_malformed", "legacy transition log is truncated")
-    update_lines = updates_data.splitlines()
-    if len(update_lines) != 1:
+    if updates_data.count(b"\n") != 1:
         raise StorageRefusal(
             "reconciliation_post_initialization",
             "legacy reconciliation requires exactly one initialization transition",
         )
     transition_value = _decode_snapshot_bytes(
-        update_lines[0], "legacy initialization transition"
+        updates_data[:-1], "legacy initialization transition"
     )
     status_triple = _snapshot_triple(status_value, status_time_key="updated_at")
     transition_triple = _snapshot_triple(transition_value, status_time_key="at")
@@ -947,7 +946,6 @@ def _read_only_shadow(home: Path, plan: Mapping[str, Any]) -> dict[str, Any]:
                 "reconciliation_post_initialization",
                 "legacy reconciliation cannot run after SQLite initialization",
             )
-        _write_immutable_json(home / "legacy-reconciliation-receipt.json", reconciliation)
     state.mkdir(mode=0o700)
     with SQLiteStorage.for_migration(state, request_wal=False) as store:
         migration = store.migrate()
@@ -2038,6 +2036,8 @@ def _migration_and_install_phase(
     fixture_home.mkdir(mode=0o700)
     fixture_shadow = _migration_shadow(fixture_home, source)
     live_shadow = _read_only_shadow(home, plan)
+    if fault is not None:
+        fault("after_live_shadow")
     staged = _staged_install(home / "staged", source)
     staged["inactive_after_checks"] = staged["rollback"]["completed"]
     staged["global_install_performed"] = False
@@ -2226,7 +2226,17 @@ def run_pre_cutover(
             sandbox=sandbox,
             mutation_manifest=mutation_manifest,
         )
-        _write_json(home / "precutover-receipt.json", result)
+        receipt_path = home / "precutover-receipt.json"
+        _write_json(receipt_path, result)
+        reconciliation = result["live_migration_shadow"].get("legacy_reconciliation")
+        if reconciliation is not None:
+            try:
+                _write_immutable_json(
+                    home / "legacy-reconciliation-receipt.json", reconciliation
+                )
+            except BaseException:
+                receipt_path.unlink(missing_ok=True)
+                raise
         return result
     except BaseException as exc:
         code = exc.code if isinstance(exc, StorageRefusal) else "precutover_failed"

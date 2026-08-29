@@ -11,7 +11,9 @@ teardown; issue #23 owns those gates.
 - A complete prompt payload is stored once by adapter, session, and source
   event. Ordered prompt items account for every meaningful part; only
   independently finishable parts create request rows.
-- `direct`, `hidden`, and `champion` are execution modes. Request state is one
+- `direct` (Shotcaller-direct), `hidden` (recorded scientist), and `champion`
+  (visible local Champion) are execution modes; `squad_route` is a separate
+  pending owner-transfer outcome. Request state is one
   of `open`, `routed`, `accepted`, `in_progress`, `awaiting_user`, `blocked`,
   `awaiting_requester`, `deferred`, `answered`, or `cancelled`.
 - Repository initialization/writes, configuration writes, migrations,
@@ -36,14 +38,23 @@ teardown; issue #23 owns those gates.
 ## Command map
 
 `league request` provides `intake`, `triage`, `claim`, `release`, `dispatch`,
-`route`, `accept`, `awaiting-user`, `block`, `defer`, `cancel`, `result`,
-`answer`, and `unresolved`. `unresolved --before-action` accepts `reply`,
+`decide-route`, `route`, `accept`, `progress`, `reconcile-progress`,
+`awaiting-user`, `block`, `defer`, `cancel`, `result`, `answer`, and
+`unresolved`. `unresolved --before-action` accepts `reply`,
 `wait`, `handoff`, or `end` and returns a bounded page plus total counts.
 
-`league assign` exposes the durable state machine: `prepare` commits the
-reservation, `launching` commits external-launch intent, `activate` accepts
-only the exact machine-readable Champion receipt, and `block` preserves either
-`blocked` or `cleanup_pending`. `AssignmentService` performs those transitions
+`league squad register`, `accept`, and `status` expose the pending exact-runtime
+registration contract. Registration cannot activate routing; acceptance
+atomically creates stable Squad/intake/event/requester-outbox state, and active
+replacement remains a guarded rollover operation.
+
+`league assign` exposes the shared durable state machine: `prepare` commits the
+role-specific reservation, `launching` commits external-launch intent,
+`activate` accepts only the exact machine-readable Champion or hidden-scientist
+receipt, `reconcile-runtime` fences a stale active runtime, and `block`
+preserves either `blocked` or `cleanup_pending`. `finish-hidden` is the only
+cleanup-gated hidden result delivery; hidden scientists emit no routine
+progress. `AssignmentService` performs visible Champion transitions
 around one injected visible launch adapter without holding a database
 transaction across launch.
 

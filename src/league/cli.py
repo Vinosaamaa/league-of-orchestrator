@@ -16,6 +16,7 @@ from . import MAX_ACCEPTANCE_SENTINEL_PATHS, __version__
 from .adapters import builtin_contract_registry
 from .cleanup import CleanupPlanner
 from .importer import build_import_plan
+from .orchestration import OrchestrationSignals
 from .routing import ModelRouter, load_routing_config
 from .reporting import REPORT_FORMATS, render_report
 from .skill_contracts import (
@@ -36,8 +37,10 @@ from .storage import (
 from .storage_request import (
     MAX_TRIAGE_JSON_BYTES,
     AnswerRequestCommand,
+    RequestProgressCommand,
     RequestResultCommand,
 )
+from .storage_assignment import FinishHiddenAssignmentCommand
 
 
 COMMAND_SCHEMA = "league.command.v1"
@@ -391,6 +394,48 @@ def _add_report_commands(groups: argparse._SubParsersAction) -> None:
     _add_report_options(show, show=True)
 
 
+def _add_squad_commands(groups: argparse._SubParsersAction) -> None:
+    squad = groups.add_parser(
+        "squad", help="Register, accept, or inspect a stable Squad without overwriting an active owner."
+    )
+    commands = squad.add_subparsers(dest="action", required=True)
+    register = commands.add_parser(
+        "register", help="Offer one pending Squad registration; routing remains inactive."
+    )
+    for name in (
+        "registration-id",
+        "squad-id",
+        "requester-agent-id",
+        "shotcaller-agent-id",
+        "runtime-instance-id",
+        "expires-at",
+        "event-id",
+        "outbox-id",
+        "at",
+    ):
+        register.add_argument(f"--{name}", required=True)
+    register.add_argument("--project-id", action="append", default=[])
+    register.add_argument("--capability", action="append", default=[])
+    accept = commands.add_parser(
+        "accept", help="Accept or reject from the exact offered live Shotcaller runtime."
+    )
+    for name in (
+        "registration-id",
+        "shotcaller-agent-id",
+        "runtime-instance-id",
+        "event-id",
+        "outbox-id",
+        "at",
+    ):
+        accept.add_argument(f"--{name}", required=True)
+    accept.add_argument("--decision", choices=("accept", "reject"), required=True)
+    status = commands.add_parser("status", help="Inspect one registration or active stable Squad.")
+    selector = status.add_mutually_exclusive_group(required=True)
+    selector.add_argument("--registration-id")
+    selector.add_argument("--squad-id")
+    status.add_argument("--at", required=True)
+
+
 def _add_task_commands(groups: argparse._SubParsersAction) -> None:
     task = groups.add_parser("task", help="Transfer task ownership with expected-version concurrency.")
     commands = task.add_subparsers(dest="action", required=True)
@@ -463,13 +508,11 @@ def _add_routing_commands(groups: argparse._SubParsersAction) -> None:
     choose.add_argument("--subject-kind", required=True)
     choose.add_argument("--subject-id", required=True)
     choose.add_argument("--role", required=True)
-    choose.add_argument(
-        "--profile",
-        choices=("coordination", "bounded", "ambiguous", "high-impact", "weak-verification"),
-        required=True,
-    )
+    choose.add_argument("--signals", type=Path, required=True)
+    choose.add_argument("--provider")
     choose.add_argument("--model")
     choose.add_argument("--effort")
+    choose.add_argument("--required-capability", action="append", default=[])
     choose.add_argument("--at", required=True)
     escalate = commands.add_parser("escalate", help="Record at most one evidence-triggered stronger retry.")
     escalate.add_argument("--config", type=Path, required=True)
@@ -496,7 +539,7 @@ def _add_routing_commands(groups: argparse._SubParsersAction) -> None:
     outcome.add_argument("--success", choices=("true", "false"), required=True)
     outcome.add_argument("--corrections", type=int, required=True)
     outcome.add_argument("--latency-ms", type=int, required=True)
-    outcome.add_argument("--cost-microunits", type=int, required=True)
+    outcome.add_argument("--cost-microunits", type=int)
     outcome.add_argument("--at", required=True)
 
 
@@ -547,15 +590,58 @@ def _add_request_commands(groups: argparse._SubParsersAction) -> None:
     for name in ("request-id", "runtime-instance-id", "claim-token", "at"):
         release.add_argument(f"--{name}", required=True)
     dispatch = commands.add_parser(
-        "dispatch", help="Record direct, hidden, or Champion execution before substantive action."
+        "dispatch",
+        help=(
+            "Record Shotcaller direct, bounded hidden scientist, or local Champion execution; "
+            "Squad ownership uses request route."
+        ),
+        description=(
+            "Choose exactly one: Shotcaller direct, recorded hidden scientist, local visible "
+            "Champion, or acknowledgement-gated Squad route. Squad is ownership, not execution."
+        ),
     )
     for name in ("request-id", "claim-token", "dispatch-id", "work-kind", "at"):
         dispatch.add_argument(f"--{name}", required=True)
-    dispatch.add_argument("--requested-mode", choices=("direct", "hidden", "champion"))
+    dispatch.add_argument(
+        "--requested-mode",
+        choices=("direct", "hidden", "champion", "squad"),
+        help=(
+            "direct=Shotcaller direct; hidden=recorded scientist; champion=local visible "
+            "Champion; squad=durable Squad ownership route"
+        ),
+    )
     dispatch.add_argument("--hidden-supported", action="store_true")
     dispatch.add_argument("--requested-model")
     dispatch.add_argument("--requested-effort")
     dispatch.add_argument("--explicit-route")
+    dispatch.add_argument("--pre-bounded", action="store_true")
+    dispatch.add_argument("--read-only", action="store_true")
+    dispatch.add_argument("--answer-or-routing-only", action="store_true")
+    dispatch.add_argument("--expected-minutes", type=int, default=0)
+    dispatch.add_argument("--expected-task-action-calls", type=int, default=0)
+    for name in (
+        "creates-artifact",
+        "mutates-state",
+        "reproduces-issue",
+        "runs-tests",
+        "runs-benchmark",
+        "uses-browser-or-computer",
+        "project-implementation",
+    ):
+        dispatch.add_argument(f"--{name}", action="store_true")
+    dispatch.add_argument("--continuation-role", choices=("champion", "shotcaller"))
+    dispatch.add_argument("--continuation-target")
+    dispatch.add_argument("--project-suggested-shotcaller")
+    dispatch.add_argument("--hidden-subtask")
+    dispatch.add_argument("--hidden-scope-budget")
+    decide_route = commands.add_parser(
+        "decide-route", help="Resolve local direct/Champion work or one deterministic Squad route."
+    )
+    decide_route.add_argument("--signals", type=Path, required=True)
+    decide_route.add_argument("--project-id", action="append", default=[])
+    decide_route.add_argument("--explicit-squad-id")
+    decide_route.add_argument("--continuation-squad-id")
+    decide_route.add_argument("--required-capability", action="append", default=[])
     route = commands.add_parser("route", help="Route ownership with event and outbox atomically.")
     for name in (
         "request-id",
@@ -567,11 +653,48 @@ def _add_request_commands(groups: argparse._SubParsersAction) -> None:
     ):
         route.add_argument(f"--{name}", required=True)
     route.add_argument("--expected-version", type=int, required=True)
+    route.add_argument("--recipient-squad-id", required=True)
+    route.add_argument(
+        "--route-reason-code",
+        choices=("explicit_squad", "continuation_squad", "unique_strong_squad"),
+        required=True,
+    )
+    route.add_argument("--route-policy-version", required=True)
+    route.add_argument("--route-confidence", choices=("explicit", "continuation", "strong"), required=True)
+    route.add_argument("--required-capability", action="append", default=[])
     accept = commands.add_parser(
         "accept", help="Claim and accept one exactly received routed request."
     )
     for name in ("request-id", "runtime-instance-id", "claim-token", "leased-until", "at"):
         accept.add_argument(f"--{name}", required=True)
+    progress = commands.add_parser(
+        "progress", help="Emit immediate requester progress or coalesce a changed routine aggregate."
+    )
+    for name in (
+        "progress-id",
+        "request-id",
+        "claim-token",
+        "reason-code",
+        "current-phase",
+        "blocker-severity",
+        "next-action",
+        "event-id",
+        "outbox-id",
+        "at",
+    ):
+        progress.add_argument(f"--{name}", required=True)
+    for name in ("expected-version", "progress-generation", "settled-count", "total-count", "blocker-count"):
+        progress.add_argument(f"--{name}", type=int, required=True)
+    progress.add_argument("--user-action-required", action="store_true")
+    progress.add_argument("--deadline-change")
+    progress.add_argument("--minimum-interval-seconds", type=int, default=900)
+    progress.add_argument("--grace-seconds", type=int, default=300)
+    progress.add_argument("--promised-checkpoint-at")
+    reconcile_progress = commands.add_parser(
+        "reconcile-progress", help="Create truthful due work and one post-grace stalled notification."
+    )
+    reconcile_progress.add_argument("--owner-agent-id", required=True)
+    reconcile_progress.add_argument("--at", required=True)
     for state in REQUEST_STATE_COMMANDS:
         command = commands.add_parser(state, help=f"Record an explicit {state} request transition.")
         for name in ("request-id", "claim-token", "summary", "event-id", "at"):
@@ -626,7 +749,10 @@ def _add_assignment_commands(groups: argparse._SubParsersAction) -> None:
         "assign", help="Drive recoverable pending, launching, active, blocked, or cleanup-pending assignment state."
     )
     commands = assignment.add_subparsers(dest="action", required=True)
-    prepare = commands.add_parser("prepare", help="Reserve one visible Champion assignment before launch.")
+    prepare = commands.add_parser(
+        "prepare",
+        help="Reserve one role-specific visible Champion or hidden-scientist assignment.",
+    )
     for name in (
         "assignment-id",
         "request-id",
@@ -634,32 +760,72 @@ def _add_assignment_commands(groups: argparse._SubParsersAction) -> None:
         "task-id",
         "task-summary",
         "coordinator-agent-id",
-        "champion-agent-id",
-        "repository",
-        "branch",
-        "worktree",
         "at",
     ):
         prepare.add_argument(f"--{name}", required=True)
-    prepare.add_argument("--issue", type=int, required=True)
+    prepare.add_argument(
+        "--assignee-agent-id",
+        "--champion-agent-id",
+        dest="champion_agent_id",
+        required=True,
+        help="Exact Champion or hidden-worker assignee; the role flag controls validation.",
+    )
+    prepare.add_argument("--role", choices=("champion", "hidden-worker"), default="champion")
+    prepare.add_argument("--repository", default="")
+    prepare.add_argument("--issue", type=int, default=0)
+    prepare.add_argument("--branch", default="")
+    prepare.add_argument("--worktree", default="")
+    prepare.add_argument("--dispatch-id")
+    prepare.add_argument("--promoted-from-assignment-id")
     prepare.add_argument("--requires", action="append", default=[])
     launching = commands.add_parser("launching", help="Commit launch intent before adapter work.")
     launching.add_argument("--assignment-id", required=True)
     launching.add_argument("--expected-version", type=int, required=True)
     launching.add_argument("--at", required=True)
-    activate = commands.add_parser("activate", help="Activate only from an exact verified Champion receipt.")
+    activate = commands.add_parser(
+        "activate", help="Activate only from an exact verified role-specific assignment receipt."
+    )
     activate.add_argument("--assignment-id", required=True)
     activate.add_argument("--expected-version", type=int, required=True)
     activate.add_argument("--receipt-json", required=True)
     activate.add_argument("--event-id", required=True)
     activate.add_argument("--outbox-id", required=True)
     activate.add_argument("--at", required=True)
+    reconcile_runtime = commands.add_parser(
+        "reconcile-runtime",
+        help="Fence one exact stale active assignment runtime without emitting progress.",
+    )
+    reconcile_runtime.add_argument("--assignment-id", required=True)
+    reconcile_runtime.add_argument("--at", required=True)
     block = commands.add_parser("block", help="Record a blocked or cleanup-pending failed launch.")
     block.add_argument("--assignment-id", required=True)
     block.add_argument("--expected-version", type=int, required=True)
     block.add_argument("--failure-class", required=True)
     block.add_argument("--cleanup-required", action="store_true")
     block.add_argument("--cleanup-proven", action="store_true")
+    finish_hidden = commands.add_parser(
+        "finish-hidden",
+        help="Deliver one cleanup-gated hidden scientist terminal result; no routine progress is allowed.",
+    )
+    for name in (
+        "assignment-id",
+        "runtime-instance-id",
+        "result-summary",
+        "cleanup-receipt",
+        "unpublished-state-receipt",
+        "transition-id",
+        "transition-key",
+        "event-id",
+        "outbox-id",
+        "at",
+    ):
+        finish_hidden.add_argument(f"--{name}", required=True)
+    finish_hidden.add_argument("--expected-version", type=int, required=True)
+    finish_hidden.add_argument(
+        "--status",
+        choices=("completed", "blocked", "failed", "promotion_required"),
+        required=True,
+    )
     block.add_argument("--at", required=True)
 
 
@@ -680,6 +846,11 @@ def _add_hook_commands(groups: argparse._SubParsersAction) -> None:
         runtime.add_argument(f"--{name}", required=True)
     runtime.add_argument("--status", choices=("active", "idle", "closed", "failed"), required=True)
     runtime.add_argument("--verified", action="store_true")
+    runtime.add_argument(
+        "--capability",
+        action="append",
+        help="Replace declared runtime capabilities on this observation.",
+    )
     watcher = commands.add_parser("register-watcher", help="Register one distinct wake lease.")
     for name in (
         "scope-id",
@@ -750,6 +921,7 @@ def _parser() -> argparse.ArgumentParser:
         _add_roster_commands,
         _add_evidence_commands,
         _add_report_commands,
+        _add_squad_commands,
         _add_task_commands,
         _add_runtime_commands,
         _add_skill_commands,
@@ -1239,8 +1411,10 @@ def _routing_choose(store: Storage, args: argparse.Namespace) -> CommandResult:
         subject_kind=args.subject_kind,
         subject_id=args.subject_id,
         role=args.role,
-        profile=args.profile,
         chosen_at=args.at,
+        signals=_read_json_object(args.signals),
+        required_capabilities=tuple(args.required_capability),
+        explicit_provider=args.provider,
         explicit_model=args.model,
         explicit_effort=args.effort,
     ), None
@@ -1342,7 +1516,38 @@ def _request_dispatch(store: Storage, args: argparse.Namespace) -> CommandResult
             requested_effort=args.requested_effort,
             explicit_route=args.explicit_route,
             at=args.at,
+            orchestration=OrchestrationSignals(
+                pre_bounded=args.pre_bounded,
+                read_only=args.read_only,
+                answer_or_routing_only=args.answer_or_routing_only,
+                expected_minutes=args.expected_minutes,
+                expected_task_action_calls=args.expected_task_action_calls,
+                creates_artifact=args.creates_artifact,
+                mutates_state=args.mutates_state,
+                reproduces_issue=args.reproduces_issue,
+                runs_tests=args.runs_tests,
+                runs_benchmark=args.runs_benchmark,
+                uses_browser_or_computer=args.uses_browser_or_computer,
+                project_implementation=args.project_implementation,
+                project_suggested_shotcaller=args.project_suggested_shotcaller,
+            ),
+            continuation_role=args.continuation_role,
+            continuation_target=args.continuation_target,
+            hidden_subtask=args.hidden_subtask,
+            hidden_scope_budget=args.hidden_scope_budget,
         )
+    ), None
+
+
+def _request_decide_route(store: Storage, args: argparse.Namespace) -> CommandResult:
+    value = _read_json_object(args.signals)
+    signals = OrchestrationSignals.from_value(value)
+    return store.orchestration_decision(
+        signals,
+        project_ids=args.project_id,
+        explicit_squad_id=args.explicit_squad_id,
+        continuation_squad_id=args.continuation_squad_id,
+        required_capabilities=args.required_capability,
     ), None
 
 
@@ -1355,6 +1560,78 @@ def _request_route(store: Storage, args: argparse.Namespace) -> CommandResult:
         args.event_id,
         args.outbox_id,
         args.at,
+        recipient_squad_id=args.recipient_squad_id,
+        route_reason_code=args.route_reason_code,
+        route_policy_version=args.route_policy_version,
+        route_confidence=args.route_confidence,
+        required_capabilities=tuple(args.required_capability),
+    ), None
+
+
+def _request_progress(store: Storage, args: argparse.Namespace) -> CommandResult:
+    return store.emit_request_progress(
+        RequestProgressCommand(
+            progress_id=args.progress_id,
+            request_id=args.request_id,
+            claim_token=args.claim_token,
+            expected_version=args.expected_version,
+            progress_generation=args.progress_generation,
+            reason_code=args.reason_code,
+            settled_count=args.settled_count,
+            total_count=args.total_count,
+            current_phase=args.current_phase,
+            blocker_count=args.blocker_count,
+            blocker_severity=args.blocker_severity,
+            user_action_required=args.user_action_required,
+            deadline_change=args.deadline_change,
+            next_action=args.next_action,
+            event_id=args.event_id,
+            outbox_id=args.outbox_id,
+            at=args.at,
+            minimum_interval_seconds=args.minimum_interval_seconds,
+            grace_seconds=args.grace_seconds,
+            promised_checkpoint_at=args.promised_checkpoint_at,
+        )
+    ), None
+
+
+def _request_reconcile_progress(store: Storage, args: argparse.Namespace) -> CommandResult:
+    return store.reconcile_request_progress(args.owner_agent_id, args.at), None
+
+
+def _squad_register(store: Storage, args: argparse.Namespace) -> CommandResult:
+    return store.register_squad(
+        registration_id=args.registration_id,
+        squad_id=args.squad_id,
+        requester_agent_id=args.requester_agent_id,
+        shotcaller_agent_id=args.shotcaller_agent_id,
+        runtime_instance_id=args.runtime_instance_id,
+        project_ids=tuple(args.project_id),
+        capabilities=tuple(args.capability),
+        expires_at=args.expires_at,
+        event_id=args.event_id,
+        outbox_id=args.outbox_id,
+        at=args.at,
+    ), None
+
+
+def _squad_accept(store: Storage, args: argparse.Namespace) -> CommandResult:
+    return store.accept_squad(
+        registration_id=args.registration_id,
+        shotcaller_agent_id=args.shotcaller_agent_id,
+        runtime_instance_id=args.runtime_instance_id,
+        decision=args.decision,
+        event_id=args.event_id,
+        outbox_id=args.outbox_id,
+        at=args.at,
+    ), None
+
+
+def _squad_status(store: Storage, args: argparse.Namespace) -> CommandResult:
+    return store.squad_status(
+        registration_id=args.registration_id,
+        squad_id=args.squad_id,
+        at=args.at,
     ), None
 
 
@@ -1432,6 +1709,9 @@ def _assign_prepare(store: Storage, args: argparse.Namespace) -> CommandResult:
             worktree=args.worktree,
             at=args.at,
             required_capabilities=tuple(args.requires),
+            assignment_role=args.role,
+            dispatch_id=args.dispatch_id,
+            promoted_from_assignment_id=args.promoted_from_assignment_id,
         )
     ), None
 
@@ -1454,6 +1734,29 @@ def _assign_activate(store: Storage, args: argparse.Namespace) -> CommandResult:
         args.outbox_id,
         args.at,
     ), None
+
+
+def _assign_finish_hidden(store: Storage, args: argparse.Namespace) -> CommandResult:
+    return store.finish_hidden_assignment(
+        FinishHiddenAssignmentCommand(
+            assignment_id=args.assignment_id,
+            runtime_instance_id=args.runtime_instance_id,
+            expected_version=args.expected_version,
+            status=args.status,
+            result_summary=args.result_summary,
+            cleanup_receipt=args.cleanup_receipt,
+            unpublished_state_receipt=args.unpublished_state_receipt,
+            transition_id=args.transition_id,
+            transition_key=args.transition_key,
+            event_id=args.event_id,
+            outbox_id=args.outbox_id,
+            at=args.at,
+        )
+    ), None
+
+
+def _assign_reconcile_runtime(store: Storage, args: argparse.Namespace) -> CommandResult:
+    return store.reconcile_assignment_runtime(args.assignment_id, args.at), None
 
 
 def _assign_block(store: Storage, args: argparse.Namespace) -> CommandResult:
@@ -1536,6 +1839,7 @@ def _hook_register_runtime(store: Storage, args: argparse.Namespace) -> CommandR
             status=args.status,
             verified=args.verified,
             at=args.at,
+            capabilities=None if args.capability is None else tuple(args.capability),
         )
     ), None
 
@@ -1608,6 +1912,9 @@ HANDLERS: dict[str, CommandHandler] = {
     "evidence.record": _evidence_record,
     "report.generate": _report_generate,
     "report.show": _report_show,
+    "squad.register": _squad_register,
+    "squad.accept": _squad_accept,
+    "squad.status": _squad_status,
     "task.transfer-owner": _task_transfer,
     "task.transition": _task_transition,
     "runtime.matrix": _runtime_matrix,
@@ -1623,7 +1930,10 @@ HANDLERS: dict[str, CommandHandler] = {
     "request.accept": _request_claim,
     "request.release": _request_release,
     "request.dispatch": _request_dispatch,
+    "request.decide-route": _request_decide_route,
     "request.route": _request_route,
+    "request.progress": _request_progress,
+    "request.reconcile-progress": _request_reconcile_progress,
     "request.awaiting-user": _request_state,
     "request.block": _request_state,
     "request.defer": _request_state,
@@ -1634,7 +1944,9 @@ HANDLERS: dict[str, CommandHandler] = {
     "assign.prepare": _assign_prepare,
     "assign.launching": _assign_launching,
     "assign.activate": _assign_activate,
+    "assign.reconcile-runtime": _assign_reconcile_runtime,
     "assign.block": _assign_block,
+    "assign.finish-hidden": _assign_finish_hidden,
     "hook.register-runtime": _hook_register_runtime,
     "hook.register-watcher": _hook_register_watcher,
     "hook.user-message": _hook_user_message,

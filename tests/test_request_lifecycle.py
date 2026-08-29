@@ -31,6 +31,7 @@ from request_lifecycle_fixture import (  # noqa: E402
     JARVAN_RUNTIME,
     LUX_ID,
     SONA_ID,
+    activate_jarvan_squad,
     capture_p100,
     create_context,
     dispatch_request,
@@ -175,6 +176,7 @@ def test_p100_routed_r2_aggregation_and_owner_return(root: Path) -> None:
     _, store, clock = create_context(root, "p100-routed")
     ids = FakeIds()
     capture_p100(store, clock)
+    squad_id = activate_jarvan_squad(store, clock)
     store.claim_request("R2", GAREN_RUNTIME, "claim-r2-garen", clock.after(120), clock.now())
     routed = store.route_request(
         "R2",
@@ -184,6 +186,8 @@ def test_p100_routed_r2_aggregation_and_owner_return(root: Path) -> None:
         "event-r2-route",
         "outbox-r2-route",
         clock.now(),
+        recipient_squad_id=squad_id,
+        required_capabilities=("request.route",),
     )
     assert store.route_request(
         "R2",
@@ -193,6 +197,8 @@ def test_p100_routed_r2_aggregation_and_owner_return(root: Path) -> None:
         "event-r2-route",
         "outbox-r2-route",
         clock.now(),
+        recipient_squad_id=squad_id,
+        required_capabilities=("request.route",),
     )["idempotent"]
     deliver(store, clock, ids, routed, JARVAN_ID)
     accepted = store.claim_request(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from typing import Any, Optional
 
@@ -24,11 +25,22 @@ def register_runtime(
     status = command.status
     verified = command.verified
     at = command.at
+    capabilities = command.capabilities
     _time(at, "runtime observation time")
     if status not in {"active", "idle", "closed", "failed"} or not all(
         (runtime_instance_id, actor_agent_id, harness_kind, backend_kind, session_ref, endpoint, runtime_generation)
     ):
         raise StorageRefusal("invalid_runtime", "runtime identity is incomplete")
+    if capabilities is not None and (
+        any(not isinstance(item, str) or not item for item in capabilities)
+        or len(set(capabilities)) != len(capabilities)
+    ):
+        raise StorageRefusal("invalid_runtime", "runtime capabilities are empty or duplicated")
+    capabilities_json = (
+        None
+        if capabilities is None
+        else json.dumps(sorted(capabilities), separators=(",", ":"))
+    )
     try:
         with store._transaction():
             actor = store.connection.execute(
@@ -52,23 +64,40 @@ def register_runtime(
                 )
                 if not immutable:
                     raise StorageRefusal("runtime_conflict", "runtime retry changed immutable identity")
-                store.connection.execute(
-                    "UPDATE runtime_instances SET status=?,verified=?,last_seen_at=? WHERE runtime_instance_id=?",
-                    (status, int(verified), at, runtime_instance_id),
-                )
+                if capabilities_json is None:
+                    store.connection.execute(
+                        "UPDATE runtime_instances SET status=?,verified=?,last_seen_at=? WHERE runtime_instance_id=?",
+                        (status, int(verified), at, runtime_instance_id),
+                    )
+                else:
+                    store.connection.execute(
+                        """
+                        UPDATE runtime_instances
+                           SET status=?,verified=?,last_seen_at=?,capabilities_json=?
+                         WHERE runtime_instance_id=?
+                        """,
+                        (status, int(verified), at, capabilities_json, runtime_instance_id),
+                    )
                 return {
                     "runtime_instance_id": runtime_instance_id,
                     "actor_agent_id": actor_agent_id,
                     "status": status,
                     "verified": verified,
+                    "capabilities": sorted(
+                        json.loads(
+                            capabilities_json
+                            if capabilities_json is not None
+                            else existing["capabilities_json"]
+                        )
+                    ),
                     "idempotent": True,
                 }
             store.connection.execute(
                 """
                 INSERT INTO runtime_instances
                   (runtime_instance_id,actor_agent_id,harness_kind,backend_kind,session_ref,
-                   endpoint,runtime_generation,status,verified,last_seen_at)
-                VALUES(?,?,?,?,?,?,?,?,?,?)
+                   endpoint,runtime_generation,status,verified,last_seen_at,capabilities_json)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     runtime_instance_id,
@@ -81,6 +110,7 @@ def register_runtime(
                     status,
                     int(verified),
                     at,
+                    capabilities_json or "[]",
                 ),
             )
     except StorageRefusal:
@@ -92,6 +122,7 @@ def register_runtime(
         "actor_agent_id": actor_agent_id,
         "status": status,
         "verified": verified,
+        "capabilities": json.loads(capabilities_json or "[]"),
         "idempotent": False,
     }
 

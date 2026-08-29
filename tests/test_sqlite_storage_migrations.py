@@ -92,16 +92,26 @@ def test_transactional_upgrade_backup_and_rollback(root: Path) -> None:
             "ix_callsign_queue_scan",
             "ux_squad_accepting_shotcaller",
             "ux_owner_changed_per_rollover",
+            "ux_pending_squad_registration",
+            "ux_pending_shotcaller_registration",
+            "ux_hidden_dispatch_assignment",
+            "ix_request_progress_latest",
+            "ix_request_progress_due",
+            "ix_report_requests_updated",
+            "ix_activity_evidence_time",
+            "ix_report_specs_created",
         } <= indexes
         assert [migration.version for migration in MIGRATIONS] == list(
             range(1, CURRENT_SCHEMA_VERSION + 1)
         )
-        assert MIGRATIONS[-3].name == "advisory-project-catalog-and-roster-indexes"
-        assert MIGRATIONS[-3].checksum == "5477db9879d6a4a9a29bb8188b398bd6db9a7a786e40e86ab819a0a938790faf"
-        assert MIGRATIONS[-2].name == "guarded-rollover-and-shuffled-callsign-queue"
-        assert MIGRATIONS[-2].checksum == "879ef4addfe6725e31c31a5aa1db9078d7c066a26610eaa2753f749c6e53ab75"
-        assert MIGRATIONS[-1].name == "bounded-reporting-and-outbound-privacy"
-        assert MIGRATIONS[-1].checksum == "bebe90eb841eac2a0b42d3f89e321cb4f3f8b23b02d92febf5a4ea2a50727cde"
+        assert MIGRATIONS[-4].name == "advisory-project-catalog-and-roster-indexes"
+        assert MIGRATIONS[-4].checksum == "5477db9879d6a4a9a29bb8188b398bd6db9a7a786e40e86ab819a0a938790faf"
+        assert MIGRATIONS[-3].name == "guarded-rollover-and-shuffled-callsign-queue"
+        assert MIGRATIONS[-3].checksum == "879ef4addfe6725e31c31a5aa1db9078d7c066a26610eaa2753f749c6e53ab75"
+        assert MIGRATIONS[-2].name == "bounded-reporting-and-outbound-privacy"
+        assert MIGRATIONS[-2].checksum == "bebe90eb841eac2a0b42d3f89e321cb4f3f8b23b02d92febf5a4ea2a50727cde"
+        assert MIGRATIONS[-1].name == "bounded-routing-policy-and-request-progress"
+        assert MIGRATIONS[-1].checksum == "593e2cf05d0200463800b6be7cbf5918a9b5fc3304f793d2ec3fad30b538e80c"
         assert store.connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
 
 

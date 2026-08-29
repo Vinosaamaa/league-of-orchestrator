@@ -217,9 +217,9 @@ def seed(store: SQLiteStorage) -> None:
             """
             INSERT INTO task_assignments
               (task_assignment_id,task_id,request_id,coordinator_agent_id,champion_agent_id,
-               runtime_instance_id,callsign,state,version,created_at,updated_at)
+               runtime_instance_id,callsign,assignment_role,state,version,created_at,updated_at)
             VALUES('assignment:orianna','task:reporting','request:champion','actor:garen','actor:orianna',
-                   'operation:runtime','Orianna','active',1,?,?)
+                   'operation:runtime','Orianna','champion','active',1,?,?)
             """,
             (AT3, AT3),
         )
@@ -236,9 +236,9 @@ def seed(store: SQLiteStorage) -> None:
             """
             INSERT INTO task_assignments
               (task_assignment_id,task_id,request_id,coordinator_agent_id,champion_agent_id,
-               runtime_instance_id,callsign,state,version,created_at,updated_at)
+               runtime_instance_id,callsign,assignment_role,state,version,created_at,updated_at)
             VALUES('assignment:lux','task:privacy','request:privacy','actor:garen','actor:lux',
-                   'operation:runtime-lux','Lux','active',1,?,?)
+                   'operation:runtime-lux','Lux','champion','active',1,?,?)
             """,
             (AT3, AT3),
         )

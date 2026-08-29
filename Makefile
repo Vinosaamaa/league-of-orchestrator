@@ -28,6 +28,12 @@ RUNTIME_LIFECYCLE_TESTS := \
 	tests/test_cleanup_lifecycle.py \
 	tests/test_model_routing.py
 
+ROUTING_POLICY_TESTS := \
+	tests/test_routing_policy.py \
+	tests/test_squad_registration.py \
+	tests/test_request_progress_policy.py \
+	tests/test_hidden_scientist_assignment.py
+
 SKILL_CONTRACT_TESTS := \
 	tests/test_skill_contracts.py
 
@@ -45,7 +51,7 @@ REPORTING_PRIVACY_TESTS := \
 	tests/test_reporting.py \
 	tests/test_reporting_performance.py
 
-.PHONY: test test-baseline test-storage test-project-roster test-acceptance test-request-lifecycle test-runtime-lifecycle test-skill-contracts test-handoff-callsigns test-reporting-privacy test-public-safety test-affected test-all
+.PHONY: test test-baseline test-storage test-project-roster test-acceptance test-request-lifecycle test-runtime-lifecycle test-routing-policy test-skill-contracts test-handoff-callsigns test-reporting-privacy test-public-safety test-affected test-all
 test:
 	@$(MAKE) --no-print-directory test-baseline
 
@@ -72,6 +78,11 @@ test-runtime-lifecycle:
 		PYTHONDONTWRITEBYTECODE=1 $(PYTHON) $$test; \
 	done
 
+test-routing-policy:
+	@set -eu; for test in $(ROUTING_POLICY_TESTS); do \
+		PYTHONDONTWRITEBYTECODE=1 $(PYTHON) $$test; \
+	done
+
 test-skill-contracts:
 	@set -eu; for test in $(SKILL_CONTRACT_TESTS); do \
 		PYTHONDONTWRITEBYTECODE=1 $(PYTHON) $$test; \
@@ -95,6 +106,6 @@ test-reporting-privacy:
 test-public-safety:
 	@PYTHONDONTWRITEBYTECODE=1 $(PYTHON) scripts/public_safety.py --base origin/main --head HEAD
 
-test-affected: test-storage test-acceptance test-request-lifecycle test-runtime-lifecycle test-skill-contracts test-handoff-callsigns test-reporting-privacy test-public-safety
+test-affected: test-storage test-acceptance test-request-lifecycle test-runtime-lifecycle test-routing-policy test-skill-contracts test-handoff-callsigns test-reporting-privacy test-public-safety
 
 test-all: test-baseline test-affected

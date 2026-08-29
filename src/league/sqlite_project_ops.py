@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import json
 import posixpath
 import re
 import sqlite3
 import unicodedata
 from datetime import datetime
 from typing import Any, Optional, Sequence
+
+from .orchestration import OrchestrationSignals, SquadCandidate, decide_orchestration_route
 from urllib.parse import urlsplit
 
 from .privacy import validate_final_rendered_payload
@@ -578,4 +581,144 @@ def project_advice(
         "suggestions": suggestions,
         "available_suggestions": [item for item in suggestions if item["available"]],
         "binding_changed": False,
+    }
+
+
+def _load_orchestration_candidate(
+    store: Any,
+    squad_id: str,
+    *,
+    strong_match: bool,
+    required: tuple[str, ...],
+) -> Optional[SquadCandidate]:
+    row = store.connection.execute(
+        """
+        SELECT s.squad_id,s.shotcaller_agent_id,s.state squad_state,s.owner_fence,
+               i.state intake_state,i.fence intake_fence,a.retired_at
+          FROM squads s JOIN agent_instances a ON a.agent_id=s.shotcaller_agent_id
+          LEFT JOIN shotcaller_intake i
+            ON i.squad_id=s.squad_id AND i.agent_id=s.shotcaller_agent_id
+         WHERE s.squad_id=?
+        """,
+        (squad_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    declared = {
+        str(item["capability"])
+        for item in store.connection.execute(
+            "SELECT capability FROM squad_capabilities WHERE squad_id=?", (squad_id,)
+        )
+    }
+    runtime_sets = (
+        set(json.loads(runtime["capabilities_json"]))
+        for runtime in store.connection.execute(
+            """
+            SELECT capabilities_json FROM runtime_instances
+             WHERE actor_agent_id=? AND status IN ('active','idle') AND verified=1
+             ORDER BY last_seen_at DESC,runtime_instance_id
+            """,
+            (row["shotcaller_agent_id"],),
+        )
+    )
+    live_count = 0
+    matching_runtime: Optional[set[str]] = None
+    for runtime_capabilities in runtime_sets:
+        live_count += 1
+        if matching_runtime is None and set(required) <= declared & runtime_capabilities:
+            matching_runtime = runtime_capabilities
+    return SquadCandidate(
+        squad_id=squad_id,
+        strong_match=strong_match,
+        accepting=(
+            row["squad_state"] == "active"
+            and row["retired_at"] is None
+            and row["intake_state"] == "accepting"
+            and row["intake_fence"] is not None
+            and int(row["intake_fence"]) == int(row["owner_fence"])
+        ),
+        owner_live=live_count > 0,
+        capabilities=frozenset(
+            declared & matching_runtime if matching_runtime is not None else ()
+        ),
+    )
+
+
+def orchestration_decision(
+    store: Any,
+    signals: OrchestrationSignals,
+    *,
+    project_ids: Sequence[str] = (),
+    explicit_squad_id: Optional[str] = None,
+    continuation_squad_id: Optional[str] = None,
+    required_capabilities: Sequence[str] = (),
+) -> dict[str, object]:
+    """Resolve only exact registered project evidence into the small route policy."""
+
+    unique_projects = tuple(dict.fromkeys(project_ids))
+    if len(unique_projects) != len(project_ids) or len(unique_projects) > 8:
+        raise StorageRefusal(
+            "orchestration_projects_invalid", "project evidence is duplicated or unbounded"
+        )
+    required = tuple(required_capabilities)
+    if len(set(required)) != len(required) or any(
+        not isinstance(item, str) or not item for item in required
+    ):
+        raise StorageRefusal(
+            "orchestration_capabilities_invalid", "required capabilities are empty or duplicated"
+        )
+    candidates: list[SquadCandidate] = []
+    if len(unique_projects) == 1:
+        squad_ids = tuple(
+            str(row["squad_id"])
+            for row in store.connection.execute(
+            """
+            SELECT ps.squad_id
+              FROM projects p
+              JOIN project_squad_suggestions ps ON ps.project_id=p.project_id
+             WHERE p.project_id=? AND p.state='active'
+             ORDER BY ps.position,ps.squad_id
+            """,
+            (unique_projects[0],),
+            )
+        )
+        candidates.extend(
+            candidate
+            for squad_id in squad_ids
+            if (
+                candidate := _load_orchestration_candidate(
+                    store, squad_id, strong_match=True, required=required
+                )
+            )
+            is not None
+        )
+    for target_squad_id in dict.fromkeys(
+        item for item in (explicit_squad_id, continuation_squad_id) if item
+    ):
+        if any(item.squad_id == target_squad_id for item in candidates):
+            continue
+        candidate = _load_orchestration_candidate(
+            store, str(target_squad_id), strong_match=False, required=required
+        )
+        if candidate is not None:
+            candidates.append(candidate)
+    decision = decide_orchestration_route(
+        signals,
+        explicit_squad_id=explicit_squad_id,
+        continuation_squad_id=continuation_squad_id,
+        candidates=tuple(candidates),
+        required_capabilities=required,
+        cross_project=len(unique_projects) > 1,
+    )
+    return {
+        **decision.as_record(),
+        "policy_version": "league.orchestration.v1",
+        "project_evidence_count": len(unique_projects),
+        "eligible_candidate_count": sum(
+            1
+            for item in candidates
+            if item.accepting
+            and item.owner_live
+            and set(required) <= item.capabilities
+        ),
     }

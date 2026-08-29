@@ -202,6 +202,10 @@ def roster_snapshot(
             """
             SELECT * FROM tasks
              WHERE julianday(updated_at)<=julianday(?)
+               AND NOT EXISTS (
+                 SELECT 1 FROM task_assignments ta
+                  WHERE ta.task_id=tasks.task_id AND ta.assignment_role='hidden-worker'
+               )
              ORDER BY updated_at DESC,task_id LIMIT ?
             """,
             (as_of, limit + 1),
@@ -211,7 +215,8 @@ def roster_snapshot(
             SELECT agent_id,callsign,role,shotcaller_agent_id,task_id,status,version,
                    updated_at,update_text,blocker,next_action,retired_at
               FROM agent_instances
-             WHERE retired_at IS NULL AND julianday(updated_at)<=julianday(?)
+             WHERE retired_at IS NULL AND role<>'hidden-worker'
+               AND julianday(updated_at)<=julianday(?)
              ORDER BY updated_at DESC,agent_id LIMIT ?
             """,
             (as_of, limit + 1),
@@ -272,8 +277,14 @@ def roster_snapshot(
         recent_event_rows = store.connection.execute(
             """
             SELECT event_id,event_type,status,update_text,occurred_at,event_seq
-              FROM events
+             FROM events
              WHERE julianday(occurred_at)<=julianday(?)
+               AND NOT (
+                 aggregate_kind='assignment' AND aggregate_id IN (
+                   SELECT task_assignment_id FROM task_assignments
+                    WHERE assignment_role='hidden-worker'
+                 )
+               )
              ORDER BY event_seq DESC,event_id DESC LIMIT ?
             """,
             (as_of, transition_limit + 1),

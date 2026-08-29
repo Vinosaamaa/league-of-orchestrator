@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Optional, Protocol
 
+from .orchestration import OrchestrationSignals
+
 
 MAX_TRIAGE_JSON_BYTES = 65_536
 MAX_TASK_RESULT_SOURCES = 128
@@ -22,6 +24,35 @@ class DispatchRequestCommand:
     requested_effort: Optional[str]
     explicit_route: Optional[str]
     at: str
+    orchestration: OrchestrationSignals = OrchestrationSignals(False, False, False, 0, 0)
+    continuation_role: Optional[str] = None
+    continuation_target: Optional[str] = None
+    hidden_subtask: Optional[str] = None
+    hidden_scope_budget: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class RequestProgressCommand:
+    progress_id: str
+    request_id: str
+    claim_token: str
+    expected_version: int
+    progress_generation: int
+    reason_code: str
+    settled_count: int
+    total_count: int
+    current_phase: str
+    blocker_count: int
+    blocker_severity: str
+    user_action_required: bool
+    deadline_change: Optional[str]
+    next_action: str
+    event_id: str
+    outbox_id: str
+    at: str
+    minimum_interval_seconds: int = 900
+    grace_seconds: int = 300
+    promised_checkpoint_at: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -85,6 +116,12 @@ class RequestStorage(Protocol):
 
     def dispatch_request(self, command: DispatchRequestCommand) -> dict[str, Any]: ...
 
+    def emit_request_progress(self, command: RequestProgressCommand) -> dict[str, Any]: ...
+
+    def reconcile_request_progress(
+        self, owner_agent_id: str, at: str
+    ) -> dict[str, Any]: ...
+
     def route_request(
         self,
         request_id: str,
@@ -94,6 +131,12 @@ class RequestStorage(Protocol):
         event_id: str,
         outbox_id: str,
         at: str,
+        *,
+        recipient_squad_id: Optional[str] = None,
+        route_reason_code: str = "explicit_squad",
+        route_policy_version: str = "league.orchestration.v1",
+        route_confidence: str = "explicit",
+        required_capabilities: tuple[str, ...] = (),
     ) -> dict[str, Any]: ...
 
     def set_request_state(

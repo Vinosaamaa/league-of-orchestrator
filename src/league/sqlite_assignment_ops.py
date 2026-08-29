@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import json
 import hashlib
+import re
 import sqlite3
 from typing import Any, Optional
 
-from .sqlite_request_ops import _active_claim, _request_row, _time
+from .sqlite_request_ops import _active_claim, _bounded_public_text, _request_row, _time
 from .sqlite_project_ops import resolve_project_routing_identity
 from .sqlite_callsign_ops import (
     _reserve_in_transaction,
@@ -15,11 +16,20 @@ from .sqlite_callsign_ops import (
     capabilities,
     stable_json,
 )
-from .storage_assignment import PrepareAssignmentCommand
+from .storage_assignment import FinishHiddenAssignmentCommand, PrepareAssignmentCommand
 from .storage_types import LIFECYCLE_STATES, StorageRefusal
 
 
-ASSIGNMENT_STATES = {"pending", "launching", "active", "blocked", "cleanup_pending"}
+ASSIGNMENT_STATES = {
+    "pending",
+    "launching",
+    "active",
+    "blocked",
+    "cleanup_pending",
+    "completed",
+    "failed",
+    "promotion_required",
+}
 TASK_TERMINAL_STATES = {
     "ready_to_land",
     "completed",
@@ -64,7 +74,7 @@ def _json(value: Any) -> str:
 
 def _validate_assignment_command(command: PrepareAssignmentCommand) -> None:
     _time(command.at, "assignment preparation time")
-    if not all(
+    if command.assignment_role not in {"champion", "hidden-worker"} or not all(
         (
             command.assignment_id,
             command.request_id,
@@ -72,12 +82,25 @@ def _validate_assignment_command(command: PrepareAssignmentCommand) -> None:
             command.task_summary,
             command.coordinator_agent_id,
             command.champion_agent_id,
-            command.repository,
-            command.branch,
-            command.worktree,
         )
-    ) or command.issue < 1:
+    ):
         raise StorageRefusal("invalid_assignment", "assignment identity is incomplete")
+    if command.assignment_role == "champion" and (
+        not all((command.repository, command.branch, command.worktree)) or command.issue < 1
+    ):
+        raise StorageRefusal(
+            "invalid_assignment", "visible Champion assignment requires issue and worktree identity"
+        )
+    if command.assignment_role == "hidden-worker" and (
+        not command.dispatch_id
+        or any((command.repository, command.branch, command.worktree))
+        or command.issue != 0
+        or command.promoted_from_assignment_id is not None
+    ):
+        raise StorageRefusal(
+            "invalid_hidden_assignment",
+            "hidden scientist assignment requires one dispatch and no issue or worktree lifecycle",
+        )
     capabilities(command.required_capabilities)
 
 
@@ -105,10 +128,13 @@ def _assignment_retry(
         and existing["coordinator_agent_id"] == command.coordinator_agent_id
         and existing["champion_agent_id"] == command.champion_agent_id
         and existing["task_summary"] == command.task_summary
-        and existing["repository"] == command.repository
-        and int(existing["issue"]) == command.issue
-        and existing["branch"] == command.branch
-        and existing["worktree"] == command.worktree
+        and existing["assignment_role"] == command.assignment_role
+        and existing["dispatch_id"] == command.dispatch_id
+        and existing["promoted_from_assignment_id"] == command.promoted_from_assignment_id
+        and (existing["repository"] or "") == command.repository
+        and int(existing["issue"] or 0) == command.issue
+        and (existing["branch"] or "") == command.branch
+        and (existing["worktree"] or "") == command.worktree
         and tuple(json.loads(existing["callsign_requirements_json"]))
             == capabilities(command.required_capabilities)
     )
@@ -126,33 +152,79 @@ def _assignment_retry(
 
 def _validate_assignment_reservation(
     store: Any, command: PrepareAssignmentCommand
-) -> Optional[str]:
+) -> tuple[Optional[str], Optional[sqlite3.Row]]:
     request = _request_row(store, command.request_id)
     _active_claim(store, command.request_id, token=command.claim_token, at=command.at)
     if request["owner_agent_id"] != command.coordinator_agent_id:
         raise StorageRefusal("owner_mismatch", "assignment coordinator does not own the request")
-    if request["execution_mode"] != "champion" or request["state"] != "in_progress":
+    if request["state"] != "in_progress":
         raise StorageRefusal(
-            "dispatch_required", "request must be explicitly dispatched to Champion mode first"
+            "dispatch_required", "request must be explicitly dispatched before assignment"
         )
+    if command.assignment_role == "hidden-worker":
+        dispatch = store.connection.execute(
+            "SELECT * FROM request_dispatches WHERE dispatch_id=? AND request_id=?",
+            (command.dispatch_id, command.request_id),
+        ).fetchone()
+        if (
+            request["execution_mode"] != "hidden"
+            or dispatch is None
+            or dispatch["execution_mode"] != "hidden"
+            or dispatch["requested_model"] is None
+            or dispatch["requested_effort"] is None
+            or dispatch["reason_code"] != "hidden_scientist"
+        ):
+            raise StorageRefusal(
+                "hidden_dispatch_required", "hidden scientist assignment must match its exact dispatch"
+            )
+        owner = store.connection.execute(
+            "SELECT role,retired_at FROM agent_instances WHERE agent_id=?",
+            (command.coordinator_agent_id,),
+        ).fetchone()
+        if owner is None or owner["role"] != "shotcaller" or owner["retired_at"] is not None:
+            raise StorageRefusal(
+                "hidden_owner_invalid", "hidden scientist assignment owner must be a live Shotcaller"
+            )
+        return None, dispatch
+    if request["execution_mode"] != "champion":
+        source = store.connection.execute(
+            "SELECT * FROM task_assignments WHERE task_assignment_id=? AND request_id=?",
+            (command.promoted_from_assignment_id, command.request_id),
+        ).fetchone()
+        if (
+            request["execution_mode"] != "hidden"
+            or source is None
+            or source["assignment_role"] != "hidden-worker"
+            or source["state"] != "active"
+        ):
+            raise StorageRefusal(
+                "champion_dispatch_required",
+                "Champion assignment requires Champion dispatch or an active hidden-scientist promotion",
+            )
     project = resolve_project_routing_identity(store, command.repository)
-    return project[0] if project is not None and project[1] == "active" else None
+    return (project[0] if project is not None and project[1] == "active" else None), None
 
 
 def _persist_assignment_reservation(
-    store: Any, command: PrepareAssignmentCommand, project_id: Optional[str]
+    store: Any,
+    command: PrepareAssignmentCommand,
+    project_id: Optional[str],
+    hidden_dispatch: Optional[sqlite3.Row],
 ) -> str:
     callsign_assignment_id = f"callsign-assignment:{command.assignment_id}"
     selected = _reserve_in_transaction(
         store,
         callsign_assignment_id,
         command.champion_agent_id,
-        "champion",
+        command.assignment_role,
         "task",
         command.task_id,
         capabilities(command.required_capabilities),
         command.at,
     )
+    hidden_input = json.loads(hidden_dispatch["input_json"]) if hidden_dispatch is not None else {}
+    hidden_signals = hidden_input.get("signals", {}) if isinstance(hidden_input, dict) else {}
+    hidden_contract = hidden_input.get("hidden_scientist", {}) if isinstance(hidden_input, dict) else {}
     store.connection.execute(
         """
         INSERT INTO tasks
@@ -182,10 +254,10 @@ def _persist_assignment_reservation(
         (
             command.coordinator_agent_id,
             command.task_id,
-            command.repository,
-            command.issue,
-            command.branch,
-            command.worktree,
+            command.repository or None,
+            command.issue or None,
+            command.branch or None,
+            command.worktree or None,
             command.champion_agent_id,
         ),
     )
@@ -193,9 +265,11 @@ def _persist_assignment_reservation(
         """
         INSERT INTO task_assignments
           (task_assignment_id,task_id,request_id,coordinator_agent_id,champion_agent_id,
-           runtime_instance_id,callsign,state,acceptance_receipt_json,failure_class,
-           cleanup_required,version,created_at,updated_at)
-        VALUES(?,?,?,?,?,NULL,?,'pending',NULL,NULL,0,1,?,?)
+           runtime_instance_id,callsign,assignment_role,dispatch_id,bounded_subtask,model,
+           effort,routing_reason_code,time_budget_minutes,scope_budget_actions,state,
+           acceptance_receipt_json,failure_class,cleanup_required,promoted_from_assignment_id,
+           version,created_at,updated_at)
+        VALUES(?,?,?,?,?,NULL,?,?,?,?,?,?,?,?,?,'pending',NULL,NULL,0,?,1,?,?)
         """,
         (
             command.assignment_id,
@@ -204,10 +278,27 @@ def _persist_assignment_reservation(
             command.coordinator_agent_id,
             command.champion_agent_id,
             selected["callsign"],
+            command.assignment_role,
+            command.dispatch_id,
+            hidden_contract.get("hidden_subtask"),
+            hidden_dispatch["requested_model"] if hidden_dispatch is not None else None,
+            hidden_dispatch["requested_effort"] if hidden_dispatch is not None else None,
+            hidden_dispatch["reason_code"] if hidden_dispatch is not None else None,
+            hidden_signals.get("expected_minutes"),
+            hidden_signals.get("expected_task_action_calls"),
+            command.promoted_from_assignment_id,
             command.at,
             command.at,
         ),
     )
+    if command.promoted_from_assignment_id is not None:
+        store.connection.execute(
+            """
+            UPDATE task_assignments SET promoted_to_assignment_id=?,updated_at=?
+             WHERE task_assignment_id=?
+            """,
+            (command.assignment_id, command.at, command.promoted_from_assignment_id),
+        )
     return str(selected["callsign"])
 
 
@@ -219,14 +310,25 @@ def _insert_pending_assignment_event(
         INSERT INTO events
           (event_id,agent_id,task_id,entity_version,event_type,status,update_text,occurred_at,
            detail_json,request_id,aggregate_kind,aggregate_id)
-        VALUES(?,NULL,?,1,'assignment_pending','pending','Champion assignment reserved',?,
+        VALUES(?,NULL,?,1,'assignment_pending','pending',?, ?,
                ?,?,'assignment',?)
         """,
         (
             f"assignment:{command.assignment_id}:1",
             command.task_id,
+            (
+                "Hidden scientist assignment reserved"
+                if command.assignment_role == "hidden-worker"
+                else "Champion assignment reserved"
+            ),
             command.at,
-            _json({"assignment_id": command.assignment_id, "callsign": callsign}),
+            _json(
+                {
+                    "assignment_id": command.assignment_id,
+                    "assignment_role": command.assignment_role,
+                    "callsign": callsign,
+                }
+            ),
             command.request_id,
             command.assignment_id,
         ),
@@ -243,8 +345,10 @@ def prepare_assignment(
             retry = _assignment_retry(store, command)
             if retry is not None:
                 return retry
-            project_id = _validate_assignment_reservation(store, command)
-            callsign = _persist_assignment_reservation(store, command, project_id)
+            project_id, hidden_dispatch = _validate_assignment_reservation(store, command)
+            callsign = _persist_assignment_reservation(
+                store, command, project_id, hidden_dispatch
+            )
             _insert_pending_assignment_event(store, command, callsign)
     except StorageRefusal:
         raise
@@ -256,6 +360,7 @@ def prepare_assignment(
         "state": "pending",
         "version": 1,
         "callsign": callsign,
+        "assignment_role": command.assignment_role,
         "idempotent": False,
     }
 
@@ -305,28 +410,6 @@ def activate_assignment(
     at: str,
 ) -> dict[str, Any]:
     _time(at, "assignment activation time")
-    required = {
-        "verified",
-        "assignment_id",
-        "task_id",
-        "champion_agent_id",
-        "callsign",
-        "runtime_instance_id",
-        "thread_id",
-        "endpoint",
-        "runtime_generation",
-        "harness_kind",
-        "backend_kind",
-        "routing_name",
-        "display_agent",
-        "repository",
-        "issue",
-        "branch",
-        "worktree",
-        "capabilities",
-    }
-    if set(receipt) != required or receipt.get("verified") is not True:
-        raise StorageRefusal("receipt_unverified", "assignment activation requires one exact verified receipt")
     try:
         with store._transaction():
             assignment = store.connection.execute(
@@ -334,6 +417,46 @@ def activate_assignment(
             ).fetchone()
             if assignment is None:
                 raise StorageRefusal("assignment_unknown", "assignment does not exist")
+            common_required = {
+                "verified",
+                "assignment_id",
+                "task_id",
+                "callsign",
+                "runtime_instance_id",
+                "thread_id",
+                "endpoint",
+                "runtime_generation",
+                "harness_kind",
+                "backend_kind",
+                "routing_name",
+                "display_agent",
+                "capabilities",
+            }
+            champion_required = common_required | {
+                "champion_agent_id",
+                "repository",
+                "issue",
+                "branch",
+                "worktree",
+            }
+            hidden_required = common_required | {
+                "hidden_worker_agent_id",
+                "bounded_subtask",
+                "model",
+                "effort",
+                "routing_reason_code",
+                "time_budget_minutes",
+                "scope_budget_actions",
+            }
+            required = (
+                hidden_required
+                if assignment["assignment_role"] == "hidden-worker"
+                else champion_required
+            )
+            if set(receipt) != required or receipt.get("verified") is not True:
+                raise StorageRefusal(
+                    "receipt_unverified", "assignment activation requires one exact role-specific receipt"
+                )
             if assignment["state"] == "active":
                 stored = json.loads(assignment["acceptance_receipt_json"])
                 if stored != receipt:
@@ -379,26 +502,45 @@ def activate_assignment(
             required_capabilities = tuple(
                 json.loads(callsign_assignment["requirements_json"])
             )
-            exact = (
-                receipt["assignment_id"] == assignment_id
-                and receipt["task_id"] == assignment["task_id"]
-                and receipt["champion_agent_id"] == assignment["champion_agent_id"]
-                and receipt["callsign"] == assignment["callsign"]
-                and receipt["repository"] == agent["repository"]
+            assignee_key = (
+                "hidden_worker_agent_id"
+                if assignment["assignment_role"] == "hidden-worker"
+                else "champion_agent_id"
+            )
+            role_exact = (
+                receipt["bounded_subtask"] == assignment["bounded_subtask"]
+                and receipt["model"] == assignment["model"]
+                and receipt["effort"] == assignment["effort"]
+                and receipt["routing_reason_code"] == assignment["routing_reason_code"]
+                and receipt["time_budget_minutes"] == assignment["time_budget_minutes"]
+                and receipt["scope_budget_actions"] == assignment["scope_budget_actions"]
+            ) if assignment["assignment_role"] == "hidden-worker" else (
+                receipt["repository"] == agent["repository"]
                 and receipt["issue"] == agent["issue"]
                 and receipt["branch"] == agent["branch"]
                 and receipt["worktree"] == agent["worktree"]
+            )
+            exact = (
+                receipt["assignment_id"] == assignment_id
+                and receipt["task_id"] == assignment["task_id"]
+                and receipt[assignee_key] == assignment["champion_agent_id"]
+                and receipt["callsign"] == assignment["callsign"]
+                and agent["role"] == assignment["assignment_role"]
+                and role_exact
                 and receipt["routing_name"] == str(assignment["callsign"]).lower()
                 and receipt["backend_kind"] in {"herdr", "tmux"}
                 and all(
                     isinstance(receipt[name], str) and receipt[name]
-                    for name in required - {"verified", "issue", "capabilities"}
+                    for name in required
+                    - {"verified", "issue", "capabilities", "time_budget_minutes", "scope_budget_actions"}
                 )
                 and all(item in declared_capabilities for item in required_capabilities)
                 and callsign_assignment["state"] == "reserved"
             )
             if not exact:
-                raise StorageRefusal("receipt_mismatch", "launch receipt does not match the reserved Champion identity")
+                raise StorageRefusal(
+                    "receipt_mismatch", "launch receipt does not match the reserved role identity"
+                )
             runtime_conflict = store.connection.execute(
                 """
                 SELECT 1 FROM runtime_instances
@@ -437,7 +579,7 @@ def activate_assignment(
                 UPDATE agent_instances
                    SET kind=?,address=?,thread_id=?,backend=?,routing_name=?,display_agent=?,
                        status='working',version=?,updated_at=?,update_text='assignment accepted',
-                       next_action='Perform the assigned task'
+                       next_action=?
                  WHERE agent_id=?
                 """,
                 (
@@ -449,6 +591,11 @@ def activate_assignment(
                     receipt["display_agent"],
                     agent_version,
                     at,
+                    (
+                        "Perform only the bounded hidden scientist subtask"
+                        if assignment["assignment_role"] == "hidden-worker"
+                        else "Perform the assigned task"
+                    ),
                     assignment["champion_agent_id"],
                 ),
             )
@@ -462,7 +609,8 @@ def activate_assignment(
                 (receipt["runtime_instance_id"], _json(receipt), next_version, at, assignment_id),
             )
             queue_meta = store.connection.execute(
-                "SELECT queue_version FROM callsign_queue_meta WHERE pool_role='champion'"
+                "SELECT queue_version FROM callsign_queue_meta WHERE pool_role=?",
+                (assignment["assignment_role"],),
             ).fetchone()
             queue_version = int(queue_meta["queue_version"]) + 1
             receipt_digest = hashlib.sha256(_json(receipt).encode("utf-8")).hexdigest()
@@ -477,11 +625,11 @@ def activate_assignment(
             )
             if queue_changed.rowcount != 1:
                 raise StorageRefusal(
-                    "queue_conflict", "Champion callsign queue reservation is not exact"
+                    "queue_conflict", "assignment callsign queue reservation is not exact"
                 )
             store.connection.execute(
-                "UPDATE callsign_queue_meta SET queue_version=? WHERE pool_role='champion'",
-                (queue_version,),
+                "UPDATE callsign_queue_meta SET queue_version=? WHERE pool_role=?",
+                (queue_version, assignment["assignment_role"]),
             )
             store.connection.execute(
                 """
@@ -528,15 +676,26 @@ def activate_assignment(
                 INSERT INTO events
                   (event_id,agent_id,task_id,entity_version,event_type,status,update_text,occurred_at,
                    detail_json,request_id,aggregate_kind,aggregate_id)
-                VALUES(?,NULL,?,?,'assignment_active','active','verified Champion accepted assignment',?,
+                VALUES(?,NULL,?,?,'assignment_active','active',?, ?,
                        ?,?,'assignment',?)
                 """,
                 (
                     event_id,
                     assignment["task_id"],
                     next_version,
+                    (
+                        "verified hidden scientist accepted assignment"
+                        if assignment["assignment_role"] == "hidden-worker"
+                        else "verified Champion accepted assignment"
+                    ),
                     at,
-                    _json({"assignment_id": assignment_id, "runtime_instance_id": receipt["runtime_instance_id"]}),
+                    _json(
+                        {
+                            "assignment_id": assignment_id,
+                            "assignment_role": assignment["assignment_role"],
+                            "runtime_instance_id": receipt["runtime_instance_id"],
+                        }
+                    ),
                     assignment["request_id"],
                     assignment_id,
                 ),
@@ -561,6 +720,312 @@ def activate_assignment(
         "runtime_instance_id": receipt["runtime_instance_id"],
         "event_id": event_id,
         "outbox_id": outbox_id,
+        "idempotent": False,
+    }
+
+
+def finish_hidden_assignment(
+    store: Any, command: FinishHiddenAssignmentCommand
+) -> dict[str, Any]:
+    """Deliver one terminal hidden-scientist result after exact cleanup."""
+
+    _time(command.at, "hidden scientist terminal time")
+    if command.status not in {"completed", "blocked", "failed", "promotion_required"}:
+        raise StorageRefusal(
+            "hidden_terminal_invalid", "hidden scientist delivery must be terminal"
+        )
+    result = _bounded_public_text(command.result_summary, "hidden result", maximum=1024)
+    digest_pattern = re.compile(r"^[0-9a-f]{64}$")
+    if (
+        not all((command.assignment_id, command.runtime_instance_id, command.transition_id,
+                 command.transition_key, command.event_id, command.outbox_id))
+        or not digest_pattern.fullmatch(command.cleanup_receipt)
+        or not digest_pattern.fullmatch(command.unpublished_state_receipt)
+    ):
+        raise StorageRefusal(
+            "hidden_terminal_receipt_invalid",
+            "hidden scientist terminal delivery requires exact cleanup receipt digests",
+        )
+    try:
+        with store._transaction():
+            assignment = store.connection.execute(
+                "SELECT * FROM task_assignments WHERE task_assignment_id=?",
+                (command.assignment_id,),
+            ).fetchone()
+            if assignment is None or assignment["assignment_role"] != "hidden-worker":
+                raise StorageRefusal(
+                    "hidden_assignment_unknown", "assignment is not a hidden scientist"
+                )
+            if assignment["state"] == command.status:
+                outbox = store.connection.execute(
+                    "SELECT outbox_id FROM delivery_outbox WHERE event_id=?",
+                    (command.event_id,),
+                ).fetchone()
+                exact = (
+                    int(assignment["version"]) == command.expected_version + 1
+                    and assignment["runtime_instance_id"] == command.runtime_instance_id
+                    and assignment["result_summary"] == result
+                    and assignment["cleanup_receipt"] == command.cleanup_receipt
+                    and assignment["unpublished_state_receipt"] == command.unpublished_state_receipt
+                    and assignment["terminal_event_id"] == command.event_id
+                    and outbox is not None
+                    and outbox["outbox_id"] == command.outbox_id
+                )
+                if not exact:
+                    raise StorageRefusal(
+                        "hidden_terminal_conflict", "hidden terminal retry changed evidence"
+                    )
+                return {
+                    "assignment_id": command.assignment_id,
+                    "state": command.status,
+                    "version": int(assignment["version"]),
+                    "event_id": command.event_id,
+                    "outbox_id": command.outbox_id,
+                    "idempotent": True,
+                }
+            if assignment["state"] not in {"active", "cleanup_pending"} or int(assignment["version"]) != command.expected_version:
+                raise StorageRefusal(
+                    "hidden_terminal_conflict",
+                    "hidden scientist is not active or cleanup-pending at the expected version",
+                )
+            if assignment["runtime_instance_id"] != command.runtime_instance_id:
+                raise StorageRefusal("runtime_mismatch", "hidden terminal runtime is not exact")
+            released = store.connection.execute(
+                """
+                SELECT * FROM callsign_assignments
+                 WHERE callsign_assignment_id=? AND role='hidden-worker'
+                """,
+                (f"callsign-assignment:{command.assignment_id}",),
+            ).fetchone()
+            if (
+                released is None
+                or released["state"] != "released"
+                or released["release_receipt_digest"] != command.cleanup_receipt
+            ):
+                raise StorageRefusal(
+                    "hidden_cleanup_unproven",
+                    "hidden scientist runtime and callsign must be released before terminal delivery",
+                )
+            if command.status == "promotion_required":
+                promoted = store.connection.execute(
+                    """
+                    SELECT 1 FROM task_assignments
+                     WHERE task_assignment_id=? AND request_id=?
+                       AND assignment_role='champion' AND state IN ('pending','launching','active')
+                    """,
+                    (assignment["promoted_to_assignment_id"], assignment["request_id"]),
+                ).fetchone()
+                if promoted is None:
+                    raise StorageRefusal(
+                        "champion_assignment_required",
+                        "promotion requires a separate durable visible Champion assignment",
+                    )
+            task = store.connection.execute(
+                "SELECT * FROM tasks WHERE task_id=?", (assignment["task_id"],)
+            ).fetchone()
+            if task is None:
+                raise StorageRefusal("assignment_incomplete", "hidden assignment task is missing")
+            next_task_version = int(task["version"]) + 1
+            next_assignment_version = command.expected_version + 1
+            store.connection.execute(
+                """
+                UPDATE tasks SET state=?,result_summary=?,version=?,updated_at=? WHERE task_id=?
+                """,
+                (command.status, result, next_task_version, command.at, assignment["task_id"]),
+            )
+            store.connection.execute(
+                """
+                INSERT INTO task_transitions
+                  (transition_id,transition_key,task_id,from_state,to_state,update_text,
+                   next_action,blocker,created_at,event_id)
+                VALUES(?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    command.transition_id,
+                    command.transition_key,
+                    assignment["task_id"],
+                    task["state"],
+                    command.status,
+                    result,
+                    (
+                        "Continue with the new visible Champion assignment"
+                        if command.status == "promotion_required"
+                        else "Reconcile the parent request"
+                    ),
+                    result if command.status in {"blocked", "failed"} else None,
+                    command.at,
+                    command.event_id,
+                ),
+            )
+            store.connection.execute(
+                """
+                INSERT INTO events
+                  (event_id,agent_id,task_id,entity_version,event_type,status,update_text,
+                   occurred_at,detail_json,request_id,aggregate_kind,aggregate_id)
+                VALUES(?,NULL,?,?,'hidden_scientist_terminal',?,?,?, ?,?,'assignment',?)
+                """,
+                (
+                    command.event_id,
+                    assignment["task_id"],
+                    next_assignment_version,
+                    command.status,
+                    result,
+                    command.at,
+                    _json(
+                        {
+                            "assignment_id": command.assignment_id,
+                            "promoted_to_assignment_id": assignment["promoted_to_assignment_id"],
+                        }
+                    ),
+                    assignment["request_id"],
+                    command.assignment_id,
+                ),
+            )
+            store.connection.execute(
+                """
+                UPDATE cleanup_obligations
+                   SET cleanup_state='cleanup_completed',next_action='None',
+                       version=version+1,updated_at=?
+                 WHERE task_id=? AND cleanup_state IN ('pending','cleanup_pending')
+                """,
+                (command.at, assignment["task_id"]),
+            )
+            store.connection.execute(
+                """
+                UPDATE task_assignments
+                   SET state=?,result_summary=?,cleanup_receipt=?,unpublished_state_receipt=?,
+                       terminal_event_id=?,version=?,updated_at=?
+                 WHERE task_assignment_id=?
+                """,
+                (
+                    command.status,
+                    result,
+                    command.cleanup_receipt,
+                    command.unpublished_state_receipt,
+                    command.event_id,
+                    next_assignment_version,
+                    command.at,
+                    command.assignment_id,
+                ),
+            )
+            store.connection.execute(
+                """
+                INSERT INTO delivery_outbox
+                  (outbox_id,event_id,recipient_agent_id,state,available_at,attempt_count)
+                VALUES(?,?,?,'pending',?,0)
+                """,
+                (
+                    command.outbox_id,
+                    command.event_id,
+                    assignment["coordinator_agent_id"],
+                    command.at,
+                ),
+            )
+    except StorageRefusal:
+        raise
+    except sqlite3.DatabaseError as exc:
+        raise store._translate_database_error(
+            exc, "hidden scientist terminal delivery conflicted with canonical state"
+        ) from exc
+    return {
+        "assignment_id": command.assignment_id,
+        "state": command.status,
+        "version": next_assignment_version,
+        "event_id": command.event_id,
+        "outbox_id": command.outbox_id,
+        "idempotent": False,
+    }
+
+
+def reconcile_assignment_runtime(
+    store: Any, assignment_id: str, at: str
+) -> dict[str, Any]:
+    """Fence one stale active runtime without inventing worker progress."""
+
+    _time(at, "assignment runtime reconciliation time")
+    try:
+        with store._transaction():
+            assignment = store.connection.execute(
+                "SELECT * FROM task_assignments WHERE task_assignment_id=?",
+                (assignment_id,),
+            ).fetchone()
+            if assignment is None:
+                raise StorageRefusal("assignment_unknown", "assignment does not exist")
+            if assignment["state"] == "cleanup_pending" and assignment["failure_class"] == "stale_runtime":
+                return {
+                    "assignment_id": assignment_id,
+                    "assignment_role": assignment["assignment_role"],
+                    "state": "cleanup_pending",
+                    "version": int(assignment["version"]),
+                    "runtime_status": "stale",
+                    "idempotent": True,
+                }
+            if assignment["state"] != "active":
+                return {
+                    "assignment_id": assignment_id,
+                    "assignment_role": assignment["assignment_role"],
+                    "state": assignment["state"],
+                    "version": int(assignment["version"]),
+                    "runtime_status": "not_active",
+                    "idempotent": True,
+                }
+            runtime = store.connection.execute(
+                "SELECT actor_agent_id,status,verified FROM runtime_instances WHERE runtime_instance_id=?",
+                (assignment["runtime_instance_id"],),
+            ).fetchone()
+            if (
+                runtime is not None
+                and runtime["actor_agent_id"] == assignment["champion_agent_id"]
+                and runtime["status"] in {"active", "idle"}
+                and bool(runtime["verified"])
+            ):
+                return {
+                    "assignment_id": assignment_id,
+                    "assignment_role": assignment["assignment_role"],
+                    "state": "active",
+                    "version": int(assignment["version"]),
+                    "runtime_status": "live",
+                    "idempotent": True,
+                }
+            next_version = int(assignment["version"]) + 1
+            store.connection.execute(
+                """
+                UPDATE task_assignments
+                   SET state='cleanup_pending',failure_class='stale_runtime',cleanup_required=1,
+                       version=?,updated_at=?
+                 WHERE task_assignment_id=?
+                """,
+                (next_version, at, assignment_id),
+            )
+            store.connection.execute(
+                "UPDATE tasks SET state='blocked',version=version+1,updated_at=? WHERE task_id=?",
+                (at, assignment["task_id"]),
+            )
+            store.connection.execute(
+                """
+                INSERT INTO cleanup_obligations
+                  (cleanup_obligation_id,task_id,cleanup_state,required_policy,next_action,version,updated_at)
+                VALUES(?,?,'pending','stale_assignment_runtime',
+                       'Verify and clean only the exact stale assignment runtime',1,?)
+                ON CONFLICT(task_id) DO UPDATE SET
+                  cleanup_state='pending',required_policy='stale_assignment_runtime',
+                  next_action='Verify and clean only the exact stale assignment runtime',
+                  version=cleanup_obligations.version+1,updated_at=excluded.updated_at
+                """,
+                (f"cleanup:{assignment['task_id']}", assignment["task_id"], at),
+            )
+    except StorageRefusal:
+        raise
+    except sqlite3.DatabaseError as exc:
+        raise store._translate_database_error(
+            exc, "assignment runtime reconciliation conflicted with canonical state"
+        ) from exc
+    return {
+        "assignment_id": assignment_id,
+        "assignment_role": assignment["assignment_role"],
+        "state": "cleanup_pending",
+        "version": next_version,
+        "runtime_status": "stale",
         "idempotent": False,
     }
 
@@ -624,6 +1089,43 @@ def block_assignment(
                     failure_digest,
                     at,
                 )
+                if assignment["assignment_role"] == "hidden-worker":
+                    event_id = f"assignment:{assignment_id}:{next_version}:blocked"
+                    outbox_id = f"outbox:{assignment_id}:{next_version}:blocked"
+                    store.connection.execute(
+                        """
+                        UPDATE task_assignments
+                           SET result_summary=?,cleanup_receipt=?,unpublished_state_receipt=?,
+                               terminal_event_id=? WHERE task_assignment_id=?
+                        """,
+                        (failure_class, failure_digest, failure_digest, event_id, assignment_id),
+                    )
+                    store.connection.execute(
+                        """
+                        INSERT INTO events
+                          (event_id,agent_id,task_id,entity_version,event_type,status,update_text,
+                           occurred_at,detail_json,request_id,aggregate_kind,aggregate_id)
+                        VALUES(?,NULL,?,?,'hidden_scientist_terminal','blocked',?,?,'{}',?,
+                               'assignment',?)
+                        """,
+                        (
+                            event_id,
+                            assignment["task_id"],
+                            next_version,
+                            failure_class,
+                            at,
+                            assignment["request_id"],
+                            assignment_id,
+                        ),
+                    )
+                    store.connection.execute(
+                        """
+                        INSERT INTO delivery_outbox
+                          (outbox_id,event_id,recipient_agent_id,state,available_at,attempt_count)
+                        VALUES(?,?,?,'pending',?,0)
+                        """,
+                        (outbox_id, event_id, assignment["coordinator_agent_id"], at),
+                    )
             else:
                 store.connection.execute(
                     """
@@ -689,6 +1191,11 @@ def _validated_transition_context(
     ).fetchone()
     if task is None or assignment is None or assignment["state"] != "active":
         raise StorageRefusal("assignment_inactive", "task has no active verified assignment")
+    if assignment["assignment_role"] == "hidden-worker":
+        raise StorageRefusal(
+            "hidden_terminal_only",
+            "hidden scientists emit no routine progress; use the cleanup-gated terminal operation",
+        )
     if assignment["runtime_instance_id"] != runtime_instance_id:
         raise StorageRefusal("runtime_mismatch", "task transition runtime does not own the assignment")
     runtime = store.connection.execute(

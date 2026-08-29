@@ -1,0 +1,42 @@
+{
+  "schema": 3,
+  "policy_version": "league.model-routing.2026-08-28.1",
+  "default_provider": "openai",
+  "provider_order": ["openai"],
+  "providers": {
+    "openai": {
+      "config_version": "openai.2026-08-28",
+      "capabilities": ["reasoning", "tools"],
+      "tiers": {
+        "COORDINATOR": {"model": "gpt-5.6-sol", "effort": "xhigh"},
+        "WORKER_FAST": {"model": "gpt-5.6-luna", "effort": "medium"},
+        "WORKER_STRONG": {"model": "gpt-5.6-sol", "effort": "xhigh"}
+      }
+    }
+  },
+  "evaluations": {
+    "openai/WORKER_FAST": {
+      "representative_tasks": 0,
+      "task_success_rate": 0.0,
+      "correction_rate": 1.0,
+      "minimum_representative_tasks": 20,
+      "minimum_task_success_rate": 0.95,
+      "maximum_correction_rate": 0.05
+    }
+  },
+  "policy": {
+    "quality_baseline": "WORKER_STRONG",
+    "safe_boundary_escalations": 1
+  },
+  "operator_overrides": [
+    {
+      "id": "sol-xhigh-2026-08-28",
+      "provider": "openai",
+      "model": "gpt-5.6-sol",
+      "effort": "xhigh",
+      "roles": ["shotcaller", "champion", "hidden-worker", "coordinator"],
+      "starts_at": "2026-08-28T00:00:00-07:00",
+      "expires_at": "2026-08-29T00:00:00-07:00"
+    }
+  ]
+}

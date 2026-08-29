@@ -239,6 +239,25 @@ def test_guarded_switch_crash_retry_and_drain(root: Path) -> None:
     state, _ = migrated_state(root, "switch")
     with SQLiteStorage(state) as store:
         context = seed_rollover(store)
+        incoming_owner = context["champion_ids"][0]
+        store.connection.execute(
+            """
+            INSERT INTO requests
+              (request_id,summary,requester_agent_id,owner_agent_id,return_to_agent_id,
+               state,version,created_at,updated_at,pending_owner_agent_id,pending_owner_squad_id)
+            VALUES('request:routed-before-rollover','Pending Squad route',?,?,?,
+                   'routed',1,?,?,?,?)
+            """,
+            (
+                incoming_owner,
+                incoming_owner,
+                incoming_owner,
+                AT2,
+                AT2,
+                OLD_ID,
+                SQUAD_ID,
+            ),
+        )
         before_bindings = {
             row["agent_id"]: tuple(row)
             for row in store.connection.execute(
@@ -343,6 +362,13 @@ def test_guarded_switch_crash_retry_and_drain(root: Path) -> None:
             )
         }
         assert intake == {OLD_ID: "draining", NEW_ID: "accepting"}
+        pending = store.connection.execute(
+            """
+            SELECT owner_agent_id,pending_owner_agent_id,pending_owner_squad_id,version
+              FROM requests WHERE request_id='request:routed-before-rollover'
+            """
+        ).fetchone()
+        assert tuple(pending) == (incoming_owner, NEW_ID, SQUAD_ID, 2)
         try:
             store.intake_prompt(
                 "prompt:old-after-switch",

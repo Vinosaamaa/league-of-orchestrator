@@ -62,6 +62,11 @@ Nothing here installs files, changes hooks, or connects to live Roster state.
   pagination, and JSON-derived Markdown/portable HTML.
 - Structured local-only project/evidence classification and one fail-closed
   final-rendered-payload validator shared by every League remote adapter.
+- One provider-neutral v1 routing slice with explicit/continuation/unique-strong
+  Squad ownership, exact direct-tiny bounds, recorded hidden scientists,
+  acknowledgement-gated transfer, safe Squad registration, parent-request
+  progress coalescing, versioned provider routing, and one evidence-triggered
+  model escalation.
 
 The proven watcher remains one deep module. The new storage slice is a small
 modular monolith: one composite `Storage` interface with cohesive administrative,
@@ -80,6 +85,7 @@ make test-storage
 make test-project-roster
 make test-request-lifecycle
 make test-runtime-lifecycle
+make test-routing-policy
 make test-skill-contracts
 make test-handoff-callsigns
 make test-acceptance
@@ -92,11 +98,14 @@ make test-all
 storage slice once, `make test-project-roster` runs the focused issues #9/#12
 contract, `make test-request-lifecycle` runs the grouped lifecycle
 suite, `make test-runtime-lifecycle` runs issues #7/#11/#14, and
+`make test-routing-policy` runs issue #36's deterministic owner/execution,
+Squad registration, parent-progress, and hidden-scientist contract, while
 `make test-skill-contracts` runs issue #10's synthetic provenance, privacy,
 duplicate-parity, CLI, and runtime-fallback contract, while
 `make test-handoff-callsigns` runs issues #8/#13, `make test-acceptance`
 runs the isolated issue-#23 foundation. `make test-affected` composes storage,
-acceptance, request lifecycle, runtime/skill lifecycle, and handoff/callsign
+acceptance, request lifecycle, runtime/skill/routing lifecycle, handoff/callsign,
+reporting/privacy, and public-safety
 coverage, and `make test-reporting-privacy` runs issues #22/#25 report, privacy, staged-guide,
 metadata, incident, renderer, pagination, and latency contracts.
 `make test-all` adds the inherited baseline once. Every
@@ -197,6 +206,7 @@ fake adapters.
 - [Advisory project catalog and project-grouped Roster](docs/PROJECT_CATALOG.md)
 - [Deterministic activity reports](docs/REPORTING.md)
 - [Outbound privacy boundary](docs/PRIVACY.md)
+- [Research-backed orchestration and model routing policy](docs/research/orchestration-model-routing-policy-evidence.md)
 - [Terminal-first Project Ledger design](docs/design/terminal-roster-ui.md)
 - [Baseline versus planned issues](docs/ROADMAP.md)
 

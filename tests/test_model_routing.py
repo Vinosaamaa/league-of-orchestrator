@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Quality-baseline, override, escalation, and outcome routing tests."""
+"""Provider config, semantic signals, overrides, eval gates, and escalation."""
 
 from __future__ import annotations
 
+import io
 import json
 import sys
 import tempfile
@@ -22,231 +23,316 @@ from storage_fixture import TASK_ID  # noqa: E402
 from storage_test_support import seeded_state  # noqa: E402
 
 
-AT3 = "2026-01-01T00:02:00Z"
-AT4 = "2026-01-01T00:03:00Z"
+AT = "2026-08-28T12:00:00-07:00"
+AFTER = "2026-08-29T12:00:00-07:00"
 
 
-def config(path: Path, *, fast_approved: bool) -> Path:
+def config(path: Path, *, evaluated: bool = False, override: bool = False) -> Path:
     value = {
-        "schema": 2,
-        "tiers": {
-            "COORDINATOR": {"model": "provider/coordinator", "effort": "high"},
-            "WORKER_FAST": {"model": "provider/fast", "effort": "medium"},
-            "WORKER_STRONG": {"model": "provider/strong", "effort": "xhigh"},
+        "schema": 3,
+        "policy_version": "test-policy.v3",
+        "default_provider": "alpha",
+        "provider_order": ["alpha", "beta"],
+        "providers": {
+            "alpha": {
+                "config_version": "alpha.v1",
+                "capabilities": ["reasoning"],
+                "tiers": {
+                    "COORDINATOR": {"model": "alpha/coordinator", "effort": "high"},
+                    "WORKER_FAST": {"model": "alpha/fast", "effort": "medium"},
+                    "WORKER_STRONG": {"model": "alpha/strong", "effort": "xhigh"},
+                },
+            },
+            "beta": {
+                "config_version": "beta.v1",
+                "capabilities": ["reasoning", "browser"],
+                "tiers": {
+                    "COORDINATOR": {"model": "beta/coordinator", "effort": "high"},
+                    "WORKER_FAST": {"model": "beta/fast", "effort": "medium"},
+                    "WORKER_STRONG": {"model": "beta/strong", "effort": "xhigh"},
+                },
+            },
         },
         "evaluations": {
-            "WORKER_FAST": {
-                "approved": fast_approved,
-                "representative_tasks": 12 if fast_approved else 0,
+            "alpha/WORKER_FAST": {
+                "representative_tasks": 24 if evaluated else 2,
+                "task_success_rate": 0.98 if evaluated else 0.5,
+                "correction_rate": 0.02 if evaluated else 0.5,
+                "minimum_representative_tasks": 20,
+                "minimum_task_success_rate": 0.95,
+                "maximum_correction_rate": 0.05,
             }
         },
         "policy": {"quality_baseline": "WORKER_STRONG", "safe_boundary_escalations": 1},
+        "operator_overrides": (
+            [
+                {
+                    "id": "today-sol-xhigh",
+                    "provider": "alpha",
+                    "model": "alpha/operator-strong",
+                    "effort": "xhigh",
+                    "roles": ["champion"],
+                    "starts_at": "2026-08-28T00:00:00-07:00",
+                    "expires_at": "2026-08-29T00:00:00-07:00",
+                }
+            ]
+            if override
+            else []
+        ),
     }
     path.write_text(json.dumps(value) + "\n", encoding="utf-8")
     return path
 
 
-def test_quality_baseline_and_explicit_overrides(root: Path) -> None:
-    _, state, _ = seeded_state(root, "routing-quality")
-    baseline_config = load_routing_config(config(root / "baseline.json", fast_approved=False))
-    evaluated_config = load_routing_config(config(root / "evaluated.json", fast_approved=True))
+def test_reliability_eval_and_explicit_precedence(root: Path) -> None:
+    _, state, _ = seeded_state(root, "model-quality")
     with SQLiteStorage(state) as store:
-        baseline = ModelRouter(baseline_config, store).choose(
+        baseline = ModelRouter(load_routing_config(config(root / "base.json")), store).choose(
             decision_id="route:baseline",
             subject_kind="task",
             subject_id=TASK_ID,
             role="champion",
-            profile="bounded",
-            chosen_at=AT3,
+            chosen_at=AFTER,
+            signals={"bounded_checkable": True},
         )
         assert baseline["tier"] == "WORKER_STRONG"
-        assert "No approved representative downgrade evidence" in baseline["reason"]
-
-        router = ModelRouter(evaluated_config, store)
-        explicit = router.choose(
+        assert baseline["reason_code"] == "reliability_baseline"
+        assert baseline["provider_config_version"] == "alpha.v1"
+        evaluated = ModelRouter(
+            load_routing_config(config(root / "evaluated.json", evaluated=True)), store
+        ).choose(
+            decision_id="route:evaluated",
+            subject_kind="task",
+            subject_id="bounded",
+            role="champion",
+            chosen_at=AFTER,
+            signals={"bounded_checkable": True},
+        )
+        assert evaluated["tier"] == "WORKER_FAST"
+        assert evaluated["reason_code"] == "evidence_downgrade"
+        explicit = ModelRouter(
+            load_routing_config(config(root / "explicit.json", evaluated=True)), store
+        ).choose(
             decision_id="route:explicit",
             subject_kind="task",
-            subject_id="synthetic-explicit",
+            subject_id="explicit",
             role="champion",
-            profile="bounded",
-            chosen_at=AT3,
-            explicit_model="user/model-exact",
-            explicit_effort="ultra",
+            chosen_at=AT,
+            signals={"bounded_checkable": True},
+            explicit_provider="beta",
+            explicit_model="user/exact",
+            explicit_effort="max",
+            required_capabilities=("browser",),
         )
-        assert explicit["tier"] == "WORKER_FAST"
-        assert explicit["model"] == "user/model-exact" and explicit["effort"] == "ultra"
+        assert (explicit["provider"], explicit["model"], explicit["effort"]) == (
+            "beta",
+            "user/exact",
+            "max",
+        )
+        assert explicit["reason_code"] == "explicit_override"
 
 
-def test_safe_boundary_escalation(root: Path) -> None:
-    _, state, _ = seeded_state(root, "routing-escalation")
-    routing_config = load_routing_config(config(root / "escalation.json", fast_approved=True))
-    with SQLiteStorage(state) as store:
-        router = ModelRouter(routing_config, store)
-        router.choose(
-            decision_id="route:explicit",
-            subject_kind="task",
-            subject_id="synthetic-explicit",
-            role="champion",
-            profile="bounded",
-            chosen_at=AT3,
-            explicit_model="user/model-exact",
-            explicit_effort="ultra",
-        )
-        escalated = router.escalate(
-            decision_id="route:escalated",
-            prior_decision_id="route:explicit",
-            failure_class="failed_acceptance",
-            chosen_at=AT4,
-        )
-        assert escalated["state"] == "escalated" and escalated["tier"] == "WORKER_STRONG"
-        assert escalated["model"] == "user/model-exact" and escalated["effort"] == "ultra"
-        blocked = router.escalate(
-            decision_id="route:blocked",
-            prior_decision_id="route:escalated",
-            failure_class="conflicting_results",
-            chosen_at=AT4,
-        )
-        assert blocked["state"] == "blocked" and blocked["escalation_count"] == 1
-        try:
-            router.escalate(
-                decision_id="route:unsupported",
-                prior_decision_id="route:explicit",
-                failure_class="preference",
-                chosen_at=AT4,
-            )
-        except StorageRefusal as exc:
-            assert exc.code == "escalation_not_evidenced"
-        else:
-            raise AssertionError("unevidenced escalation was accepted")
-
-
-def test_outcome_retry_is_idempotent_by_outcome_id(root: Path) -> None:
-    _, state, _ = seeded_state(root, "routing-outcome")
-    routing_config = load_routing_config(config(root / "outcome.json", fast_approved=True))
-    with SQLiteStorage(state) as store:
-        router = ModelRouter(routing_config, store)
-        router.choose(
-            decision_id="route:outcome",
-            subject_kind="task",
-            subject_id=TASK_ID,
-            role="champion",
-            profile="bounded",
-            chosen_at=AT3,
-        )
-        outcome = router.record_outcome(
-            outcome_id="outcome:explicit",
-            decision_id="route:outcome",
-            success=True,
-            corrections=1,
-            latency_ms=1250,
-            cost_microunits=42,
-            recorded_at=AT4,
-        )
-        assert outcome["success"] == 1 and outcome["corrections"] == 1
-        retried = router.record_outcome(
-            outcome_id="outcome:explicit",
-            decision_id="route:outcome",
-            success=True,
-            corrections=1,
-            latency_ms=1250,
-            cost_microunits=42,
-            recorded_at=AT4,
-        )
-        assert retried["idempotent"] is True
-        try:
-            router.record_outcome(
-                outcome_id="outcome:explicit",
-                decision_id="route:outcome",
-                success=True,
-                corrections=2,
-                latency_ms=1250,
-                cost_microunits=42,
-                recorded_at=AT4,
-            )
-        except StorageRefusal as exc:
-            assert exc.code == "routing_outcome_conflict"
-        else:
-            raise AssertionError("outcome id was reused with different evidence")
-
-
-def test_malformed_evaluations_are_refused(root: Path) -> None:
-    valid = json.loads(config(root / "valid.json", fast_approved=True).read_text())
-    malformed = (
-        [],
-        {"WORKER_FAST": []},
-        {"WORKER_FAST": {"approved": "true", "representative_tasks": 12}},
-        {"WORKER_FAST": {"approved": True, "representative_tasks": True}},
+def test_model_decision_corpus(root: Path) -> None:
+    corpus = json.loads(
+        (ROOT / "tests" / "fixtures" / "routing_decision_corpus.json").read_text()
     )
-    for index, evaluations in enumerate(malformed):
-        value = dict(valid)
-        value["evaluations"] = evaluations
-        path = root / f"malformed-{index}.json"
-        path.write_text(json.dumps(value) + "\n", encoding="utf-8")
-        try:
-            load_routing_config(path)
-        except StorageRefusal as exc:
-            assert exc.code == "routing_config_invalid"
-        else:
-            raise AssertionError(f"malformed routing evaluations were accepted: {index}")
-    invalid_policy = dict(valid)
-    invalid_policy["policy"] = {
-        "quality_baseline": "WORKER_STRONG",
-        "safe_boundary_escalations": True,
-    }
-    try:
-        ModelRouter(invalid_policy, None)  # type: ignore[arg-type]
-    except StorageRefusal as exc:
-        assert exc.code == "routing_config_invalid"
-    else:
-        raise AssertionError("Boolean safe-boundary escalation count was accepted")
-
-
-def test_one_atomic_escalation_child_per_prior(root: Path) -> None:
-    _, state, _ = seeded_state(root, "routing-race")
-    routing_config = load_routing_config(config(root / "race.json", fast_approved=True))
+    _, state, _ = seeded_state(root, "model-corpus")
     with SQLiteStorage(state) as store:
-        ModelRouter(routing_config, store).choose(
+        for index, case in enumerate(corpus["model"]):
+            routing = load_routing_config(
+                config(
+                    root / f"corpus-{index}.json",
+                    evaluated=case.get("evaluated", False),
+                    override=case.get("override", False),
+                )
+            )
+            try:
+                decision = ModelRouter(routing, store).choose(
+                    decision_id=f"route:corpus:{index}",
+                    subject_kind="task",
+                    subject_id=f"corpus:{index}",
+                    role="champion",
+                    chosen_at=case["at"],
+                    signals=case["signals"],
+                    required_capabilities=tuple(case.get("required_capabilities", [])),
+                    explicit_provider=case.get("explicit_provider"),
+                    explicit_model=case.get("explicit_model"),
+                    explicit_effort=case.get("explicit_effort"),
+                )
+            except StorageRefusal as exc:
+                assert exc.code == case.get("refusal"), case["name"]
+                continue
+            assert "refusal" not in case, case["name"]
+            assert all(decision[key] == value for key, value in case["expected"].items()), case[
+                "name"
+            ]
+            if "escalate_failure" in case:
+                escalated = ModelRouter(routing, store).escalate(
+                    decision_id=f"route:corpus:{index}:escalated",
+                    prior_decision_id=f"route:corpus:{index}",
+                    failure_class=case["escalate_failure"],
+                    chosen_at=case["at"],
+                )
+                assert all(
+                    escalated[key] == value
+                    for key, value in case["escalated_expected"].items()
+                ), case["name"]
+
+
+def test_operator_expiry_capability_fallback_and_risk(root: Path) -> None:
+    _, state, _ = seeded_state(root, "model-override")
+    routing = load_routing_config(config(root / "override.json", evaluated=True, override=True))
+    with SQLiteStorage(state) as store:
+        router = ModelRouter(routing, store)
+        active = router.choose(
+            decision_id="route:override",
+            subject_kind="task",
+            subject_id="today",
+            role="champion",
+            chosen_at=AT,
+            signals={"bounded_checkable": True},
+        )
+        assert active["operator_override_id"] == "today-sol-xhigh"
+        assert active["reason_code"] == "operator_override"
+        expired = router.choose(
+            decision_id="route:expired",
+            subject_kind="task",
+            subject_id="tomorrow",
+            role="champion",
+            chosen_at=AFTER,
+            signals={"bounded_checkable": True},
+        )
+        assert expired["operator_override_id"] is None and expired["tier"] == "WORKER_FAST"
+        fallback = router.choose(
+            decision_id="route:fallback",
+            subject_kind="task",
+            subject_id="browser",
+            role="hidden-worker",
+            chosen_at=AFTER,
+            signals={"bounded_checkable": True},
+            required_capabilities=("browser",),
+        )
+        assert fallback["provider"] == "beta" and fallback["fallback_from_provider"] == "alpha"
+        assert fallback["reason_code"] == "provider_capability_fallback"
+        risk = router.choose(
+            decision_id="route:risk",
+            subject_kind="task",
+            subject_id="risk",
+            role="hidden-worker",
+            chosen_at=AFTER,
+            signals={"bounded_checkable": True, "high_impact": True},
+        )
+        assert risk["tier"] == "WORKER_STRONG"
+
+
+def test_one_concrete_safe_boundary_escalation(root: Path) -> None:
+    _, state, _ = seeded_state(root, "model-escalation")
+    routing = load_routing_config(config(root / "escalation.json", evaluated=True))
+    with SQLiteStorage(state) as store:
+        router = ModelRouter(routing, store)
+        router.choose(
             decision_id="route:prior",
             subject_kind="task",
             subject_id=TASK_ID,
             role="champion",
-            profile="bounded",
-            chosen_at=AT3,
+            chosen_at=AFTER,
+            signals={"bounded_checkable": True},
+        )
+        escalated = router.escalate(
+            decision_id="route:escalated",
+            prior_decision_id="route:prior",
+            failure_class="failed_acceptance",
+            chosen_at=AFTER,
+        )
+        assert escalated["state"] == "escalated" and escalated["tier"] == "WORKER_STRONG"
+        blocked = router.escalate(
+            decision_id="route:blocked",
+            prior_decision_id="route:escalated",
+            failure_class="conflicting_results",
+            chosen_at=AFTER,
+        )
+        assert blocked["state"] == "blocked" and blocked["escalation_count"] == 1
+        outcome = router.record_outcome(
+            outcome_id="outcome:one",
+            decision_id="route:escalated",
+            success=True,
+            corrections=0,
+            latency_ms=500,
+            cost_microunits=None,
+            recorded_at=AFTER,
+        )
+        assert outcome["cost_microunits"] is None
+
+
+def test_explicit_target_pin_blocks_silent_stronger_replacement(root: Path) -> None:
+    _, state, _ = seeded_state(root, "model-explicit-escalation")
+    routing = load_routing_config(config(root / "explicit-escalation.json", evaluated=True))
+    with SQLiteStorage(state) as store:
+        router = ModelRouter(routing, store)
+        router.choose(
+            decision_id="route:explicit-prior",
+            subject_kind="task",
+            subject_id=TASK_ID,
+            role="champion",
+            chosen_at=AFTER,
+            signals={"bounded_checkable": True},
+            explicit_model="user/pinned",
+            explicit_effort="medium",
+        )
+        blocked = router.escalate(
+            decision_id="route:explicit-blocked",
+            prior_decision_id="route:explicit-prior",
+            failure_class="tool_failure",
+            chosen_at=AFTER,
+        )
+        assert blocked["state"] == "blocked"
+        assert (blocked["model"], blocked["effort"], blocked["escalation_count"]) == (
+            "user/pinned",
+            "medium",
+            0,
         )
 
+
+def test_atomic_single_escalation_child(root: Path) -> None:
+    _, state, _ = seeded_state(root, "model-race")
+    routing = load_routing_config(config(root / "race.json", evaluated=True))
+    with SQLiteStorage(state) as store:
+        ModelRouter(routing, store).choose(
+            decision_id="route:race-prior",
+            subject_kind="task",
+            subject_id=TASK_ID,
+            role="champion",
+            chosen_at=AFTER,
+            signals={"bounded_checkable": True},
+        )
     barrier = threading.Barrier(2)
 
-    def escalate(decision_id: str) -> tuple[str, str]:
+    def race(decision_id: str) -> str:
         with SQLiteStorage(state) as store:
-            router = ModelRouter(routing_config, store)
             barrier.wait()
             try:
-                result = router.escalate(
+                ModelRouter(routing, store).escalate(
                     decision_id=decision_id,
-                    prior_decision_id="route:prior",
-                    failure_class="failed_acceptance",
-                    chosen_at=AT4,
+                    prior_decision_id="route:race-prior",
+                    failure_class="tool_failure",
+                    chosen_at=AFTER,
                 )
             except StorageRefusal as exc:
-                return "refused", exc.code
-            return "created", str(result["decision_id"])
+                return exc.code
+            return "created"
 
     with ThreadPoolExecutor(max_workers=2) as pool:
-        results = list(pool.map(escalate, ("route:child-a", "route:child-b")))
-    assert sorted(result[0] for result in results) == ["created", "refused"]
-    assert next(result[1] for result in results if result[0] == "refused") == "routing_escalation_conflict"
-    with SQLiteStorage(state) as store:
-        count = store.connection.execute(
-            "SELECT COUNT(*) FROM model_routing_decisions WHERE prior_decision_id='route:prior'"
-        ).fetchone()[0]
-        assert count == 1
+        assert sorted(pool.map(race, ("route:race-a", "route:race-b"))) == [
+            "created",
+            "routing_escalation_conflict",
+        ]
 
 
-def test_stable_cli_routes_configured_provider_name(root: Path) -> None:
-    _, state, _ = seeded_state(root, "cli")
-    config_path = config(root / "cli-routing.json", fast_approved=True)
-    import io
-
+def test_cli_and_malformed_config(root: Path) -> None:
+    _, state, _ = seeded_state(root, "model-cli")
+    config_path = config(root / "cli.json", evaluated=True)
+    signals = root / "signals.json"
+    signals.write_text('{"bounded_checkable":true}\n', encoding="utf-8")
     output = io.BytesIO()
     code = league_main(
         [
@@ -264,29 +350,37 @@ def test_stable_cli_routes_configured_provider_name(root: Path) -> None:
             TASK_ID,
             "--role",
             "champion",
-            "--profile",
-            "bounded",
+            "--signals",
+            str(signals),
             "--at",
-            AT3,
+            AFTER,
         ],
         output=output,
     )
-    payload = json.loads(output.getvalue())
-    assert code == 0
-    assert payload["result"]["tier"] == "WORKER_FAST"
-    assert payload["result"]["model"] == "provider/fast"
+    assert code == 0 and json.loads(output.getvalue())["result"]["tier"] == "WORKER_FAST"
+    malformed = json.loads(config_path.read_text())
+    malformed["policy_version"] = ""
+    bad = root / "bad.json"
+    bad.write_text(json.dumps(malformed), encoding="utf-8")
+    try:
+        load_routing_config(bad)
+    except StorageRefusal as exc:
+        assert exc.code == "routing_config_invalid"
+    else:
+        raise AssertionError("unversioned provider config was accepted")
 
 
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="league-model-routing-") as temporary:
         root = Path(temporary)
-        test_quality_baseline_and_explicit_overrides(root)
-        test_safe_boundary_escalation(root)
-        test_outcome_retry_is_idempotent_by_outcome_id(root)
-        test_malformed_evaluations_are_refused(root)
-        test_one_atomic_escalation_child_per_prior(root)
-        test_stable_cli_routes_configured_provider_name(root)
-    print("PASS: quality baseline, exact overrides, one safe escalation, role outcomes, and assignment-neutral routing API")
+        test_model_decision_corpus(root)
+        test_reliability_eval_and_explicit_precedence(root)
+        test_operator_expiry_capability_fallback_and_risk(root)
+        test_one_concrete_safe_boundary_escalation(root)
+        test_explicit_target_pin_blocks_silent_stronger_replacement(root)
+        test_atomic_single_escalation_child(root)
+        test_cli_and_malformed_config(root)
+    print("PASS: versioned provider policy, eval gate, override expiry, fallback, and one escalation")
 
 
 if __name__ == "__main__":

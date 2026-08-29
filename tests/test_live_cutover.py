@@ -13,7 +13,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / "src"), str(ROOT / "tests")]
 
-from league.livecutover import run_live_cutover  # noqa: E402
+from league.livecutover import run_live_cutover, verify_legacy_archive  # noqa: E402
 from league.precutover import run_pre_cutover  # noqa: E402
 from league.storage import StorageRefusal  # noqa: E402
 from test_pre_cutover import fixture_plan, write_json  # noqa: E402
@@ -23,6 +23,24 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="league-live-cutover-") as temporary:
         root = Path(temporary)
         fixture = fixture_plan(root / "fixture")
+        write_json(fixture["hook"], {"hooks": {}})
+        cursor_hooks = fixture["live"] / "config/cursor-hooks.json"
+        write_json(
+            cursor_hooks,
+            {"version": 1, "hooks": {"sessionStart": [{"command": "keep-me"}]}},
+        )
+        fixture["plan"]["current_targets"].append(
+            {
+                "target_id": "cursor-hooks",
+                "kind": "hook_config",
+                "path": str(cursor_hooks),
+                "required": True,
+            }
+        )
+        fixture["plan"]["proposed"]["hooks"].append(
+            {"harness": "cursor", "target": str(cursor_hooks)}
+        )
+        write_json(fixture["plan_path"], fixture["plan"])
         acceptance = root / "acceptance"
         acceptance.mkdir()
         sentinel = root / "sentinel"
@@ -71,6 +89,33 @@ def main() -> None:
         )
         assert watcher.returncode == 0, watcher.stderr
         assert json.loads(watcher.stdout)["writer"] == "sqlite"
+        hook_receipts = {item["harness"]: item for item in applied["hooks"]}
+        assert hook_receipts["codex"]["added"] == ["UserPromptSubmit", "Stop"]
+        assert hook_receipts["cursor"]["added"] == ["beforeSubmitPrompt", "stop"]
+        cursor_document = json.loads(cursor_hooks.read_text())
+        assert cursor_document["hooks"]["sessionStart"] == [{"command": "keep-me"}]
+        assert applied["watcher_smoke"]["status"] == "passed"
+        archive = (
+            Path(fixture["plan"]["proposed"]["archive_root"])
+            / applied["writer_generation"]
+        )
+        verified = verify_legacy_archive(archive)
+        assert verified["verified"] is True
+        assert (archive / "RESTORE.md").is_file()
+        restore = (archive / "RESTORE.md").read_text(encoding="utf-8")
+        assert "acceptance archive-verify" in restore
+        assert "never copy by hand" in restore
+        manifest = json.loads((archive / "archive-manifest.json").read_text())
+        archived = {item["target_id"] for item in manifest["entries"]}
+        assert {"hooks", "cursor-hooks", "installed", "legacy", "watcher-launcher"} <= archived
+        archived_installed = archive / "legacy-system/installed/bin/agent-watcher"
+        archived_installed.write_bytes(archived_installed.read_bytes() + b"tampered")
+        try:
+            verify_legacy_archive(archive)
+        except StorageRefusal as exc:
+            assert exc.code == "legacy_archive_mismatch"
+        else:
+            raise AssertionError("tampered legacy archive unexpectedly verified")
         try:
             run_live_cutover(
                 acceptance,

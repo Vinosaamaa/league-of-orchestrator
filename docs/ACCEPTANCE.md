@@ -230,6 +230,16 @@ installation, canonical import, hook/watcher mutation, live delivery, or the
 live writer switch. Those exact proposed mutations remain separately gated by
 the no-apply preflight receipt and explicit cutover authority.
 
+The authorized cutover archives the complete replaced legacy system beneath
+the plan's owner-only archive root, keyed by the new SQLite writer generation.
+The archive contains exact hashed copies of the old watcher bundle and launcher,
+hook configurations, JSON/JSONL records, watcher state, pools, routing, and
+resources. Its `RESTORE.md` records the guarded restoration order, and
+`league acceptance archive-verify --archive <generation-directory>` verifies
+every archived node before any separately authorized rollback. The archive is
+never an active writer; stable hooks retain their existing command paths and
+switch together by resolving the new SQLite-backed launcher.
+
 The command refuses missing, relative, symbolic-link, or malformed sentinels
 and refuses an existing namespace. It accepts at most 16 byte sentinels so a
 caller cannot create an unbounded preflight workload. The global

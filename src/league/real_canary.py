@@ -13,6 +13,7 @@ import json
 import os
 import re
 import subprocess
+import time
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -323,6 +324,12 @@ def _create_repository_artifact_canary(
 
 def _create_herdr_canary(home: Path, worktree: Path, namespace: str) -> dict[str, str]:
     name = f"l23{hashlib.sha256(namespace.encode('utf-8')).hexdigest()[:12]}"
+    repository = worktree.parent / "repository"
+    if not repository.is_dir() or repository.is_symlink():
+        raise StorageRefusal("real_canary_scope_refused", "disposable repository identity changed")
+    trust_override = (
+        f"projects.{json.dumps(str(repository))}.trust_level=\"trusted\""
+    )
     if _exact_agent(home, name) is not None:
         raise StorageRefusal("real_canary_name_conflict", "Herdr canary name is already active")
     split = _herdr(
@@ -369,6 +376,8 @@ def _create_herdr_canary(home: Path, worktree: Path, namespace: str) -> dict[str
             "gpt-5.6-sol",
             "--config",
             'model_reasoning_effort="high"',
+            "--config",
+            trust_override,
         ),
         home,
         timeout=150,
@@ -392,8 +401,6 @@ def _create_herdr_canary(home: Path, worktree: Path, namespace: str) -> dict[str
         name,
         "Reply exactly LEAGUE23_CANARY_READY. Do not edit files or run commands.",
         "--wait",
-        "--until",
-        "idle",
         "--timeout",
         str(READINESS_WAIT_MILLISECONDS),
     )
@@ -414,10 +421,23 @@ def _create_herdr_canary(home: Path, worktree: Path, namespace: str) -> dict[str
             raise StorageRefusal(
                 "real_canary_command_failed", "Herdr readiness prompt was not accepted"
             )
+        if prompted.returncode == 0:
+            _run(
+                (
+                    "herdr", "pane", "wait-output", pane_id,
+                    "--match", "LEAGUE23_CANARY_READY",
+                    "--source", "recent-unwrapped", "--lines", "160",
+                    "--timeout", "15000",
+                ),
+                cwd=home,
+                allowed=frozenset({0, 1}),
+                timeout=20,
+            )
         observed = _run(read_arguments, cwd=home)
         if "LEAGUE23_CANARY_READY" in observed.stdout:
             break
         if attempt == 0 and error_code == "agent_prompt_stalled":
+            time.sleep(1)
             continue
         break
     if observed is None:
@@ -1088,16 +1108,22 @@ def _cleanup_failed_herdr(
             "failed canary agent endpoint identity changed",
         )
     if agent is not None and agent.get("agent_status") != "done":
-        _run(
-            (
-                "herdr", "agent", "prompt", str(agent_name), "/exit",
-                "--wait", "--until", "done", "--timeout", "30000",
-            ),
-            cwd=home,
-            allowed=frozenset({0, 1}),
-            timeout=45,
-        )
-        remaining = _exact_agent(home, str(agent_name))
+        remaining = agent
+        for attempt in range(2):
+            _run(
+                (
+                    "herdr", "agent", "prompt", str(agent_name), "/exit",
+                    "--wait", "--timeout", "30000",
+                ),
+                cwd=home,
+                allowed=frozenset({0, 1}),
+                timeout=45,
+            )
+            remaining = _exact_agent(home, str(agent_name))
+            if remaining is None or remaining.get("agent_status") == "done":
+                break
+            if attempt == 0:
+                time.sleep(1)
         if remaining is not None and remaining.get("agent_status") != "done":
             raise StorageRefusal(
                 "real_canary_failure_cleanup_refused",

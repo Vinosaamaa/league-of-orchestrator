@@ -39,6 +39,8 @@ def _parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("codex-stop-hook")
     commands.add_parser("codex-user-prompt-hook")
+    commands.add_parser("cursor-stop-hook")
+    commands.add_parser("cursor-before-submit-hook")
     commands.add_parser("status")
     for name in (
         "enable", "disable", "allow-stop", "wait", "supervise", "deliver",
@@ -57,7 +59,7 @@ def _state_root() -> Path:
 
 
 def _actor(store: SQLiteStorage, args: argparse.Namespace, payload: dict[str, Any]) -> Any:
-    session = args.session_id or payload.get("session_id")
+    session = args.session_id or payload.get("session_id") or payload.get("conversation_id")
     if session:
         row = store.connection.execute(
             "SELECT agent_id,callsign FROM agent_instances WHERE retired_at IS NULL AND (thread_id=? OR agent_id=?)",
@@ -83,12 +85,18 @@ def _scope(store: SQLiteStorage, actor_id: str, callsign: str) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     args, _ = _parser().parse_known_args(argv)
-    if args.command not in {"codex-stop-hook", "codex-user-prompt-hook", "status"}:
+    if args.command not in {
+        "codex-stop-hook",
+        "codex-user-prompt-hook",
+        "cursor-stop-hook",
+        "cursor-before-submit-hook",
+        "status",
+    }:
         raise StorageRefusal(
             "legacy_writer_fenced",
             "SQLite is canonical; this legacy writer command is fenced",
         )
-    payload = _payload() if args.command.startswith("codex-") else {}
+    payload = _payload() if args.command.endswith("-hook") else {}
     with SQLiteStorage(_state_root(), request_wal=False) as store:
         actor = _actor(store, args, payload)
         if actor is None:
@@ -96,13 +104,13 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         actor_id, callsign = str(actor[0]), str(actor[1])
         scope = _scope(store, actor_id, callsign)
-        if args.command == "codex-user-prompt-hook":
+        if args.command in {"codex-user-prompt-hook", "cursor-before-submit-hook"}:
             store.note_user_message(
                 scope, actor_id, datetime.now().astimezone().isoformat(timespec="seconds")
             )
             _emit({})
             return 0
-        if args.command == "codex-stop-hook":
+        if args.command in {"codex-stop-hook", "cursor-stop-hook"}:
             terminal = hashlib.sha256(
                 json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
             ).hexdigest()
@@ -112,11 +120,15 @@ def main(argv: list[str] | None = None) -> int:
                 terminal,
                 datetime.now().astimezone().isoformat(timespec="seconds"),
             )
-            _emit(
-                {"decision": "block", "reason": "League has unresolved obligations."}
-                if result["decision"] == "block"
-                else {}
-            )
+            blocked = result["decision"] == "block"
+            if args.command == "cursor-stop-hook":
+                _emit({"followup_message": "League has unresolved obligations."} if blocked else {})
+            else:
+                _emit(
+                    {"decision": "block", "reason": "League has unresolved obligations."}
+                    if blocked
+                    else {}
+                )
             return 0
         _emit({"writer": "sqlite", "shotcaller": callsign})
         return 0

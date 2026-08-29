@@ -469,6 +469,7 @@ def test_schema_and_command_inventory() -> None:
         "league-pre-cutover-plan.schema.json",
         "league-pre-cutover-receipt.schema.json",
         "league-cleanup-canary-adapters.schema.json",
+        "league-real-cleanup-artifact-profile.schema.json",
         "league-real-cleanup-canary-receipt.schema.json",
     ):
         added = json.loads((ROOT / "schema" / name).read_text(encoding="utf-8"))
@@ -483,6 +484,7 @@ def test_schema_and_command_inventory() -> None:
     )
     inventory_value = json.loads(inventory.stdout)["result"]
     assert "acceptance.cleanup-canary" in inventory_value["commands"]
+    assert "league-real-cleanup-artifact-profile.schema.json" in inventory_value["schemas"]
     assert "league-real-cleanup-canary-receipt.schema.json" in inventory_value["schemas"]
     help_result = subprocess.run(
         [str(LEAGUE), "--help"], text=True, capture_output=True, check=True, timeout=10

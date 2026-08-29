@@ -341,9 +341,10 @@ class HerdrHarnessAdapter(_BaseAdapter):
                 "done",
                 "--timeout",
                 "30000",
-            ),
-            allow_failure=True,
+            )
         )
+        if completed.returncode != 0:
+            raise StorageRefusal("cleanup_adapter_failed", "Codex canary exit was rejected")
         remaining = self._agent()
         if remaining is not None and remaining.get("agent_status") != "done":
             raise StorageRefusal("cleanup_adapter_failed", "Codex canary did not exit")

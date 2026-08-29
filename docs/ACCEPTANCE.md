@@ -53,29 +53,42 @@ snapshot parity plus zero preflight writes. It does not claim continuous
 external stability; a separately authorized cutover must quiesce and lock live
 writers before relying on those preconditions.
 
-The receipt `league.pre-cutover-receipt.v1` adds these proofs to the foundation:
+The receipt `league.pre-cutover-receipt.v1` adds four grouped proofs.
+
+### Migration and rollback proof
 
 - a consistent explicit-binding copy of the caller's legacy state, strict
   dry-run, isolated import, exact legacy-field and row-count parity, source
   recheck, verified SQLite backup, and restricted rollback export;
 - sandbox-only backup and restore of every current target, including exact
   absent-target rollback instructions;
+
+### Staged-install proof
+
 - a staged-inactive League and compatibility-watcher bundle with exact
   source/release/staged bytes, version and manifest parity, executable
-  permissions, launcher/help/schema/hook checks, and pointer rollback;
+  permissions, launcher/help/schema/hook checks, and pointer rollback.
+
+### Lifecycle proof
+
 - one fully integrated synthetic request, assignment, transition delivery,
   Stop block/allow, exact fake-resource teardown, answer, and safe-finish gate;
 - Codex/Herdr, Pi/Herdr, and attached Codex/tmux contract canaries using only
   deterministic doubles. Cursor and genuine Herdr/tmux execution remain
-  explicitly unverified; these receipts are not real-runtime claims;
+  explicitly unverified; these receipts are not real-runtime claims.
+
+### Cutover-model proof
+
 - the crash-restart writer-pointer matrix, exact fake canary cleanup, live-path
   and caller sentinel parity, and source/staged/current-installed manifest
-  checks; and
+  checks;
 - one deterministic `league.cutover-mutation-manifest.v1` containing every
   proposed backup, inactive install/import, launcher/hook/pointer switch,
   writer activation, live smoke, intake reopen, and exact rollback target. Every
   operation has `applied:false`, and the operation receipt stops at
   `awaiting_authority`.
+
+## Normative supervision compatibility policy
 
 Supervision evidence keeps normal transitions and user prompts on an immediate
 event-driven registered-listener path. The isolated benchmark records wake
@@ -119,10 +132,8 @@ per-action and final teardown receipts. Fault injection stops after the archive
 external effect, then a separate League CLI process reopens the SQLite store and
 resumes the same operation idempotently. Only `cleanup_completed` clears Stop.
 
-Readiness uses the same 30-second, maximum-two-observation compatibility cadence
-recorded by the pre-cutover mutation manifest. It sends no periodic unchanged
-message and defines no 15-second fallback. The command never uses the user's
-home directory, canonical League state, or a global install. It is a real
+Readiness uses the normative supervision compatibility policy above. The
+command never uses the user's home directory, canonical League state, or a global install. It is a real
 Codex/Herdr canary only; it is not evidence for Cursor, Pi, another harness,
 tmux, a live repository, or the final cutover.
 
@@ -180,7 +191,6 @@ make test-runtime-lifecycle
 make test-skill-contracts
 make test-handoff-callsigns
 make test-reporting-privacy
-make test-affected
 ```
 
 The staged migration assertion and strict receipt schema follow

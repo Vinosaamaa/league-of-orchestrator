@@ -40,7 +40,7 @@ def runtime_cleanup_identity(
     if not all((runtime_instance_id, endpoint_identity, runtime_generation)):
         raise StorageRefusal("cleanup_identity_mismatch", "runtime cleanup identity is incomplete")
     runtime = store.connection.execute(
-        "SELECT endpoint,runtime_generation,status FROM runtime_instances WHERE runtime_instance_id=?",
+        "SELECT endpoint,runtime_generation,status,verified FROM runtime_instances WHERE runtime_instance_id=?",
         (runtime_instance_id,),
     ).fetchone()
     if runtime is None:
@@ -119,16 +119,16 @@ def close_runtime_for_cleanup(
             runtime = runtime_cleanup_identity(
                 store, runtime_instance_id, endpoint_identity, runtime_generation
             )
-            if runtime["status"] == "closed":
+            if runtime["status"] == "closed" and not bool(runtime["verified"]):
                 return {
                     "runtime_instance_id": runtime_instance_id,
                     "status": "closed",
                     "idempotent": True,
                 }
-            if runtime["status"] not in {"active", "idle"}:
+            if runtime["status"] not in {"active", "idle", "closed"}:
                 raise StorageRefusal("cleanup_identity_mismatch", "runtime is not cleanup-eligible")
             store.connection.execute(
-                "UPDATE runtime_instances SET status='closed',last_seen_at=? WHERE runtime_instance_id=?",
+                "UPDATE runtime_instances SET status='closed',verified=0,last_seen_at=? WHERE runtime_instance_id=?",
                 (at, runtime_instance_id),
             )
     except StorageRefusal:

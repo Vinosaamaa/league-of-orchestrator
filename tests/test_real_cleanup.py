@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import subprocess
 import sys
@@ -28,6 +29,7 @@ from league.real_canary import (  # noqa: E402
     LIFECYCLE_TASK_ID,
     SHOTCALLER_ID,
     _cleanup_files,
+    _cleanup_failed_canary,
     _codex_session_id,
     _create_git_canary,
     _settle_transition_and_request,
@@ -35,7 +37,7 @@ from league.real_canary import (  # noqa: E402
 )
 from league.sqlite_handoff_schema import CHAMPION_SEED, SHUFFLE_VERSION  # noqa: E402
 from league.sqlite_store import SQLiteStorage  # noqa: E402
-from league.storage import StorageRefusal  # noqa: E402
+from league.storage import RuntimeRegistrationCommand, StorageRefusal  # noqa: E402
 from storage_test_support import migrated_state  # noqa: E402
 
 
@@ -59,6 +61,18 @@ def run(arguments: Sequence[str]) -> str:
     )
     assert completed.returncode == 0, completed.stderr
     return completed.stdout.strip()
+
+
+def herdr_identity(agent_name: str = "cleanupcanary") -> dict[str, str]:
+    return {
+        "agent_name": agent_name,
+        "workspace_id": "w-test",
+        "pane_id": "w-test:p-canary",
+        "terminal_id": "terminal-canary",
+        "session_id": "canary-session",
+        "runtime_instance_id": "runtime:canary",
+        "runtime_generation": "generation:canary",
+    }
 
 
 def git_fixture(root: Path) -> dict[str, Any]:
@@ -211,6 +225,7 @@ class FakeHerdrRunner:
         self.agent = True
         self.pane = True
         self.fail_close_once = False
+        self.fail_exit_once = False
         self.calls: list[tuple[str, ...]] = []
 
     def run(
@@ -233,6 +248,9 @@ class FakeHerdrRunner:
             )
             output = json.dumps({"result": {"agents": agents}})
         elif args[1:3] == ("agent", "prompt"):
+            if self.fail_exit_once:
+                self.fail_exit_once = False
+                return subprocess.CompletedProcess(list(args), 1, "", "synthetic refusal")
             self.agent = "done"
             output = json.dumps({"result": {"submitted": True}})
         elif args[1:3] == ("pane", "list"):
@@ -262,15 +280,7 @@ def test_archive_git_and_scope(root: Path) -> None:
         "scope": "disposable-canary",
         "temporary_root": str(root),
         "archive_path": str(root / "archive/identity.json"),
-        "herdr": {
-            "agent_name": "cleanupcanary",
-            "workspace_id": "w-test",
-            "pane_id": "w-test:p-canary",
-            "terminal_id": "terminal-canary",
-            "session_id": "canary-session",
-            "runtime_instance_id": "runtime:canary",
-            "runtime_generation": "generation:canary",
-        },
+        "herdr": herdr_identity(),
         "git": git,
         "callsign": {
             "assignment_id": "callsign-assignment:canary",
@@ -334,15 +344,7 @@ def test_herdr_and_callsign_exact_cleanup(root: Path) -> None:
     root.mkdir(parents=True)
     state, _ = migrated_state(root, "sqlite")
     runner = FakeHerdrRunner()
-    identity = {
-        "agent_name": "cleanupcanary",
-        "workspace_id": "w-test",
-        "pane_id": "w-test:p-canary",
-        "terminal_id": "terminal-canary",
-        "session_id": "canary-session",
-        "runtime_instance_id": "runtime:canary",
-        "runtime_generation": "generation:canary",
-    }
+    identity = herdr_identity()
     with SQLiteStorage(state) as store:
         assignment = active_callsign(store)
         harness_action = {
@@ -354,6 +356,9 @@ def test_herdr_and_callsign_exact_cleanup(root: Path) -> None:
             "intended_state": {"completed": True, "action": "session_exit"},
         }
         harness = HerdrHarnessAdapter(identity, runner)
+        runner.fail_exit_once = True
+        refused(lambda: harness.apply(harness_action), "cleanup_adapter_failed")
+        assert runner.agent is True
         harness.apply(harness_action)
         assert harness.inspect(harness_action) == harness_action["intended_state"]
 
@@ -432,15 +437,7 @@ def test_backend_close_resumes_after_external_failure(root: Path) -> None:
     state, _ = migrated_state(root, "sqlite")
     runner = FakeHerdrRunner()
     runner.fail_close_once = True
-    identity = {
-        "agent_name": "cleanupcanary",
-        "workspace_id": "w-test",
-        "pane_id": "w-test:p-canary",
-        "terminal_id": "terminal-canary",
-        "session_id": "canary-session",
-        "runtime_instance_id": "runtime:canary",
-        "runtime_generation": "generation:canary",
-    }
+    identity = herdr_identity()
     action = {
         "expected_identity": {
             key: identity[key]
@@ -461,6 +458,24 @@ def test_backend_close_resumes_after_external_failure(root: Path) -> None:
         assert store.connection.execute(
             "SELECT status FROM runtime_instances WHERE runtime_instance_id='runtime:canary'"
         ).fetchone()[0] == "closed"
+        refused(
+            lambda: store.register_runtime(
+                RuntimeRegistrationCommand(
+                    runtime_instance_id=identity["runtime_instance_id"],
+                    actor_agent_id="agent:canary",
+                    harness_kind="codex",
+                    backend_kind="herdr",
+                    session_ref="codex:canary-session",
+                    endpoint=identity["pane_id"],
+                    runtime_generation=identity["runtime_generation"],
+                    status="active",
+                    verified=True,
+                    at="2026-01-01T00:03:00Z",
+                    capabilities=("backend.herdr",),
+                )
+            ),
+            "runtime_closed",
+        )
         receipt = backend.apply(action)
         assert receipt["runtime"]["idempotent"] is True
         assert backend.inspect(action) == action["intended_state"]
@@ -469,15 +484,7 @@ def test_backend_close_resumes_after_external_failure(root: Path) -> None:
 def test_real_canary_sqlite_setup_uses_explicit_root(root: Path) -> None:
     root.mkdir(parents=True)
     git = _create_git_canary(root)
-    herdr = {
-        "agent_name": "cleanupcanary",
-        "workspace_id": "w-test",
-        "pane_id": "w-test:p-canary",
-        "terminal_id": "terminal-canary",
-        "session_id": "canary-session",
-        "runtime_instance_id": "runtime:canary",
-        "runtime_generation": "generation:canary",
-    }
+    herdr = herdr_identity()
     setup = _setup_sqlite(root, ROOT, git, herdr)
     extended_git = {
         **git,
@@ -516,7 +523,34 @@ def test_real_canary_sqlite_setup_uses_explicit_root(root: Path) -> None:
         ).fetchone()[0] == "delivered"
 
 
-def write_fake_herdr(root: Path, state_path: Path) -> Path:
+def test_failure_scope_removes_only_exact_git_resources(root: Path) -> None:
+    namespace = "testfailure"
+    home = root / f"league-real-canary-{namespace}"
+    home.mkdir(parents=True)
+    git = _create_git_canary(home)
+    (home / "failure-scope.json").write_text(
+        json.dumps(
+            {
+                "schema": "league.real-canary-failure-scope.v1",
+                "namespace": namespace,
+                "git": git,
+            }
+        ),
+        encoding="utf-8",
+    )
+    _cleanup_failed_canary(home)
+    assert not Path(git["worktree"]).exists()
+    branch = run(
+        (
+            "git", "-C", git["repository"], "for-each-ref", "--format=%(objectname)",
+            f"refs/heads/{git['branch']}",
+        )
+    )
+    assert branch == ""
+    assert Path(git["repository"]).is_dir()
+
+
+def write_fake_herdr(root: Path, state_path: Path, agent_name: str = "cleanupcanary") -> Path:
     binary = root / "fake-bin/herdr"
     binary.parent.mkdir(parents=True)
     binary.write_text(
@@ -533,7 +567,7 @@ if args[:2] == ["agent", "list"]:
     agents = []
     if state["agent"]:
         agents = [{
-            "name": "cleanupcanary",
+            "name": state["agent_name"],
             "pane_id": "w-test:p-canary",
             "agent_status": "done" if state["done"] else "idle",
             "agent_session": {"value": "canary-session"},
@@ -561,9 +595,56 @@ print(json.dumps({"result": result}, sort_keys=True))
     )
     binary.chmod(0o755)
     state_path.write_text(
-        json.dumps({"agent": True, "pane": True, "done": False}), encoding="utf-8"
+        json.dumps(
+            {"agent": True, "pane": True, "done": False, "agent_name": agent_name}
+        ),
+        encoding="utf-8",
     )
     return binary.parent
+
+
+def test_failure_scope_closes_exact_fake_herdr(root: Path) -> None:
+    namespace = "testfailureherdr"
+    home = root / f"league-real-canary-{namespace}"
+    home.mkdir(parents=True)
+    git = _create_git_canary(home)
+    agent_name = "l23" + hashlib.sha256(namespace.encode()).hexdigest()[:12]
+    fake_state = home / "fake-herdr.json"
+    fake_bin = write_fake_herdr(home, fake_state, agent_name)
+    (home / "failure-scope.json").write_text(
+        json.dumps(
+            {
+                "schema": "league.real-canary-failure-scope.v1",
+                "namespace": namespace,
+                "git": git,
+                "herdr": herdr_identity(agent_name),
+            }
+        ),
+        encoding="utf-8",
+    )
+    previous_path = os.environ.get("PATH")
+    previous_state = os.environ.get("LEAGUE_FAKE_HERDR_STATE")
+    os.environ["PATH"] = str(fake_bin) + os.pathsep + (previous_path or "/usr/bin:/bin")
+    os.environ["LEAGUE_FAKE_HERDR_STATE"] = str(fake_state)
+    try:
+        _cleanup_failed_canary(home)
+    finally:
+        if previous_path is None:
+            os.environ.pop("PATH", None)
+        else:
+            os.environ["PATH"] = previous_path
+        if previous_state is None:
+            os.environ.pop("LEAGUE_FAKE_HERDR_STATE", None)
+        else:
+            os.environ["LEAGUE_FAKE_HERDR_STATE"] = previous_state
+    observed = json.loads(fake_state.read_text(encoding="utf-8"))
+    assert observed == {
+        "agent": False,
+        "pane": False,
+        "done": True,
+        "agent_name": agent_name,
+    }
+    assert not Path(git["worktree"]).exists()
 
 
 def cleanup_reconcile_command(
@@ -622,15 +703,7 @@ def cleanup_reconcile_command(
 def test_cleanup_reconcile_resumes_in_a_new_process(root: Path) -> None:
     root.mkdir(parents=True)
     git = _create_git_canary(root)
-    herdr = {
-        "agent_name": "cleanupcanary",
-        "workspace_id": "w-test",
-        "pane_id": "w-test:p-canary",
-        "terminal_id": "terminal-canary",
-        "session_id": "canary-session",
-        "runtime_instance_id": "runtime:canary",
-        "runtime_generation": "generation:canary",
-    }
+    herdr = herdr_identity()
     setup = _setup_sqlite(root, ROOT, git, herdr)
     state = root / "league/state"
     with SQLiteStorage(state, request_wal=False) as store:
@@ -713,6 +786,7 @@ def test_session_title_fallback_and_strict_canary_schemas() -> None:
     )
     for name in (
         "league-cleanup-canary-adapters.schema.json",
+        "league-real-cleanup-artifact-profile.schema.json",
         "league-real-cleanup-canary-receipt.schema.json",
     ):
         schema = json.loads((ROOT / "schema" / name).read_text(encoding="utf-8"))
@@ -740,6 +814,8 @@ def main() -> None:
         test_repository_artifact_squash_tree_is_cleanup_eligible(root / "artifact")
         test_backend_close_resumes_after_external_failure(root / "backend-retry")
         test_real_canary_sqlite_setup_uses_explicit_root(root / "canary-setup")
+        test_failure_scope_removes_only_exact_git_resources(root / "failure-cleanup")
+        test_failure_scope_closes_exact_fake_herdr(root / "failure-herdr")
         test_cleanup_reconcile_resumes_in_a_new_process(root / "true-restart")
     test_session_title_fallback_and_strict_canary_schemas()
     print(

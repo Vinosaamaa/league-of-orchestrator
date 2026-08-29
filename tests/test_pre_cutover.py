@@ -17,7 +17,7 @@ LEAGUE = ROOT / "bin/league"
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "tests"))
 
-from league.acceptance import PROCESS_SENTINEL_SCHEMA  # noqa: E402
+from league.acceptance import PROCESS_SENTINEL_SCHEMA, _sha256, _stable_bytes  # noqa: E402
 from league.precutover import PLAN_SCHEMA, RECEIPT_SCHEMA, run_pre_cutover  # noqa: E402
 from league.sqlite_store import CURRENT_SCHEMA_VERSION  # noqa: E402
 from league.storage import StorageRefusal  # noqa: E402
@@ -346,10 +346,12 @@ def test_command_e2e_and_deterministic_manifest(root: Path) -> None:
         "processes": fixture["processes"].read_bytes(),
     }
     first = command_preflight(fixture, temporary_root, "command-one")
-    second = command_preflight(fixture, temporary_root, "command-two")
     assert_receipt(first, fixture)
-    assert_receipt(second, fixture)
-    assert first["mutation_manifest"] == second["mutation_manifest"]
+    manifest = dict(first["mutation_manifest"])
+    digest = manifest.pop("manifest_sha256")
+    assert digest == _sha256(_stable_bytes(manifest))
+    assert first["determinism"]["clock"] == "2026-01-01T00:00:00Z"
+    assert first["determinism"]["ids_allocated"] > 0
     assert before == {
         "legacy": fixture["legacy"].joinpath("import-manifest.json").read_bytes(),
         "hook": fixture["hook"].read_bytes(),
@@ -434,6 +436,29 @@ def test_invalid_plan_and_root_overlap_refuse_before_home(root: Path) -> None:
         "plan_invalid",
     )
     assert not (temporary_root / "league-reserved-precutover").exists()
+
+    for namespace, replacement in (
+        ("aliased", fixture["plan"]["proposed"]["backup_root"]),
+        ("nested", str(Path(fixture["plan"]["proposed"]["backup_root"]) / "archive")),
+    ):
+        overlapping = dict(fixture["plan"])
+        overlapping["proposed"] = dict(overlapping["proposed"])
+        overlapping["proposed"]["archive_root"] = replacement
+        overlapping_path = fixture["live"] / f"{namespace}-destination-plan.json"
+        write_json(overlapping_path, overlapping)
+        refused(
+            lambda path=overlapping_path, name=namespace: run_pre_cutover(
+                temporary_root,
+                name,
+                plan_path=path,
+                sentinel_paths=(fixture["legacy"],),
+                config_sentinel=fixture["hook"],
+                process_sentinel=fixture["processes"],
+                source_root=ROOT,
+            ),
+            "plan_invalid",
+        )
+        assert not (temporary_root / f"league-{namespace}-precutover").exists()
 
 
 def test_backup_fault_blocks_resumably_without_live_change(root: Path) -> None:

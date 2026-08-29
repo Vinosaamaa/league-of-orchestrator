@@ -292,6 +292,30 @@ def _validate_plan(path: Path) -> dict[str, Any]:
         normalized_hooks.append({"harness": str(harness), "target": str(target)})
     normalized_proposed["hooks"] = normalized_hooks
 
+    destinations = [
+        Path(normalized_proposed[key])
+        for key in (
+            "backup_root",
+            "release_prefix",
+            "stable_launcher",
+            "watcher_launcher",
+            "state_root",
+            "writer_pointer",
+            "archive_root",
+        )
+    ] + [Path(item["target"]) for item in normalized_hooks]
+    for index, destination in enumerate(destinations):
+        for other in destinations[index + 1 :]:
+            if (
+                destination == other
+                or destination in other.parents
+                or other in destination.parents
+            ):
+                raise StorageRefusal(
+                    "plan_invalid",
+                    "proposed cutover destinations must be unique and non-overlapping",
+                )
+
     required_target_kinds = {
         Path(normalized_proposed["backup_root"]): "backup_root",
         Path(normalized_proposed["release_prefix"]): "release_prefix",
@@ -632,9 +656,7 @@ def _read_only_shadow(home: Path, plan: Mapping[str, Any]) -> dict[str, Any]:
         if not integrity["ok"]:
             raise StorageRefusal("shadow_parity_failed", "read-only live shadow integrity failed")
         backup = store.backup("precutover-shadow.sqlite3")
-        rollback_bytes = store.export_bytes(
-            format_name="json", purpose="rollback", max_records=10_000
-        )
+        rollback_bytes = _stable_bytes(exported)
         store.write_restricted("precutover-shadow-rollback.json", rollback_bytes)
     for item in plan["legacy"]["bindings"]:
         expected = next(
@@ -642,6 +664,8 @@ def _read_only_shadow(home: Path, plan: Mapping[str, Any]) -> dict[str, Any]:
         )
         if _regular_content_sha256(Path(item["source"])) != expected["sha256"]:
             raise StorageRefusal("source_changed", "legacy source changed after shadow import")
+    if _regular_content_sha256(Path(plan["legacy"]["manifest"])) != snapshot["manifest_sha256"]:
+        raise StorageRefusal("source_changed", "legacy manifest changed after shadow import")
     return {
         "migration": migration,
         "dry_run": {

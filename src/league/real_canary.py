@@ -134,20 +134,34 @@ def _codex_session_id(agent: Mapping[str, Any]) -> str | None:
     return matched.group("session") if matched is not None else None
 
 
-def _create_git_canary(home: Path) -> dict[str, str]:
+def _disposable_git_scope(
+    home: Path, *, deterministic_dates: bool = False
+) -> tuple[Path, Path, dict[str, str]]:
     repository = (home / "git/repository").resolve(strict=False)
     worktree = (home / "git/worktree").resolve(strict=False)
     repository.parent.mkdir(parents=True, mode=0o700)
-    isolated_home = home / "process-home"
-    isolated_home.mkdir(mode=0o700)
+    process_home = home / "process-home"
+    process_home.mkdir(mode=0o700, exist_ok=True)
     environment = {
         **os.environ,
-        "HOME": str(isolated_home),
+        "HOME": str(process_home),
         "GIT_CONFIG_NOSYSTEM": "1",
         "GIT_CONFIG_GLOBAL": "/dev/null",
-        "GIT_AUTHOR_DATE": "2026-01-01T00:00:00Z",
-        "GIT_COMMITTER_DATE": "2026-01-01T00:00:00Z",
     }
+    if deterministic_dates:
+        environment.update(
+            {
+                "GIT_AUTHOR_DATE": "2026-01-01T00:00:00Z",
+                "GIT_COMMITTER_DATE": "2026-01-01T00:00:00Z",
+            }
+        )
+    return repository, worktree, environment
+
+
+def _create_git_canary(home: Path) -> dict[str, str]:
+    repository, worktree, environment = _disposable_git_scope(
+        home, deterministic_dates=True
+    )
     _run(("git", "init", "-b", "main", str(repository)), cwd=home, env=environment)
     _atomic_write(repository / "README.md", b"League disposable cleanup canary\n", mode=0o600)
     _run(("git", "-C", str(repository), "add", "README.md"), cwd=home, env=environment)
@@ -200,19 +214,9 @@ def _create_git_canary(home: Path) -> dict[str, str]:
 
 
 def _create_repository_artifact_canary(
-    home: Path, source_root: Path
+    home: Path, source_root: Path, namespace: str
 ) -> dict[str, str]:
-    repository = (home / "git/repository").resolve(strict=False)
-    worktree = (home / "git/worktree").resolve(strict=False)
-    repository.parent.mkdir(parents=True, mode=0o700)
-    process_home = home / "process-home"
-    process_home.mkdir(mode=0o700)
-    environment = {
-        **os.environ,
-        "HOME": str(process_home),
-        "GIT_CONFIG_NOSYSTEM": "1",
-        "GIT_CONFIG_GLOBAL": "/dev/null",
-    }
+    repository, worktree, environment = _disposable_git_scope(home)
     remote = _run(
         ("git", "-C", str(source_root), "remote", "get-url", "origin"),
         cwd=home,
@@ -224,6 +228,19 @@ def _create_repository_artifact_canary(
             "source root is not the repository bound to the artifact receipt",
         )
     _run(("git", "init", str(repository)), cwd=home, env=environment)
+    _write_json(
+        home / "failure-scope.json",
+        {
+            "schema": "league.real-canary-failure-scope.v1",
+            "namespace": namespace,
+            "git": {
+                "repository": str(repository),
+                "worktree": str(worktree),
+                "branch": REPORT_BRANCH,
+                "head": REPORT_TESTED_HEAD,
+            }
+        },
+    )
     for commit in (REPORT_TESTED_HEAD, REPORT_MERGE_COMMIT):
         _run(
             (
@@ -328,6 +345,14 @@ def _create_herdr_canary(home: Path, worktree: Path, namespace: str) -> dict[str
     pane_id = pane.get("pane_id") if isinstance(pane, dict) else None
     if not isinstance(pane_id, str) or not pane_id:
         raise StorageRefusal("real_canary_output_invalid", "Herdr split receipt lacks a pane id")
+    failure_scope_path = home / "failure-scope.json"
+    failure_scope = json.loads(failure_scope_path.read_text(encoding="utf-8"))
+    failure_scope["herdr"] = {
+        "agent_name": name,
+        "workspace_id": pane_id.split(":", 1)[0],
+        "pane_id": pane_id,
+    }
+    _write_json(failure_scope_path, failure_scope)
     _herdr(
         (
             "agent",
@@ -986,8 +1011,15 @@ def _real_canary_paths(
 
 
 def _prepare_real_canary(home: Path, source: Path, namespace: str) -> dict[str, Any]:
-    git = _create_repository_artifact_canary(home, source)
+    git = _create_repository_artifact_canary(home, source, namespace)
+    scope = {
+        "schema": "league.real-canary-failure-scope.v1",
+        "namespace": namespace,
+        "git": git,
+    }
+    _write_json(home / "failure-scope.json", scope)
     herdr = _create_herdr_canary(home, Path(git["worktree"]), namespace)
+    _write_json(home / "failure-scope.json", {**scope, "herdr": herdr})
     _write_json(home / "setup-receipt.json", {"git": git, "herdr": herdr})
     setup = _setup_sqlite(home, source, git, herdr)
     declaration, publication = _artifact_files(home, git)
@@ -999,6 +1031,166 @@ def _prepare_real_canary(home: Path, source: Path, namespace: str) -> dict[str, 
         "artifact_declaration": declaration,
         "artifact_publication": publication,
     }
+
+
+def _failure_scope(home: Path) -> tuple[str, dict[str, Any]] | None:
+    scope_path = home / "failure-scope.json"
+    if not scope_path.is_file() or scope_path.is_symlink():
+        return None
+    scope = json.loads(scope_path.read_text(encoding="utf-8"))
+    if not isinstance(scope, dict) or set(scope) not in (
+        {"schema", "namespace", "git"},
+        {"schema", "namespace", "git", "herdr"},
+    ) or not isinstance(scope.get("git"), Mapping) or (
+        "herdr" in scope and not isinstance(scope.get("herdr"), Mapping)
+    ):
+        raise StorageRefusal(
+            "real_canary_failure_cleanup_refused",
+            "failed canary cleanup scope is malformed",
+        )
+    namespace = scope.get("namespace")
+    if (
+        scope.get("schema") != "league.real-canary-failure-scope.v1"
+        or not isinstance(namespace, str)
+        or not NAMESPACE_PATTERN.fullmatch(namespace)
+        or home.name != f"league-real-canary-{namespace}"
+    ):
+        raise StorageRefusal(
+            "real_canary_failure_cleanup_refused",
+            "failed canary cleanup scope identity changed",
+        )
+    return str(namespace), scope
+
+
+def _cleanup_failed_herdr(
+    home: Path, namespace: str, herdr: Mapping[str, Any]
+) -> None:
+    agent_name = herdr.get("agent_name")
+    pane_id = herdr.get("pane_id")
+    workspace_id = herdr.get("workspace_id")
+    if not all(
+        isinstance(value, str) and value
+        for value in (agent_name, pane_id, workspace_id)
+    ):
+        raise StorageRefusal(
+            "real_canary_failure_cleanup_refused",
+            "failed canary Herdr identity is incomplete",
+        )
+    expected_agent = f"l23{hashlib.sha256(namespace.encode('utf-8')).hexdigest()[:12]}"
+    if agent_name != expected_agent:
+        raise StorageRefusal(
+            "real_canary_failure_cleanup_refused", "failed canary agent name changed"
+        )
+    agent = _exact_agent(home, str(agent_name))
+    if agent is not None and agent.get("pane_id") != pane_id:
+        raise StorageRefusal(
+            "real_canary_failure_cleanup_refused",
+            "failed canary agent endpoint identity changed",
+        )
+    if agent is not None and agent.get("agent_status") != "done":
+        _run(
+            (
+                "herdr", "agent", "prompt", str(agent_name), "/exit",
+                "--wait", "--until", "done", "--timeout", "30000",
+            ),
+            cwd=home,
+            allowed=frozenset({0, 1}),
+            timeout=45,
+        )
+        remaining = _exact_agent(home, str(agent_name))
+        if remaining is not None and remaining.get("agent_status") != "done":
+            raise StorageRefusal(
+                "real_canary_failure_cleanup_refused",
+                "failed canary agent did not terminate",
+            )
+    pane_inventory = _herdr(("pane", "list", "--workspace", str(workspace_id)), home)
+    panes = pane_inventory.get("result", {}).get("panes", [])
+    if not isinstance(panes, list) or any(
+        not isinstance(item, Mapping) for item in panes
+    ):
+        raise StorageRefusal(
+            "real_canary_failure_cleanup_refused",
+            "failed canary pane inventory is malformed",
+        )
+    matches = [item for item in panes if item.get("pane_id") == pane_id]
+    if len(matches) > 1:
+        raise StorageRefusal(
+            "real_canary_failure_cleanup_refused",
+            "failed canary pane identity is ambiguous",
+        )
+    if matches:
+        _herdr(("pane", "close", str(pane_id)), home)
+
+
+def _cleanup_failed_git(home: Path, git: Mapping[str, Any]) -> None:
+    repository = Path(str(git.get("repository", "")))
+    worktree = Path(str(git.get("worktree", "")))
+    branch = git.get("branch")
+    head = git.get("head")
+    if not (
+        repository.resolve(strict=False) == (home / "git/repository").resolve(strict=False)
+        and worktree.resolve(strict=False) == (home / "git/worktree").resolve(strict=False)
+        and repository.is_dir()
+        and isinstance(branch, str)
+        and isinstance(head, str)
+        and re.fullmatch(r"[0-9a-f]{40}", head)
+        and branch in {REPORT_BRANCH, "canary/issue-23-cleanup"}
+    ):
+        raise StorageRefusal(
+            "real_canary_failure_cleanup_refused",
+            "failed canary Git identity is incomplete",
+        )
+    if worktree.exists():
+        status = _run(("git", "-C", str(worktree), "status", "--porcelain"), cwd=home)
+        observed_head = _run(("git", "-C", str(worktree), "rev-parse", "HEAD"), cwd=home)
+        observed_branch = _run(
+            ("git", "-C", str(worktree), "branch", "--show-current"), cwd=home
+        )
+        if (
+            status.stdout
+            or observed_head.stdout.strip() != head
+            or observed_branch.stdout.strip() != branch
+        ):
+            raise StorageRefusal(
+                "real_canary_failure_cleanup_refused",
+                "failed canary worktree is not clean and exact",
+            )
+        _run(
+            ("git", "-C", str(repository), "worktree", "remove", str(worktree)),
+            cwd=home,
+        )
+    ref = _run(
+        (
+            "git", "-C", str(repository), "for-each-ref", "--format=%(objectname)",
+            f"refs/heads/{branch}",
+        ),
+        cwd=home,
+    ).stdout.strip()
+    if ref and ref != head:
+        raise StorageRefusal(
+            "real_canary_failure_cleanup_refused", "failed canary branch head changed"
+        )
+    if ref:
+        _run(
+            (
+                "git", "-C", str(repository), "update-ref", "-d",
+                f"refs/heads/{branch}", head,
+            ),
+            cwd=home,
+        )
+
+
+def _cleanup_failed_canary(home: Path) -> None:
+    """Remove only exact active resources recorded by this disposable run."""
+
+    validated = _failure_scope(home)
+    if validated is None:
+        return
+    namespace, scope = validated
+    if isinstance(scope.get("herdr"), Mapping):
+        _cleanup_failed_herdr(home, namespace, scope["herdr"])
+    if isinstance(scope.get("git"), Mapping):
+        _cleanup_failed_git(home, scope["git"])
 
 
 def _complete_real_canary_task(
@@ -1286,11 +1478,25 @@ def run_real_cleanup_canary(
     source_root: Path | None = None,
 ) -> dict[str, Any]:
     root, source, home = _real_canary_paths(temporary_root, namespace, source_root)
-    prepared = _prepare_real_canary(home, source, namespace)
-    task = _complete_real_canary_task(home, source, prepared)
-    operation_id = "operation:real-cleanup-canary"
-    publication = _publish_real_canary_artifact(home, source, prepared, task, operation_id)
-    cleanup = _execute_real_canary_cleanup(home, source, prepared, task, operation_id)
-    return _build_real_canary_receipt(
-        root, home, namespace, prepared, task, publication, cleanup, operation_id
-    )
+    try:
+        prepared = _prepare_real_canary(home, source, namespace)
+        task = _complete_real_canary_task(home, source, prepared)
+        operation_id = "operation:real-cleanup-canary"
+        publication = _publish_real_canary_artifact(
+            home, source, prepared, task, operation_id
+        )
+        cleanup = _execute_real_canary_cleanup(
+            home, source, prepared, task, operation_id
+        )
+        return _build_real_canary_receipt(
+            root, home, namespace, prepared, task, publication, cleanup, operation_id
+        )
+    except BaseException:
+        try:
+            _cleanup_failed_canary(home)
+        except BaseException as cleanup_exc:
+            raise StorageRefusal(
+                "real_canary_failure_cleanup_failed",
+                "failed canary resources could not be proven safe for exact cleanup",
+            ) from cleanup_exc
+        raise

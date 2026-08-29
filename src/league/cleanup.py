@@ -24,6 +24,12 @@ FINAL_ACTION_ADAPTERS = {
     "callsign_release": "callsign",
 }
 
+
+@dataclass(frozen=True)
+class CleanupFaultEvent:
+    phase: str
+    action_kind: str
+
 POLICY_REQUIREMENTS: dict[str, tuple[str, ...]] = {
     "analysis": ("identity.exact", "endpoint.terminal_or_idle"),
     "local_git": (
@@ -495,7 +501,12 @@ class CleanupExecutor:
                     raise StorageRefusal("cleanup_identity_mismatch", "cleanup action identity is stale or ambiguous")
                 receipt = dict(adapter.apply(action))
                 if fault is not None:
-                    fault(f"after_external_action:{action['action_kind']}")
+                    fault(
+                        CleanupFaultEvent(
+                            phase="after_external_action",
+                            action_kind=str(action["action_kind"]),
+                        )
+                    )
                 after = dict(adapter.inspect(action))
                 if not adapter.intended(action, after):
                     raise StorageRefusal("cleanup_verification_failed", "cleanup action effect was not verified")

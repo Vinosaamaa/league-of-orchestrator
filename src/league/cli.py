@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from . import MAX_ACCEPTANCE_SENTINEL_PATHS, __version__
 from .adapters import builtin_contract_registry
 from .artifacts import ArtifactLifecycle
-from .cleanup import CleanupExecutor, CleanupPlanner
+from .cleanup import CleanupExecutor, CleanupFaultEvent, CleanupPlanner
 from .importer import build_import_plan
 from .orchestration import OrchestrationSignals
 from .routing import ModelRouter, load_routing_config
@@ -1551,10 +1551,11 @@ def _cleanup_reconcile(store: Storage, args: argparse.Namespace) -> CommandResul
         at=args.at,
     )
 
-    def fault(point: str) -> None:
+    def fault(event: CleanupFaultEvent) -> None:
         if (
             args.simulate_interruption_after_archive
-            and point == "after_external_action:archive_identity_evidence"
+            and event.phase == "after_external_action"
+            and event.action_kind == "archive_identity_evidence"
         ):
             raise StorageRefusal(
                 "cleanup_interrupted",
@@ -2089,6 +2090,7 @@ SCHEMA_INVENTORY = (
     "league-pre-cutover-plan.schema.json",
     "league-pre-cutover-receipt.schema.json",
     "league-cleanup-canary-adapters.schema.json",
+    "league-real-cleanup-artifact-profile.schema.json",
     "league-real-cleanup-canary-receipt.schema.json",
     "league-help.schema.json",
     "league-request-triage.schema.json",

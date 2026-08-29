@@ -44,6 +44,115 @@ def refused(operation, code: str) -> None:
     raise AssertionError(f"expected refusal {code}")
 
 
+def add_retired_watcher_cursor(
+    source: Path, fixture: dict[str, object], *, authorize: bool = True
+) -> dict[str, object]:
+    archive = source / "archives/Bard"
+    status_path = archive / "status.json"
+    updates_path = archive / "updates.jsonl"
+    original_record = fixture["runtime_root"] / "rosters/Garen/champions/Bard"
+    original_updates = str(original_record / "updates.jsonl")
+    original_status = str(original_record / "status.json")
+    lines = [
+        stable_json(
+            {
+                "at": "2026-01-01T00:00:00Z",
+                "status": "working",
+                "update": "Synthetic retired assignment started.",
+            }
+        ),
+        stable_json(
+            {
+                "at": "2026-01-01T00:01:00Z",
+                "status": "ready_to_land",
+                "update": "Synthetic retired assignment became ready.",
+            }
+        ),
+        stable_json(
+            {
+                "at": "2026-01-01T00:02:00Z",
+                "status": "completed",
+                "update": "Synthetic retired assignment was archived.",
+            }
+        ),
+    ]
+    status = {
+        "callsign": "Bard",
+        "role": "champion",
+        "shotcaller": "Garen",
+        "kind": "codex-thread",
+        "address": "w1:p8",
+        "thread_id": "88888888-8888-4888-8888-888888888888",
+        "backend": "herdr",
+        "task_id": "synthetic-retired-task",
+        "repository": REPOSITORY,
+        "issue": 19,
+        "branch": "agent/synthetic/retired",
+        "worktree": str(fixture["runtime_root"] / "worktrees/retired"),
+        "task": "Synthetic retired task",
+        "status": "COMPLETED",
+        "updated_at": "2026-01-01T00:02:00Z",
+        "update": "Synthetic retired assignment was archived.",
+        "blocker": None,
+        "next": "Retain synthetic archive evidence.",
+    }
+    archive.mkdir(parents=True)
+    status_path.write_text(stable_json(status) + "\n", encoding="utf-8")
+    updates_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    cursor_offset = len((lines[0] + "\n" + lines[1] + "\n").encode("utf-8"))
+    first_id = hashlib.sha256(
+        f"{original_updates}\0{0}\0{lines[0]}".encode("utf-8")
+    ).hexdigest()
+    second_offset = len((lines[0] + "\n").encode("utf-8"))
+    second_id = hashlib.sha256(
+        f"{original_updates}\0{second_offset}\0{lines[1]}".encode("utf-8")
+    ).hexdigest()
+
+    manifest = json.loads(Path(fixture["manifest"]).read_text(encoding="utf-8"))
+    manifest["retained_files"].extend(
+        [
+            {
+                "artifact_id": "T5-retired-Bard-status",
+                "class": "legacy-archive",
+                "path": "archives/Bard/status.json",
+            },
+            {
+                "artifact_id": "T5-retired-Bard-updates",
+                "class": "legacy-archive",
+                "path": "archives/Bard/updates.jsonl",
+            },
+        ]
+    )
+    watcher_entry = manifest["canonical_sources"]["watcher_states"][0]
+    if authorize:
+        watcher_entry["retired_cursors"] = [
+            {
+                "source_path": original_updates,
+                "expected_next_offset": cursor_offset,
+                "retained_status_artifact_id": "T5-retired-Bard-status",
+                "retained_updates_artifact_id": "T5-retired-Bard-updates",
+                "expected_status_sha256": hashlib.sha256(status_path.read_bytes()).hexdigest(),
+                "expected_updates_sha256": hashlib.sha256(updates_path.read_bytes()).hexdigest(),
+                "disposition": "retained_non_active",
+            }
+        ]
+    Path(fixture["manifest"]).write_text(stable_json(manifest) + "\n", encoding="utf-8")
+
+    watcher_path = source / "watcher/Garen/state.json"
+    watcher = json.loads(watcher_path.read_text(encoding="utf-8"))
+    watcher["last_active"].append(original_status)
+    watcher["offsets"][original_updates] = cursor_offset
+    watcher["seen"].extend([first_id, second_id])
+    watcher["delivered_events"][second_id] = {"channel": "watcher"}
+    watcher["last_event_id"] = second_id
+    watcher_path.write_text(stable_json(watcher) + "\n", encoding="utf-8")
+    return {
+        "authorization": watcher_entry.get("retired_cursors", [None])[0],
+        "event_ids": {first_id, second_id},
+        "source_path": original_updates,
+    }
+
+
 def test_complete_dry_run_apply_and_round_trip(root: Path) -> None:
     source = root / "source"
     source.mkdir()
@@ -253,6 +362,177 @@ def test_visible_assignment_record_malformed_and_stale_refusals(root: Path) -> N
     )
 
 
+def test_retired_watcher_cursor_classification(root: Path) -> None:
+    source = root / "retired-cursor"
+    source.mkdir()
+    fixture = write_complete_fixture(source)
+    retired = add_retired_watcher_cursor(source, fixture)
+    watcher_path = source / "watcher/Garen/state.json"
+    watcher_value = json.loads(watcher_path.read_text(encoding="utf-8"))
+    unbound_seen = "a" * 64
+    unbound_delivered = "b" * 64
+    watcher_value["seen"].append(unbound_seen)
+    watcher_value["delivered_events"][unbound_delivered] = {"channel": "watcher"}
+    watcher_path.write_text(stable_json(watcher_value) + "\n", encoding="utf-8")
+    manifest_value = json.loads(Path(fixture["manifest"]).read_text(encoding="utf-8"))
+    manifest_value["canonical_sources"]["watcher_states"][0][
+        "retired_unbound_receipts"
+    ] = {
+        "expected_watcher_sha256": hashlib.sha256(watcher_path.read_bytes()).hexdigest(),
+        "seen_only": [unbound_seen],
+        "delivered": [
+            {
+                "legacy_event_id": unbound_delivered,
+                "channel": "watcher",
+                "seen": False,
+            }
+        ],
+        "disposition": "retained_unbound_no_delivery_history",
+    }
+    Path(fixture["manifest"]).write_text(
+        stable_json(manifest_value) + "\n", encoding="utf-8"
+    )
+    source_sentinels = {
+        path: path.read_bytes()
+        for path in (
+            watcher_path,
+            source / "archives/Bard/status.json",
+            source / "archives/Bard/updates.jsonl",
+        )
+    }
+    plan = build_import_plan(source, fixture["manifest"])
+    assert all(path.read_bytes() == before for path, before in source_sentinels.items())
+    assert "Bard" not in {row["callsign"] for row in plan["rows"]["agent_instances"]}
+    assert len(plan["rows"]["events"]) == 2
+    assert len(plan["rows"]["watcher_cursors"]) == 1
+    assert len(plan["rows"]["watcher_seen"]) == 2
+    assert len(plan["rows"]["deliveries"]) == 2
+    assert not retired["event_ids"] & {
+        row["legacy_event_id"] for row in plan["rows"]["watcher_seen"]
+    }
+    watcher = plan["rows"]["watcher_scopes"][0]
+    metadata = json.loads(watcher["metadata_json"])
+    classification = metadata["retired_watcher_cursors"][0]
+    assert classification["source_path"] == retired["source_path"]
+    assert classification["cursor_event_count"] == 2
+    assert classification["archived_event_count"] == 3
+    assert classification["seen_count"] == 2
+    assert classification["delivered_count"] == 1
+    assert classification["was_last_active"] is True
+    assert classification["was_last_event"] is True
+    assert classification["disposition"] == "retained_non_active_no_history_or_delivery"
+    assert watcher["last_event_id"] is None
+    assert metadata["retired_unbound_receipts"]["seen_only_count"] == 1
+    assert metadata["retired_unbound_receipts"]["delivered_count"] == 1
+    assert metadata["retired_unbound_receipts"]["disposition"] == (
+        "retained_unbound_no_delivery_history"
+    )
+
+    stale_receipt_manifest = copy.deepcopy(manifest_value)
+    stale_receipt_manifest["canonical_sources"]["watcher_states"][0][
+        "retired_unbound_receipts"
+    ]["expected_watcher_sha256"] = "0" * 64
+    Path(fixture["manifest"]).write_text(
+        stable_json(stale_receipt_manifest) + "\n", encoding="utf-8"
+    )
+    refused(
+        lambda: build_import_plan(source, fixture["manifest"]),
+        "identity_collision",
+    )
+    Path(fixture["manifest"]).write_text(
+        stable_json(manifest_value) + "\n", encoding="utf-8"
+    )
+
+    state, _ = migrated_state(root, "retired-cursor-state")
+    with SQLiteStorage(state) as store:
+        store.apply_import(plan, plan["report_digest"])
+        rollback = json.loads(
+            store.export_bytes(format_name="json", purpose="rollback", max_records=1000)
+        )
+        stored = rollback["tables"]["watcher_scopes"][0]
+        assert json.loads(stored["metadata_json"])["retired_watcher_cursors"] == [
+            classification
+        ]
+    assert all(path.read_bytes() == before for path, before in source_sentinels.items())
+
+    missing = root / "retired-cursor-missing"
+    missing.mkdir()
+    missing_fixture = write_complete_fixture(missing)
+    add_retired_watcher_cursor(missing, missing_fixture, authorize=False)
+    refused(
+        lambda: build_import_plan(missing, missing_fixture["manifest"]),
+        "unknown_consumer",
+    )
+
+    stale = root / "retired-cursor-stale"
+    stale.mkdir()
+    stale_fixture = write_complete_fixture(stale)
+    add_retired_watcher_cursor(stale, stale_fixture)
+    stale_manifest = json.loads(Path(stale_fixture["manifest"]).read_text(encoding="utf-8"))
+    stale_manifest["canonical_sources"]["watcher_states"][0]["retired_cursors"][0][
+        "expected_updates_sha256"
+    ] = "0" * 64
+    Path(stale_fixture["manifest"]).write_text(
+        stable_json(stale_manifest) + "\n", encoding="utf-8"
+    )
+    refused(
+        lambda: build_import_plan(stale, stale_fixture["manifest"]),
+        "identity_collision",
+    )
+
+    overlap = root / "retired-cursor-overlap"
+    overlap.mkdir()
+    overlap_fixture = write_complete_fixture(overlap)
+    add_retired_watcher_cursor(overlap, overlap_fixture)
+    overlap_manifest = json.loads(
+        Path(overlap_fixture["manifest"]).read_text(encoding="utf-8")
+    )
+    overlap_declaration = overlap_manifest["canonical_sources"]["watcher_states"][0][
+        "retired_cursors"
+    ][0]
+    overlap_declaration["retained_updates_artifact_id"] = overlap_declaration[
+        "retained_status_artifact_id"
+    ]
+    Path(overlap_fixture["manifest"]).write_text(
+        stable_json(overlap_manifest) + "\n", encoding="utf-8"
+    )
+    refused(
+        lambda: build_import_plan(overlap, overlap_fixture["manifest"]),
+        "identity_collision",
+    )
+
+    pending = root / "retired-cursor-pending"
+    pending.mkdir()
+    pending_fixture = write_complete_fixture(pending)
+    pending_retired = add_retired_watcher_cursor(pending, pending_fixture)
+    pending_watcher = pending / "watcher/Garen/state.json"
+    pending_value = json.loads(pending_watcher.read_text(encoding="utf-8"))
+    pending_id = next(
+        event_id
+        for event_id in pending_retired["event_ids"]
+        if event_id not in pending_value["delivered_events"]
+    )
+    pending_value["pending_events"][pending_id] = {"event_id": pending_id}
+    pending_watcher.write_text(stable_json(pending_value) + "\n", encoding="utf-8")
+    refused(
+        lambda: build_import_plan(pending, pending_fixture["manifest"]),
+        "unknown_consumer",
+    )
+
+    malformed = root / "retired-cursor-malformed"
+    malformed.mkdir()
+    malformed_fixture = write_complete_fixture(malformed)
+    add_retired_watcher_cursor(malformed, malformed_fixture)
+    malformed_watcher = malformed / "watcher/Garen/state.json"
+    malformed_value = json.loads(malformed_watcher.read_text(encoding="utf-8"))
+    malformed_value["seen"].append({"not": "an event ID"})
+    malformed_watcher.write_text(stable_json(malformed_value) + "\n", encoding="utf-8")
+    refused(
+        lambda: build_import_plan(malformed, malformed_fixture["manifest"]),
+        "malformed_input",
+    )
+
+
 def test_import_crash_atomicity_and_plan_tamper(root: Path) -> None:
     source = root / "crash-source"
     source.mkdir()
@@ -324,6 +604,7 @@ def main() -> None:
         test_complete_dry_run_apply_and_round_trip(root)
         test_malformed_duplicate_unknown_and_foreign_key_refusals(root)
         test_visible_assignment_record_malformed_and_stale_refusals(root)
+        test_retired_watcher_cursor_classification(root)
         test_import_crash_atomicity_and_plan_tamper(root)
         test_descriptor_bound_read_survives_path_replacement(root)
     print("PASS: complete dry-run import, parity/export, malformed/collision refusal, FK, and crash atomicity")

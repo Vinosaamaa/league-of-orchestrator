@@ -102,6 +102,14 @@ only the temporary snapshot, emits a create-once receipt, and rejects every
 unbound or post-initialization use; its canonical contract remains in
 [`docs/ACCEPTANCE.md`](ACCEPTANCE.md).
 
+The issue-#23 archived-cursor successor adds original League migration-only
+classification for exact hash-bound watcher cursors whose Roster source is
+already archived or non-active. The deliberate difference from the filesystem
+baseline is that retained archive evidence is represented in restricted
+watcher metadata while no agent, event, cursor, seen row, or delivery is
+invented. Unclassified or ambiguous consumers remain fail-closed; the
+canonical contract remains in [`docs/ACCEPTANCE.md`](ACCEPTANCE.md).
+
 The real cleanup canary, its strict adapter/receipt schemas, and focused fake
 adapter tests are original League work for issue #23. The issue-#40 artifact
 lifecycle and issue-#39/PR-#41 report receipts are composed inputs, not

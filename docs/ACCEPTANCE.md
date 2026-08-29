@@ -87,6 +87,36 @@ An ordered-list success instead creates one owner-only, create-once
 the same complete per-pair proofs. No singular or list receipt is emitted when
 any authorization or a later preflight stage refuses.
 
+### Issue 23 archived watcher-cursor classification
+
+An archived or otherwise non-active Roster referenced by a watcher cursor is
+not an active agent and must not be imported as one. The default remains
+`unknown_consumer`. A migration manifest may classify a cursor only when all
+of these checks pass:
+
+- **Binding:** exact watcher source hash, cursor source path, byte offset, and
+  one non-overlapping retained status/history artifact pair with both current
+  SHA-256 hashes;
+- **Roster identity:** one inactive Champion or worker whose callsign, record
+  path, and active Shotcaller owner agree exactly;
+- **History:** a matching status/latest-transition triple, an exact cursor
+  line boundary, every cursor-prefix digest already seen, and no retained event
+  pending or ambiguously claimed; post-cursor archive events must not appear in
+  watcher seen, delivery, pending, or current-event state;
+- **Unbound receipts:** a separate exact watcher-hash-bound enumeration for
+  legacy receipt IDs with no recoverable event payload; and
+- **Effect:** preserve the source pair in the backup inventory and store only
+  restricted classification metadata—never create an agent, event, cursor,
+  seen row, or delivery from retired evidence.
+
+Unbound receipt evidence is retained only as counts and a classification
+digest, never reconstructed as delivery history. Missing, stale, duplicate,
+overlapping, active, foreign-owner, unseen, pending, current-last-event, broad,
+or ambiguous classifications fail closed.
+Two watcher scopes may cite the same retired source. The same source and offset
+must bind the same artifact pair and hashes; distinct offsets may bind distinct
+archived incarnations. Divergent evidence for one source/offset refuses.
+
 The receipt `league.pre-cutover-receipt.v1` adds four grouped proofs.
 
 ### Migration and rollback proof

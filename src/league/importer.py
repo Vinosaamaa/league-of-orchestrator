@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import re
@@ -201,6 +202,7 @@ class ImportPlanner:
         self.artifact_ids: set[str] = set()
         self.artifacts: list[dict[str, Any]] = []
         self.retained: list[dict[str, Any]] = []
+        self.retained_sources: dict[str, dict[str, Any]] = {}
         self.rows: dict[str, list[dict[str, Any]]] = {table: [] for table in _IMPORT_COLUMNS}
         self.target_counts = target_counts or {table: 0 for table in _IMPORT_COLUMNS}
         self.callsigns: dict[str, dict[str, Any]] = {}
@@ -217,6 +219,9 @@ class ImportPlanner:
         self.leases: dict[str, dict[str, Any]] = {}
         self.launch_attempts: dict[str, dict[str, Any]] = {}
         self.deliveries: dict[tuple[str, str], dict[str, Any]] = {}
+        self.retired_cursor_bindings: dict[tuple[str, int], tuple[Any, ...]] = {}
+        self.retired_artifact_sources: dict[str, str] = {}
+        self.retired_event_sources: dict[str, str] = {}
         self._source_order: dict[str, int] = {}
         self.manifest = self._load_manifest(manifest_path)
 
@@ -827,7 +832,12 @@ class ImportPlanner:
         return canonical
 
     def _parse_watcher(self, entry: dict[str, Any]) -> None:
-        if set(entry) != {"artifact_id", "path", "_sort_path"}:
+        base_fields = {"artifact_id", "path", "_sort_path"}
+        allowed_fields = base_fields | {
+            "retired_cursors",
+            "retired_unbound_receipts",
+        }
+        if not base_fields <= set(entry) or set(entry) - allowed_fields:
             raise StorageRefusal("malformed_input", "watcher manifest entry has unsupported fields")
         artifact_id = entry["artifact_id"]
         _, data = self._read(entry["path"])
@@ -854,20 +864,36 @@ class ImportPlanner:
             raise StorageRefusal("identity_collision", "watcher event is both pending and delivered")
         if not isinstance(value["last_active"], list):
             raise StorageRefusal("malformed_input", "watcher last_active must be a list")
+        last_active_paths = [
+            _text(item, "watcher last_active path") for item in value["last_active"]
+        ]
+        if len(last_active_paths) != len(set(last_active_paths)):
+            raise StorageRefusal(
+                "identity_collision", "watcher last_active contains a duplicate Roster"
+            )
+        seen_events = [_text(item, "watcher seen event") for item in seen]
+        if len(seen_events) != len(set(seen_events)):
+            raise StorageRefusal("identity_collision", "watcher seen contains a duplicate event")
+        value = dict(value)
+        value["last_active"] = last_active_paths
+        value["seen"] = seen_events
+        retired = self._retired_watcher_cursors(entry, value)
+        retired_sources = {item["source_path"] for item in retired}
+        retired_status_paths = {item["status_path"] for item in retired}
+        retired_event_ids = {
+            event_id for item in retired for event_id in item["legacy_event_ids"]
+        }
         active_agent_ids: list[str] = []
-        for active_path in value["last_active"]:
-            active_path = _text(active_path, "watcher last_active path")
+        for active_path in last_active_paths:
+            if active_path in retired_status_paths:
+                continue
             path = Path(active_path)
             callsign = path.parent.name if path.name == "status.json" else path.name
             agent_id = self.agent_by_callsign.get(callsign)
             if agent_id is None:
                 raise StorageRefusal("unknown_consumer", "watcher last_active references an unknown Roster")
-            if agent_id in active_agent_ids:
-                raise StorageRefusal("identity_collision", "watcher last_active contains a duplicate Roster")
             active_agent_ids.append(agent_id)
-        seen = [_text(item, "watcher seen event") for item in seen]
-        if len(seen) != len(set(seen)):
-            raise StorageRefusal("identity_collision", "watcher seen contains a duplicate event")
+        seen = seen_events
         wait_pid = value["wait_pid"]
         wait_process_start = value["wait_process_start"]
         if wait_pid is not None:
@@ -877,26 +903,53 @@ class ImportPlanner:
             raise StorageRefusal("malformed_input", "watcher wait process identity is incomplete")
         if value["wait_active"] and wait_pid is None:
             raise StorageRefusal("malformed_input", "active watcher wait requires exact process identity")
-        metadata = {"last_active_agent_ids": active_agent_ids}
-        self.rows["watcher_scopes"].append(
-            {
-                "scope_id": scope_id,
-                "schema_version": 2,
-                "enabled": _boolean(value["enabled"], "watcher.enabled"),
-                "allow_stop_once": _boolean(value["allow_stop_once"], "watcher.allow_stop_once"),
-                "stop_blocked": _boolean(value["stop_blocked"], "watcher.stop_blocked"),
-                "generation": _integer(value["generation"], "watcher.generation"),
-                "initialized": _boolean(value["initialized"], "watcher.initialized"),
-                "user_message_generation": _integer(value["user_message_generation"], "watcher.user_message_generation"),
-                "wait_active": _boolean(value["wait_active"], "watcher.wait_active"),
-                "wait_generation": _integer(value["wait_generation"], "watcher.wait_generation"),
-                "wait_pid": value["wait_pid"],
-                "wait_process_start": value["wait_process_start"],
-                "last_event_id": value["last_event_id"],
-                "metadata_json": _stable_json(metadata),
-            }
-        )
+        metadata: dict[str, Any] = {"last_active_agent_ids": active_agent_ids}
+        if retired:
+            metadata["retired_watcher_cursors"] = [
+                {
+                    key: item[key]
+                    for key in (
+                        "source_path",
+                        "expected_next_offset",
+                        "retained_status_artifact_id",
+                        "retained_updates_artifact_id",
+                        "expected_status_sha256",
+                        "expected_updates_sha256",
+                        "cursor_event_count",
+                        "archived_event_count",
+                        "seen_count",
+                        "delivered_count",
+                        "was_last_active",
+                        "was_last_event",
+                        "disposition",
+                    )
+                }
+                for item in retired
+            ]
+        last_event_id = value["last_event_id"]
+        active_last_event_id = None if last_event_id in retired_event_ids else last_event_id
+        scope_row = {
+            "scope_id": scope_id,
+            "schema_version": 2,
+            "enabled": _boolean(value["enabled"], "watcher.enabled"),
+            "allow_stop_once": _boolean(value["allow_stop_once"], "watcher.allow_stop_once"),
+            "stop_blocked": _boolean(value["stop_blocked"], "watcher.stop_blocked"),
+            "generation": _integer(value["generation"], "watcher.generation"),
+            "initialized": _boolean(value["initialized"], "watcher.initialized"),
+            "user_message_generation": _integer(
+                value["user_message_generation"], "watcher.user_message_generation"
+            ),
+            "wait_active": _boolean(value["wait_active"], "watcher.wait_active"),
+            "wait_generation": _integer(value["wait_generation"], "watcher.wait_generation"),
+            "wait_pid": value["wait_pid"],
+            "wait_process_start": value["wait_process_start"],
+            "last_event_id": active_last_event_id,
+            "metadata_json": _stable_json(metadata),
+        }
+        self.rows["watcher_scopes"].append(scope_row)
         for original_source, next_offset in sorted(offsets.items()):
+            if original_source in retired_sources:
+                continue
             callsign = Path(original_source).parent.name
             agent_id = self.agent_by_callsign.get(callsign)
             if agent_id is None:
@@ -914,6 +967,12 @@ class ImportPlanner:
                 if prior not in {None, line["event_id"]}:
                     raise StorageRefusal("identity_collision", "watcher cursor legacy digest is ambiguous")
                 self.event_aliases[alias] = line["event_id"]
+        retired_receipt_ids, retired_receipts = self._retired_watcher_receipts(
+            entry, value, data, retired_event_ids
+        )
+        if retired_receipts is not None:
+            metadata["retired_unbound_receipts"] = retired_receipts
+            scope_row["metadata_json"] = _stable_json(metadata)
         pending_candidates: dict[str, dict[str, Any]] = {}
         for legacy_id, raw_candidate in pending.items():
             if not isinstance(raw_candidate, dict) or raw_candidate.get("event_id") != legacy_id:
@@ -938,6 +997,8 @@ class ImportPlanner:
                 "last_error": None,
             }
         for legacy_id, receipt in delivered.items():
+            if legacy_id in retired_event_ids or legacy_id in retired_receipt_ids:
+                continue
             if not isinstance(receipt, dict) or not isinstance(receipt.get("channel"), str):
                 raise StorageRefusal("malformed_input", "delivered watcher receipt is malformed")
             canonical = self.event_aliases.get(legacy_id)
@@ -965,11 +1026,12 @@ class ImportPlanner:
                 "last_error": None,
             }
         for legacy_id in seen:
+            if legacy_id in retired_event_ids or legacy_id in retired_receipt_ids:
+                continue
             if legacy_id not in self.event_aliases:
                 raise StorageRefusal("unknown_consumer", "watcher seen event has no imported durable event")
             self.rows["watcher_seen"].append({"scope_id": scope_id, "legacy_event_id": legacy_id})
-        last_event_id = value["last_event_id"]
-        if last_event_id is not None and last_event_id not in self.event_aliases:
+        if active_last_event_id is not None and active_last_event_id not in self.event_aliases:
             raise StorageRefusal("unknown_consumer", "watcher last_event_id has no imported durable event")
         for record, observation in sorted(reconciliation.items()):
             if not isinstance(observation, dict):
@@ -1106,15 +1168,437 @@ class ImportPlanner:
             if artifact_id in self.artifact_ids:
                 raise StorageRefusal("duplicate_artifact", "retained artifact_id collides with canonical input")
             self.artifact_ids.add(artifact_id)
-            _, data = self._read(raw["path"])
+            source_path, data = self._read(raw["path"])
+            digest = hashlib.sha256(data).hexdigest()
+            retained_class = _text(raw["class"], "retained class")
+            self.retained_sources[artifact_id] = {
+                "artifact_id": artifact_id,
+                "class": retained_class,
+                "path": source_path,
+                "data": data,
+                "digest": digest,
+            }
             self.retained.append(
                 {
                     "artifact_id": artifact_id,
-                    "class": _text(raw["class"], "retained class"),
-                    "digest": hashlib.sha256(data).hexdigest(),
+                    "class": retained_class,
+                    "digest": digest,
                     "bytes": len(data),
                 }
             )
+
+    def _retired_watcher_cursors(
+        self, entry: dict[str, Any], value: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        declarations = entry.get("retired_cursors")
+        if declarations is None:
+            return []
+        if not isinstance(declarations, list) or not declarations or len(declarations) > MAX_RECORDS:
+            raise StorageRefusal(
+                "malformed_input", "retired watcher cursor declarations are missing or exceed the bound"
+            )
+        offsets = value["offsets"]
+        seen = set(value["seen"])
+        pending = set(value["pending_events"])
+        delivered = set(value["delivered_events"])
+        last_active = set(value["last_active"])
+        last_event_id = value["last_event_id"]
+        normalized: list[dict[str, Any]] = []
+        declared_sources: set[str] = set()
+        declared_artifacts: set[str] = set()
+        declared_event_ids: set[str] = set()
+        for declaration in declarations:
+            bound = self._bind_retired_watcher_cursor(
+                declaration, offsets, declared_sources, declared_artifacts
+            )
+            archive = self._parse_retired_watcher_archive(bound)
+            classified = self._classify_retired_watcher_cursor(
+                bound, archive, seen, pending, delivered, last_active, last_event_id,
+                declared_event_ids,
+            )
+            self._register_retired_watcher_binding(bound, classified["archive_event_ids"])
+            declared_sources.add(bound["source_path"])
+            declared_artifacts.update(bound["artifact_ids"])
+            declared_event_ids.update(classified["archive_event_ids"])
+            normalized.append(classified)
+        return normalized
+
+    def _bind_retired_watcher_cursor(
+        self,
+        declaration: Any,
+        offsets: dict[str, Any],
+        declared_sources: set[str],
+        declared_artifacts: set[str],
+    ) -> dict[str, Any]:
+        expected_fields = {
+            "source_path",
+            "expected_next_offset",
+            "retained_status_artifact_id",
+            "retained_updates_artifact_id",
+            "expected_status_sha256",
+            "expected_updates_sha256",
+            "disposition",
+        }
+        if not isinstance(declaration, dict) or set(declaration) != expected_fields:
+            raise StorageRefusal(
+                "malformed_input", "retired watcher cursor declaration fields are unsupported"
+            )
+        source_path = _text(declaration["source_path"], "retired cursor source_path")
+        source = Path(source_path)
+        if (
+            not source.is_absolute()
+            or str(source) != source_path
+            or source.name != "updates.jsonl"
+            or any(part in {".", ".."} for part in source.parts)
+        ):
+            raise StorageRefusal(
+                "malformed_input", "retired watcher cursor source path is not canonical"
+            )
+        if source_path in declared_sources or source_path not in offsets:
+            raise StorageRefusal(
+                "identity_collision", "retired watcher cursor is duplicated or stale"
+            )
+        next_offset = _integer(
+            declaration["expected_next_offset"], "retired cursor expected_next_offset"
+        )
+        if offsets[source_path] != next_offset:
+            raise StorageRefusal(
+                "identity_collision", "retired watcher cursor offset does not match"
+            )
+        if declaration["disposition"] != "retained_non_active":
+            raise StorageRefusal(
+                "malformed_input", "retired watcher cursor disposition is unsupported"
+            )
+        status_artifact_id = _artifact_id(declaration["retained_status_artifact_id"])
+        updates_artifact_id = _artifact_id(declaration["retained_updates_artifact_id"])
+        artifact_ids = {status_artifact_id, updates_artifact_id}
+        if len(artifact_ids) != 2 or artifact_ids & declared_artifacts:
+            raise StorageRefusal("identity_collision", "retired watcher cursor artifacts overlap")
+        status_source = self.retained_sources.get(status_artifact_id)
+        updates_source = self.retained_sources.get(updates_artifact_id)
+        if status_source is None or updates_source is None:
+            raise StorageRefusal(
+                "unknown_consumer", "retired watcher cursor archive pair is not retained"
+            )
+        retained_status_path = Path(status_source["path"])
+        retained_updates_path = Path(updates_source["path"])
+        if (
+            retained_status_path.name != "status.json"
+            or retained_updates_path.name != "updates.jsonl"
+        ):
+            raise StorageRefusal(
+                "identity_collision", "retired watcher cursor archive pair does not match"
+            )
+        if status_source["class"] not in {"legacy-archive", "legacy-history"} or updates_source[
+            "class"
+        ] != status_source["class"]:
+            raise StorageRefusal(
+                "identity_collision", "retired watcher cursor archive classes do not match"
+            )
+        status_hash = _text(declaration["expected_status_sha256"], "retired cursor status hash")
+        updates_hash = _text(
+            declaration["expected_updates_sha256"], "retired cursor updates hash"
+        )
+        if (
+            not re.fullmatch(r"[0-9a-f]{64}", status_hash)
+            or not re.fullmatch(r"[0-9a-f]{64}", updates_hash)
+            or status_hash != status_source["digest"]
+            or updates_hash != updates_source["digest"]
+        ):
+            raise StorageRefusal(
+                "identity_collision", "retired watcher cursor archive hash does not match"
+            )
+        return {
+            "source_path": source_path,
+            "source": source,
+            "next_offset": next_offset,
+            "status_artifact_id": status_artifact_id,
+            "updates_artifact_id": updates_artifact_id,
+            "artifact_ids": artifact_ids,
+            "status_hash": status_hash,
+            "updates_hash": updates_hash,
+            "status_source": status_source,
+            "updates_source": updates_source,
+            "binding": (
+                status_artifact_id,
+                updates_artifact_id,
+                status_hash,
+                updates_hash,
+            ),
+        }
+
+    def _register_retired_watcher_binding(
+        self, bound: dict[str, Any], archive_event_ids: list[str]
+    ) -> None:
+        source_path = bound["source_path"]
+        cursor_key = (source_path, bound["next_offset"])
+        prior_binding = self.retired_cursor_bindings.get(cursor_key)
+        if prior_binding not in {None, bound["binding"]}:
+            raise StorageRefusal(
+                "identity_collision", "retired watcher cursor has conflicting scope bindings"
+            )
+        for artifact_id in bound["artifact_ids"]:
+            prior_source = self.retired_artifact_sources.get(artifact_id)
+            if prior_source not in {None, source_path}:
+                raise StorageRefusal(
+                    "identity_collision", "retired watcher cursor artifact is claimed by another source"
+                )
+        for event_id in archive_event_ids:
+            prior_source = self.retired_event_sources.get(event_id)
+            if prior_source not in {None, source_path}:
+                raise StorageRefusal(
+                    "identity_collision", "retired watcher cursor event is claimed by another source"
+                )
+        self.retired_cursor_bindings[cursor_key] = bound["binding"]
+        for artifact_id in bound["artifact_ids"]:
+            self.retired_artifact_sources[artifact_id] = source_path
+        for event_id in archive_event_ids:
+            self.retired_event_sources[event_id] = source_path
+
+    def _parse_retired_watcher_archive(self, bound: dict[str, Any]) -> dict[str, Any]:
+        status = _decode_object(bound["status_source"]["data"], "retired watcher cursor status")
+        callsign = _text(status.get("callsign"), "retired cursor status.callsign")
+        owner = _text(status.get("shotcaller"), "retired cursor status.shotcaller")
+        role = _text(status.get("role"), "retired cursor status.role").lower()
+        source = bound["source"]
+        if (
+            role not in {"champion", "worker"}
+            or source.parent.name != callsign
+            or source.parent.parent.name != "champions"
+            or source.parent.parent.parent.name != owner
+            or callsign in self.agent_by_callsign
+        ):
+            raise StorageRefusal(
+                "identity_collision", "retired watcher cursor Roster identity does not match"
+            )
+        owner_id = self.agent_by_callsign.get(owner)
+        if owner_id is None or self.agents[owner_id]["role"] != "shotcaller":
+            raise StorageRefusal(
+                "unknown_consumer", "retired watcher cursor owner is not an active Shotcaller"
+            )
+        status_value = _text(status.get("status"), "retired cursor status.status").lower()
+        if status_value not in LIFECYCLE_STATES:
+            raise StorageRefusal(
+                "malformed_input", "retired cursor status lifecycle state is unsupported"
+            )
+        status_updated_at = _timestamp(
+            status.get("updated_at"), "retired cursor status.updated_at"
+        )
+        status_update = _text(status.get("update"), "retired cursor status.update")
+        updates_data = bound["updates_source"]["data"]
+        next_offset = bound["next_offset"]
+        if not updates_data or not updates_data.endswith(b"\n") or next_offset > len(updates_data):
+            raise StorageRefusal(
+                "identity_collision", "retired watcher cursor archive prefix is unavailable"
+            )
+        cursor_event_ids: list[str] = []
+        archive_event_ids: list[str] = []
+        archive_offset = 0
+        latest: Optional[tuple[str, str, str]] = None
+        prefix_complete = False
+        for line_number, raw in enumerate(io.BytesIO(updates_data), 1):
+            line = raw.rstrip(b"\r\n")
+            transition = _decode_object(line, f"retired watcher cursor update {line_number}")
+            event_at = _timestamp(transition.get("at"), "retired transition.at")
+            event_status = _text(transition.get("status"), "retired transition.status").lower()
+            if event_status not in LIFECYCLE_STATES:
+                raise StorageRefusal("malformed_input", "retired transition status is unsupported")
+            event_update = _text(transition.get("update"), "retired transition.update")
+            latest = (event_status, event_at, event_update)
+            event_id = _legacy_digest(
+                bound["source_path"], archive_offset, line.decode("utf-8")
+            )
+            archive_event_ids.append(event_id)
+            if archive_offset < next_offset:
+                if archive_offset + len(raw) > next_offset:
+                    raise StorageRefusal(
+                        "identity_collision", "retired watcher cursor offset splits an event"
+                    )
+                cursor_event_ids.append(event_id)
+                prefix_complete = archive_offset + len(raw) == next_offset
+            archive_offset += len(raw)
+        if latest is None or not prefix_complete or not cursor_event_ids:
+            raise StorageRefusal(
+                "identity_collision", "retired watcher cursor prefix is incomplete"
+            )
+        if latest != (status_value, status_updated_at, status_update):
+            raise StorageRefusal(
+                "snapshot_event_mismatch", "retained Roster status and latest transition do not match"
+            )
+        return {
+            "cursor_event_ids": cursor_event_ids,
+            "archive_event_ids": archive_event_ids,
+        }
+
+    def _classify_retired_watcher_cursor(
+        self,
+        bound: dict[str, Any],
+        archive: dict[str, list[str]],
+        seen: set[str],
+        pending: set[str],
+        delivered: set[str],
+        last_active: set[str],
+        last_event_id: Any,
+        declared_event_ids: set[str],
+    ) -> dict[str, Any]:
+        cursor_event_set = set(archive["cursor_event_ids"])
+        archive_event_set = set(archive["archive_event_ids"])
+        suffix_event_set = archive_event_set - cursor_event_set
+        if (
+            not cursor_event_set <= seen
+            or suffix_event_set & (seen | delivered | pending)
+            or last_event_id in suffix_event_set
+            or archive_event_set & pending
+            or archive_event_set & declared_event_ids
+        ):
+            raise StorageRefusal(
+                "unknown_consumer", "retired watcher cursor has unseen, pending, or ambiguous events"
+            )
+        status_path = str(bound["source"].with_name("status.json"))
+        return {
+            "source_path": bound["source_path"],
+            "status_path": status_path,
+            "expected_next_offset": bound["next_offset"],
+            "retained_status_artifact_id": bound["status_artifact_id"],
+            "retained_updates_artifact_id": bound["updates_artifact_id"],
+            "expected_status_sha256": bound["status_hash"],
+            "expected_updates_sha256": bound["updates_hash"],
+            "legacy_event_ids": archive["cursor_event_ids"],
+            "archive_event_ids": archive["archive_event_ids"],
+            "cursor_event_count": len(cursor_event_set),
+            "archived_event_count": len(archive_event_set),
+            "seen_count": len(archive_event_set & seen),
+            "delivered_count": len(archive_event_set & delivered),
+            "was_last_active": status_path in last_active,
+            "was_last_event": last_event_id in archive_event_set,
+            "disposition": "retained_non_active_no_history_or_delivery",
+        }
+
+    def _retired_watcher_receipts(
+        self,
+        entry: dict[str, Any],
+        value: dict[str, Any],
+        data: bytes,
+        retired_event_ids: set[str],
+    ) -> tuple[set[str], Optional[dict[str, Any]]]:
+        declaration = entry.get("retired_unbound_receipts")
+        seen = set(value["seen"])
+        delivered = value["delivered_events"]
+        pending = set(value["pending_events"])
+        known = set(self.event_aliases) | retired_event_ids
+        unknown_seen = seen - known
+        unknown_delivered = set(delivered) - known
+        unknown = unknown_seen | unknown_delivered
+        if not unknown:
+            if declaration is not None:
+                raise StorageRefusal(
+                    "identity_collision", "retired watcher receipt declaration is stale"
+                )
+            return set(), None
+        if declaration is None:
+            raise StorageRefusal(
+                "unknown_consumer", "watcher receipt has no imported durable event"
+            )
+        if not isinstance(declaration, dict) or set(declaration) != {
+            "expected_watcher_sha256",
+            "seen_only",
+            "delivered",
+            "disposition",
+        }:
+            raise StorageRefusal(
+                "malformed_input", "retired watcher receipt declaration fields are unsupported"
+            )
+        if not entry.get("retired_cursors"):
+            raise StorageRefusal(
+                "unknown_consumer", "unbound watcher receipts require retired cursor evidence"
+            )
+        watcher_hash = _text(
+            declaration["expected_watcher_sha256"], "retired watcher receipt source hash"
+        )
+        if (
+            not re.fullmatch(r"[0-9a-f]{64}", watcher_hash)
+            or watcher_hash != hashlib.sha256(data).hexdigest()
+        ):
+            raise StorageRefusal(
+                "identity_collision", "retired watcher receipt source hash does not match"
+            )
+        if declaration["disposition"] != "retained_unbound_no_delivery_history":
+            raise StorageRefusal(
+                "malformed_input", "retired watcher receipt disposition is unsupported"
+            )
+        raw_seen_only = declaration["seen_only"]
+        raw_delivered = declaration["delivered"]
+        if (
+            not isinstance(raw_seen_only, list)
+            or not isinstance(raw_delivered, list)
+            or len(raw_seen_only) + len(raw_delivered) > MAX_RECORDS
+        ):
+            raise StorageRefusal(
+                "malformed_input", "retired watcher receipt lists are malformed or exceed the bound"
+            )
+        declared_seen_only = {
+            _text(item, "retired watcher seen-only event") for item in raw_seen_only
+        }
+        if len(declared_seen_only) != len(raw_seen_only) or any(
+            not re.fullmatch(r"[0-9a-f]{64}", item) for item in declared_seen_only
+        ):
+            raise StorageRefusal(
+                "identity_collision", "retired watcher seen-only events are duplicated or malformed"
+            )
+        declared_delivered: dict[str, dict[str, Any]] = {}
+        for item in raw_delivered:
+            if not isinstance(item, dict) or set(item) != {
+                "legacy_event_id",
+                "channel",
+                "seen",
+            }:
+                raise StorageRefusal(
+                    "malformed_input", "retired watcher delivered receipt is malformed"
+                )
+            legacy_id = _text(item["legacy_event_id"], "retired watcher delivered event")
+            channel = _text(item["channel"], "retired watcher delivered channel")
+            if (
+                not re.fullmatch(r"[0-9a-f]{64}", legacy_id)
+                or legacy_id in declared_delivered
+                or not isinstance(item["seen"], bool)
+            ):
+                raise StorageRefusal(
+                    "identity_collision", "retired watcher delivered receipt is duplicated or malformed"
+                )
+            declared_delivered[legacy_id] = {
+                "channel": channel,
+                "seen": item["seen"],
+            }
+        expected_seen_only = unknown_seen - unknown_delivered
+        if declared_seen_only != expected_seen_only or set(declared_delivered) != unknown_delivered:
+            raise StorageRefusal(
+                "identity_collision", "retired watcher receipt set does not match the source"
+            )
+        for legacy_id, declared in declared_delivered.items():
+            receipt = delivered[legacy_id]
+            if (
+                not isinstance(receipt, dict)
+                or receipt.get("channel") != declared["channel"]
+                or (legacy_id in seen) != declared["seen"]
+            ):
+                raise StorageRefusal(
+                    "identity_collision", "retired watcher delivered receipt evidence does not match"
+                )
+        if unknown & pending or value["last_event_id"] in unknown:
+            raise StorageRefusal(
+                "unknown_consumer", "retired watcher receipt is pending or is the current last event"
+            )
+        normalized = {
+            "expected_watcher_sha256": watcher_hash,
+            "seen_only_count": len(expected_seen_only),
+            "delivered_count": len(unknown_delivered),
+            "seen_delivered_count": len(unknown_seen & unknown_delivered),
+            "classification_sha256": hashlib.sha256(
+                _stable_json(declaration).encode("utf-8")
+            ).hexdigest(),
+            "disposition": "retained_unbound_no_delivery_history",
+        }
+        return unknown, normalized
 
     def _resolve_relationships(self) -> None:
         for agent in self.agents.values():
@@ -1205,6 +1689,7 @@ class ImportPlanner:
 
     def build(self) -> ImportPlan:
         ordered = self._ordered_entries()
+        self._parse_retained()
         # Identity sources first, then coordination sources that reference them.
         dispatch = {
             "rosters": self._parse_roster,
@@ -1226,7 +1711,6 @@ class ImportPlanner:
         }
         for kind, entry in sorted(ordered, key=lambda item: (priority[item[0]], self._source_order[item[1]["artifact_id"]])):
             dispatch[kind](entry)
-        self._parse_retained()
         self._resolve_relationships()
         self.rows["projects"] = sorted(self.projects.values(), key=lambda row: row["project_id"])
         self.rows["callsigns"] = sorted(

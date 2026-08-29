@@ -74,6 +74,26 @@ def test_complete_dry_run_apply_and_round_trip(root: Path) -> None:
             range(len(report["ordering"]))
         )
         assert report["retained_files"][0]["artifact_id"] == "T5-evidence"
+        agents = {row["callsign"]: row for row in plan["rows"]["agent_instances"]}
+        garen_record = str(fixture["runtime_root"] / "rosters/Garen/status.json")
+        assert json.loads(agents["Garen"]["metadata_json"])[
+            "legacy_visible_assignment"
+        ] == {
+            "record": garen_record,
+            "record_directory": str(fixture["runtime_root"] / "rosters/Garen"),
+            "locator_kind": "status_snapshot",
+        }
+        assert json.loads(agents["Thresh"]["metadata_json"])[
+            "legacy_visible_assignment"
+        ] == {
+            "record": fixture["champion_record"],
+            "record_directory": fixture["champion_record"],
+            "locator_kind": "record_directory",
+        }
+        launch = plan["rows"]["launch_attempts"][0]
+        assert launch["record_locator"] == str(
+            fixture["runtime_root"] / "rosters/Garen/champions/Pyke"
+        )
         applied = store.apply_import(plan, report["report_digest"])
         assert applied["applied"] and not applied["dry_run"]
         assert store.integrity()["ok"]
@@ -101,6 +121,16 @@ def test_complete_dry_run_apply_and_round_trip(root: Path) -> None:
         assert fixture["champion_worktree"].encode("utf-8") in rollback
         rollback_value = json.loads(rollback)
         assert rollback_value["purpose"] == "rollback"
+        rollback_agents = {
+            row["callsign"]: row
+            for row in rollback_value["tables"]["agent_instances"]
+        }
+        assert json.loads(rollback_agents["Garen"]["metadata_json"])[
+            "legacy_visible_assignment"
+        ]["record"] == garen_record
+        assert json.loads(rollback_agents["Thresh"]["metadata_json"])[
+            "legacy_visible_assignment"
+        ]["record"] == fixture["champion_record"]
         assert rollback_value["tables"]["events"][-1]["status"] == "progress"
         assert {row["state"] for row in rollback_value["tables"]["deliveries"]} == {
             "accepted",
@@ -181,6 +211,48 @@ def test_malformed_duplicate_unknown_and_foreign_key_refusals(root: Path) -> Non
         assert store.integrity()["ok"]
 
 
+def test_visible_assignment_record_malformed_and_stale_refusals(root: Path) -> None:
+    malformed_source = root / "malformed-visible-record"
+    malformed_source.mkdir()
+    fixture = write_complete_fixture(malformed_source)
+    pool_path = malformed_source / "league-champions.json"
+    pool = json.loads(pool_path.read_text(encoding="utf-8"))
+    pool["in_use"]["Thresh"]["record"] = "relative/Garen/champions/Thresh"
+    pool_path.write_text(stable_json(pool) + "\n", encoding="utf-8")
+    refused(
+        lambda: build_import_plan(malformed_source, fixture["manifest"]),
+        "malformed_input",
+    )
+
+    stale_owner_source = root / "stale-visible-record-owner"
+    stale_owner_source.mkdir()
+    fixture = write_complete_fixture(stale_owner_source)
+    pool_path = stale_owner_source / "league-champions.json"
+    pool = json.loads(pool_path.read_text(encoding="utf-8"))
+    pool["in_use"]["Thresh"]["record"] = str(
+        fixture["runtime_root"] / "rosters/Other/champions/Thresh"
+    )
+    pool_path.write_text(stable_json(pool) + "\n", encoding="utf-8")
+    refused(
+        lambda: build_import_plan(stale_owner_source, fixture["manifest"]),
+        "identity_collision",
+    )
+
+    stale_pending_source = root / "stale-visible-record-pending"
+    stale_pending_source.mkdir()
+    fixture = write_complete_fixture(stale_pending_source)
+    pool_path = stale_pending_source / "league-champions.json"
+    pool = json.loads(pool_path.read_text(encoding="utf-8"))
+    pool["in_use"]["Pyke"]["record"] = str(
+        fixture["runtime_root"] / "rosters/Garen/champions/Other"
+    )
+    pool_path.write_text(stable_json(pool) + "\n", encoding="utf-8")
+    refused(
+        lambda: build_import_plan(stale_pending_source, fixture["manifest"]),
+        "identity_collision",
+    )
+
+
 def test_import_crash_atomicity_and_plan_tamper(root: Path) -> None:
     source = root / "crash-source"
     source.mkdir()
@@ -251,6 +323,7 @@ def main() -> None:
         root = Path(temporary)
         test_complete_dry_run_apply_and_round_trip(root)
         test_malformed_duplicate_unknown_and_foreign_key_refusals(root)
+        test_visible_assignment_record_malformed_and_stale_refusals(root)
         test_import_crash_atomicity_and_plan_tamper(root)
         test_descriptor_bound_read_survives_path_replacement(root)
     print("PASS: complete dry-run import, parity/export, malformed/collision refusal, FK, and crash atomicity")

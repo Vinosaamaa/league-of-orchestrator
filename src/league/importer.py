@@ -147,6 +147,35 @@ def _artifact_id(value: Any) -> str:
     return item
 
 
+def _legacy_visible_record(value: Any) -> dict[str, str]:
+    record = _text(value, "visible assignment record")
+    try:
+        path = Path(record)
+    except (OSError, ValueError) as exc:
+        raise StorageRefusal(
+            "malformed_input", "visible assignment record must be an absolute canonical path"
+        ) from exc
+    if (
+        not path.is_absolute()
+        or str(path) != record
+        or any(part in {".", ".."} for part in path.parts)
+    ):
+        raise StorageRefusal(
+            "malformed_input", "visible assignment record must be an absolute canonical path"
+        )
+    locator_kind = "status_snapshot" if path.name == "status.json" else "record_directory"
+    record_directory = path.parent if locator_kind == "status_snapshot" else path
+    if record_directory == Path("/") or not record_directory.name:
+        raise StorageRefusal(
+            "malformed_input", "visible assignment record has no record directory"
+        )
+    return {
+        "record": record,
+        "record_directory": str(record_directory),
+        "locator_kind": locator_kind,
+    }
+
+
 def _legacy_digest(source: str, offset: int, line: str) -> str:
     return hashlib.sha256(f"{source}\0{offset}\0{line}".encode("utf-8")).hexdigest()
 
@@ -606,8 +635,10 @@ class ImportPlanner:
             callsign = _text(callsign, "in-use callsign")
             if callsign in seen or not isinstance(assignment, dict):
                 raise StorageRefusal("identity_collision", "visible in-use callsign is duplicated or malformed")
-            if set(assignment) - {"role", "task_id", "pending"}:
+            if set(assignment) - {"role", "task_id", "pending", "record"}:
                 raise StorageRefusal("malformed_input", "visible in-use assignment fields are unsupported")
+            if "record" in assignment:
+                _legacy_visible_record(assignment["record"])
             seen.add(callsign)
             agent_id = self.agent_by_callsign.get(callsign)
             inferred_role = self.agents[agent_id]["role"] if agent_id else assignment.get("role", "champion")
@@ -1120,15 +1151,51 @@ class ImportPlanner:
                 launch = next((item for item in self.launch_attempts.values() if item["callsign"] == callsign), None)
                 if agent_id is None and not (pending and launch is not None):
                     raise StorageRefusal("unknown_consumer", "in-use callsign has no exact agent or pending launch")
+                legacy_record = None
+                if isinstance(assignment, dict) and "record" in assignment:
+                    legacy_record = _legacy_visible_record(assignment["record"])
                 if agent_id is not None:
                     if callsign in self.leases:
                         raise StorageRefusal("identity_collision", "callsign has multiple live leases")
+                    agent = self.agents[agent_id]
+                    if legacy_record is not None:
+                        record_directory = Path(legacy_record["record_directory"])
+                        if record_directory.name != callsign:
+                            raise StorageRefusal(
+                                "identity_collision",
+                                "visible assignment record does not match its active callsign",
+                            )
+                        if agent["role"] == "champion":
+                            owner_id = agent["shotcaller_agent_id"]
+                            owner_callsign = self.agents[owner_id]["callsign"]
+                            if (
+                                record_directory.parent.name != "champions"
+                                or record_directory.parent.parent.name != owner_callsign
+                            ):
+                                raise StorageRefusal(
+                                    "identity_collision",
+                                    "visible assignment record does not match its active Roster owner",
+                                )
+                        metadata = json.loads(agent["metadata_json"])
+                        if "legacy_visible_assignment" in metadata:
+                            raise StorageRefusal(
+                                "identity_collision",
+                                "visible assignment record metadata collides with Roster metadata",
+                            )
+                        metadata["legacy_visible_assignment"] = legacy_record
+                        agent["metadata_json"] = _stable_json(metadata)
                     self.leases[callsign] = {
                         "callsign": callsign,
                         "agent_id": agent_id,
                         "launch_attempt_id": None,
                         "reserved_at": self.agents[agent_id]["updated_at"],
                     }
+                elif legacy_record is not None and launch is not None:
+                    if legacy_record["record"] != launch["record_locator"]:
+                        raise StorageRefusal(
+                            "identity_collision",
+                            "visible assignment record does not match its pending launch",
+                        )
         elif any(agent["role"] in {"shotcaller", "champion"} for agent in self.agents.values()):
             raise StorageRefusal("unknown_consumer", "visible agents require an explicit visible callsign pool")
         for legacy_id, event_id in sorted(self.event_aliases.items()):

@@ -107,3 +107,7 @@ The JSON, activity-evidence, and outbound-receipt contracts are
 [`league-report.schema.json`](../schema/league-report.schema.json),
 [`league-activity-evidence.schema.json`](../schema/league-activity-evidence.schema.json),
 and [`league-outbound-receipt.schema.json`](../schema/league-outbound-receipt.schema.json).
+
+## Published reports
+
+- 2026-08-28 overnight delivery: [Markdown](reports/2026-08-28-overnight-delivery-report.md) · [portable HTML](../.lavish/reports/2026-08-28-overnight-delivery-report.html)

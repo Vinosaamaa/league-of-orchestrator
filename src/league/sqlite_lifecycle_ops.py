@@ -39,7 +39,10 @@ def transition(
     try:
         with store._transaction():
             current = store.connection.execute(
-                "SELECT version FROM agent_instances WHERE agent_id=? AND retired_at IS NULL",
+                """
+                SELECT version,role,shotcaller_agent_id
+                  FROM agent_instances WHERE agent_id=? AND retired_at IS NULL
+                """,
                 (agent_id,),
             ).fetchone()
             if current is None or int(current["version"]) != expected_version:
@@ -63,11 +66,34 @@ def transition(
             )
             if changed.rowcount != 1:
                 raise StorageRefusal("version_conflict", "transition expected-version precondition failed")
+            recipient_agent_id = (
+                str(current["shotcaller_agent_id"])
+                if current["role"] == "champion" and current["shotcaller_agent_id"]
+                else None
+            )
+            outbox_id = None
+            if recipient_agent_id is not None:
+                outbox_id = f"outbox:{event_id}"
+                store.connection.execute(
+                    """
+                    INSERT INTO delivery_outbox
+                      (outbox_id,event_id,recipient_agent_id,state,available_at,attempt_count)
+                    VALUES(?,?,?,'pending',?,0)
+                    """,
+                    (outbox_id, event_id, recipient_agent_id, at),
+                )
     except StorageRefusal:
         raise
     except sqlite3.DatabaseError as exc:
         raise store._translate_database_error(exc, "transition conflicted with canonical state") from exc
-    return {"event_id": event_id, "agent_id": agent_id, "version": next_version, "status": status}
+    return {
+        "event_id": event_id,
+        "outbox_id": outbox_id,
+        "recipient_agent_id": recipient_agent_id,
+        "agent_id": agent_id,
+        "version": next_version,
+        "status": status,
+    }
 
 
 def reserve_callsign(

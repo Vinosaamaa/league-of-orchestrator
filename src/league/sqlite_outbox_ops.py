@@ -373,9 +373,12 @@ def delivery_target(store: Any, recipient_agent_id: str, at: str) -> Optional[di
         }
     runtime = store.connection.execute(
         """
-        SELECT runtime_instance_id,endpoint,runtime_generation,status,verified
-          FROM runtime_instances
-         WHERE actor_agent_id=? AND status IN ('active','idle') AND verified=1
+        SELECT r.runtime_instance_id,r.endpoint,r.runtime_generation,r.status,r.verified,
+               r.backend_kind,r.session_ref,a.routing_name,a.thread_id
+          FROM runtime_instances r
+          JOIN agent_instances a ON a.agent_id=r.actor_agent_id
+         WHERE r.actor_agent_id=? AND r.status IN ('active','idle') AND r.verified=1
+           AND a.retired_at IS NULL
          ORDER BY last_seen_at DESC,runtime_instance_id
          LIMIT 1
         """,
@@ -388,6 +391,10 @@ def delivery_target(store: Any, recipient_agent_id: str, at: str) -> Optional[di
         "runtime_instance_id": runtime["runtime_instance_id"],
         "locator": runtime["endpoint"],
         "generation": runtime["runtime_generation"],
+        "backend_kind": runtime["backend_kind"],
+        "session_ref": runtime["session_ref"],
+        "routing_name": runtime["routing_name"],
+        "thread_id": runtime["thread_id"],
         "fence": None,
     }
 

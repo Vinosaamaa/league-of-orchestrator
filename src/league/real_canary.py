@@ -67,6 +67,15 @@ CODEX_SESSION_TITLE = re.compile(
 )
 
 
+class _FixtureSettlementIds:
+    def __init__(self) -> None:
+        self.sequence = 0
+
+    def new(self, kind: str) -> str:
+        self.sequence += 1
+        return f"{kind}:fixture-settlement:{self.sequence}"
+
+
 def _run(
     arguments: Sequence[str],
     *,
@@ -560,6 +569,46 @@ def _setup_sqlite(
                 at=clock.now(),
             )
         )
+        roster = store.roster_snapshot(
+            as_of=clock.now(),
+            recent_since="2025-01-01T00:00:00Z",
+            stale_before="2025-01-01T00:00:00Z",
+            visibility="local",
+        )
+        imported_champions: dict[str, dict[str, Any]] = {}
+        fixture_ids = _FixtureSettlementIds()
+        for project in roster["projects"]:
+            for group in project["groups"].values():
+                for item in group:
+                    if item.get("kind") == "agent" and item.get("role") == "champion":
+                        imported_champions[str(item["agent_id"])] = item
+                    for agent in item.get("agents", []):
+                        if agent.get("role") == "champion":
+                            imported_champions[str(agent["agent_id"])] = agent
+        for imported_id in sorted(imported_champions):
+            if imported_id == CHAMPION_ID:
+                continue
+            imported = store.agent_status(imported_id)
+            if imported is None or imported["status"] in {
+                "completed", "complete", "cancelled", "canceled", "failed"
+            }:
+                continue
+            settled = store.transition(
+                imported_id,
+                int(imported["version"]),
+                "completed",
+                "Synthetic pre-existing fixture settled before isolated canary.",
+                clock.now(),
+            )
+            DeliveryService(
+                store,
+                delivery,
+                clock,
+                fixture_ids,
+                dispatcher_id=f"dispatcher:fixture-settlement:{imported_id}",
+            ).dispatch_source(
+                settled["outbox_id"], settled["event_id"], settled["recipient_agent_id"]
+            )
         store.intake_prompt(
             "prompt:real-cleanup-canary",
             SHOTCALLER_ID,
@@ -734,7 +783,9 @@ def _settle_transition_and_request(
             or end_stop.get("obligations") != expected_obligations
         ):
             raise StorageRefusal(
-                "real_canary_stop_gate_failed", "cleanup was not the sole remaining Stop obligation"
+                "real_canary_stop_gate_failed",
+                "cleanup was not the sole remaining Stop obligation: "
+                f"wait={wait_stop.get('obligations')!r}, end={end_stop.get('obligations')!r}",
             )
         return {
             "cleanup_state": obligation["cleanup_state"],

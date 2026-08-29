@@ -98,6 +98,8 @@ class RequestStorage(Protocol):
         source_event_key: str,
         body: str,
         at: str,
+        *,
+        wake_scope_id: Optional[str] = None,
     ) -> dict[str, Any]: ...
     def triage_prompt(self, prompt_id: str, items: list[dict[str, Any]], at: str) -> dict[str, Any]: ...
 

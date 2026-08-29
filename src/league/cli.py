@@ -1087,9 +1087,20 @@ def _agent_status(store: Storage, args: argparse.Namespace) -> CommandResult:
 
 
 def _agent_transition(store: Storage, args: argparse.Namespace) -> CommandResult:
-    return store.transition(
+    transition = store.transition(
         args.agent_id, args.expected_version, args.status, args.update, args.at
-    ), None
+    )
+    if transition.get("outbox_id"):
+        from .canonical_delivery import dispatch_event
+
+        transition["delivery"] = dispatch_event(
+            store,
+            outbox_id=transition["outbox_id"],
+            event_id=transition["event_id"],
+            recipient_agent_id=transition["recipient_agent_id"],
+            at=args.at,
+        )
+    return transition, None
 
 
 def _callsign_reconcile(store: Storage, args: argparse.Namespace) -> CommandResult:

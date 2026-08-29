@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import os
 import sqlite3
+import stat
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,6 +22,7 @@ from .sqlite_artifact_ops import publish as record_repository_publication_operat
 from .sqlite_artifact_ops import status as task_artifacts_operation
 from .sqlite_artifact_ops import unresolved as unresolved_repository_publications_operation
 from .sqlite_core import SQLiteTransactionCore
+from . import sqlite_assignment_ops
 from .sqlite_assignment_ops import activate_assignment as activate_assignment_operation
 from .sqlite_assignment_ops import block_assignment as block_assignment_operation
 from .sqlite_assignment_ops import finish_hidden_assignment as finish_hidden_assignment_operation
@@ -64,6 +66,7 @@ from .sqlite_request_ops import route_request as route_request_operation
 from .sqlite_request_ops import set_request_state as set_request_state_operation
 from .sqlite_request_ops import triage_prompt as triage_prompt_operation
 from .sqlite_request_ops import unresolved_requests as unresolved_requests_operation
+from .sqlite_request_ops import untriaged_intake as untriaged_intake_operation
 from .sqlite_progress_ops import emit_request_progress as emit_request_progress_operation
 from .sqlite_progress_ops import reconcile_request_progress as reconcile_request_progress_operation
 from .sqlite_rollover_ops import abort_rollover as abort_rollover_operation
@@ -1511,7 +1514,16 @@ class SQLiteStorage(SQLiteTransactionCore):
         root = Path(state_root)
         if not root.is_absolute():
             raise StorageRefusal("invalid_root", "state root must be an explicit absolute path")
-        if not root.is_dir():
+        try:
+            root_mode = root.stat().st_mode
+        except PermissionError as exc:
+            raise StorageRefusal(
+                "state_root_unavailable",
+                "League state root is not accessible to this runtime; grant only the exact canonical root or use a trusted broker",
+            ) from exc
+        except FileNotFoundError as exc:
+            raise StorageRefusal("invalid_root", "state root must be an existing directory") from exc
+        if not stat.S_ISDIR(root_mode):
             raise StorageRefusal("invalid_root", "state root must be an existing directory")
         if root.is_symlink():
             raise StorageRefusal("invalid_root", "state root cannot be a symbolic link")
@@ -1525,8 +1537,18 @@ class SQLiteStorage(SQLiteTransactionCore):
         self.database = self.state_root / DATABASE_NAME
         if self.database.is_symlink():
             raise StorageRefusal("invalid_root", "League database cannot be a symbolic link")
-        if not allow_create and not self.database.is_file():
-            raise StorageRefusal("store_missing", "League storage has not been migrated")
+        if not allow_create:
+            try:
+                database_mode = self.database.stat().st_mode
+            except PermissionError as exc:
+                raise StorageRefusal(
+                    "state_root_unavailable",
+                    "League database is not accessible to this runtime; grant only the exact canonical root or use a trusted broker",
+                ) from exc
+            except FileNotFoundError as exc:
+                raise StorageRefusal("store_missing", "League storage has not been migrated") from exc
+            if not stat.S_ISREG(database_mode):
+                raise StorageRefusal("store_missing", "League storage is not a regular file")
         self._database_existed = self.database.exists()
         try:
             self.connection = sqlite3.connect(
@@ -1586,6 +1608,15 @@ class SQLiteStorage(SQLiteTransactionCore):
             if hasattr(self, "connection"):
                 self.connection.close()
             raise
+        except sqlite3.OperationalError as exc:
+            if hasattr(self, "connection"):
+                self.connection.close()
+            if "unable to open database file" in str(exc).lower():
+                raise StorageRefusal(
+                    "state_root_unavailable",
+                    "League database is not accessible to this runtime; grant only the exact canonical root or use a trusted broker",
+                ) from exc
+            raise self._translate_database_error(exc, "storage open failed") from exc
         except sqlite3.DatabaseError as exc:
             if hasattr(self, "connection"):
                 self.connection.close()
@@ -2365,6 +2396,48 @@ class SQLiteStorage(SQLiteTransactionCore):
     ) -> dict[str, Any]:
         return triage_prompt_operation(self, prompt_id, items, at)
 
+    def triage_prompt_batch(
+        self,
+        owner_agent_id: str,
+        expected_prompt_ids: tuple[str, ...],
+        decisions: list[dict[str, Any]],
+        at: str,
+    ) -> dict[str, Any]:
+        from .sqlite_request_ops import triage_prompt_batch
+
+        return triage_prompt_batch(
+            self, owner_agent_id, expected_prompt_ids, decisions, at
+        )
+
+    def begin_request_turn(
+        self,
+        owner_agent_id: str,
+        expected_prompt_ids: tuple[str, ...],
+        decisions: list[dict[str, Any]],
+        plans: tuple[Any, ...],
+        at: str,
+    ) -> dict[str, Any]:
+        from .sqlite_request_ops import begin_request_turn
+
+        return begin_request_turn(
+            self, owner_agent_id, expected_prompt_ids, decisions, plans, at
+        )
+
+    def commit_request_turn(
+        self,
+        owner_agent_id: str,
+        actions: tuple[Any, ...],
+        at: str,
+    ) -> dict[str, Any]:
+        from .sqlite_request_ops import commit_request_turn
+
+        return commit_request_turn(self, owner_agent_id, actions, at)
+
+    def request_turn_boundary(self, owner_agent_id: str) -> dict[str, Any]:
+        from .sqlite_request_ops import request_turn_boundary
+
+        return request_turn_boundary(self, owner_agent_id)
+
     def quarantine_prompt(
         self,
         prompt_id: str,
@@ -2514,6 +2587,17 @@ class SQLiteStorage(SQLiteTransactionCore):
     ) -> dict[str, Any]:
         return unresolved_requests_operation(
             self, owner_agent_id, limit=limit, before_action=before_action
+        )
+
+    def untriaged_intake(
+        self,
+        owner_agent_id: str,
+        *,
+        limit: int = 20,
+        max_bytes: int = 1_000_000,
+    ) -> dict[str, Any]:
+        return untriaged_intake_operation(
+            self, owner_agent_id, limit=limit, max_bytes=max_bytes
         )
 
     def prepare_assignment(self, command: PrepareAssignmentCommand) -> dict[str, Any]:
@@ -2872,6 +2956,64 @@ class SQLiteStorage(SQLiteTransactionCore):
             runtime_instance_id,
             endpoint_identity,
             runtime_generation,
+            at,
+        )
+
+    def assignment_launch_context(self, assignment_id: str) -> dict[str, Any]:
+        return sqlite_assignment_ops.assignment_launch_context(self, assignment_id)
+
+    def record_assignment_context_delivery(
+        self,
+        assignment_id: str,
+        expected_version: int,
+        context_sha256: str,
+        byte_count: int,
+        effect_sha256: str,
+        event_id: str,
+        at: str,
+    ) -> dict[str, Any]:
+        return sqlite_assignment_ops.record_assignment_context_delivery(
+            self,
+            assignment_id,
+            expected_version,
+            context_sha256,
+            byte_count,
+            effect_sha256,
+            event_id,
+            at,
+        )
+
+    def fail_assignment_context_delivery(
+        self,
+        assignment_id: str,
+        expected_version: int,
+        failure_class: str,
+        event_id: str,
+        outbox_id: str,
+        at: str,
+    ) -> dict[str, Any]:
+        return sqlite_assignment_ops.fail_assignment_context_delivery(
+            self,
+            assignment_id,
+            expected_version,
+            failure_class,
+            event_id,
+            outbox_id,
+            at,
+        )
+
+    def settle_assignment_launch_cleanup(
+        self,
+        assignment_id: str,
+        expected_version: int,
+        cleanup_receipt_digest: str,
+        at: str,
+    ) -> dict[str, Any]:
+        return sqlite_assignment_ops.settle_assignment_launch_cleanup(
+            self,
+            assignment_id,
+            expected_version,
+            cleanup_receipt_digest,
             at,
         )
 

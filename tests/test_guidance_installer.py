@@ -20,6 +20,12 @@ def main() -> None:
     source = ROOT / "global-agent-instructions" / "shared-AGENTS.md"
     original = source.read_bytes()
     assert b"final rendered payload" in original
+    assert b"request turn" in original
+    assert b"one Shotcaller League process total" in original
+    assert b"never rewrite the body, inject control text" in original
+    assert b"league assign run" in original
+    assert b"never create, edit, or depend on `status.json`, `updates.jsonl`" in original
+    assert b"agent-watcher transition" not in original
     with tempfile.TemporaryDirectory(prefix="league-guidance-stage-") as temporary:
         root = Path(temporary)
         for harness in sorted(SUPPORTED_HARNESSES):

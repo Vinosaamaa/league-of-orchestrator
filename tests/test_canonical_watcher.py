@@ -574,6 +574,65 @@ def test_queued_prompts_reusing_turn_id_are_unique_and_conflicts_quarantine(
     assert _watcher(env, "codex-user-prompt-hook", payload=second) == {}
     assert generation() == second_generation
 
+    turn = subprocess.Popen(
+        [
+            str(LEAGUE),
+            "--state-root",
+            str(state),
+            "request",
+            "turn",
+            "--owner-agent-id",
+            SHOTCALLER_ID,
+            "--at",
+            AT2,
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    assert turn.stdout is not None and turn.stdin is not None
+    intake = json.loads(turn.stdout.readline())["result"]
+    assert intake["returned_count"] == 2 and intake["truncated"] is False
+    assert [row["body"] for row in intake["prompts"]] == [
+        first["prompt"],
+        second["prompt"],
+    ]
+    decisions = []
+    for ordinal, _prompt in enumerate(intake["prompts"], start=1):
+        decisions.append(
+            {
+                "items": [
+                {
+                    "summary": f"Semantic acknowledgement for queued prompt {ordinal}",
+                    "disposition": "acknowledgement",
+                }
+                ],
+            }
+        )
+    turn.stdin.write(
+        json.dumps({"decisions": decisions, "plans": []}, separators=(",", ":"))
+        + "\n"
+    )
+    turn.stdin.flush()
+    committed = json.loads(turn.stdout.readline())["result"]
+    assert committed["phase"] == "begun"
+    assert committed["batch"]["prompt_count"] == 2
+    assert not committed["batch"]["idempotent"]
+    turn.stdin.write(json.dumps({"actions": []}, separators=(",", ":")) + "\n")
+    turn.stdin.flush()
+    completed = json.loads(turn.stdout.readline())["result"]
+    assert turn.wait(timeout=10) == 0
+    assert completed["phase"] == "committed"
+    settled = _league(
+        state,
+        "request",
+        "untriaged",
+        "--owner-agent-id",
+        SHOTCALLER_ID,
+    )["result"]
+    assert settled["untriaged_prompt_count"] == 0 and settled["prompts"] == []
+
     champion = {
         "session_id": CHAMPION_ID,
         "turn_id": first["turn_id"],

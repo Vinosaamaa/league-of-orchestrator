@@ -333,6 +333,60 @@ content or sessions cannot share the stored source key. A residual ownership or
 source conflict is retained in no-wake quarantine and never rejects the user
 message.
 
+### Issue 23 one-process Shotcaller turn and visible Champion launch
+
+UserPromptSubmit and Cursor before-submit remain boundary handlers: each stores
+the exact prompt once, advances the durable wait generation in the same
+transaction, and wakes only a verified Shotcaller. They never rewrite the body,
+inject control text, infer semantic items, mine transcripts, or shell through
+stable `league` subcommands. Stop similarly performs one bounded in-process
+storage decision.
+
+An ordinary Shotcaller turn uses exactly one external League process:
+
+```sh
+league --state-root <canonical-root> request turn \
+  --owner-agent-id <shotcaller-agent-id>
+```
+
+The process emits one bounded exact intake envelope, then reads a single-line
+JSON object containing ordered model-authored semantic `decisions` and matching
+semantic routing `plans`. The adapter supplies all mechanical IDs, claim tokens, timestamps,
+hashes, locators, JSON, and command arguments. One transaction triages every
+prompt, claims every new request, and records each direct, hidden, or Champion
+plan. Missing, reordered, duplicate, stale, cross-owner, conflicting, or partial
+input rolls back the whole begin phase. The connection holds no transaction
+while the same normal Shotcaller reasoning pass performs the work.
+
+Before reply, wait, handoff, or end, the same PID reads one semantic-only commit
+line with model-authorized answer/result content and outcomes. The adapter
+manufactures exact time, versions, hashes, and receipt identities. A second
+transaction records all outcomes and any delivery effects, then the process
+returns `phase=committed` with Stop-equivalent counts for unresolved prompts and
+requests, pending assignments/deliveries, active Champions/tasks, and cleanup
+obligations before exiting. A normal active turn never starts status, unresolved,
+or supervise polling. Cross-Squad routing and explicit defer, awaiting-user,
+block, or cancel remain dedicated claim/version-checked commands.
+
+`league assign run` is the supported visible launch surface. It composes the
+existing assignment service and real Herdr/Codex adapter: reserve, mark
+launching, create one unfocused exact-worktree endpoint, start workspace-write
+Codex with only the canonical League root added, observe the generated thread
+UUID, verify routing/display/backend/workspace/pane/terminal/cwd/title identity,
+activate, and deliver one bounded SQLite-only context. External-effect failures
+settle blocked only after exact endpoint and reservation cleanup; otherwise the
+assignment and cleanup obligation remain `cleanup_pending`.
+
+The release gate is one installed disposable flow: exact capture, one-process
+semantic begin, Champion `assign run`, Champion working and terminal
+transitions, registered-watcher delivery, one-process final commit/boundary,
+proof-gated cleanup, endpoint and callsign release, zero residue, and storage
+integrity. Installed phase timings are recorded separately from the protocol
+mock, candidate CLI/SQLite measurements, and variable model reasoning. A
+multi-second installed infrastructure handoff refuses the performance gate and
+requires an in-process adapter without replacing SQLite or adding another
+external Garen process.
+
 The command refuses missing, relative, symbolic-link, or malformed sentinels
 and refuses an existing namespace. It accepts at most 16 byte sentinels so a
 caller cannot create an unbounded preflight workload. The global

@@ -1145,6 +1145,379 @@ def block_assignment(
     return {"assignment_id": assignment_id, "state": state, "version": next_version}
 
 
+def assignment_launch_context(store: Any, assignment_id: str) -> dict[str, Any]:
+    assignment = store.connection.execute(
+        """
+        SELECT task_assignment_id,state,version,runtime_instance_id,callsign,
+               acceptance_receipt_json,failure_class
+          FROM task_assignments WHERE task_assignment_id=?
+        """,
+        (assignment_id,),
+    ).fetchone()
+    if assignment is None:
+        raise StorageRefusal("assignment_unknown", "assignment does not exist")
+    delivery = store.connection.execute(
+        """
+        SELECT event_id,occurred_at,detail_json
+          FROM events
+         WHERE aggregate_kind='assignment' AND aggregate_id=?
+           AND event_type='assignment_context_delivered'
+         ORDER BY occurred_at,event_id LIMIT 2
+        """,
+        (assignment_id,),
+    ).fetchall()
+    if len(delivery) > 1:
+        raise StorageRefusal(
+            "assignment_context_ambiguous",
+            "assignment has more than one bounded context receipt",
+        )
+    receipt = (
+        json.loads(assignment["acceptance_receipt_json"])
+        if assignment["acceptance_receipt_json"] is not None
+        else None
+    )
+    delivered = None
+    if delivery:
+        detail = json.loads(delivery[0]["detail_json"])
+        delivered = {
+            "event_id": delivery[0]["event_id"],
+            "at": delivery[0]["occurred_at"],
+            **detail,
+        }
+    return {
+        "assignment_id": assignment_id,
+        "state": assignment["state"],
+        "version": int(assignment["version"]),
+        "runtime_instance_id": assignment["runtime_instance_id"],
+        "callsign": assignment["callsign"],
+        "failure_class": assignment["failure_class"],
+        "acceptance_receipt": receipt,
+        "context_delivery": delivered,
+    }
+
+
+def record_assignment_context_delivery(
+    store: Any,
+    assignment_id: str,
+    expected_version: int,
+    context_sha256: str,
+    byte_count: int,
+    effect_sha256: str,
+    event_id: str,
+    at: str,
+) -> dict[str, Any]:
+    _time(at, "assignment context delivery time")
+    digest_pattern = re.compile(r"^[0-9a-f]{64}$")
+    if (
+        not digest_pattern.fullmatch(context_sha256)
+        or not digest_pattern.fullmatch(effect_sha256)
+        or not event_id
+        or byte_count < 1
+        or byte_count > 4096
+    ):
+        raise StorageRefusal(
+            "assignment_context_invalid",
+            "bounded assignment context receipt is invalid",
+        )
+    detail = {
+        "bytes": byte_count,
+        "context_sha256": context_sha256,
+        "effect_sha256": effect_sha256,
+    }
+    try:
+        with store._transaction():
+            existing = store.connection.execute(
+                """
+                SELECT event_id,detail_json FROM events
+                 WHERE aggregate_kind='assignment' AND aggregate_id=?
+                   AND event_type='assignment_context_delivered'
+                """,
+                (assignment_id,),
+            ).fetchall()
+            if existing:
+                if len(existing) != 1 or json.loads(existing[0]["detail_json"]) != detail:
+                    raise StorageRefusal(
+                        "assignment_context_conflict",
+                        "assignment context was already delivered with different bytes",
+                    )
+                return {
+                    "assignment_id": assignment_id,
+                    "state": "active",
+                    "version": expected_version,
+                    "event_id": existing[0]["event_id"],
+                    "context_sha256": context_sha256,
+                    "bytes": byte_count,
+                    "idempotent": True,
+                }
+            assignment = store.connection.execute(
+                "SELECT task_id,state,version FROM task_assignments WHERE task_assignment_id=?",
+                (assignment_id,),
+            ).fetchone()
+            if (
+                assignment is None
+                or assignment["state"] != "active"
+                or int(assignment["version"]) != expected_version
+            ):
+                raise StorageRefusal(
+                    "assignment_conflict",
+                    "assignment context requires the exact active assignment version",
+                )
+            next_version = expected_version + 1
+            store.connection.execute(
+                """
+                INSERT INTO events
+                  (event_id,agent_id,task_id,entity_version,event_type,status,update_text,
+                   occurred_at,detail_json,aggregate_kind,aggregate_id)
+                VALUES(?,NULL,?,?,'assignment_context_delivered','active',
+                       'bounded League context delivered',?,?,'assignment',?)
+                """,
+                (
+                    event_id,
+                    assignment["task_id"],
+                    next_version,
+                    at,
+                    _json(detail),
+                    assignment_id,
+                ),
+            )
+            store.connection.execute(
+                "UPDATE task_assignments SET version=?,updated_at=? WHERE task_assignment_id=?",
+                (next_version, at, assignment_id),
+            )
+    except StorageRefusal:
+        raise
+    except sqlite3.DatabaseError as exc:
+        raise store._translate_database_error(
+            exc, "assignment context receipt conflicted with canonical state"
+        ) from exc
+    return {
+        "assignment_id": assignment_id,
+        "state": "active",
+        "version": next_version,
+        "event_id": event_id,
+        "context_sha256": context_sha256,
+        "bytes": byte_count,
+        "idempotent": False,
+    }
+
+
+def fail_assignment_context_delivery(
+    store: Any,
+    assignment_id: str,
+    expected_version: int,
+    failure_class: str,
+    event_id: str,
+    outbox_id: str,
+    at: str,
+) -> dict[str, Any]:
+    _time(at, "assignment context failure time")
+    if not all((failure_class, event_id, outbox_id)):
+        raise StorageRefusal(
+            "invalid_assignment_failure", "assignment context failure identity is incomplete"
+        )
+    try:
+        with store._transaction():
+            assignment = store.connection.execute(
+                "SELECT * FROM task_assignments WHERE task_assignment_id=?",
+                (assignment_id,),
+            ).fetchone()
+            if assignment is None:
+                raise StorageRefusal("assignment_unknown", "assignment does not exist")
+            if (
+                assignment["state"] == "cleanup_pending"
+                and assignment["failure_class"] == failure_class
+            ):
+                return {
+                    "assignment_id": assignment_id,
+                    "state": "cleanup_pending",
+                    "version": int(assignment["version"]),
+                    "event_id": event_id,
+                    "outbox_id": outbox_id,
+                    "idempotent": True,
+                }
+            delivered = store.connection.execute(
+                """
+                SELECT 1 FROM events
+                 WHERE aggregate_kind='assignment' AND aggregate_id=?
+                   AND event_type='assignment_context_delivered'
+                """,
+                (assignment_id,),
+            ).fetchone()
+            if (
+                assignment["state"] != "active"
+                or int(assignment["version"]) != expected_version
+                or delivered is not None
+            ):
+                raise StorageRefusal(
+                    "assignment_conflict",
+                    "assignment context failure does not match an undelivered active assignment",
+                )
+            next_version = expected_version + 1
+            store.connection.execute(
+                """
+                UPDATE task_assignments
+                   SET state='cleanup_pending',failure_class=?,cleanup_required=1,
+                       version=?,updated_at=?
+                 WHERE task_assignment_id=?
+                """,
+                (failure_class, next_version, at, assignment_id),
+            )
+            store.connection.execute(
+                "UPDATE tasks SET state='blocked',version=version+1,updated_at=? WHERE task_id=?",
+                (at, assignment["task_id"]),
+            )
+            store.connection.execute(
+                """
+                INSERT INTO cleanup_obligations
+                  (cleanup_obligation_id,task_id,cleanup_state,required_policy,next_action,
+                   version,updated_at)
+                VALUES(?,?,'pending','failed_launch_context',
+                       'Clean only the exact activated launch runtime and callsign',1,?)
+                ON CONFLICT(task_id) DO UPDATE SET
+                  cleanup_state='pending',required_policy='failed_launch_context',
+                  next_action='Clean only the exact activated launch runtime and callsign',
+                  version=cleanup_obligations.version+1,updated_at=excluded.updated_at
+                """,
+                (f"cleanup:{assignment['task_id']}", assignment["task_id"], at),
+            )
+            store.connection.execute(
+                """
+                INSERT INTO events
+                  (event_id,agent_id,task_id,entity_version,event_type,status,update_text,
+                   occurred_at,detail_json,request_id,aggregate_kind,aggregate_id)
+                VALUES(?,NULL,?,?,'assignment_launch_failed','cleanup_pending',?,?,?, ?,
+                       'assignment',?)
+                """,
+                (
+                    event_id,
+                    assignment["task_id"],
+                    next_version,
+                    failure_class,
+                    at,
+                    _json({"failure_class": failure_class}),
+                    assignment["request_id"],
+                    assignment_id,
+                ),
+            )
+            store.connection.execute(
+                """
+                INSERT INTO delivery_outbox
+                  (outbox_id,event_id,recipient_agent_id,state,available_at,attempt_count)
+                VALUES(?,?,?,'pending',?,0)
+                """,
+                (outbox_id, event_id, assignment["coordinator_agent_id"], at),
+            )
+    except StorageRefusal:
+        raise
+    except sqlite3.DatabaseError as exc:
+        raise store._translate_database_error(
+            exc, "assignment context failure conflicted with canonical state"
+        ) from exc
+    return {
+        "assignment_id": assignment_id,
+        "state": "cleanup_pending",
+        "version": next_version,
+        "event_id": event_id,
+        "outbox_id": outbox_id,
+        "idempotent": False,
+    }
+
+
+def settle_assignment_launch_cleanup(
+    store: Any,
+    assignment_id: str,
+    expected_version: int,
+    cleanup_receipt_digest: str,
+    at: str,
+) -> dict[str, Any]:
+    _time(at, "assignment launch cleanup settlement time")
+    if not re.fullmatch(r"[0-9a-f]{64}", cleanup_receipt_digest):
+        raise StorageRefusal(
+            "receipt_required", "launch cleanup requires an exact receipt digest"
+        )
+    try:
+        with store._transaction():
+            assignment = store.connection.execute(
+                "SELECT * FROM task_assignments WHERE task_assignment_id=?",
+                (assignment_id,),
+            ).fetchone()
+            if assignment is None:
+                raise StorageRefusal("assignment_unknown", "assignment does not exist")
+            if assignment["state"] == "blocked":
+                if assignment["cleanup_receipt"] != cleanup_receipt_digest:
+                    raise StorageRefusal(
+                        "receipt_conflict", "settled launch cleanup has a different receipt"
+                    )
+                return {
+                    "assignment_id": assignment_id,
+                    "state": "blocked",
+                    "version": int(assignment["version"]),
+                    "cleanup_receipt": cleanup_receipt_digest,
+                    "idempotent": True,
+                }
+            if (
+                assignment["state"] != "cleanup_pending"
+                or int(assignment["version"]) != expected_version
+                or not assignment["runtime_instance_id"]
+            ):
+                raise StorageRefusal(
+                    "assignment_conflict", "launch cleanup is not pending at the expected version"
+                )
+            runtime = store.connection.execute(
+                "SELECT status FROM runtime_instances WHERE runtime_instance_id=?",
+                (assignment["runtime_instance_id"],),
+            ).fetchone()
+            callsign = store.connection.execute(
+                """
+                SELECT state,release_receipt_digest FROM callsign_assignments
+                 WHERE callsign_assignment_id=?
+                """,
+                (f"callsign-assignment:{assignment_id}",),
+            ).fetchone()
+            if (
+                runtime is None
+                or runtime["status"] != "closed"
+                or callsign is None
+                or callsign["state"] != "released"
+                or callsign["release_receipt_digest"] != cleanup_receipt_digest
+            ):
+                raise StorageRefusal(
+                    "cleanup_unproven",
+                    "exact runtime close and callsign release are required before settlement",
+                )
+            next_version = expected_version + 1
+            store.connection.execute(
+                """
+                UPDATE task_assignments
+                   SET state='blocked',cleanup_required=0,cleanup_receipt=?,version=?,updated_at=?
+                 WHERE task_assignment_id=?
+                """,
+                (cleanup_receipt_digest, next_version, at, assignment_id),
+            )
+            store.connection.execute(
+                """
+                UPDATE cleanup_obligations
+                   SET cleanup_state='cleanup_completed',next_action='None',
+                       version=version+1,updated_at=?
+                 WHERE task_id=? AND cleanup_state IN ('pending','cleanup_pending')
+                """,
+                (at, assignment["task_id"]),
+            )
+    except StorageRefusal:
+        raise
+    except sqlite3.DatabaseError as exc:
+        raise store._translate_database_error(
+            exc, "assignment launch cleanup settlement conflicted with canonical state"
+        ) from exc
+    return {
+        "assignment_id": assignment_id,
+        "state": "blocked",
+        "version": next_version,
+        "cleanup_receipt": cleanup_receipt_digest,
+        "idempotent": False,
+    }
+
+
 def _task_transition_retry(
     store: Any,
     *,

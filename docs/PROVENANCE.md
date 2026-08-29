@@ -40,7 +40,7 @@ These toolkit files were inventoried but not copied:
 | `install-agent-watcher` | `f051a516fbc4000bfbc1ee71b4cb9afd2e10dcbadcf994d78960da2518ca4495` | Live install and rollback remain toolkit-owned. |
 | `shell-completions/_agent-watcher` | `667d96d44c06fda95096a768c64d89790bafbe43c81124ca46511473d1592b2e` | Completion moves with a later installation slice. |
 | `AGENT_ORCHESTRATION_REFERENCE.md` | `ec2eff727ac52d23434d92c1f07ee7806206b4574fb7e33dbd3bf30040baccd4` | Installed global policy is not silently replaced. |
-| `global-agent-instructions/shared-AGENTS.md` | `e1dff2fcb7fac2afe4704584221d5fb19a25b21c887c2cf48792ad69804f4c35` | Global guide ownership changes require a release gate. |
+| `global-agent-instructions/shared-AGENTS.md` | `67a1fec8e2e341ee55ae5936b5c402167d6fcf94c6d0154ad0da06d516d59a69` | Issue #23 deliberately replaces the retained legacy-writer guide only after exact-head release, backup, byte-parity installation, smoke, and rollback proof. |
 
 The example and schema files in this repository are new, synthetic authoring
 artifacts derived from the runtime validator rather than copies of live Roster
@@ -188,6 +188,21 @@ opening supervisor, prompt, or Stop connections. This preserves the database's
 established WAL mode across transition, delivery, hook, watcher, and reporting
 commands and removes the exclusive WAL-to-DELETE negotiation that previously
 failed before hook processing.
+
+The issue-#23 one-process runtime successor deliberately replaces per-prompt
+and per-request model command choreography with one bounded `request turn`
+process and one canonical connection. UserPromptSubmit remains exact
+capture-and-wake only. The Shotcaller model authors semantic triage and routing
+in its normal reasoning pass; the adapter supplies only mechanical IDs, claim
+tokens, times, hashes, locators, JSON, and arguments. Begin atomically persists
+triage, claims, and routing plans; commit atomically persists answers/results
+and delivery effects; the connection holds no transaction while the model
+works. The same successor composes the existing assignment phases and real
+Herdr/Codex boundary into `assign run`, grants only the exact canonical state
+root as an additional workspace-write root, and records bounded context or
+exact failure-cleanup receipts. The source-managed guide is therefore a
+deliberate behavioral replacement, covered by focused staging and runtime
+tests, rather than an untracked installed-policy edit.
 
 Tests that require process inspection explicitly inject the single
 `tests/fakes/ps` adapter through `tests/process_adapter.py`; Make targets do not

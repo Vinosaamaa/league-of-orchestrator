@@ -5,9 +5,10 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import sqlite3
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, BinaryIO, Callable, Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -37,11 +38,21 @@ from .storage import (
 )
 from .storage_request import (
     MAX_TRIAGE_JSON_BYTES,
+    MAX_TRIAGE_TURN_BYTES,
     AnswerRequestCommand,
     RequestProgressCommand,
     RequestResultCommand,
+    TurnDispatchPlan,
 )
 from .storage_assignment import FinishHiddenAssignmentCommand
+from .request_services import AssignmentSpec
+from .visible_launch import (
+    HerdrCodexLaunchAdapter,
+    VisibleChampionLaunchService,
+    VisibleLaunchOptions,
+    derived_assignment_id,
+    derived_champion_agent_id,
+)
 
 
 COMMAND_SCHEMA = "league.command.v1"
@@ -663,6 +674,17 @@ def _add_request_commands(groups: argparse._SubParsersAction) -> None:
     triage.add_argument("--prompt-id", required=True)
     triage.add_argument("--items-json", required=True, help="JSON array of bounded prompt items.")
     triage.add_argument("--at", required=True)
+    turn = commands.add_parser(
+        "turn",
+        help=(
+            "Emit one bounded exact intake, read one model-authored decision batch from stdin, "
+            "and commit it atomically on the same SQLite connection."
+        ),
+    )
+    turn.add_argument("--owner-agent-id", required=True)
+    turn.add_argument("--at", help=argparse.SUPPRESS)
+    turn.add_argument("--limit", type=int, default=20)
+    turn.add_argument("--max-bytes", type=int, default=1_000_000)
     bind_prompt = commands.add_parser(
         "bind-prompt", help="Bind one quarantined prompt to an exact verified runtime."
     )
@@ -827,6 +849,13 @@ def _add_request_commands(groups: argparse._SubParsersAction) -> None:
     unresolved.add_argument("--owner-agent-id", required=True)
     unresolved.add_argument("--before-action", choices=("reply", "wait", "handoff", "end"))
     unresolved.add_argument("--limit", type=int, default=100)
+    untriaged = commands.add_parser(
+        "untriaged",
+        help="Read exact retained untriaged prompt bodies for one live Shotcaller turn.",
+    )
+    untriaged.add_argument("--owner-agent-id", required=True)
+    untriaged.add_argument("--limit", type=int, default=20)
+    untriaged.add_argument("--max-bytes", type=int, default=1_000_000)
 
 
 def _add_assignment_commands(groups: argparse._SubParsersAction) -> None:
@@ -863,6 +892,31 @@ def _add_assignment_commands(groups: argparse._SubParsersAction) -> None:
     prepare.add_argument("--dispatch-id")
     prepare.add_argument("--promoted-from-assignment-id")
     prepare.add_argument("--requires", action="append", default=[])
+    launch = commands.add_parser(
+        "run",
+        help="Reserve, start, verify, activate, and brief one visible Herdr/Codex Champion.",
+    )
+    for name in (
+        "request-id",
+        "claim-token",
+        "task-id",
+        "task-summary",
+        "coordinator-agent-id",
+        "repository",
+        "branch",
+        "worktree",
+        "task-label",
+        "model",
+        "effort",
+    ):
+        launch.add_argument(f"--{name}", required=True)
+    launch.add_argument("--issue", type=int, required=True)
+    launch.add_argument("--assignment-id")
+    launch.add_argument("--champion-agent-id")
+    launch.add_argument("--workspace-id")
+    launch.add_argument("--league-command")
+    launch.add_argument("--requires", action="append", default=[])
+    launch.add_argument("--startup-timeout-ms", type=int, default=120_000)
     launching = commands.add_parser("launching", help="Commit launch intent before adapter work.")
     launching.add_argument("--assignment-id", required=True)
     launching.add_argument("--expected-version", type=int, required=True)
@@ -1662,6 +1716,283 @@ def _request_triage(store: Storage, args: argparse.Namespace) -> CommandResult:
     return store.triage_prompt(args.prompt_id, items, args.at), None
 
 
+def _read_turn_payload(source: BinaryIO) -> dict[str, Any]:
+    encoded = source.readline(MAX_TRIAGE_TURN_BYTES + 2)
+    if not encoded:
+        raise StorageRefusal(
+            "triage_batch_missing", "triage turn ended before the model-authored batch arrived"
+        )
+    if len(encoded) > MAX_TRIAGE_TURN_BYTES + 1 or (
+        len(encoded) == MAX_TRIAGE_TURN_BYTES + 1 and not encoded.endswith(b"\n")
+    ):
+        raise StorageRefusal(
+            "invalid_json", "triage turn decision batch exceeds its encoded bound"
+        )
+    try:
+        value = json.loads(encoded)
+    except (json.JSONDecodeError, UnicodeError) as exc:
+        raise StorageRefusal(
+            "invalid_json", "triage turn decisions must be one valid JSON line"
+        ) from exc
+    if not isinstance(value, dict):
+        raise StorageRefusal("invalid_turn_payload", "request turn input must be an object")
+    return value
+
+
+def _turn_time(value: Optional[str] = None) -> str:
+    if value is not None:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            raise StorageRefusal("invalid_time", "turn time must include a UTC offset")
+        return value
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _turn_mechanical_id(kind: str, *parts: str) -> str:
+    payload = "\0".join(("league.request-turn.v1", kind, *parts)).encode("utf-8")
+    return f"{kind}:{hashlib.sha256(payload).hexdigest()}"
+
+
+def _mechanize_turn_decisions(
+    intake: dict[str, Any], value: Any, at: str
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    prompts = intake["prompts"]
+    if not isinstance(value, list) or len(value) != len(prompts):
+        raise StorageRefusal(
+            "incomplete_triage_batch", "turn must decide every fetched prompt exactly once"
+        )
+    decisions: list[dict[str, Any]] = []
+    new_requests: list[dict[str, Any]] = []
+    for prompt_index, (prompt, raw_decision) in enumerate(zip(prompts, value), start=1):
+        if not isinstance(raw_decision, dict) or set(raw_decision) != {"items"}:
+            raise StorageRefusal(
+                "invalid_triage_batch", "each semantic decision must contain only items"
+            )
+        raw_items = raw_decision["items"]
+        if not isinstance(raw_items, list):
+            raise StorageRefusal("invalid_triage_batch", "semantic items must be an array")
+        items: list[dict[str, Any]] = []
+        for ordinal, raw in enumerate(raw_items, start=1):
+            if not isinstance(raw, dict):
+                raise StorageRefusal("invalid_triage", "every semantic item must be an object")
+            disposition = raw.get("disposition")
+            allowed = {"summary", "disposition"}
+            if disposition in {"follow_up", "duplicate"}:
+                allowed.add("related_request_id")
+            if disposition == "deferred":
+                allowed.add("defer_seconds")
+            if set(raw) != allowed:
+                raise StorageRefusal(
+                    "invalid_triage", "semantic item contains missing or mechanical fields"
+                )
+            summary = raw.get("summary")
+            if not isinstance(summary, str) or not summary:
+                raise StorageRefusal("invalid_triage", "semantic item summary is required")
+            item_id = _turn_mechanical_id(
+                "prompt-item", str(prompt["prompt_id"]), str(ordinal)
+            )
+            request_id: Optional[str] = None
+            next_attention_at: Optional[str] = None
+            if disposition in {"new_request", "deferred"}:
+                request_id = _turn_mechanical_id("request", item_id)
+            elif disposition in {"follow_up", "duplicate"}:
+                related = raw.get("related_request_id")
+                if not isinstance(related, str) or not related:
+                    raise StorageRefusal(
+                        "invalid_triage", "related request identity is required"
+                    )
+                request_id = related
+            if disposition == "deferred":
+                seconds = raw.get("defer_seconds")
+                if type(seconds) is not int or not 1 <= seconds <= 31_536_000:
+                    raise StorageRefusal(
+                        "invalid_triage", "defer duration must be one second to one year"
+                    )
+                parsed = datetime.fromisoformat(at.replace("Z", "+00:00"))
+                next_attention_at = (parsed + timedelta(seconds=seconds)).isoformat(
+                    timespec="seconds"
+                ).replace("+00:00", "Z")
+            item = {
+                "prompt_item_id": item_id,
+                "ordinal": ordinal,
+                "summary": summary,
+                "disposition": disposition,
+                "request_id": request_id,
+                "next_attention_at": next_attention_at,
+            }
+            items.append(item)
+            if disposition == "new_request":
+                new_requests.append(
+                    {
+                        "request_id": request_id,
+                        "prompt_index": prompt_index,
+                        "prompt_id": prompt["prompt_id"],
+                        "adapter_kind": prompt["adapter_kind"],
+                        "session_ref": prompt["session_ref"],
+                        "runtime_instance_id": prompt["runtime_instance_id"],
+                    }
+                )
+        decisions.append({"prompt_id": prompt["prompt_id"], "items": items})
+    return decisions, new_requests
+
+
+def _turn_dispatch_plans(
+    value: Any, at: str, new_requests: list[dict[str, Any]]
+) -> tuple[TurnDispatchPlan, ...]:
+    if not isinstance(value, list) or len(value) > 20:
+        raise StorageRefusal("invalid_turn_plan", "turn routing plans must be a bounded array")
+    if len(value) != len(new_requests):
+        raise StorageRefusal(
+            "incomplete_turn_plan", "turn plans must match each new semantic request"
+        )
+    required = {"work_kind", "requested_mode", "signals"}
+    optional = {
+        "hidden_supported",
+        "requested_model",
+        "requested_effort",
+        "explicit_route",
+        "continuation_role",
+        "continuation_target",
+        "hidden_subtask",
+        "hidden_scope_budget",
+    }
+    plans: list[TurnDispatchPlan] = []
+    parsed_at = datetime.fromisoformat(at.replace("Z", "+00:00"))
+    leased_until = (parsed_at + timedelta(minutes=15)).isoformat(
+        timespec="seconds"
+    ).replace("+00:00", "Z")
+    for raw, request in zip(value, new_requests):
+        if not isinstance(raw, dict) or not required <= set(raw) or set(raw) - required - optional:
+            raise StorageRefusal("invalid_turn_plan", "turn routing plan shape is invalid")
+        requested_mode = raw["requested_mode"]
+        if requested_mode == "squad":
+            raise StorageRefusal(
+                "batched_route_unsupported",
+                "cross-Squad ownership still requires the acknowledgement-gated request route command",
+            )
+        if not isinstance(raw["work_kind"], str) or not raw["work_kind"]:
+            raise StorageRefusal("invalid_turn_plan", "turn work kind is incomplete")
+        if requested_mode not in {"direct", "hidden", "champion"}:
+            raise StorageRefusal("invalid_turn_plan", "turn routing mode is invalid")
+        if "hidden_supported" in raw and not isinstance(raw["hidden_supported"], bool):
+            raise StorageRefusal("invalid_turn_plan", "hidden support must be a boolean")
+        for name in optional - {"hidden_supported"}:
+            if name in raw and raw[name] is not None and (
+                not isinstance(raw[name], str) or not raw[name]
+            ):
+                raise StorageRefusal("invalid_turn_plan", "optional turn routing identity is invalid")
+        signals = raw["signals"]
+        if not isinstance(signals, dict):
+            raise StorageRefusal("invalid_turn_plan", "turn routing signals must be an object")
+        plans.append(
+            TurnDispatchPlan(
+                runtime_instance_id=request["runtime_instance_id"],
+                claim_token=_turn_mechanical_id("claim", request["request_id"]),
+                leased_until=leased_until,
+                command=DispatchRequestCommand(
+                    request_id=request["request_id"],
+                    claim_token=_turn_mechanical_id("claim", request["request_id"]),
+                    dispatch_id=_turn_mechanical_id("dispatch", request["request_id"]),
+                    work_kind=raw["work_kind"],
+                    requested_mode=requested_mode,
+                    hidden_supported=raw.get("hidden_supported", False),
+                    requested_model=raw.get("requested_model"),
+                    requested_effort=raw.get("requested_effort"),
+                    explicit_route=raw.get("explicit_route"),
+                    at=at,
+                    orchestration=OrchestrationSignals.from_value(signals),
+                    continuation_role=raw.get("continuation_role"),
+                    continuation_target=raw.get("continuation_target"),
+                    hidden_subtask=raw.get("hidden_subtask"),
+                    hidden_scope_budget=raw.get("hidden_scope_budget"),
+                ),
+            )
+        )
+    return tuple(plans)
+
+
+def _turn_commit_actions(
+    value: Any, at: str, new_requests: list[dict[str, Any]], begun: dict[str, Any]
+) -> tuple[Any, ...]:
+    if not isinstance(value, list) or len(value) > 100:
+        raise StorageRefusal("invalid_turn_commit", "turn commit actions must be a bounded array")
+    actions: list[Any] = []
+    for raw in value:
+        if not isinstance(raw, dict) or raw.get("kind") not in {"answer", "result"}:
+            raise StorageRefusal("invalid_turn_commit", "turn commit action kind is invalid")
+        if raw["kind"] == "answer":
+            fields = {"kind", "request_index", "content", "resolution_summary"}
+            if set(raw) != fields:
+                raise StorageRefusal("invalid_turn_commit", "turn answer action shape is invalid")
+            if (
+                type(raw["request_index"]) is not int
+                or not isinstance(raw["content"], str)
+                or not raw["content"]
+                or not isinstance(raw["resolution_summary"], str)
+                or not raw["resolution_summary"]
+            ):
+                raise StorageRefusal("invalid_turn_commit", "turn answer action values are invalid")
+            index = raw["request_index"] - 1
+            if not 0 <= index < len(new_requests):
+                raise StorageRefusal("invalid_turn_commit", "turn request index is invalid")
+            request = new_requests[index]
+            routing = begun["routing"][index]
+            request_id = request["request_id"]
+            claim_token = _turn_mechanical_id("claim", request_id)
+            actions.append(
+                AnswerRequestCommand(
+                    request_id=request_id,
+                    claim_token=claim_token,
+                    expected_version=routing["dispatch"]["request_version"],
+                    response_ref_id=_turn_mechanical_id("response", request_id),
+                    adapter_kind=request["adapter_kind"],
+                    session_locator=request["session_ref"],
+                    response_locator=f"turn:{request['prompt_id']}:{request['prompt_index']}",
+                    durability="durable",
+                    content_hash=hashlib.sha256(raw["content"].encode("utf-8")).hexdigest(),
+                    resolution_summary=raw["resolution_summary"],
+                    event_id=_turn_mechanical_id("event-answer", request_id),
+                    at=at,
+                )
+            )
+        else:
+            fields = {"kind", "request_index", "outcome", "summary", "task_ids", "return_to_requester"}
+            if (
+                set(raw) != fields
+                or type(raw["request_index"]) is not int
+                or not isinstance(raw["task_ids"], list)
+                or any(not isinstance(item, str) or not item for item in raw["task_ids"])
+                or not isinstance(raw["return_to_requester"], bool)
+                or any(
+                    not isinstance(raw[name], str) or not raw[name]
+                    for name in fields - {"kind", "request_index", "task_ids", "return_to_requester"}
+                )
+            ):
+                raise StorageRefusal("invalid_turn_commit", "turn result action shape is invalid")
+            index = raw["request_index"] - 1
+            if not 0 <= index < len(new_requests):
+                raise StorageRefusal("invalid_turn_commit", "turn request index is invalid")
+            request_id = new_requests[index]["request_id"]
+            routing = begun["routing"][index]
+            actions.append(
+                RequestResultCommand(
+                    request_id=request_id,
+                    claim_token=_turn_mechanical_id("claim", request_id),
+                    expected_version=routing["dispatch"]["request_version"],
+                    result_id=_turn_mechanical_id("result", request_id),
+                    idempotency_key=_turn_mechanical_id("result-key", request_id),
+                    outcome=raw["outcome"],
+                    summary=raw["summary"],
+                    task_ids=tuple(raw["task_ids"]),
+                    at=at,
+                    return_to_requester=raw["return_to_requester"],
+                    event_id=_turn_mechanical_id("event-result", request_id) if raw["return_to_requester"] else None,
+                    outbox_id=_turn_mechanical_id("outbox-result", request_id) if raw["return_to_requester"] else None,
+                )
+            )
+    return tuple(actions)
+
+
 def _request_bind_prompt(store: Storage, args: argparse.Namespace) -> CommandResult:
     return store.bind_quarantined_prompt(
         args.prompt_id, args.intake_actor_id, args.runtime_instance_id, args.at
@@ -1874,6 +2205,12 @@ def _request_unresolved(store: Storage, args: argparse.Namespace) -> CommandResu
     ), None
 
 
+def _request_untriaged(store: Storage, args: argparse.Namespace) -> CommandResult:
+    return store.untriaged_intake(
+        args.owner_agent_id, limit=args.limit, max_bytes=args.max_bytes
+    ), None
+
+
 def _assign_prepare(store: Storage, args: argparse.Namespace) -> CommandResult:
     return store.prepare_assignment(
         PrepareAssignmentCommand(
@@ -1895,6 +2232,48 @@ def _assign_prepare(store: Storage, args: argparse.Namespace) -> CommandResult:
             promoted_from_assignment_id=args.promoted_from_assignment_id,
         )
     ), None
+
+
+def _assign_launch(store: Storage, args: argparse.Namespace) -> CommandResult:
+    if args.state_root is None:
+        raise StorageRefusal("state_root_required", "visible launch requires canonical state")
+    assignment_id = args.assignment_id or derived_assignment_id(
+        args.request_id, args.task_id
+    )
+    champion_agent_id = args.champion_agent_id or derived_champion_agent_id(
+        assignment_id
+    )
+    workspace_id = args.workspace_id or os.environ.get("HERDR_WORKSPACE_ID", "")
+    league_command = str(
+        Path(args.league_command).resolve()
+        if args.league_command
+        else Path(sys.argv[0]).resolve()
+    )
+    options = VisibleLaunchOptions(
+        workspace_id=workspace_id,
+        task_label=args.task_label,
+        model=args.model,
+        effort=args.effort,
+        league_command=league_command,
+        state_root=str(args.state_root.resolve()),
+        startup_timeout_ms=args.startup_timeout_ms,
+    )
+    spec = AssignmentSpec(
+        assignment_id=assignment_id,
+        request_id=args.request_id,
+        claim_token=args.claim_token,
+        task_id=args.task_id,
+        task_summary=args.task_summary,
+        coordinator_agent_id=args.coordinator_agent_id,
+        champion_agent_id=champion_agent_id,
+        repository=args.repository,
+        issue=args.issue,
+        branch=args.branch,
+        worktree=str(Path(args.worktree).resolve()),
+        required_capabilities=tuple(args.requires),
+    )
+    adapter = HerdrCodexLaunchAdapter(options)
+    return VisibleChampionLaunchService(store, adapter, options).launch(spec), None
 
 
 def _assign_launching(store: Storage, args: argparse.Namespace) -> CommandResult:
@@ -2128,7 +2507,9 @@ HANDLERS: dict[str, CommandHandler] = {
     "request.result": _request_result,
     "request.answer": _request_answer,
     "request.unresolved": _request_unresolved,
+    "request.untriaged": _request_untriaged,
     "assign.prepare": _assign_prepare,
+    "assign.run": _assign_launch,
     "assign.launching": _assign_launching,
     "assign.activate": _assign_activate,
     "assign.reconcile-runtime": _assign_reconcile_runtime,
@@ -2316,12 +2697,94 @@ def _run(args: argparse.Namespace) -> CommandResult:
         return handler(store, args)
 
 
-def main(argv: Optional[list[str]] = None, *, output: Optional[BinaryIO] = None) -> int:
+def main(
+    argv: Optional[list[str]] = None,
+    *,
+    input_stream: Optional[BinaryIO] = None,
+    output: Optional[BinaryIO] = None,
+) -> int:
     args = _parser().parse_args(argv)
     command = _command_name(args)
     sink = output or sys.stdout.buffer
     try:
-        result, raw = _run(args)
+        if command == "request.turn":
+            with _open(args) as store:
+                source = input_stream or sys.stdin.buffer
+                begin_at = _turn_time(args.at)
+                intake = store.untriaged_intake(
+                    args.owner_agent_id,
+                    limit=args.limit,
+                    max_bytes=args.max_bytes,
+                )
+                sink.write(
+                    _envelope_bytes(command, result={"phase": "intake", **intake})
+                )
+                sink.flush()
+                expected_prompt_ids = tuple(
+                    prompt["prompt_id"] for prompt in intake["prompts"]
+                )
+                begin_payload = (
+                    _read_turn_payload(source)
+                    if expected_prompt_ids
+                    else {"decisions": [], "plans": []}
+                )
+                if set(begin_payload) != {"decisions", "plans"} or not isinstance(
+                    begin_payload["decisions"], list
+                ):
+                    raise StorageRefusal(
+                        "invalid_turn_payload",
+                        "turn begin input must contain only decisions and plans arrays",
+                    )
+                decisions, new_requests = _mechanize_turn_decisions(
+                    intake, begin_payload["decisions"], begin_at
+                )
+                begun = store.begin_request_turn(
+                    args.owner_agent_id,
+                    expected_prompt_ids,
+                    decisions,
+                    _turn_dispatch_plans(begin_payload["plans"], begin_at, new_requests),
+                    begin_at,
+                )
+                for request, route in zip(new_requests, begun["routing"]):
+                    route["mechanical"] = {
+                        "request_id": request["request_id"],
+                        "claim_token": _turn_mechanical_id("claim", request["request_id"]),
+                    }
+                sink.write(
+                    _envelope_bytes(
+                        command,
+                        result={
+                            "phase": "begun",
+                            **begun,
+                            "unresolved": store.request_turn_boundary(args.owner_agent_id),
+                        },
+                    )
+                )
+                sink.flush()
+                commit_payload = _read_turn_payload(source)
+                if set(commit_payload) != {"actions"}:
+                    raise StorageRefusal(
+                        "invalid_turn_payload",
+                        "turn commit input must contain only an actions array",
+                    )
+                commit_at = _turn_time(args.at)
+                committed = store.commit_request_turn(
+                    args.owner_agent_id,
+                    _turn_commit_actions(
+                        commit_payload["actions"], commit_at, new_requests, begun
+                    ),
+                    commit_at,
+                )
+                result, raw = (
+                    {
+                        "phase": "committed",
+                        **committed,
+                        "unresolved": store.request_turn_boundary(args.owner_agent_id),
+                    },
+                    None,
+                )
+        else:
+            result, raw = _run(args)
     except StorageRefusal as exc:
         sink.write(_envelope_bytes(command, error=exc))
         sink.flush()

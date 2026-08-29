@@ -18,6 +18,7 @@ LEAGUE = ROOT / "bin/league"
 sys.path[:0] = [str(ROOT / "src"), str(ROOT / "tests")]
 
 import league.cli as cli  # noqa: E402
+import league.sqlite_store as sqlite_store_module  # noqa: E402
 from league.sqlite_store import CURRENT_SCHEMA_VERSION  # noqa: E402
 from storage_fixture import (  # noqa: E402
     CHAMPION_ID,
@@ -92,7 +93,9 @@ def test_launcher_help_and_schemas() -> None:
         )
     )
     assignment_help = groups.choices["assign"].format_help()
-    assert all(name in assignment_help for name in ("reconcile-runtime", "finish-hidden"))
+    assert all(name in assignment_help for name in ("run", "reconcile-runtime", "finish-hidden"))
+    request_help = groups.choices["request"].format_help()
+    assert "untriaged" in request_help and "turn" in request_help
     for name in (
         "league-command-output.schema.json",
         "league-import-report.schema.json",
@@ -423,6 +426,27 @@ def test_admin_export_and_operational_envelope(root: Path) -> None:
     refusal(json.loads(output.getvalue()), "storage.integrity", "operation_failed")
 
 
+def test_inaccessible_database_has_actionable_error(root: Path) -> None:
+    _, state, _ = seeded_state(root, "inaccessible-root")
+    original = sqlite_store_module.sqlite3.connect
+
+    def unavailable(*args, **kwargs):
+        del args, kwargs
+        raise sqlite_store_module.sqlite3.OperationalError(
+            "unable to open database file"
+        )
+
+    try:
+        sqlite_store_module.sqlite3.connect = unavailable
+        payload = invoke_cli(
+            state, "storage", "integrity", expected=2
+        )
+    finally:
+        sqlite_store_module.sqlite3.connect = original
+    refusal(payload, "storage.integrity", "state_root_unavailable")
+    assert "exact canonical root" in payload["error"]["message"]
+
+
 def main() -> None:
     test_launcher_help_and_schemas()
     with tempfile.TemporaryDirectory(prefix="league-storage-command-") as temporary:
@@ -431,6 +455,7 @@ def main() -> None:
         test_agent_and_delivery_commands(root)
         test_callsign_project_and_task_commands(root)
         test_admin_export_and_operational_envelope(root)
+        test_inaccessible_database_has_actionable_error(root)
     print("PASS: focused CLI groups, schemas, envelopes, lease recovery, and launcher smoke")
 
 

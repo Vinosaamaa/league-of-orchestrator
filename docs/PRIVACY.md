@@ -54,9 +54,10 @@ failure prints only the commit hash and identity category. This prevents the
 metadata class that affected PR #34 without embedding the exposed value in the
 repository or failure output.
 
-`global-agent-instructions/shared-AGENTS.md` is the small source-managed
-cross-harness rule. `src/league/guidance.py` can stage exact bytes only beneath
+`global-agent-instructions/shared-AGENTS.md` is the bounded source-managed
+cross-harness SQLite runtime guide. `src/league/guidance.py` can stage exact bytes only beneath
 an explicit isolated Codex, Cursor, or Pi root with backup, atomic replacement,
 parity proof, and rollback. It has no home-directory default and no CLI. Issue
-#23 owns any later installed guidance, migration, or cutover; this change does
-not perform one.
+#23 owns exact-merged installation of that guide and must emit a restricted
+backup/parity/rollback receipt; repository publication contains no installed
+path, hook payload, runtime identity, raw prompt, or machine state.

@@ -1551,15 +1551,41 @@ class SQLiteStorage(SQLiteTransactionCore):
             if not self._database_existed:
                 os.chmod(self.database, 0o600)
             loaded = tuple(int(item) for item in sqlite3.sqlite_version_info[:3])
-            requested_mode, refusal = journal_policy(loaded, request_wal=request_wal)
             self.connection.execute("PRAGMA foreign_keys=ON")
             self.connection.execute(f"PRAGMA busy_timeout={int(busy_timeout_ms)}")
-            actual_mode = str(
-                self.connection.execute(f"PRAGMA journal_mode={requested_mode}").fetchone()[0]
-            ).upper()
+            if allow_create:
+                requested_mode, refusal = journal_policy(
+                    loaded, request_wal=request_wal
+                )
+                actual_mode = str(
+                    self.connection.execute(
+                        f"PRAGMA journal_mode={requested_mode}"
+                    ).fetchone()[0]
+                ).upper()
+                wal_allowed = requested_mode == "WAL"
+            else:
+                actual_mode = str(
+                    self.connection.execute("PRAGMA journal_mode").fetchone()[0]
+                ).upper()
+                if actual_mode not in {"DELETE", "WAL"}:
+                    raise StorageRefusal(
+                        "journal_mode_unsupported",
+                        f"established canonical journal mode {actual_mode} is unsupported",
+                    )
+                if actual_mode == "WAL" and loaded < WAL_MINIMUM:
+                    raise StorageRefusal(
+                        "wal_runtime_unsupported",
+                        "established WAL mode requires SQLite 3.51.3 or newer",
+                    )
+                wal_allowed = actual_mode == "WAL"
+                refusal = None if wal_allowed else "canonical_delete_mode"
             self.connection.execute("PRAGMA synchronous=FULL")
             foreign_keys = bool(self.connection.execute("PRAGMA foreign_keys").fetchone()[0])
             synchronous = int(self.connection.execute("PRAGMA synchronous").fetchone()[0])
+        except StorageRefusal:
+            if hasattr(self, "connection"):
+                self.connection.close()
+            raise
         except sqlite3.DatabaseError as exc:
             if hasattr(self, "connection"):
                 self.connection.close()
@@ -1567,7 +1593,7 @@ class SQLiteStorage(SQLiteTransactionCore):
         if not foreign_keys:
             self.connection.close()
             raise StorageRefusal("foreign_keys_unavailable", "foreign-key enforcement could not be enabled")
-        if actual_mode != requested_mode:
+        if allow_create and actual_mode != requested_mode:
             self.connection.close()
             raise StorageRefusal(
                 "journal_mode_refused",
@@ -1579,7 +1605,7 @@ class SQLiteStorage(SQLiteTransactionCore):
         self.policy = ConnectionPolicy(
             loaded_runtime=loaded,
             journal_mode=actual_mode,
-            wal_allowed=requested_mode == "WAL",
+            wal_allowed=wal_allowed,
             wal_refusal=refusal,
             busy_timeout_ms=busy_timeout_ms,
             foreign_keys=True,

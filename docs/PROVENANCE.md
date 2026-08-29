@@ -179,6 +179,16 @@ separate bounded one-second wait, so it is neither silently stripped nor routed
 through a second store. All non-busy refusals and public storage commands retain
 their prior behavior.
 
+The journal-mode contention successor changes the connection-policy boundary,
+not the timeout. Migration connections remain the only path that may establish
+or change SQLite journal mode under maintenance. Normal connections query the
+existing mode, accept only DELETE or WAL, and refuse WAL when the loaded runtime
+is older than 3.51.3. The canonical watcher no longer requests DELETE while
+opening supervisor, prompt, or Stop connections. This preserves the database's
+established WAL mode across transition, delivery, hook, watcher, and reporting
+commands and removes the exclusive WAL-to-DELETE negotiation that previously
+failed before hook processing.
+
 Tests that require process inspection explicitly inject the single
 `tests/fakes/ps` adapter through `tests/process_adapter.py`; Make targets do not
 alter `PATH` for unrelated tests. This keeps self-process and resource-lifecycle

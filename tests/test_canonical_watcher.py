@@ -307,6 +307,115 @@ def test_supervise_user_priority(root: Path) -> None:
     }
 
 
+def test_long_lived_supervisor_allows_concurrent_prompt_and_stop(root: Path) -> None:
+    _, state, _ = seeded_state(root, "supervisor-hot-opens")
+    env = _environment(root / "supervisor-hot-opens", state)
+    _register_garen_runtime(
+        state, "supervisor-hot-opens", session_ref=SHOTCALLER_ID
+    )
+    waiter = subprocess.Popen(
+        [
+            env["TEST_INSTALLED_WATCHER"],
+            "--shotcaller",
+            "Garen",
+            "supervise",
+            "--poll-seconds",
+            "0.05",
+        ],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+    )
+    deadline = time.monotonic() + 3
+    registered = False
+    while time.monotonic() < deadline:
+        with SQLiteStorage(
+            state, busy_timeout_ms=100, request_wal=False
+        ) as observer:
+            registered = observer.connection.execute(
+                "SELECT 1 FROM watcher_registrations WHERE actor_agent_id=?",
+                (SHOTCALLER_ID,),
+            ).fetchone() is not None
+            assert observer.policy.journal_mode == "WAL"
+        if registered:
+            break
+        time.sleep(0.02)
+    assert registered and waiter.poll() is None
+
+    prompt_payload = {
+        "session_id": SHOTCALLER_ID,
+        "turn_id": "turn:supervisor-hot-open",
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": "Prompt captured while the foreground supervisor stays open.",
+    }
+    stop_payload = {
+        "session_id": SHOTCALLER_ID,
+        "turn_id": "turn:supervisor-hot-open",
+        "hook_event_name": "Stop",
+        "stop_hook_active": False,
+    }
+    barrier = threading.Barrier(3)
+    results: dict[str, tuple[subprocess.CompletedProcess[str], float]] = {}
+
+    def invoke(name: str, command: str, payload: dict[str, object]) -> None:
+        barrier.wait()
+        started = time.monotonic()
+        completed = subprocess.run(
+            [env["TEST_INSTALLED_WATCHER"], command],
+            input=json.dumps(payload),
+            text=True,
+            capture_output=True,
+            env=env,
+            check=False,
+        )
+        results[name] = (completed, time.monotonic() - started)
+
+    prompt_thread = threading.Thread(
+        target=invoke,
+        args=("prompt", "codex-user-prompt-hook", prompt_payload),
+    )
+    stop_thread = threading.Thread(
+        target=invoke, args=("stop", "codex-stop-hook", stop_payload)
+    )
+    prompt_thread.start()
+    stop_thread.start()
+    barrier.wait()
+    prompt_thread.join(timeout=5)
+    stop_thread.join(timeout=5)
+    assert not prompt_thread.is_alive() and not stop_thread.is_alive()
+
+    prompt, prompt_elapsed = results["prompt"]
+    stop, stop_elapsed = results["stop"]
+    assert prompt.returncode == 0, prompt.stdout + prompt.stderr
+    assert json.loads(prompt.stdout) == {}
+    assert prompt_elapsed < 1.5
+    assert stop.returncode == 0, stop.stdout + stop.stderr
+    assert json.loads(stop.stdout)["decision"] == "block"
+    assert stop_elapsed < 1.0
+    output, error = waiter.communicate(timeout=5)
+    assert not error, error
+    assert json.loads(output)["priority"] == "user"
+
+    with SQLiteStorage(state, request_wal=False) as store:
+        rows = store.connection.execute(
+            """
+            SELECT p.source_event_key,pp.body_hash,pp.byte_count
+              FROM prompts p JOIN prompt_payloads pp ON pp.prompt_id=p.prompt_id
+             WHERE p.source_event_key=?
+            """,
+            (_hook_source_event_key("codex", prompt_payload),),
+        ).fetchall()
+        assert store.policy.journal_mode == "WAL"
+    encoded = prompt_payload["prompt"].encode("utf-8")
+    assert len(rows) == 1
+    assert tuple(rows[0]) == (
+        _hook_source_event_key("codex", prompt_payload),
+        hashlib.sha256(encoded).hexdigest(),
+        len(encoded),
+    )
+
+
 def test_codex_and_cursor_prompt_capture_exactly_once(root: Path) -> None:
     for name, command, event_field, payload in (
         (
@@ -1028,7 +1137,18 @@ def test_material_delivery_watcher_direct_dedup_and_unavailable(root: Path) -> N
         stderr=subprocess.PIPE,
         env=watcher_env,
     )
-    time.sleep(0.15)
+    deadline = time.monotonic() + 3
+    registered = False
+    while time.monotonic() < deadline:
+        with SQLiteStorage(watcher_state) as observer:
+            registered = observer.connection.execute(
+                "SELECT 1 FROM watcher_registrations WHERE actor_agent_id=?",
+                (SHOTCALLER_ID,),
+            ).fetchone() is not None
+        if registered:
+            break
+        time.sleep(0.02)
+    assert registered and waiter.poll() is None
     current = _league(watcher_state, "agent", "status", "--agent-id", CHAMPION_ID)
     version = current["result"]["agent"]["version"]
     transitioned = _league(
@@ -1092,7 +1212,12 @@ def test_material_delivery_watcher_direct_dedup_and_unavailable(root: Path) -> N
     _, unavailable_state, _ = seeded_state(root, "unavailable-delivery")
     unavailable_env = _environment(root / "unavailable-delivery", unavailable_state)
     _register_garen_runtime(unavailable_state, "unavailable")
-    unavailable_env["PATH"] = "/usr/bin:/bin"
+    unavailable_bin = root / "unavailable-delivery" / "unavailable-bin"
+    unavailable_bin.mkdir()
+    unavailable_herdr = unavailable_bin / "herdr"
+    unavailable_herdr.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    unavailable_herdr.chmod(0o755)
+    unavailable_env["PATH"] = f"{unavailable_bin}:{unavailable_env['PATH']}"
     current = _league_env(
         unavailable_state,
         unavailable_env,
@@ -1139,6 +1264,7 @@ def main() -> None:
         test_explicit_and_session_stop_dispatch(root)
         test_supervise_wakes_and_stop_allows_after_settlement(root)
         test_supervise_user_priority(root)
+        test_long_lived_supervisor_allows_concurrent_prompt_and_stop(root)
         test_codex_and_cursor_prompt_capture_exactly_once(root)
         test_queued_prompts_reusing_turn_id_are_unique_and_conflicts_quarantine(root)
         test_missing_identity_quarantines_then_binds_and_triages(root)

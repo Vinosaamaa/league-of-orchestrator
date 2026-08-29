@@ -69,6 +69,16 @@ coverage holds an `agent.transition` transaction open while UserPromptSubmit
 and Stop overlap, then proves the retry block, prompt bytes, transition event,
 delivery, and unresolved obligations all remain durable.
 
+Journal mode is canonical database state, not a hot-path preference. Migration
+under exclusive maintenance may establish WAL or rollback-journal mode. Every
+normal supervisor, prompt, Stop, transition, delivery, and reporting connection
+only reads and validates the established mode; it never issues a journal-mode
+change. Established WAL additionally requires the loaded SQLite runtime to pass
+the 3.51.3 safety gate. Focused acceptance keeps an actual supervisor process
+open on WAL while prompt and Stop hook processes open concurrently, then proves
+both hooks succeed, the supervisor wakes for user priority, and the exact prompt
+is durable once. Timeout bounds are unchanged.
+
 Run the complete foundation with one command after creating task-owned sentinel
 fixtures outside the requested namespace:
 

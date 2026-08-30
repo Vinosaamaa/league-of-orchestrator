@@ -19,6 +19,7 @@ from league.production_cleanup import (  # noqa: E402
     ProductionCleanup,
     SystemProcessPort,
     _validate_runtime_context,
+    production_cleanup_registry,
 )
 from league.real_cleanup import SubprocessRunner  # noqa: E402
 from league.real_canary import (  # noqa: E402
@@ -60,6 +61,28 @@ class ProcessInspectionRunner:
         self.calls.append(tuple(arguments))
         return subprocess.CompletedProcess(
             arguments, 0, "Thu Jan  1 00:00:00 2026 Ss+\n", ""
+        )
+
+
+class ExactIssueRunner:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, ...]] = []
+
+    def run(self, arguments, *, timeout_seconds: int = 30):
+        del timeout_seconds
+        command = tuple(arguments)
+        self.calls.append(command)
+        if command != (
+            "test-gh",
+            "issue",
+            "view",
+            "83",
+            "--repo",
+            "example/league",
+        ):
+            return subprocess.CompletedProcess(command, 1, "", "identity mismatch")
+        return subprocess.CompletedProcess(
+            command, 0, "issue:\n  number: 83\n  state: open\n", ""
         )
 
 
@@ -386,6 +409,15 @@ def test_production_cleanup_crash_resume_and_lease_scope(root: Path) -> None:
             "SELECT COUNT(*) FROM teardown_receipts WHERE operation_id=?",
             (planned["operation_id"],),
         ).fetchone()[0] == 1
+        policy = store.connection.execute(
+            "SELECT required_policy FROM cleanup_obligations WHERE task_id=?",
+            (LIFECYCLE_TASK_ID,),
+        ).fetchone()[0]
+        receipt_policy = store.connection.execute(
+            "SELECT policy_version FROM teardown_receipts WHERE operation_id=?",
+            (planned["operation_id"],),
+        ).fetchone()[0]
+        assert receipt_policy == policy
 
 
 def test_ready_to_land_owner_cancellation_recovers_planned_fence_zero_after_reopen(
@@ -537,10 +569,86 @@ def test_production_cleanup_accepts_visible_codex_thread_runtime() -> None:
     assert identity["session_id"] == "00000000-0000-4000-8000-000000000099"
 
 
+def test_production_registry_injects_exact_issue_adapter_boundary() -> None:
+    issue = {
+        "action_kind": "issue_close",
+        "adapter_kind": "issue",
+        "expected_identity": {
+            "repository": "git@github.com:example/league.git",
+            "issue": 83,
+            "state": "open",
+        },
+        "intended_state": {
+            "repository": "git@github.com:example/league.git",
+            "issue": 83,
+            "state": "closed",
+        },
+    }
+    actions = [
+        {
+            "action_kind": "archive_identity_evidence",
+            "adapter_kind": "archive",
+            "intended_state": {"verified": True},
+        },
+        {
+            "action_kind": "session_exit",
+            "adapter_kind": "harness",
+            "expected_identity": {
+                "agent_name": "lux",
+                "pane_id": "w1:p99",
+                "session_id": "00000000-0000-4000-8000-000000000099",
+            },
+        },
+        {
+            "action_kind": "endpoint_close",
+            "adapter_kind": "backend",
+            "expected_identity": {
+                "pane_id": "w1:p99",
+                "terminal_id": "terminal:99",
+                "runtime_instance_id": "runtime:lux",
+                "runtime_generation": "generation:99",
+            },
+        },
+        {
+            "action_kind": "callsign_release",
+            "adapter_kind": "callsign",
+            "expected_identity": {"assignment_id": "callsign:lux"},
+        },
+        issue,
+    ]
+    context = {
+        "operation": {"actions": actions},
+        "runtime_instances": [
+            {
+                "runtime_instance_id": "runtime:lux",
+                "harness_kind": "codex-thread",
+                "backend_kind": "herdr",
+                "session_ref": "00000000-0000-4000-8000-000000000099",
+                "endpoint": "w1:p99",
+                "runtime_generation": "generation:99",
+                "status": "active",
+                "verified": True,
+            }
+        ],
+    }
+    issue_runner = ExactIssueRunner()
+    registry = production_cleanup_registry(
+        object(),  # type: ignore[arg-type]
+        context,
+        at=AT_PLAN,
+        runner=ProcessInspectionRunner(),  # type: ignore[arg-type]
+        issue_runner=issue_runner,
+        issue_executable="test-gh",
+    )
+    assert registry.get("issue").inspect(issue) == issue["expected_identity"]
+    assert len(issue_runner.calls) == 1
+
+
 def main() -> None:
     test_rollover_predecessor_requires_exact_switch_and_emits_drain_receipt()
     test_process_inspection_uses_one_exact_query()
     test_production_cleanup_accepts_visible_codex_thread_runtime()
+    test_production_registry_injects_exact_issue_adapter_boundary()
     with tempfile.TemporaryDirectory(prefix="league-production-cleanup-") as temporary:
         root = Path(temporary)
         test_production_cleanup_crash_resume_and_lease_scope(root / "e2e")

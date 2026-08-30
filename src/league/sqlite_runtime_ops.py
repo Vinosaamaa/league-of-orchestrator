@@ -1148,7 +1148,7 @@ def finalize_cleanup(store: Any, operation_id: str, fence: int, at: str) -> dict
         with store._transaction():
             operation = store.connection.execute(
                 """
-                SELECT o.*,c.task_id,c.version AS cleanup_version,c.cleanup_state
+                SELECT o.*,c.task_id,c.version AS cleanup_version,c.cleanup_state,c.required_policy
                   FROM cleanup_operations o JOIN cleanup_obligations c
                     ON c.cleanup_obligation_id=o.cleanup_obligation_id
                  WHERE o.operation_id=?
@@ -1179,7 +1179,7 @@ def finalize_cleanup(store: Any, operation_id: str, fence: int, at: str) -> dict
             receipt_id = f"teardown:{operation_id}"
             store.connection.execute(
                 "INSERT INTO teardown_receipts(receipt_id,operation_id,task_id,policy_version,receipt_hash,completed_at) VALUES(?,?,?,?,?,?)",
-                (receipt_id, operation_id, operation["task_id"], operation["plan_digest"], digest, at),
+                (receipt_id, operation_id, operation["task_id"], operation["required_policy"], digest, at),
             )
             from .sqlite_continuation_ops import finalize_thread_archive_for_cleanup
 

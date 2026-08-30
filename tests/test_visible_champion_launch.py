@@ -27,6 +27,7 @@ from league.issue_first import (  # noqa: E402
     semantic_scope_digest,
 )
 from league.sqlite_project_ops import canonical_repository  # noqa: E402
+from league.storage_assignment import PrepareAssignmentCommand  # noqa: E402
 import league.visible_launch as visible_launch  # noqa: E402
 from league.storage_issue import (  # noqa: E402
     BeginIssueSelectionCommand,
@@ -36,13 +37,13 @@ from league.visible_launch import (  # noqa: E402
     HerdrCodexLaunchAdapter,
     VisibleChampionLaunchService,
     VisibleLaunchOptions,
-    _codex_trust_root,
 )
 from league.legacy_display_reconciliation import (  # noqa: E402
     HerdrLegacyDisplayAdapter,
     LegacyDisplayReconciliationService,
     LegacyDisplayReconciliationSpec,
 )
+from league.worktree import verified_worktree_repository_root  # noqa: E402
 from lifecycle_fakes import FakeLaunchAdapter  # noqa: E402
 from request_lifecycle_fixture import (  # noqa: E402
     GAREN_RUNTIME,
@@ -490,13 +491,22 @@ def _adapter(options: VisibleLaunchOptions, runner: FakeHerdrRunner, store):
 
 
 class ResumeSessionReportRunner(FakeHerdrRunner):
-    def __init__(self, worktree: Path, options: VisibleLaunchOptions) -> None:
+    def __init__(
+        self,
+        worktree: Path,
+        options: VisibleLaunchOptions,
+        *,
+        initial_session: bool = False,
+        process_thread_id: str = THREAD_ID,
+    ) -> None:
         super().__init__(worktree)
         self.options = options
+        self.initial_session = initial_session
+        self.process_thread_id = process_thread_id
 
     def _agent(self) -> dict[str, object]:
         agent = super()._agent()
-        if not self.session_reported:
+        if not self.initial_session and not self.session_reported:
             agent.pop("agent_session", None)
         return agent
 
@@ -525,7 +535,7 @@ class ResumeSessionReportRunner(FakeHerdrRunner):
                                 self.options.state_root,
                                 "--cd",
                                 self.worktree,
-                                THREAD_ID,
+                                self.process_thread_id,
                             ],
                         }
                     ]
@@ -586,6 +596,91 @@ def test_exact_resume_uses_declared_thread_and_skips_fresh_handshake(root: Path)
     assert report[report.index("--agent-session-id") + 1] == THREAD_ID
     assert report[report.index("--source") + 1] == "herdr:codex"
     assert report[report.index("--seq") + 1] == "100"
+    store.close()
+
+
+def test_immediate_resume_session_still_requires_exact_process_identity(root: Path) -> None:
+    store, _, worktree = _context(root, "immediate-resume-proof")
+    options = _options(root)
+    runner = ResumeSessionReportRunner(
+        worktree,
+        options,
+        initial_session=True,
+        process_thread_id="44444444-4444-4444-8444-444444444444",
+    )
+    adapter = HerdrCodexLaunchAdapter(
+        options,
+        runner,
+        environment={"HERDR_ENV": "1", "HERDR_WORKSPACE_ID": "w1"},
+        resume_thread_id=THREAD_ID,
+    )
+    try:
+        adapter.launch(replace(_spec(worktree, "immediate-resume-proof"), callsign="Lux"))
+    except LaunchAdapterError as exc:
+        assert exc.failure_class == "thread_identity_ambiguous"
+        assert exc.cleanup_proven is True
+    else:
+        raise AssertionError("immediate session metadata bypassed resumed-process proof")
+    assert any(
+        call[:3] == ("herdr", "pane", "process-info") for call in runner.calls
+    )
+    assert runner.closed is True
+    store.close()
+
+
+def test_resume_retry_reconciles_owned_endpoint_without_second_launch(root: Path) -> None:
+    store, clock, worktree = _context(root, "resume-retry-reconcile")
+    options = _options(root)
+    runner = ResumeSessionReportRunner(worktree, options, initial_session=True)
+    spec = _spec(worktree, "resume-retry-reconcile")
+    prepared = store.prepare_assignment(
+        PrepareAssignmentCommand(
+            assignment_id=spec.assignment_id,
+            request_id=spec.request_id,
+            claim_token=spec.claim_token,
+            task_id=spec.task_id,
+            task_summary=spec.task_summary,
+            coordinator_agent_id=spec.coordinator_agent_id,
+            champion_agent_id=spec.champion_agent_id,
+            repository=spec.repository,
+            issue=spec.issue,
+            branch=spec.branch,
+            worktree=spec.worktree,
+            at=clock.now(),
+            required_capabilities=spec.required_capabilities,
+        )
+    )
+    store.mark_assignment_launching(
+        spec.assignment_id, prepared["version"], clock.now()
+    )
+    first = HerdrCodexLaunchAdapter(
+        options,
+        runner,
+        environment={"HERDR_ENV": "1", "HERDR_WORKSPACE_ID": "w1"},
+        resume_thread_id=THREAD_ID,
+    ).launch(replace(spec, callsign=prepared["callsign"]))
+    retry_adapter = HerdrCodexLaunchAdapter(
+        options,
+        runner,
+        environment={"HERDR_ENV": "1", "HERDR_WORKSPACE_ID": "w1"},
+        resume_thread_id=THREAD_ID,
+    )
+    retried = VisibleChampionLaunchService(
+        store, retry_adapter, options, clock
+    ).launch(spec)
+    assert retried["state"] == "active"
+    assert retried["runtime_instance_id"] == first["runtime_instance_id"]
+    assert store.assignment_launch_context(spec.assignment_id)["state"] == "active"
+    assert len(
+        [call for call in runner.calls if call[:3] == ("herdr", "tab", "create")]
+    ) == 1
+    assert len(
+        [call for call in runner.calls if call[:3] == ("herdr", "agent", "start")]
+    ) == 1
+    assert len(
+        [call for call in runner.calls if call[:3] == ("herdr", "pane", "process-info")]
+    ) >= 2
+    assert runner.closed is False
     store.close()
 
 
@@ -1854,7 +1949,7 @@ def test_linked_worktree_trust_binds_owning_repository(root: Path) -> None:
     marker = worktree / ".git"
     marker.write_text(f"gitdir: {git_dir}\n", encoding="utf-8")
     (git_dir / "gitdir").write_text(f"{marker}\n", encoding="utf-8")
-    assert _codex_trust_root(worktree) == repository.resolve()
+    assert verified_worktree_repository_root(worktree) == repository.resolve()
 
 
 class FailingAdapter:
@@ -1998,6 +2093,8 @@ def main() -> None:
         test_legacy_display_command_exposes_exact_owner_cas_inputs()
         test_task_label_defaults_and_explicit_labels_stay_two_words(root)
         test_exact_resume_uses_declared_thread_and_skips_fresh_handshake(root)
+        test_immediate_resume_session_still_requires_exact_process_identity(root)
+        test_resume_retry_reconciles_owned_endpoint_without_second_launch(root)
         test_real_adapter_one_command_success_and_retry(root)
         test_active_retry_requires_migration18_issue_binding(root)
         test_active_retry_refuses_changed_owner_issue_before_title_read(root)

@@ -18,7 +18,12 @@ from . import MAX_ACCEPTANCE_SENTINEL_PATHS, __version__
 from .adapters import builtin_contract_registry
 from .artifacts import ArtifactLifecycle
 from .cleanup import CleanupExecutor, CleanupFaultEvent, CleanupPlanner
-from .continuation import ContinuationIssueReopener, GitHubIssueAdapter, verified_binding
+from .continuation import (
+    ContinuationIssueReopener,
+    GitHubIssueAdapter,
+    continuation_resume_thread,
+    verified_binding,
+)
 from .importer import build_import_plan
 from .orchestration import OrchestrationSignals
 from .routing import ModelRouter, load_routing_config
@@ -2681,42 +2686,17 @@ def _assign_launch(store: Storage, args: argparse.Namespace) -> CommandResult:
     champion_agent_id = args.champion_agent_id or derived_champion_agent_id(
         assignment_id
     )
-    continuation = store.continuation_for_assignment(assignment_id)
-    resume_thread_id = None
-    if continuation is not None:
-        if (
-            continuation["new_task_id"] != args.task_id
-            or continuation["new_agent_id"] != champion_agent_id
-            or continuation["repository"] != args.repository
-            or int(continuation["issue"]) != args.issue
-            or continuation["branch"] != args.branch
-            or continuation["worktree"] != str(Path(args.worktree).resolve())
-        ):
-            raise StorageRefusal(
-                "continuation_conflict", "assign run differs from its exact continuation claim"
-            )
-        if continuation["state"] == "issue_reopened":
-            continuation = {
-                **continuation,
-                **store.mark_continuation_launching(
-                    continuation["operation_id"], continuation["version"], _turn_time()
-                ),
-            }
-        elif continuation["state"] not in {"launching", "resumed"}:
-            raise StorageRefusal(
-                "continuation_conflict", "exact owning issue must reopen before assign run"
-            )
-        lineage = continuation["lineage"]
-        capabilities = lineage["resume_capabilities"]
-        if (
-            lineage["provider_kind"] != "codex"
-            or capabilities.get("exact_resume") is not True
-            or capabilities.get("safe_worktree_rebind") is not True
-        ):
-            raise StorageRefusal(
-                "resume_unsupported", "visible Codex launch cannot resume this provider archive"
-            )
-        resume_thread_id = str(lineage["thread_identity"]).removeprefix("codex:")
+    resume_thread_id = continuation_resume_thread(
+        store,
+        assignment_id=assignment_id,
+        task_id=args.task_id,
+        champion_agent_id=champion_agent_id,
+        repository=args.repository,
+        issue=args.issue,
+        branch=args.branch,
+        worktree=args.worktree,
+        at=_turn_time(),
+    )
     workspace_id = args.workspace_id or os.environ.get("HERDR_WORKSPACE_ID", "")
     league_command = str(
         Path(args.league_command).resolve()

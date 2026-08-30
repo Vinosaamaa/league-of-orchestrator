@@ -20,6 +20,7 @@ from league.continuation import (  # noqa: E402
     verified_binding,
 )
 from league.request_services import AssignmentService, AssignmentSpec  # noqa: E402
+from league.sqlite_continuation_ops import authorize_resumed_runtime  # noqa: E402
 from league.storage import StorageRefusal  # noqa: E402
 from lifecycle_fakes import FakeClock  # noqa: E402
 from request_lifecycle_fixture import (  # noqa: E402
@@ -31,10 +32,11 @@ from request_lifecycle_fixture import (  # noqa: E402
     dispatch_request,
 )
 from runtime_doubles import StateCleanupAdapter  # noqa: E402
-from storage_fixture import REPOSITORY, SHOTCALLER_ID  # noqa: E402
+from storage_fixture import SHOTCALLER_ID  # noqa: E402
 
 
 THREAD_ID = "33333333-3333-4333-8333-333333333333"
+REPOSITORY = "https://github.com/example/league.git"
 DIGEST = hashlib.sha256(b"issue-83-policy").hexdigest()
 AT_PLAN = "2026-01-01T00:10:00Z"
 AT_EXECUTE = "2026-01-01T00:11:00Z"
@@ -160,7 +162,8 @@ class FakeIssueAdapter:
 
 
 class FakeGitHubRunner:
-    def __init__(self) -> None:
+    def __init__(self, repository: str = "Vinosaamaa/league-of-orchestrator") -> None:
+        self.repository = repository
         self.state = "open"
         self.calls: list[tuple[str, ...]] = []
 
@@ -168,6 +171,10 @@ class FakeGitHubRunner:
         del timeout_seconds
         command = tuple(arguments)
         self.calls.append(command)
+        issue = command[3] if len(command) > 3 else ""
+        repository = command[command.index("--repo") + 1] if "--repo" in command else ""
+        if issue != "83" or repository != self.repository:
+            return subprocess.CompletedProcess(command, 1, "", "exact identity mismatch")
         if command[1:3] == ("issue", "view"):
             stdout = f"issue:\n  number: 83\n  state: {self.state}\n"
         elif command[1:3] == ("issue", "close"):
@@ -203,6 +210,16 @@ def test_exact_github_issue_adapter() -> None:
         call[call.index("--repo") + 1] == "Vinosaamaa/league-of-orchestrator"
         for call in runner.calls
     )
+    wrong_issue = {
+        "expected_identity": {**expected, "issue": 84},
+        "intended_state": {**expected, "issue": 84, "state": "closed"},
+    }
+    try:
+        adapter.inspect(wrong_issue)
+    except StorageRefusal as exc:
+        assert exc.code == "issue_action_failed"
+    else:
+        raise AssertionError("exact-identity fake accepted a different issue")
 
 
 def test_exact_new_worktree_binding(root: Path) -> None:
@@ -223,14 +240,21 @@ def test_exact_new_worktree_binding(root: Path) -> None:
     (worktree / "README.md").write_text("synthetic\n", encoding="utf-8")
     git("add", "README.md")
     git("commit", "-m", "synthetic binding")
-    git("remote", "add", "origin", REPOSITORY)
-    binding = verified_binding(
-        repository=REPOSITORY,
-        issue=83,
-        branch="agent/synthetic/exact-binding",
-        worktree=str(worktree),
+    accepted = (
+        "https://github.com/example/league.git",
+        "git@github.com:example/league.git",
+        "ssh://git@github.com/example/league.git",
     )
-    assert binding["verified"] is True and len(binding["head"]) == 40
+    git("remote", "add", "origin", accepted[0])
+    for remote in accepted:
+        git("remote", "set-url", "origin", remote)
+        binding = verified_binding(
+            repository=REPOSITORY,
+            issue=83,
+            branch="agent/synthetic/exact-binding",
+            worktree=str(worktree),
+        )
+        assert binding["verified"] is True and len(binding["head"]) == 40
     try:
         verified_binding(
             repository=REPOSITORY,
@@ -242,6 +266,18 @@ def test_exact_new_worktree_binding(root: Path) -> None:
         assert exc.code == "workspace_binding_unsafe"
     else:
         raise AssertionError("stale/default branch binding was accepted")
+    git("remote", "set-url", "origin", "git://github.com/example/league.git")
+    try:
+        verified_binding(
+            repository=REPOSITORY,
+            issue=83,
+            branch="agent/synthetic/exact-binding",
+            worktree=str(worktree),
+        )
+    except StorageRefusal as exc:
+        assert exc.code == "workspace_binding_unsafe"
+    else:
+        raise AssertionError("unsupported GitHub remote form was durably claimable")
 
 
 def _complete_task(store, task_id: str, runtime_id: str, suffix: str) -> None:
@@ -624,6 +660,15 @@ def test_reopen_exact_thread_new_callsign_and_final_cleanup(root: Path) -> None:
         branch=continuation["branch"],
         worktree=continuation["worktree"],
     )
+    wrong_receipt = ExactThreadLaunchAdapter(
+        "44444444-4444-4444-8444-444444444444"
+    ).launch(AssignmentSpec(**{**vars(successor), "callsign": "Ahri"}))
+    try:
+        authorize_resumed_runtime(store, successor.assignment_id, wrong_receipt)
+    except StorageRefusal as exc:
+        assert exc.code == "thread_identity_ambiguous"
+    else:
+        raise AssertionError("exact-thread fake accepted the wrong archived identity")
     active = AssignmentService(
         store, ExactThreadLaunchAdapter(THREAD_ID), clock, Ids("resume:successor")
     ).assign(successor)
@@ -659,7 +704,7 @@ def test_reopen_exact_thread_new_callsign_and_final_cleanup(root: Path) -> None:
     store.close()
 
 
-def test_resume_refusals_concurrency_and_partial_reopen_recovery(root: Path) -> None:
+def test_resume_capability_and_acceptance_refusals(root: Path) -> None:
     store, _, original, manifest = _prepare_fixture(root, "refusals", exact_resume=False)
     incomplete = {
         **manifest,
@@ -693,6 +738,8 @@ def test_resume_refusals_concurrency_and_partial_reopen_recovery(root: Path) -> 
         raise AssertionError("unsupported exact resume was accepted")
     store.close()
 
+
+def test_provider_driver_refuses_opaque_thread(root: Path) -> None:
     opaque_thread = "opaque/provider-thread?id=17#fragment"
     store, _, original, manifest = _prepare_fixture(
         root,
@@ -729,6 +776,8 @@ def test_resume_refusals_concurrency_and_partial_reopen_recovery(root: Path) -> 
     assert issue.calls == [] and issue_state["value"] == "closed"
     store.close()
 
+
+def test_unhealthy_context_refusal(root: Path) -> None:
     store, _, original, manifest = _prepare_fixture(
         root, "unhealthy", context_health="unhealthy"
     )
@@ -750,6 +799,8 @@ def test_resume_refusals_concurrency_and_partial_reopen_recovery(root: Path) -> 
         raise AssertionError("unhealthy archived context was accepted")
     store.close()
 
+
+def test_instruction_drift_requires_reconciliation(root: Path) -> None:
     store, _, original, manifest = _prepare_fixture(root, "instruction-drift")
     issue_state = {"value": "open"}
     _execute_cleanup(
@@ -762,6 +813,11 @@ def test_resume_refusals_concurrency_and_partial_reopen_recovery(root: Path) -> 
     drift = _continuation_spec(
         root, "instruction-drift", "archive:instruction-drift:original"
     )
+    drift["repository"] = "git@github.com:example/league.git"
+    drift["binding"] = {
+        **drift["binding"],
+        "repository": drift["repository"],
+    }
     drift["instruction_digest"] = "b" * 64
     try:
         store.prepare_continuation(drift)
@@ -773,6 +829,8 @@ def test_resume_refusals_concurrency_and_partial_reopen_recovery(root: Path) -> 
     assert store.prepare_continuation(drift)["state"] == "prepared"
     store.close()
 
+
+def test_continuation_claim_and_partial_reopen_recovery(root: Path) -> None:
     store, _, original, manifest = _prepare_fixture(root, "guards")
     issue_state = {"value": "open"}
     _execute_cleanup(
@@ -782,6 +840,21 @@ def test_resume_refusals_concurrency_and_partial_reopen_recovery(root: Path) -> 
         original.assignment_id,
         FakeIssueAdapter(issue_state),
     )
+    unsupported = _continuation_spec(
+        root, "guards", "archive:guards:original"
+    )
+    unsupported["repository"] = "https://example.invalid/example/league.git"
+    unsupported["binding"] = {
+        **unsupported["binding"],
+        "repository": unsupported["repository"],
+    }
+    try:
+        store.prepare_continuation(unsupported)
+    except StorageRefusal as exc:
+        assert exc.code == "workspace_binding_unsafe"
+    else:
+        raise AssertionError("unsupported repository form reached a durable claim")
+    assert store.continuation_status(unsupported["operation_id"]) is None
     unsafe = _continuation_spec(root, "guards", "archive:guards:original")
     unsafe["binding"] = {**unsafe["binding"], "verified": False}
     try:
@@ -824,6 +897,8 @@ def test_resume_refusals_concurrency_and_partial_reopen_recovery(root: Path) -> 
     assert recovered["state"] == "issue_reopened" and recovered["idempotent"] is False
     store.close()
 
+
+def test_reused_thread_identity_refusal(root: Path) -> None:
     store, _, original, manifest = _prepare_fixture(root, "reused")
     issue_state = {"value": "open"}
     _execute_cleanup(
@@ -866,7 +941,12 @@ def main() -> None:
         test_exact_new_worktree_binding(root)
         test_cleanup_close_retries_and_already_closed_is_idempotent(root)
         test_reopen_exact_thread_new_callsign_and_final_cleanup(root)
-        test_resume_refusals_concurrency_and_partial_reopen_recovery(root)
+        test_resume_capability_and_acceptance_refusals(root)
+        test_provider_driver_refuses_opaque_thread(root)
+        test_unhealthy_context_refusal(root)
+        test_instruction_drift_requires_reconciliation(root)
+        test_continuation_claim_and_partial_reopen_recovery(root)
+        test_reused_thread_identity_refusal(root)
     print(
         "PASS: pre-close cleanup/issue retry, exact-thread reopen, new callsign/runtime, "
         "resume refusals, opaque provider IDs, fencing, partial recovery, and final cleanup"

@@ -520,7 +520,6 @@ def main() -> None:
         test_v6_to_v7_rolls_back_and_applies_privacy_defaults(root)
         test_v15_to_v16_rolls_back_before_thread_lineage_cutover(root)
         test_schema_refusals_without_test_sql(root)
-        test_v15_to_v16_rolls_back_before_thread_lineage_cutover(root)
         test_v17_active_assignment_requires_migration18_issue_reconciliation(root)
         test_v3_upgrade_preserves_cleanup_and_indexes_legacy_project(root)
         test_backup_collision_and_corruption(root)

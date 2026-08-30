@@ -11,10 +11,18 @@ from pathlib import Path
 from typing import Any, Mapping, Optional, Protocol, Sequence
 
 from .storage import Storage, StorageRefusal
+from .worktree import (
+    GitCommandRunner,
+    SubprocessGitRunner,
+    normalized_github_repository,
+    verified_worktree_repository_root,
+)
 
 
 MAX_ISSUE_OUTPUT_BYTES = 256 * 1024
-_REPOSITORY = re.compile(r"^https://github\.com/([^/]+)/([^/]+?)(?:\.git)?$")
+_THREAD_UUID = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+)
 
 
 class IssueCommandRunner(Protocol):
@@ -57,17 +65,16 @@ def _issue_identity(value: Mapping[str, Any]) -> tuple[str, int, str]:
     repository = value.get("repository")
     issue = value.get("issue")
     state = value.get("state")
-    match = _REPOSITORY.fullmatch(str(repository))
     if (
         set(value) != {"repository", "issue", "state"}
-        or match is None
+        or not isinstance(repository, str)
         or isinstance(issue, bool)
         or not isinstance(issue, int)
         or issue < 1
         or state not in {"open", "closed"}
     ):
         raise StorageRefusal("issue_binding_mismatch", "issue action identity is invalid")
-    return f"{match.group(1)}/{match.group(2)}", issue, state
+    return normalized_github_repository(repository), issue, state
 
 
 class GitHubIssueAdapter:
@@ -156,15 +163,13 @@ class ContinuationIssueReopener:
             raise StorageRefusal("continuation_unknown", "continuation operation does not exist")
         lineage = operation["lineage"]
         capabilities = lineage["resume_capabilities"]
-        from .visible_launch import THREAD_UUID
-
         thread_identity = str(lineage["thread_identity"])
         if (
             lineage["provider_kind"] != "codex"
             or capabilities.get("exact_resume") is not True
             or capabilities.get("safe_worktree_rebind") is not True
             or not thread_identity.startswith("codex:")
-            or THREAD_UUID.fullmatch(thread_identity.removeprefix("codex:")) is None
+            or _THREAD_UUID.fullmatch(thread_identity.removeprefix("codex:")) is None
         ):
             raise StorageRefusal(
                 "resume_unsupported",
@@ -183,6 +188,19 @@ class ContinuationIssueReopener:
         operation = self.store.continuation_status(operation_id)
         if operation is None:
             raise StorageRefusal("continuation_unknown", "continuation operation disappeared")
+        outcome, receipt = self._reconcile_issue(operation)
+        return self.store.record_issue_reopen(
+            operation_id,
+            int(claimed["version"]),
+            int(claimed["fence"]),
+            outcome,
+            receipt,
+            at,
+        )
+
+    def _reconcile_issue(
+        self, operation: Mapping[str, Any]
+    ) -> tuple[str, Mapping[str, Any]]:
         expected = {
             "repository": operation["repository"],
             "issue": int(operation["issue"]),
@@ -206,14 +224,64 @@ class ContinuationIssueReopener:
                     "issue_action_failed", "owning issue reopen did not verify", retryable=True
                 )
             outcome = "applied"
-        return self.store.record_issue_reopen(
-            operation_id,
-            int(claimed["version"]),
-            int(claimed["fence"]),
-            outcome,
-            receipt,
-            at,
+        return outcome, receipt
+
+
+def continuation_resume_thread(
+    store: Storage,
+    *,
+    assignment_id: str,
+    task_id: str,
+    champion_agent_id: str,
+    repository: str,
+    issue: int,
+    branch: str,
+    worktree: str,
+    at: str,
+) -> Optional[str]:
+    """Apply the exact continuation launch policy and return its archived UUID."""
+
+    continuation = store.continuation_for_assignment(assignment_id)
+    if continuation is None:
+        return None
+    exact_claim = (
+        continuation["new_task_id"] == task_id
+        and continuation["new_agent_id"] == champion_agent_id
+        and normalized_github_repository(continuation["repository"])
+        == normalized_github_repository(repository)
+        and int(continuation["issue"]) == issue
+        and continuation["branch"] == branch
+        and continuation["worktree"] == str(Path(worktree).resolve())
+    )
+    if not exact_claim:
+        raise StorageRefusal(
+            "continuation_conflict", "assign run differs from its exact continuation claim"
         )
+    if continuation["state"] == "issue_reopened":
+        continuation = {
+            **continuation,
+            **store.mark_continuation_launching(
+                continuation["operation_id"], continuation["version"], at
+            ),
+        }
+    elif continuation["state"] not in {"launching", "resumed"}:
+        raise StorageRefusal(
+            "continuation_conflict", "exact owning issue must reopen before assign run"
+        )
+    lineage = continuation["lineage"]
+    capabilities = lineage["resume_capabilities"]
+    thread_identity = str(lineage["thread_identity"])
+    if (
+        lineage["provider_kind"] != "codex"
+        or capabilities.get("exact_resume") is not True
+        or capabilities.get("safe_worktree_rebind") is not True
+        or not thread_identity.startswith("codex:")
+        or _THREAD_UUID.fullmatch(thread_identity.removeprefix("codex:")) is None
+    ):
+        raise StorageRefusal(
+            "resume_unsupported", "visible Codex launch cannot resume this provider archive"
+        )
+    return thread_identity.removeprefix("codex:")
 
 
 def verified_binding(
@@ -222,20 +290,18 @@ def verified_binding(
     issue: int,
     branch: str,
     worktree: str,
+    runner: Optional[GitCommandRunner] = None,
 ) -> dict[str, Any]:
     """Verify one exact new Git worktree without mutating it."""
-
-    from .visible_launch import SubprocessRunner as LaunchRunner
-    from .visible_launch import _codex_trust_root
 
     path = Path(worktree)
     if not path.is_absolute() or not path.is_dir() or path.is_symlink():
         raise StorageRefusal("workspace_binding_unsafe", "continuation worktree is not exact")
-    _codex_trust_root(path)
-    runner = LaunchRunner()
+    verified_worktree_repository_root(path)
+    git_runner = runner or SubprocessGitRunner()
 
     def git(*arguments: str) -> str:
-        completed = runner.run(("git", "-C", str(path), *arguments))
+        completed = git_runner.run(("git", "-C", str(path), *arguments))
         if completed.returncode != 0:
             raise StorageRefusal("workspace_binding_unsafe", "continuation Git binding did not verify")
         return completed.stdout.strip()
@@ -244,12 +310,18 @@ def verified_binding(
     observed_branch = git("branch", "--show-current")
     head = git("rev-parse", "HEAD")
     origin = git("remote", "get-url", "origin")
-    normalized_origin = origin.removesuffix(".git")
+    try:
+        normalized_origin = normalized_github_repository(origin)
+        normalized_expected = normalized_github_repository(repository)
+    except StorageRefusal as exc:
+        raise StorageRefusal(
+            "workspace_binding_unsafe", "continuation repository remote is unsupported"
+        ) from exc
     if (
         Path(top).resolve() != path.resolve()
         or observed_branch != branch
         or branch.lower() in {"main", "master"}
-        or normalized_origin != repository.removesuffix(".git")
+        or normalized_origin != normalized_expected
         or re.fullmatch(r"[0-9a-f]{40}", head) is None
         or issue < 1
     ):
@@ -269,5 +341,7 @@ __all__ = [
     "GitHubIssueAdapter",
     "IssueCommandRunner",
     "SubprocessIssueRunner",
+    "continuation_resume_thread",
+    "normalized_github_repository",
     "verified_binding",
 ]

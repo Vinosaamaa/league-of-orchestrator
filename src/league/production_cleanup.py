@@ -15,7 +15,7 @@ from .cleanup import (
     CleanupExecutor,
     cleanup_action_digest,
 )
-from .continuation import GitHubIssueAdapter
+from .continuation import GitHubIssueAdapter, IssueCommandRunner
 from .real_cleanup import (
     CallsignAdapter,
     CommandRunner,
@@ -163,6 +163,20 @@ class SharedLeaseAdapter(_BaseAdapter):
         return self.store.release_resource_lease_for_cleanup(self._expected(action))
 
 
+PRODUCTION_CLEANUP_ADAPTER_KINDS = frozenset(
+    {
+        CanonicalArchiveAdapter.kind,
+        HerdrHarnessAdapter.kind,
+        HerdrBackendAdapter.kind,
+        GitAdapter.kind,
+        CallsignAdapter.kind,
+        ExactProcessAdapter.kind,
+        SharedLeaseAdapter.kind,
+        GitHubIssueAdapter.kind,
+    }
+)
+
+
 def _one(actions: Sequence[Mapping[str, Any]], action_kind: str) -> Mapping[str, Any]:
     matches = [action for action in actions if action.get("action_kind") == action_kind]
     if len(matches) != 1:
@@ -232,6 +246,8 @@ def production_cleanup_registry(
     at: str,
     runner: Optional[CommandRunner] = None,
     process_port: Optional[ProcessPort] = None,
+    issue_runner: Optional[IssueCommandRunner] = None,
+    issue_executable: Optional[str] = None,
 ) -> CleanupAdapterRegistry:
     """Validate every persisted adapter policy before returning executable drivers."""
 
@@ -240,8 +256,7 @@ def production_cleanup_registry(
     if not isinstance(actions, list):
         raise StorageRefusal("cleanup_operation_invalid", "canonical action plan is malformed")
     declared = {str(action.get("adapter_kind")) for action in actions}
-    supported = {"archive", "harness", "backend", "git", "callsign", "process", "lease", "issue"}
-    unknown = declared - supported
+    unknown = declared - PRODUCTION_CLEANUP_ADAPTER_KINDS
     if unknown:
         raise StorageRefusal(
             "cleanup_adapter_unsupported",
@@ -273,7 +288,9 @@ def production_cleanup_registry(
     if "lease" in declared:
         registry.register(SharedLeaseAdapter(store))
     if "issue" in declared:
-        registry.register(GitHubIssueAdapter())
+        registry.register(
+            GitHubIssueAdapter(issue_runner, executable=issue_executable)
+        )
     return registry
 
 
@@ -303,10 +320,14 @@ class ProductionCleanup:
         *,
         runner: Optional[CommandRunner] = None,
         process_port: Optional[ProcessPort] = None,
+        issue_runner: Optional[IssueCommandRunner] = None,
+        issue_executable: Optional[str] = None,
     ) -> None:
         self.store = store
         self.runner = runner
         self.process_port = process_port
+        self.issue_runner = issue_runner
+        self.issue_executable = issue_executable
 
     def execute(
         self,
@@ -325,6 +346,8 @@ class ProductionCleanup:
             at=at,
             runner=self.runner,
             process_port=self.process_port,
+            issue_runner=self.issue_runner,
+            issue_executable=self.issue_executable,
         )
         execution = CleanupExecutor(self.store, registry).execute(
             operation_id,
@@ -382,4 +405,5 @@ __all__ = [
     "SharedLeaseAdapter",
     "SystemProcessPort",
     "production_cleanup_registry",
+    "PRODUCTION_CLEANUP_ADAPTER_KINDS",
 ]

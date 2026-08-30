@@ -10,6 +10,7 @@ from datetime import datetime
 from typing import Any, Mapping, Optional
 
 from .storage_types import StorageRefusal
+from .worktree import normalized_github_repository
 
 
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
@@ -324,7 +325,9 @@ def thread_archive(store: Any, archive_id: str) -> Optional[dict[str, Any]]:
     return None if row is None else _archive_value(row)
 
 
-def prepare_continuation(store: Any, spec: Mapping[str, Any]) -> dict[str, Any]:
+def _validate_continuation_request(
+    spec: Mapping[str, Any],
+) -> tuple[Mapping[str, Any], Optional[str]]:
     required = {
         "operation_id",
         "archive_id",
@@ -375,11 +378,154 @@ def prepare_continuation(store: Any, spec: Mapping[str, Any]) -> dict[str, Any]:
         or any(binding.get(key) != spec[key] for key in ("repository", "issue", "branch", "worktree"))
     ):
         raise StorageRefusal("workspace_binding_unsafe", "new continuation worktree binding is unverified")
+    try:
+        if normalized_github_repository(str(binding["repository"])) != normalized_github_repository(
+            str(spec["repository"])
+        ):
+            raise StorageRefusal(
+                "workspace_binding_unsafe", "new continuation repository identity conflicts"
+            )
+    except StorageRefusal as exc:
+        raise StorageRefusal(
+            "workspace_binding_unsafe", "new continuation repository identity is unsupported"
+        ) from exc
     if not _DIGEST.fullmatch(str(spec["instruction_digest"])):
         raise StorageRefusal("continuation_invalid", "current instruction digest is invalid")
     reconciliation = spec["reconciliation_digest"]
     if reconciliation is not None and not _DIGEST.fullmatch(str(reconciliation)):
         raise StorageRefusal("continuation_invalid", "instruction reconciliation digest is invalid")
+    return binding, reconciliation
+
+
+def _verify_closed_lineage_runtimes(
+    store: Any, lineage: Mapping[str, Any]
+) -> str:
+    session_ref = _decode_thread_identity(
+        str(lineage["provider_kind"]), str(lineage["thread_identity"])
+    )
+    runtimes = store.connection.execute(
+        "SELECT runtime_instance_id,status FROM runtime_instances WHERE session_ref=? ORDER BY runtime_instance_id",
+        (session_ref,),
+    ).fetchall()
+    linked = {
+        row["runtime_instance_id"]
+        for row in store.connection.execute(
+            "SELECT runtime_instance_id FROM thread_incarnations WHERE lineage_id=?",
+            (lineage["lineage_id"],),
+        )
+    }
+    if (
+        not runtimes
+        or {row["runtime_instance_id"] for row in runtimes} != linked
+        or any(row["status"] != "closed" for row in runtimes)
+    ):
+        raise StorageRefusal(
+            "thread_identity_reused",
+            "provider thread identity is ambiguous, reused, or still live",
+        )
+    return session_ref
+
+
+def _continuation_archive_claim(
+    store: Any,
+    spec: Mapping[str, Any],
+    reconciliation: Optional[str],
+) -> tuple[Mapping[str, Any], Mapping[str, Any]]:
+    archive = store.connection.execute(
+        "SELECT * FROM thread_archives WHERE archive_id=?", (spec["archive_id"],)
+    ).fetchone()
+    if (
+        archive is None
+        or archive["state"] != "available"
+        or int(archive["version"]) != int(spec["expected_archive_version"])
+    ):
+        raise StorageRefusal(
+            "continuation_conflict", "thread archive is not exclusively claimable"
+        )
+    lineage = store.connection.execute(
+        "SELECT * FROM thread_lineages WHERE lineage_id=?", (archive["lineage_id"],)
+    ).fetchone()
+    capabilities = json.loads(lineage["resume_capabilities_json"])
+    if not all(
+        capabilities.get(key) is True
+        for key in ("durable", "exact_resume", "safe_worktree_rebind")
+    ):
+        raise StorageRefusal(
+            "resume_unsupported",
+            "provider does not declare exact durable resume and safe rebinding",
+        )
+    if archive["context_health"] != "healthy":
+        raise StorageRefusal(
+            "resume_context_unhealthy", "archived provider context is not healthy"
+        )
+    if (
+        normalized_github_repository(archive["repository"])
+        != normalized_github_repository(spec["repository"])
+        or int(archive["issue"]) != int(spec["issue"])
+    ):
+        raise StorageRefusal(
+            "issue_binding_mismatch", "continuation does not target the archived owning issue"
+        )
+    if archive["instruction_digest"] != spec["instruction_digest"] and reconciliation is None:
+        raise StorageRefusal(
+            "instruction_drift_unreconciled",
+            "changed governing instructions require an explicit reconciliation digest",
+        )
+    close_rows = store.connection.execute(
+        """
+        SELECT r.after_json
+          FROM cleanup_actions a JOIN cleanup_action_receipts r ON r.action_id=a.action_id
+         WHERE a.operation_id=? AND a.action_kind='issue_close'
+        """,
+        (archive["cleanup_operation_id"],),
+    ).fetchall()
+    if len(close_rows) != 1 or json.loads(close_rows[0]["after_json"]).get("state") != "closed":
+        raise StorageRefusal(
+            "issue_close_receipt_missing", "archived task has no exact owning-issue close receipt"
+        )
+    _verify_closed_lineage_runtimes(store, lineage)
+    return archive, lineage
+
+
+def _verify_fresh_continuation_successor(store: Any, spec: Mapping[str, Any]) -> None:
+    if store.connection.execute(
+        """
+        SELECT 1 FROM agent_instances
+         WHERE retired_at IS NULL
+           AND (worktree=? OR (repository=? AND branch=?))
+        """,
+        (spec["worktree"], spec["repository"], spec["branch"]),
+    ).fetchone() is not None:
+        raise StorageRefusal(
+            "workspace_binding_unsafe", "new continuation worktree is already bound"
+        )
+    if any(
+        store.connection.execute(query, (value,)).fetchone() is not None
+        for query, value in (
+            ("SELECT 1 FROM task_assignments WHERE task_assignment_id=?", spec["assignment_id"]),
+            ("SELECT 1 FROM tasks WHERE task_id=?", spec["new_task_id"]),
+            ("SELECT 1 FROM agent_instances WHERE agent_id=?", spec["new_agent_id"]),
+        )
+    ):
+        raise StorageRefusal(
+            "continuation_conflict",
+            "successor assignment, task, or agent identity is not fresh",
+        )
+    active = store.connection.execute(
+        """
+        SELECT operation_id FROM continuation_operations
+         WHERE archive_id=? AND state IN ('prepared','reopening_issue','issue_reopened','launching')
+        """,
+        (spec["archive_id"],),
+    ).fetchone()
+    if active is not None:
+        raise StorageRefusal(
+            "continuation_conflict", "thread archive already has an exclusive continuation claim"
+        )
+
+
+def prepare_continuation(store: Any, spec: Mapping[str, Any]) -> dict[str, Any]:
+    binding, reconciliation = _validate_continuation_request(spec)
     try:
         with store._transaction():
             existing = store.connection.execute(
@@ -410,115 +556,10 @@ def prepare_continuation(store: Any, spec: Mapping[str, Any]) -> dict[str, Any]:
                 result = _operation_value(store, existing)
                 result["idempotent"] = True
                 return result
-            archive = store.connection.execute(
-                "SELECT * FROM thread_archives WHERE archive_id=?", (spec["archive_id"],)
-            ).fetchone()
-            if (
-                archive is None
-                or archive["state"] != "available"
-                or int(archive["version"]) != int(spec["expected_archive_version"])
-            ):
-                raise StorageRefusal(
-                    "continuation_conflict", "thread archive is not exclusively claimable"
-                )
-            lineage = store.connection.execute(
-                "SELECT * FROM thread_lineages WHERE lineage_id=?", (archive["lineage_id"],)
-            ).fetchone()
-            capabilities = json.loads(lineage["resume_capabilities_json"])
-            if not all(
-                capabilities.get(key) is True
-                for key in ("durable", "exact_resume", "safe_worktree_rebind")
-            ):
-                raise StorageRefusal(
-                    "resume_unsupported", "provider does not declare exact durable resume and safe rebinding"
-                )
-            if archive["context_health"] != "healthy":
-                raise StorageRefusal(
-                    "resume_context_unhealthy", "archived provider context is not healthy"
-                )
-            if (
-                archive["repository"] != spec["repository"]
-                or int(archive["issue"]) != int(spec["issue"])
-            ):
-                raise StorageRefusal(
-                    "issue_binding_mismatch", "continuation does not target the archived owning issue"
-                )
-            if (
-                archive["instruction_digest"] != spec["instruction_digest"]
-                and reconciliation is None
-            ):
-                raise StorageRefusal(
-                    "instruction_drift_unreconciled",
-                    "changed governing instructions require an explicit reconciliation digest",
-                )
-            close_rows = store.connection.execute(
-                """
-                SELECT r.after_json
-                  FROM cleanup_actions a JOIN cleanup_action_receipts r ON r.action_id=a.action_id
-                 WHERE a.operation_id=? AND a.action_kind='issue_close'
-                """,
-                (archive["cleanup_operation_id"],),
-            ).fetchall()
-            if len(close_rows) != 1 or json.loads(close_rows[0]["after_json"]).get("state") != "closed":
-                raise StorageRefusal(
-                    "issue_close_receipt_missing", "archived task has no exact owning-issue close receipt"
-                )
-            provider_kind = lineage["provider_kind"]
-            session_ref = _decode_thread_identity(provider_kind, lineage["thread_identity"])
-            runtimes = store.connection.execute(
-                "SELECT runtime_instance_id,status FROM runtime_instances WHERE session_ref=? ORDER BY runtime_instance_id",
-                (session_ref,),
-            ).fetchall()
-            linked = {
-                row["runtime_instance_id"]
-                for row in store.connection.execute(
-                    "SELECT runtime_instance_id FROM thread_incarnations WHERE lineage_id=?",
-                    (lineage["lineage_id"],),
-                )
-            }
-            if (
-                not runtimes
-                or {row["runtime_instance_id"] for row in runtimes} != linked
-                or any(row["status"] != "closed" for row in runtimes)
-            ):
-                raise StorageRefusal(
-                    "thread_identity_reused",
-                    "provider thread identity is ambiguous, reused, or still live",
-                )
-            if store.connection.execute(
-                """
-                SELECT 1 FROM agent_instances
-                 WHERE retired_at IS NULL
-                   AND (worktree=? OR (repository=? AND branch=?))
-                """,
-                (spec["worktree"], spec["repository"], spec["branch"]),
-            ).fetchone() is not None:
-                raise StorageRefusal(
-                    "workspace_binding_unsafe", "new continuation worktree is already bound"
-                )
-            if any(
-                store.connection.execute(query, (value,)).fetchone() is not None
-                for query, value in (
-                    ("SELECT 1 FROM task_assignments WHERE task_assignment_id=?", spec["assignment_id"]),
-                    ("SELECT 1 FROM tasks WHERE task_id=?", spec["new_task_id"]),
-                    ("SELECT 1 FROM agent_instances WHERE agent_id=?", spec["new_agent_id"]),
-                )
-            ):
-                raise StorageRefusal(
-                    "continuation_conflict",
-                    "successor assignment, task, or agent identity is not fresh",
-                )
-            active = store.connection.execute(
-                """
-                SELECT operation_id FROM continuation_operations
-                 WHERE archive_id=? AND state IN ('prepared','reopening_issue','issue_reopened','launching')
-                """,
-                (spec["archive_id"],),
-            ).fetchone()
-            if active is not None:
-                raise StorageRefusal(
-                    "continuation_conflict", "thread archive already has an exclusive continuation claim"
-                )
+            archive, lineage = _continuation_archive_claim(
+                store, spec, reconciliation
+            )
+            _verify_fresh_continuation_successor(store, spec)
             store.connection.execute(
                 """
                 INSERT INTO continuation_operations
@@ -803,25 +844,7 @@ def authorize_resumed_runtime(
         raise StorageRefusal(
             "thread_identity_ambiguous", "resumed runtime receipt is not the exact claimed thread and binding"
         )
-    runtimes = store.connection.execute(
-        "SELECT runtime_instance_id,status FROM runtime_instances WHERE harness_kind=? AND session_ref=?",
-        (receipt["harness_kind"], session_ref),
-    ).fetchall()
-    linked = {
-        row["runtime_instance_id"]
-        for row in store.connection.execute(
-            "SELECT runtime_instance_id FROM thread_incarnations WHERE lineage_id=?",
-            (lineage["lineage_id"],),
-        )
-    }
-    if (
-        not runtimes
-        or {row["runtime_instance_id"] for row in runtimes} != linked
-        or any(row["status"] != "closed" for row in runtimes)
-    ):
-        raise StorageRefusal(
-            "thread_identity_reused", "resumed provider thread identity is no longer unique and closed"
-        )
+    _verify_closed_lineage_runtimes(store, lineage)
     return {
         "operation": dict(operation),
         "archive": dict(archive),

@@ -803,6 +803,21 @@ def test_one_grant_propagates_across_protected_gates_without_reprompt(
             assert receipt["protected_gate"]["outcome"] == "succeeded"
             goal_version = receipt["mode_action"]["goal_version"]
 
+        retry_action = json.loads(
+            (root / "protected-1.json").read_text(encoding="utf-8")
+        )
+        retried = executor.execute(
+            gate_name="shotcaller.create",
+            gate_scope={"synthetic_target": "target:1"},
+            action=retry_action,
+            expected_goal_version=1,
+            at=AT,
+            operation=lambda _: callbacks.append("settled-retry"),
+        )
+        assert retried["operation"] is None
+        assert retried["mode_action"]["idempotent"] is True
+        assert retried["protected_gate"]["outcome"] == "succeeded"
+
         adjacent = json.loads(
             _action(
                 root / "protected-adjacent.json",

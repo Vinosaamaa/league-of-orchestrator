@@ -45,6 +45,18 @@ class ProtectedGateExecutor:
             )
         )
         gate = begun["protected_gate"]
+        if gate["outcome"] == "failed":
+            raise StorageRefusal(
+                "protected_gate_previously_failed",
+                "protected gate retry names an already-failed exact action",
+            )
+        if gate["outcome"] == "succeeded":
+            protected_gate = begun.pop("protected_gate")
+            return {
+                "operation": None,
+                "mode_action": begun,
+                "protected_gate": protected_gate,
+            }
         try:
             operation_result = operation(begun)
         except Exception as exc:

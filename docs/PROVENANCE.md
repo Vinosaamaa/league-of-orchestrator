@@ -716,3 +716,20 @@ correction changes no schema, callsign requirement, live runtime, hook,
 installed release, or active rollover state. Focused synthetic tests cover
 superset preservation, missing requirements, runtime drift, unverified
 identity, exact retry, and unchanged snapshot/ownership CAS boundaries.
+
+## Partial-progress rollover refresh provenance
+
+Issue #23 deliberately extends only the expired switched-rollover refresh
+boundary. A descendant still owned by the predecessor keeps the prior checks.
+A descendant already owned by the successor is accepted only when one durable
+`rollover_descendant_reconciled` receipt proves the same operation and exact
+task, assignment, callsign, runtime, capability, and outbox transfer. Capture
+history and prior snapshot revisions remain immutable.
+
+The replacement snapshot retains the complete original Champion/task/callsign
+set. Its immutable refresh receipt records predecessor-pending and
+successor-reconciled progress separately; `rollover bindings` exposes only the
+proved successor entries as terminal markers. Missing, duplicate, forged,
+stale, partially retargeted, or concurrently changed proof refuses before the
+snapshot pointer CAS. This changes no schema, release, installation, or live
+rollover state.

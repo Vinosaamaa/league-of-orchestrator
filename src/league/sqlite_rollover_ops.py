@@ -923,6 +923,110 @@ def rollover_bindings(
         "digest": digest(rows),
         "rows": rows,
     }
+    refresh_events = store.connection.execute(
+        """
+        SELECT detail_json FROM events
+         WHERE event_type='rollover_snapshot_refreshed' AND squad_id=?
+         ORDER BY occurred_at,event_id
+        """,
+        (operation["squad_id"],),
+    ).fetchall()
+    terminal_markers: list[dict[str, Any]] = []
+    matching_receipts = []
+    for event in refresh_events:
+        try:
+            detail = json.loads(event["detail_json"])
+            receipt = detail["receipt"]
+            receipt_digest = detail["receipt_digest"]
+        except (json.JSONDecodeError, KeyError, TypeError):
+            continue
+        snapshot_receipt = receipt.get("snapshot") if isinstance(receipt, dict) else None
+        if (
+            isinstance(snapshot_receipt, dict)
+            and receipt.get("operation_id") == operation_id
+            and snapshot_receipt.get("snapshot_id") == snapshot["snapshot_id"]
+        ):
+            matching_receipts.append((receipt, receipt_digest))
+    if int(snapshot["snapshot_version"]) > 1:
+        if len(matching_receipts) != 1:
+            raise StorageRefusal(
+                "snapshot_refresh_receipt_unverified",
+                "current refreshed snapshot lacks one exact immutable receipt",
+            )
+        refresh_receipt, refresh_receipt_digest = matching_receipts[0]
+        progress_bindings = refresh_receipt.get("progress_bindings")
+        if (
+            not isinstance(refresh_receipt_digest, str)
+            or digest(refresh_receipt) != refresh_receipt_digest
+        ):
+            raise StorageRefusal(
+                "snapshot_refresh_receipt_unverified",
+                "current refreshed snapshot receipt is malformed",
+            )
+        if progress_bindings is not None:
+            marker_keys = {
+                "champion_agent_id",
+                "task_id",
+                "state",
+                "reconciliation_id",
+                "receipt_digest",
+            }
+            snapshot_identity = {
+                (row["champion_agent_id"], row["task_id"])
+                for row in store.connection.execute(
+                    """
+                    SELECT champion_agent_id,task_id FROM active_champion_snapshot_rows
+                     WHERE snapshot_id=?
+                    """,
+                    (snapshot["snapshot_id"],),
+                )
+            }
+            if (
+                not isinstance(progress_bindings, list)
+                or len(progress_bindings) != int(snapshot["total_count"])
+                or any(
+                    not isinstance(item, dict)
+                    or set(item) != marker_keys
+                    or (item.get("champion_agent_id"), item.get("task_id"))
+                    not in snapshot_identity
+                    or item.get("state")
+                    not in {"predecessor_pending", "successor_reconciled"}
+                    or (
+                        item.get("state") == "predecessor_pending"
+                        and (
+                            item.get("reconciliation_id") is not None
+                            or item.get("receipt_digest") is not None
+                        )
+                    )
+                    or (
+                        item.get("state") == "successor_reconciled"
+                        and (
+                            not isinstance(item.get("reconciliation_id"), str)
+                            or not item["reconciliation_id"]
+                            or not isinstance(item.get("receipt_digest"), str)
+                            or not item["receipt_digest"]
+                        )
+                    )
+                    for item in progress_bindings
+                )
+                or {
+                    (item["champion_agent_id"], item["task_id"])
+                    for item in progress_bindings
+                }
+                != snapshot_identity
+            ):
+                raise StorageRefusal(
+                    "snapshot_refresh_receipt_unverified",
+                    "current refreshed snapshot progress receipt is not exact",
+                )
+            terminal_markers = sorted(
+                (
+                    dict(item)
+                    for item in progress_bindings
+                    if item["state"] == "successor_reconciled"
+                ),
+                key=lambda item: (item["champion_agent_id"], item["task_id"]),
+            )
     return {
         "schema": "league.rollover-bindings.v1",
         "operation_id": operation_id,
@@ -934,6 +1038,7 @@ def rollover_bindings(
         "expires_at": snapshot["expires_at"],
         "page": page,
         "next_cursor": next_cursor,
+        "terminal_markers": terminal_markers,
     }
 
 

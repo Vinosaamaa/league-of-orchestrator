@@ -1376,6 +1376,293 @@ def test_snapshot_refresh_retry_returns_the_identical_receipt(root: Path) -> Non
         assert second["idempotent"] is True
 
 
+def _seed_partially_reconciled_refresh(
+    store: SQLiteStorage,
+    root: Path,
+    label: str,
+    *,
+    outbox_count: int = 0,
+) -> dict:
+    context = seed_rollover(store, champion_count=2)
+    champion_id = context["champion_ids"][0]
+    task_id = "task:champion:0"
+    terminal_id = _bind_exact_herdr_runtime_with_capabilities(
+        store, root, champion_id, ["hook.capture", "task.execute"]
+    )
+    prepared, switched = switch_rollover(store, context)
+    rows = {
+        row["champion_agent_id"]: row
+        for row in store.rollover_bindings(prepared["operation_id"], AT6)["page"][
+            "rows"
+        ]
+    }
+    pending_outbox_ids = []
+    for ordinal in range(outbox_count):
+        event_id = f"event:partial-refresh:{label}:{ordinal}"
+        outbox_id = f"outbox:partial-refresh:{label}:{ordinal}"
+        store.connection.execute(
+            """
+            INSERT INTO events
+              (event_id,agent_id,task_id,squad_id,entity_version,event_type,status,
+               update_text,occurred_at,detail_json,aggregate_kind,aggregate_id)
+            VALUES(?,NULL,?,NULL,1,'diagnostic','working',?,?,'{}','task',?)
+            """,
+            (event_id, task_id, "Synthetic pending descendant delivery.", AT5, task_id),
+        )
+        store.connection.execute(
+            """
+            INSERT INTO delivery_outbox
+              (outbox_id,event_id,recipient_agent_id,state,available_at,attempt_count)
+            VALUES(?,?,?,'pending',?,0)
+            """,
+            (outbox_id, event_id, OLD_ID, AT5),
+        )
+        pending_outbox_ids.append(outbox_id)
+    champion = store.agent_status(champion_id)
+    callsign_version = store.connection.execute(
+        "SELECT version FROM callsign_assignments WHERE agent_id=?",
+        (champion_id,),
+    ).fetchone()[0]
+    target = store.rollover_descendant_target(
+        prepared["operation_id"],
+        f"reconciliation:partial-refresh:{label}",
+        champion_id,
+        task_id,
+        prepared["snapshot"]["digest"],
+        rows[champion_id]["row_digest"],
+        switched["version"],
+        champion["version"],
+        1,
+        0,
+        callsign_version,
+    )
+    runtime_id = target["runtime"]["runtime_instance_id"]
+    runtime_receipt_value = descendant_runtime_receipt(
+        target, runtime_id, terminal_id
+    )
+    runtime_receipt_value["runtime_generation"] = target["runtime"][
+        "runtime_generation"
+    ]
+    reconciled = store.reconcile_rollover_descendant(
+        prepared["operation_id"],
+        f"reconciliation:partial-refresh:{label}",
+        champion_id,
+        task_id,
+        runtime_id,
+        prepared["snapshot"]["digest"],
+        rows[champion_id]["row_digest"],
+        switched["version"],
+        champion["version"],
+        1,
+        0,
+        callsign_version,
+        runtime_receipt_value,
+        tuple(pending_outbox_ids),
+        AT6,
+    )
+    return {
+        "context": context,
+        "prepared": prepared,
+        "switched": switched,
+        "champion_id": champion_id,
+        "task_id": task_id,
+        "reconciliation_id": f"reconciliation:partial-refresh:{label}",
+        "reconciled": reconciled,
+        "outbox_ids": tuple(pending_outbox_ids),
+        "original_rows": rows,
+    }
+
+
+def _partial_refresh_inputs(partial: dict, label: str) -> dict:
+    return {
+        "operation_id": partial["prepared"]["operation_id"],
+        "refresh_id": f"refresh:partial-progress:{label}",
+        "squad_id": SQUAD_ID,
+        "predecessor_agent_id": OLD_ID,
+        "successor_agent_id": NEW_ID,
+        "expected_rollover_version": partial["switched"]["version"],
+        "expected_snapshot_version": partial["prepared"]["snapshot"]["version"],
+        "expected_snapshot_digest": partial["prepared"]["snapshot"]["digest"],
+        "expires_at": "2026-01-01T03:00:00Z",
+        "at": "2026-01-01T02:00:00Z",
+    }
+
+
+def test_snapshot_refresh_preserves_exact_mixed_progress_and_terminal_marker(
+    root: Path,
+) -> None:
+    state, _ = migrated_state(root, "refresh-partial-progress")
+    with SQLiteStorage(state) as store:
+        partial = _seed_partially_reconciled_refresh(
+            store, root, "success", outbox_count=2
+        )
+        inputs = _partial_refresh_inputs(partial, "success")
+        service = RolloverSnapshotRefreshService(store, ExactSnapshotInventory())
+        first = service.refresh(**inputs)
+        second = service.refresh(**inputs)
+
+        assert first["receipt_digest"] == second["receipt_digest"]
+        assert first["idempotent"] is False
+        assert second["idempotent"] is True
+        assert first["descendant_count"] == 2
+        assert first["progress_bindings"] == [
+            {
+                "champion_agent_id": partial["context"]["champion_ids"][0],
+                "task_id": "task:champion:0",
+                "state": "successor_reconciled",
+                "reconciliation_id": partial["reconciliation_id"],
+                "receipt_digest": partial["reconciled"]["receipt_digest"],
+            },
+            {
+                "champion_agent_id": partial["context"]["champion_ids"][1],
+                "task_id": "task:champion:1",
+                "state": "predecessor_pending",
+                "reconciliation_id": None,
+                "receipt_digest": None,
+            },
+        ]
+        bindings = store.rollover_bindings(
+            partial["prepared"]["operation_id"], "2026-01-01T02:01:00Z"
+        )
+        assert bindings["snapshot_count"] == 2
+        assert {
+            (row["champion_agent_id"], row["task_id"], row["callsign"])
+            for row in bindings["page"]["rows"]
+        } == {
+            (row["champion_agent_id"], row["task_id"], row["callsign"])
+            for row in partial["original_rows"].values()
+        }
+        assert bindings["terminal_markers"] == [first["progress_bindings"][0]]
+        assert store.agent_status(partial["champion_id"])[
+            "shotcaller_agent_id"
+        ] == NEW_ID
+        assert json.loads(
+            store.connection.execute(
+                "SELECT capabilities_json FROM runtime_instances WHERE actor_agent_id=?",
+                (partial["champion_id"],),
+            ).fetchone()[0]
+        ) == ["hook.capture", "task.execute"]
+
+
+def test_snapshot_refresh_refuses_forged_or_missing_successor_receipt(
+    root: Path,
+) -> None:
+    for label in ("missing", "forged"):
+        state, _ = migrated_state(root, f"refresh-partial-{label}")
+        with SQLiteStorage(state) as store:
+            partial = _seed_partially_reconciled_refresh(store, root, label)
+            if label == "missing":
+                store.connection.execute(
+                    "DELETE FROM events WHERE event_id=?",
+                    (partial["reconciliation_id"],),
+                )
+            else:
+                row = store.connection.execute(
+                    "SELECT detail_json FROM events WHERE event_id=?",
+                    (partial["reconciliation_id"],),
+                ).fetchone()
+                detail = json.loads(row["detail_json"])
+                detail["receipt"]["successor_agent_id"] = "agent:forged-successor"
+                detail["receipt_digest"] = hashlib.sha256(
+                    json.dumps(
+                        detail["receipt"],
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest()
+                store.connection.execute(
+                    "UPDATE events SET detail_json=? WHERE event_id=?",
+                    (
+                        json.dumps(detail, sort_keys=True, separators=(",", ":")),
+                        partial["reconciliation_id"],
+                    ),
+                )
+            try:
+                RolloverSnapshotRefreshService(
+                    store, ExactSnapshotInventory()
+                ).refresh(**_partial_refresh_inputs(partial, label))
+            except StorageRefusal as exc:
+                assert exc.code == "snapshot_refresh_identity_changed"
+            else:
+                raise AssertionError(f"{label} successor proof refreshed snapshot")
+            status = store.rollover_status(partial["prepared"]["operation_id"])
+            assert status["snapshot"] == partial["prepared"]["snapshot"]
+            assert status["version"] == partial["switched"]["version"]
+
+
+def test_snapshot_refresh_refuses_partially_retargeted_descendant_outbox(
+    root: Path,
+) -> None:
+    state, _ = migrated_state(root, "refresh-partial-outbox")
+    with SQLiteStorage(state) as store:
+        partial = _seed_partially_reconciled_refresh(
+            store, root, "outbox", outbox_count=2
+        )
+        store.connection.execute(
+            "UPDATE delivery_outbox SET recipient_agent_id=? WHERE outbox_id=?",
+            (OLD_ID, partial["outbox_ids"][0]),
+        )
+        try:
+            RolloverSnapshotRefreshService(
+                store, ExactSnapshotInventory()
+            ).refresh(**_partial_refresh_inputs(partial, "outbox"))
+        except StorageRefusal as exc:
+            assert exc.code == "snapshot_refresh_identity_changed"
+        else:
+            raise AssertionError("partially retargeted outbox refreshed snapshot")
+        assert store.rollover_status(partial["prepared"]["operation_id"])[
+            "snapshot"
+        ] == partial["prepared"]["snapshot"]
+
+
+def test_partial_progress_refresh_keeps_expiry_and_crash_boundaries(
+    root: Path,
+) -> None:
+    state, _ = migrated_state(root, "refresh-partial-expiry-crash")
+    with SQLiteStorage(state) as store:
+        partial = _seed_partially_reconciled_refresh(store, root, "expiry-crash")
+        inputs = _partial_refresh_inputs(partial, "expiry-crash")
+        too_early = {**inputs, "at": AT6, "expires_at": "2026-01-01T02:00:00Z"}
+        try:
+            RolloverSnapshotRefreshService(
+                store, ExactSnapshotInventory()
+            ).refresh(**too_early)
+        except StorageRefusal as exc:
+            assert exc.code == "snapshot_refresh_not_expired"
+        else:
+            raise AssertionError("mixed snapshot refreshed before expiry")
+
+        target = store.rollover_snapshot_refresh_target(**inputs)
+        observations = ExactSnapshotInventory().observe(target["descendants"])
+
+        def crash(point: str) -> None:
+            if point == "after_refresh_rows":
+                raise InjectedCrash(point)
+
+        try:
+            store.refresh_rollover_snapshot(
+                **inputs,
+                canonical_digest=target["canonical_digest"],
+                observations=observations,
+                final_observer=lambda _descendants: observations,
+                fault=crash,
+            )
+        except InjectedCrash as exc:
+            assert str(exc) == "after_refresh_rows"
+        else:
+            raise AssertionError("mixed refresh crash boundary did not fire")
+        status = store.rollover_status(partial["prepared"]["operation_id"])
+        assert status["snapshot"] == partial["prepared"]["snapshot"]
+        assert status["version"] == partial["switched"]["version"]
+        recovered = store.refresh_rollover_snapshot(
+            **inputs,
+            canonical_digest=target["canonical_digest"],
+            observations=observations,
+            final_observer=lambda _descendants: observations,
+        )
+        assert recovered["snapshot"]["version"] == 2
+
+
 def test_refreshed_snapshot_drives_descendant_reconciliation(root: Path) -> None:
     state, _ = migrated_state(root, "refresh-then-reconcile")
     with SQLiteStorage(state) as store:
@@ -3485,6 +3772,10 @@ def main() -> None:
         test_snapshot_refresh_refuses_before_expiry_without_live_observation(root)
         test_snapshot_refresh_refuses_a_changed_descendant_set(root)
         test_snapshot_refresh_retry_returns_the_identical_receipt(root)
+        test_snapshot_refresh_preserves_exact_mixed_progress_and_terminal_marker(root)
+        test_snapshot_refresh_refuses_forged_or_missing_successor_receipt(root)
+        test_snapshot_refresh_refuses_partially_retargeted_descendant_outbox(root)
+        test_partial_progress_refresh_keeps_expiry_and_crash_boundaries(root)
         test_refreshed_snapshot_drives_descendant_reconciliation(root)
         test_snapshot_refresh_refuses_concurrent_canonical_mutation(root)
         test_snapshot_refresh_refuses_a_changed_final_live_observation(root)

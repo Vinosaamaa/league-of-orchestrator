@@ -84,7 +84,11 @@ Nothing here installs files, changes hooks, or connects to live Roster state.
   generations are derived from the observed terminal and exact thread/session,
   and must also match an existing canonical generation; stale rows are never
   reused. The final observation runs in the consistent deferred transaction
-  immediately before pointer CAS without reserving the SQLite writer lock.
+  immediately before pointer CAS without reserving the SQLite writer lock. A
+  partially reconciled switched rollover may refresh only when every
+  successor-owned descendant has one exact immutable reconciliation receipt;
+  the new receipt retains the full original set and exposes proved terminal
+  markers so already-transferred rows are not reconciled twice.
 - Deterministic bounded activity reports with stable JSON, exact range/timezone
   and scope, immutable show/since specifications, completion gates, indexed
   pagination, and JSON-derived Markdown/portable HTML.

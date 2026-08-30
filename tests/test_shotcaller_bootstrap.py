@@ -47,12 +47,17 @@ class RecordingHerdr:
         self.worktree = str(worktree.resolve())
         self.thread_id = thread_id
         self.terminal_id = "terminal:1"
+        self.agent_status = "working"
         self.publish_mismatch = publish_mismatch
         self.delayed_auto_title_reads = delayed_auto_title_reads
         self.name: str | None = None
+        self.routing_name_field: object | None = None
+        self.routing_alias_field: object | None = None
         self.tokens: dict[str, str] | None = {}
         self.title = ""
         self.metadata_source = "herdr:codex"
+        self.expose_metadata_source = True
+        self.provider_managed_presentation = False
         self.source_sequences: dict[str, int] = {}
         self.pending_auto_title_reads: int | None = None
         self.auto_title_scheduled = False
@@ -64,11 +69,10 @@ class RecordingHerdr:
     def _agent(self) -> dict[str, object]:
         value: dict[str, object] = {
             "agent": "codex",
-            "agent_status": "working",
+            "agent_status": self.agent_status,
             "agent_session": {"source": "herdr:codex", "value": self.thread_id},
             "cwd": self.worktree,
             "foreground_cwd": self.worktree,
-            "metadata_source": self.metadata_source,
             "pane_id": "w1:p1",
             "state_change_seq": self.state_change_seq,
             "tab_id": "w1:t1",
@@ -86,8 +90,14 @@ class RecordingHerdr:
                 else self.terminal_title_stripped_override
             ),
         }
+        if self.expose_metadata_source:
+            value["metadata_source"] = self.metadata_source
         if self.name is not None:
             value["name"] = self.name
+        if self.routing_name_field is not None:
+            value["routing_name"] = self.routing_name_field
+        if self.routing_alias_field is not None:
+            value["routing_alias"] = self.routing_alias_field
         return value
 
     def _advance_auto_title(self) -> None:
@@ -116,6 +126,19 @@ class RecordingHerdr:
         elif command[:3] == ("herdr", "agent", "rename"):
             self.name = None if command[-1] == "--clear" else command[-1]
             self.state_change_seq += 1
+            if self.provider_managed_presentation and self.name is not None:
+                callsign = self.name[0].upper() + self.name[1:]
+                self.tokens = {
+                    "callsign": callsign,
+                    "harness": "codex",
+                    "identity_thread_id": self.thread_id,
+                    "identity_title": f"Codex | {callsign}",
+                    "orchestrator_identity": f"codex · {self.name}",
+                    "routing_alias": self.name,
+                    "sidebar_name": callsign,
+                    "thread_title": callsign,
+                }
+                self.title = f"{callsign} | codex"
             result = {"agent": self._agent()}
         elif command[:3] == ("herdr", "pane", "report-metadata"):
             source = command[command.index("--source") + 1]
@@ -136,7 +159,11 @@ class RecordingHerdr:
                 self.metadata_source = source
                 title = command[command.index("--title") + 1]
                 if not self.publish_mismatch or not title:
-                    self.title = title
+                    self.title = (
+                        f"{title} | codex"
+                        if self.provider_managed_presentation and title
+                        else title
+                    )
             positions = [index for index, value in enumerate(command) if value == "--token"]
             for position in positions:
                 key, value = command[position + 1].split("=", 1)
@@ -1268,6 +1295,178 @@ def test_legacy_rolled_back_bootstrap_residue_captures_clean_live_baseline(
         }
         for call in retry_calls
     )
+
+
+def test_legacy_residue_accepts_installed_provider_presentation_without_route(
+    root: Path,
+) -> None:
+    state, _ = migrated_state(root, "shotcaller-installed-provider-presentation")
+    worktree = root / "shotcaller-installed-provider-presentation" / "worktree"
+    worktree.mkdir()
+    clock = FakeClock()
+    runner = RecordingHerdr(worktree, publish_mismatch=True)
+    with SQLiteStorage(state) as store:
+        _seed_available_ashe(store, clock)
+        service = _service(store, clock, worktree, runner)
+        original, original_assignment = _make_legacy_bootstrap_residue(
+            store, service, runner
+        )
+        retry = ShotcallerBootstrapSpec(
+            assignment_id="callsign-assignment:bootstrap:ashe:installed-provider",
+            agent_id=original.agent_id,
+            runtime_instance_id=original.runtime_instance_id,
+            thread_id=original.thread_id,
+            capabilities=original.capabilities,
+        )
+        prompt_title = "Execute shotcaller command"
+        runner.expose_metadata_source = False
+        runner.provider_managed_presentation = True
+        runner.agent_status = "done"
+        runner.title = f"{prompt_title} | codex"
+        runner.tokens = {
+            "callsign": prompt_title,
+            "harness": "codex",
+            "identity_thread_id": original.thread_id,
+            "identity_title": f"Codex | {prompt_title}",
+            "sidebar_name": prompt_title,
+            "thread_title": prompt_title,
+        }
+        runner.state_change_seq += 1
+        calls_before_retry = len(runner.calls)
+
+        created = service.bootstrap(retry)
+
+        assert created["state"] == "active"
+        assert created["callsign"] == original_assignment["callsign"]
+        baseline = store.shotcaller_bootstrap_baseline(retry.assignment_id)
+        assert baseline is not None
+        assert baseline["presentation_source"] == "herdr:codex"
+        assert baseline["routing_name"] is None
+        assert baseline["sidebar_name"] == prompt_title
+        assert baseline["thread_title"] == prompt_title
+        assert baseline["title"] == prompt_title
+        assert store.callsign_assignment_status(original.assignment_id) == original_assignment
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM squads WHERE shotcaller_agent_id=?", (AGENT_ID,)
+        ).fetchone()[0] == 0
+
+        published_calls = runner.calls[calls_before_retry:]
+        assert runner.name == "ashe"
+        assert runner.title == "Ashe | codex"
+        assert runner.tokens == {
+            "callsign": "Ashe",
+            "harness": "codex",
+            "identity_thread_id": original.thread_id,
+            "identity_title": "Codex | Ashe",
+            "orchestrator_identity": "codex · ashe",
+            "routing_alias": "ashe",
+            "sidebar_name": "Ashe",
+            "thread_title": "Ashe",
+        }
+        assert any(
+            call[:3] == ("herdr", "agent", "rename") for call in published_calls
+        )
+        assert not any(
+            call[:3]
+            in {
+                ("herdr", "tab", "create"),
+                ("herdr", "pane", "split"),
+                ("herdr", "workspace", "create"),
+                ("herdr", "agent", "start"),
+                ("herdr", "agent", "prompt"),
+            }
+            for call in published_calls
+        )
+
+        calls_before_exact_retry = len(runner.calls)
+        exact_retry = _service(store, clock, worktree, runner).bootstrap(retry)
+        assert exact_retry == {**created, "idempotent": True}
+        assert not any(
+            call[:3]
+            in {
+                ("herdr", "agent", "rename"),
+                ("herdr", "pane", "report-metadata"),
+                ("herdr", "agent", "prompt"),
+                ("herdr", "tab", "create"),
+                ("herdr", "pane", "split"),
+                ("herdr", "workspace", "create"),
+                ("herdr", "agent", "start"),
+            }
+            for call in runner.calls[calls_before_exact_retry:]
+        )
+
+
+def test_installed_provider_presentation_refuses_real_or_ambiguous_route(
+    root: Path,
+) -> None:
+    for case in (
+        "name",
+        "routing-name",
+        "routing-alias",
+        "conflicting-route",
+        "partial-source",
+    ):
+        state, _ = migrated_state(root, f"shotcaller-installed-route-{case}")
+        worktree = root / f"shotcaller-installed-route-{case}" / "worktree"
+        worktree.mkdir()
+        clock = FakeClock()
+        runner = RecordingHerdr(worktree)
+        prompt_title = "Execute shotcaller command"
+        runner.expose_metadata_source = False
+        runner.provider_managed_presentation = True
+        runner.agent_status = "done"
+        runner.title = f"{prompt_title} | codex"
+        runner.tokens = {
+            "callsign": prompt_title,
+            "harness": "codex",
+            "identity_thread_id": THREAD_ID,
+            "identity_title": f"Codex | {prompt_title}",
+            "sidebar_name": prompt_title,
+            "thread_title": prompt_title,
+        }
+        if case == "name":
+            runner.name = "foreign"
+        elif case == "routing-name":
+            runner.routing_name_field = "foreign"
+        elif case == "routing-alias":
+            runner.routing_alias_field = "foreign"
+        elif case == "conflicting-route":
+            runner.name = "ashe"
+            runner.routing_alias_field = "foreign"
+        else:
+            runner.expose_metadata_source = True
+            runner.metadata_source = None  # type: ignore[assignment]
+
+        with SQLiteStorage(state) as store:
+            _seed_available_ashe(store, clock)
+            before = store.callsign_status("shotcaller")
+            service = _service(store, clock, worktree, runner)
+
+            try:
+                service.bootstrap(_spec())
+            except StorageRefusal as exc:
+                assert exc.code == "shotcaller_identity_unverified"
+            else:
+                raise AssertionError(f"installed ambiguous route {case} was accepted")
+
+            assert store.callsign_status("shotcaller") == before
+            assert store.callsign_assignment_status(_spec().assignment_id) is None
+            assert store.connection.execute(
+                "SELECT COUNT(*) FROM agent_instances WHERE agent_id=?", (AGENT_ID,)
+            ).fetchone()[0] == 0
+        assert not any(
+            call[:3]
+            in {
+                ("herdr", "agent", "rename"),
+                ("herdr", "pane", "report-metadata"),
+                ("herdr", "agent", "prompt"),
+                ("herdr", "tab", "create"),
+                ("herdr", "pane", "split"),
+                ("herdr", "workspace", "create"),
+                ("herdr", "agent", "start"),
+            }
+            for call in runner.calls
+        )
 
 
 def test_legacy_residue_refuses_dirty_or_ambiguous_state_before_publication(
@@ -2666,6 +2865,8 @@ def main() -> None:
         test_bootstrap_metadata_and_atomic_finalization_failures_restore_exact_state(root)
         test_clean_rolled_back_bootstrap_residue_rebinds_same_thread_in_place(root)
         test_legacy_rolled_back_bootstrap_residue_captures_clean_live_baseline(root)
+        test_legacy_residue_accepts_installed_provider_presentation_without_route(root)
+        test_installed_provider_presentation_refuses_real_or_ambiguous_route(root)
         test_legacy_residue_refuses_dirty_or_ambiguous_state_before_publication(root)
         test_legacy_residue_refuses_newer_presentation_write_before_publication(root)
         test_legacy_residue_refuses_thread_or_generation_race_before_publication(root)

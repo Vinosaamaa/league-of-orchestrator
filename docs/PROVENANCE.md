@@ -557,6 +557,16 @@ preserving a newer user presentation. If endpoint identity changes before that
 restoration can be proven, League retains the reservation, lease, rebound agent,
 and v2 baseline as the cleanup obligation; canonical rollback occurs only after
 an exact retry proves and completes the external cleanup.
+Installed Herdr can omit `metadata_source` while still exposing its complete
+provider presentation envelope. Shotcaller preflight accepts that shape only
+when `harness`, identity thread/title, callsign, sidebar, thread, logical
+terminal title, and provider session source agree exactly; the terminal's
+provider suffix is normalized without changing the stored title. Presentation
+tokens never establish routing. Only consistent top-level `name`,
+`routing_name`, or `routing_alias` fields do, and any conflicting route,
+present-but-invalid source, partial envelope, thread, terminal, or generation
+observation refuses before mutation. A settled Herdr `done` Codex remains a
+live exact endpoint under the same fences.
 The reopened issue adds one deliberately separate legacy provenance path:
 owner-authorized reconciliation binds the exact canonical Champion identity to
 the expected live presentation, writes immutable intent before the external

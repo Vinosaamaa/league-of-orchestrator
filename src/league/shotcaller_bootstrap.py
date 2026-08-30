@@ -20,7 +20,8 @@ from .visible_launch import CommandRunner, SubprocessRunner
 THREAD_UUID = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
 )
-LIVE_STATUSES = {"active", "blocked", "idle", "waiting", "working"}
+LIVE_STATUSES = {"active", "blocked", "done", "idle", "waiting", "working"}
+ROUTING_ALIAS = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 
 
 class _MalformedHerdrResult(StorageRefusal):
@@ -146,6 +147,88 @@ class HerdrShotcallerBootstrapAdapter:
             )
         return dict(pane), matches[0]
 
+    def _routing_name(self, agent: Mapping[str, Any]) -> str | None:
+        """Read only explicit Herdr route fields, never presentation tokens."""
+
+        bindings: set[str] = set()
+        for field in ("name", "routing_name", "routing_alias"):
+            value = agent.get(field)
+            if value is None or value == "":
+                continue
+            if not isinstance(value, str) or not ROUTING_ALIAS.fullmatch(value):
+                raise StorageRefusal(
+                    "shotcaller_identity_unverified",
+                    "calling Codex routing observation is ambiguous",
+                )
+            bindings.add(value)
+        if len(bindings) > 1:
+            raise StorageRefusal(
+                "shotcaller_identity_unverified",
+                "calling Codex routing observation is ambiguous",
+            )
+        return next(iter(bindings), None)
+
+    def _presentation_title(self, agent: Mapping[str, Any]) -> str | None:
+        value = agent.get("terminal_title_stripped", agent.get("terminal_title"))
+        if not isinstance(value, str):
+            return None
+        agent_kind = agent.get("agent")
+        suffix = f" | {agent_kind}" if isinstance(agent_kind, str) else ""
+        return value[: -len(suffix)] if suffix and value.endswith(suffix) else value
+
+    def _presentation_source(self, agent: Mapping[str, Any]) -> str | None:
+        """Return an explicit source or a fully proven Herdr provider presentation."""
+
+        source = agent.get("metadata_source")
+        if "metadata_source" in agent:
+            if isinstance(source, str) and source:
+                return source
+            return None
+        tokens = agent.get("tokens")
+        authority_source = _session_source(agent)
+        thread_id = _session(agent)
+        title = self._presentation_title(agent)
+        if (
+            not isinstance(tokens, Mapping)
+            or not isinstance(authority_source, str)
+            or not isinstance(thread_id, str)
+            or not isinstance(title, str)
+        ):
+            return None
+        labels = (
+            tokens.get("callsign"),
+            tokens.get("sidebar_name"),
+            tokens.get("thread_title"),
+        )
+        if (
+            not all(isinstance(value, str) and value for value in labels)
+            or len(set(labels)) != 1
+            or tokens.get("harness") != "codex"
+            or tokens.get("identity_thread_id") != thread_id
+            or tokens.get("identity_title") != f"Codex | {labels[0]}"
+            or title != labels[0]
+        ):
+            return None
+        route = self._routing_name(agent)
+        token_route = tokens.get("routing_alias")
+        orchestrator_identity = tokens.get("orchestrator_identity")
+        if route is None:
+            if (
+                (token_route is not None and token_route != "")
+                or (
+                    orchestrator_identity is not None
+                    and orchestrator_identity != ""
+                )
+            ):
+                return None
+        elif (
+            token_route != route
+            or orchestrator_identity != f"codex · {route}"
+            or str(labels[0]).casefold() != route.casefold()
+        ):
+            return None
+        return authority_source
+
     def _exact(
         self,
         spec: ShotcallerBootstrapSpec,
@@ -191,18 +274,19 @@ class HerdrShotcallerBootstrapAdapter:
             )
         pane, agent = self._current()
         tokens = agent.get("tokens")
+        routing_name = self._routing_name(agent)
+        presentation_source = self._presentation_source(agent)
         routing_exact = (
-            agent.get("name") in {None, ""}
+            routing_name is None
             if expected_alias is None
-            else agent.get("name") == expected_alias
-            or (allow_unpublished and agent.get("name") in {None, ""})
+            else routing_name == expected_alias
+            or (allow_unpublished and routing_name is None)
         )
         if (
             not self._exact(spec, pane, agent)
             or not routing_exact
             or not isinstance(tokens, Mapping)
-            or not isinstance(agent.get("metadata_source"), str)
-            or not agent["metadata_source"]
+            or not isinstance(presentation_source, str)
         ):
             raise StorageRefusal(
                 "shotcaller_identity_unverified",
@@ -212,9 +296,9 @@ class HerdrShotcallerBootstrapAdapter:
             "terminal_id": str(agent["terminal_id"]),
             "state_change_seq": int(agent["state_change_seq"]),
             "tokens": dict(tokens) if isinstance(tokens, Mapping) else {},
-            "title": agent.get("terminal_title_stripped", agent.get("terminal_title", "")),
-            "routing_name": agent.get("name") or None,
-            "presentation_source": agent.get("metadata_source"),
+            "title": self._presentation_title(agent),
+            "routing_name": routing_name,
+            "presentation_source": presentation_source,
             "endpoint_generation": "herdr:"
             + hashlib.sha256(
                 f"{agent['terminal_id']}\0{spec.thread_id}".encode("utf-8")
@@ -275,25 +359,27 @@ class HerdrShotcallerBootstrapAdapter:
 
         pane, agent = self._current()
         tokens = agent.get("tokens")
-        title = agent.get("terminal_title_stripped", agent.get("terminal_title", "")) or ""
+        title = self._presentation_title(agent)
+        routing_name = self._routing_name(agent)
+        presentation_source = self._presentation_source(agent)
         common_exact = bool(
             baseline.get("schema") == "league.shotcaller-bootstrap-baseline.v2"
             and self._exact(spec, pane, agent)
             and isinstance(tokens, Mapping)
             and agent.get("terminal_id") == baseline.get("terminal_id")
-            and agent.get("metadata_source") == baseline.get("presentation_source")
+            and presentation_source == baseline.get("presentation_source")
             and str(tokens.get("sidebar_name", "")) == baseline.get("sidebar_name")
             and str(tokens.get("thread_title", "")) == baseline.get("thread_title")
             and str(title) == baseline.get("title")
         )
         unpublished = bool(
             common_exact
-            and agent.get("name") in {None, ""}
+            and routing_name is None
             and agent.get("state_change_seq") == baseline.get("state_change_seq")
         )
         route_only_publication = bool(
             common_exact
-            and agent.get("name") == callsign.lower()
+            and routing_name == callsign.lower()
             and agent.get("state_change_seq") == baseline.get("state_change_seq") + 1
         )
         if not unpublished and not route_only_publication:
@@ -316,7 +402,7 @@ class HerdrShotcallerBootstrapAdapter:
             )
         self._resume_owned_route = False
         pane, agent = self._current()
-        if not self._exact(spec, pane, agent) or agent.get("name") != alias:
+        if not self._exact(spec, pane, agent) or self._routing_name(agent) != alias:
             raise StorageRefusal(
                 "shotcaller_identity_unverified",
                 "same-pane Shotcaller routing identity did not verify",
@@ -380,15 +466,16 @@ class HerdrShotcallerBootstrapAdapter:
         agent: Mapping[str, Any],
     ) -> bool:
         tokens = agent.get("tokens")
+        presentation_source = self._presentation_source(agent)
+        authority_source = _session_source(agent)
         return bool(
             self._exact(spec, pane, agent)
-            and agent.get("name") == callsign.lower()
-            and agent.get("metadata_source") == self._title_source(spec)
+            and self._routing_name(agent) == callsign.lower()
+            and presentation_source in {self._title_source(spec), authority_source}
             and isinstance(tokens, Mapping)
             and tokens.get("sidebar_name") == callsign
             and tokens.get("thread_title") == callsign
-            and agent.get("terminal_title") == callsign
-            and agent.get("terminal_title_stripped") == callsign
+            and self._presentation_title(agent) == callsign
         )
 
     def _stable_published(
@@ -400,11 +487,11 @@ class HerdrShotcallerBootstrapAdapter:
         for _ in range(50):
             pane, agent = self._current()
             authority_source = _session_source(agent)
-            presentation_source = agent.get("metadata_source")
+            presentation_source = self._presentation_source(agent)
             sequence = agent.get("state_change_seq")
             endpoint_exact = bool(
                 self._exact(spec, pane, agent)
-                and agent.get("name") == callsign.lower()
+                and self._routing_name(agent) == callsign.lower()
                 and isinstance(authority_source, str)
                 and isinstance(presentation_source, str)
                 and isinstance(sequence, int)
@@ -485,7 +572,7 @@ class HerdrShotcallerBootstrapAdapter:
         try:
             pane, agent = self._current()
             tokens = agent.get("tokens")
-            presentation_source = agent.get("metadata_source")
+            presentation_source = self._presentation_source(agent)
             authority_source = _session_source(agent)
             if (
                 not self._exact_placeholder(pane, agent)
@@ -500,10 +587,7 @@ class HerdrShotcallerBootstrapAdapter:
             }
             protected = {
                 "metadata_source": presentation_source,
-                "title": agent.get(
-                    "terminal_title_stripped", agent.get("terminal_title", "")
-                )
-                or "",
+                "title": self._presentation_title(agent) or "",
                 "tokens": dict(tokens),
             }
             self._run(
@@ -517,16 +601,10 @@ class HerdrShotcallerBootstrapAdapter:
                 authority_source = _session_source(agent)
                 if (
                     not self._exact_placeholder(pane, agent)
-                    or agent.get("name") not in {None, ""}
-                    or agent.get("metadata_source") != protected["metadata_source"]
-                    or (
-                        agent.get(
-                            "terminal_title_stripped",
-                            agent.get("terminal_title", ""),
-                        )
-                        or ""
-                    )
-                    != protected["title"]
+                    or self._routing_name(agent) is not None
+                    or self._presentation_source(agent)
+                    != protected["metadata_source"]
+                    or (self._presentation_title(agent) or "") != protected["title"]
                     or not isinstance(current_tokens, Mapping)
                     or not isinstance(sequence, int)
                     or not isinstance(authority_source, str)
@@ -568,15 +646,10 @@ class HerdrShotcallerBootstrapAdapter:
                 pane, agent = self._current()
                 return bool(
                     self._exact_placeholder(pane, agent)
-                    and agent.get("name") in {None, ""}
-                    and agent.get("metadata_source") == protected["metadata_source"]
-                    and (
-                        agent.get(
-                            "terminal_title_stripped",
-                            agent.get("terminal_title", ""),
-                        )
-                        or ""
-                    )
+                    and self._routing_name(agent) is None
+                    and self._presentation_source(agent)
+                    == protected["metadata_source"]
+                    and (self._presentation_title(agent) or "")
                     == protected["title"]
                     and agent.get("tokens") == expected_tokens
                 )
@@ -619,13 +692,13 @@ class HerdrShotcallerBootstrapAdapter:
             tokens = agent.get("tokens")
             observed_sidebar = tokens.get("sidebar_name", "") if isinstance(tokens, Mapping) else ""
             observed_thread = tokens.get("thread_title", "") if isinstance(tokens, Mapping) else ""
-            title = agent.get("terminal_title_stripped", agent.get("terminal_title", "")) or ""
+            title = self._presentation_title(agent) or ""
             return bool(
                 self._exact_placeholder(pane, agent)
                 and observed_sidebar == previous_sidebar
                 and observed_thread == previous_thread_title
                 and title == previous_title
-                and agent.get("name") in {None, ""}
+                and self._routing_name(agent) is None
             )
         except StorageRefusal:
             return False

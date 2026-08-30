@@ -398,7 +398,7 @@ def _supervision_snapshot(
            AND a.status IN ('active','started','working','progress','blocked','ready_to_land')
            AND (
              a.task_id IS NULL
-             OR t.state IN ('active','pending','accepted','in_progress','blocked','ready_to_land')
+             OR t.state IN ('active','pending','accepted','working','progress','in_progress','blocked','ready_to_land')
            )
          ORDER BY a.agent_id
         """,

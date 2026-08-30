@@ -218,7 +218,15 @@ route, session, terminal, sequence, descendant set, owner/fence, runtime
 ambiguity, missing or unready endpoint, concurrent canonical mutation, or
 failed read-to-write upgrade refuses without inserting or pointing at a new
 revision. The original revision remains immutable evidence; refresh does not
-repeat acknowledgement or switch ownership.
+repeat acknowledgement or switch ownership. If descendant reconciliation made
+partial progress before expiry, refresh keeps the exact original
+Champion/task/callsign set. Predecessor-owned rows retain the normal live checks;
+successor-owned rows require one exact prior reconciliation receipt whose task,
+assignment, callsign, runtime capabilities, and outbox transfer still match
+canonical state. The refreshed receipt records that proof as a terminal marker
+so a later reconciliation plan excludes the row without rewriting or losing
+its original snapshot accounting. Missing, duplicate, forged, or drifted proof
+refuses before pointer CAS.
 
 ## Crash, rollback, and callsign behavior
 
@@ -307,7 +315,7 @@ state machine.
 | #83 | `league continuation prepare|reopen|status` | Exclusively claim one exact healthy archive in a verified new binding, reopen only its owning issue under a recoverable fence, and read the complete operation/lineage/archive record. Fresh remains the default outside this explicit path. |
 | #8 | `league rollover prepare|acknowledge|commit|abort|status` | One fenced two-phase replacement for either role. `commit` requires exact acknowledgement and performs the single owner change; `abort` is pre-commit only. |
 | #8 | `league rollover bindings OPERATION_ID [--cursor CURSOR] [--limit COUNT]` | Read one frozen Shotcaller active-Champion snapshot in bounded stable pages. Each page repeats snapshot version/count/digest/expiry and returns an opaque next cursor; acknowledgement verifies the fully retrieved digest against the owner fence. |
-| #23 | `league rollover refresh-bindings --operation-id OP --refresh-id ID --squad-id SQUAD --predecessor-agent-id OLD --successor-agent-id NEW --expected-rollover-version N --expected-snapshot-version N --expected-snapshot-digest DIGEST --expires-at TIME --at TIME` | Replace only an expired snapshot for the exact already-switched operation after one full canonical read and two identical Herdr observations. The final observation runs inside the deferred transaction immediately before pointer CAS without reserving the writer lock; the prior revision and owner switch remain immutable. |
+| #23 | `league rollover refresh-bindings --operation-id OP --refresh-id ID --squad-id SQUAD --predecessor-agent-id OLD --successor-agent-id NEW --expected-rollover-version N --expected-snapshot-version N --expected-snapshot-digest DIGEST --expires-at TIME --at TIME` | Replace only an expired snapshot for the exact already-switched operation after one full canonical read and two identical Herdr observations. The final observation runs inside the deferred transaction immediately before pointer CAS without reserving the writer lock; the prior revision and owner switch remain immutable. Partial progress requires an exact prior descendant receipt and becomes a terminal marker without removing the original row. |
 | #13 | `league callsign allocate|status` | Select and reserve the first compatible queue entry atomically; return queue version and bounded refusal counts. |
 | #13 | existing `league callsign release` | Append an activated released assignment to the tail under an exact lease/version precondition. Failed unactivated reservations restore their recorded queue position. |
 

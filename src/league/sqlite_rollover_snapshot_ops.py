@@ -10,6 +10,7 @@ from typing import Any, Callable, Mapping, Optional, Sequence
 from .rollover_descendant import _herdr_runtime_generation
 from .sqlite_callsign_ops import capabilities, digest, stable_json, timestamp
 from .sqlite_rollover_ops import (
+    _descendant_reconciliation_receipt_exact,
     _operation,
     _runtime_capability_contract,
     _runtime_identity,
@@ -43,12 +44,247 @@ def _snapshot_value(snapshot: Any) -> dict[str, Any]:
     }
 
 
+def _successor_progress(
+    store: Any,
+    operation: Mapping[str, Any],
+    champion: Mapping[str, Any],
+    task_id: str,
+    callsign_assignment: Mapping[str, Any],
+    runtime: Mapping[str, Any],
+    required_capabilities: Sequence[str],
+    runtime_capabilities: Sequence[str],
+) -> dict[str, Any]:
+    """Prove one already-transferred descendant from its immutable receipt."""
+
+    events = store.connection.execute(
+        """
+        SELECT event_id,task_id,entity_version,event_type,detail_json,aggregate_kind,
+               aggregate_id,source_event_id
+          FROM events
+         WHERE event_type='rollover_descendant_reconciled' AND task_id=?
+         ORDER BY event_id
+        """,
+        (task_id,),
+    ).fetchall()
+    proofs: list[tuple[Any, dict[str, Any], str]] = []
+    for event in events:
+        try:
+            detail = json.loads(event["detail_json"])
+            receipt = detail["receipt"]
+            receipt_digest = detail["receipt_digest"]
+        except (json.JSONDecodeError, KeyError, TypeError):
+            continue
+        if (
+            isinstance(receipt, dict)
+            and receipt.get("operation_id") == operation["operation_id"]
+            and receipt.get("champion_agent_id") == champion["agent_id"]
+            and receipt.get("task_id") == task_id
+        ):
+            proofs.append((event, receipt, receipt_digest))
+    if len(proofs) != 1:
+        raise StorageRefusal(
+            "snapshot_refresh_identity_changed",
+            "successor-owned descendant lacks one exact reconciliation receipt",
+        )
+    event, receipt, receipt_digest = proofs[0]
+    try:
+        receipt_task_version = int(receipt["task_version"])
+        expected_agent_version = int(receipt["expected_agent_version"])
+        expected_assignment_version = int(receipt["expected_assignment_version"])
+        expected_callsign_version = int(
+            receipt["expected_callsign_assignment_version"]
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise StorageRefusal(
+            "snapshot_refresh_identity_changed",
+            "successor-owned descendant reconciliation receipt is malformed",
+        ) from exc
+    required_receipt = {
+        "schema": "league.rollover-descendant-reconciliation.v1",
+        "operation_id": operation["operation_id"],
+        "reconciliation_id": event["event_id"],
+        "squad_id": operation["squad_id"],
+        "predecessor_agent_id": operation["predecessor_agent_id"],
+        "successor_agent_id": operation["successor_agent_id"],
+        "champion_agent_id": champion["agent_id"],
+        "task_id": task_id,
+        "runtime_instance_id": runtime["runtime_instance_id"],
+        "runtime_generation": runtime["runtime_generation"],
+        "callsign_assignment_id": callsign_assignment["callsign_assignment_id"],
+        "result": "reconciled",
+    }
+    if (
+        not isinstance(receipt_digest, str)
+        or not _descendant_reconciliation_receipt_exact(receipt)
+        or digest(receipt) != receipt_digest
+        or any(receipt.get(key) != value for key, value in required_receipt.items())
+        or event["event_type"] != "rollover_descendant_reconciled"
+        or event["task_id"] != task_id
+        or event["aggregate_kind"] != "task"
+        or event["aggregate_id"] != task_id
+        or event["source_event_id"] != operation["owner_event_id"]
+        or int(event["entity_version"]) != receipt_task_version
+        or receipt.get("required_capabilities") != list(required_capabilities)
+        or receipt.get("runtime_capabilities") != list(runtime_capabilities)
+    ):
+        raise StorageRefusal(
+            "snapshot_refresh_identity_changed",
+            "successor-owned descendant reconciliation receipt is not exact",
+        )
+    source_snapshot = store.connection.execute(
+        """
+        SELECT snapshot_id,operation_id,snapshot_version,digest
+          FROM active_champion_snapshots
+         WHERE snapshot_id=?
+        """,
+        (receipt.get("snapshot_id"),),
+    ).fetchone()
+    source_row = store.connection.execute(
+        """
+        SELECT champion_agent_id,task_id,callsign,binding_digest,row_digest
+          FROM active_champion_snapshot_rows
+         WHERE snapshot_id=? AND champion_agent_id=?
+        """,
+        (receipt.get("snapshot_id"), champion["agent_id"]),
+    ).fetchone()
+    if (
+        source_snapshot is None
+        or source_snapshot["operation_id"] != operation["operation_id"]
+        or source_snapshot["digest"] != receipt.get("snapshot_digest")
+        or source_row is None
+        or source_row["task_id"] != task_id
+        or source_row["callsign"] != champion["callsign"]
+        or source_row["row_digest"] != receipt.get("snapshot_row_digest")
+        or _snapshot_row_digest(
+            source_snapshot["snapshot_id"],
+            int(source_snapshot["snapshot_version"]),
+            {
+                "champion_agent_id": source_row["champion_agent_id"],
+                "task_id": source_row["task_id"],
+                "callsign": source_row["callsign"],
+                "binding_digest": source_row["binding_digest"],
+            },
+        )
+        != source_row["row_digest"]
+    ):
+        raise StorageRefusal(
+            "snapshot_refresh_identity_changed",
+            "successor-owned descendant source snapshot proof is missing or changed",
+        )
+    task = store.connection.execute(
+        "SELECT * FROM tasks WHERE task_id=?", (task_id,)
+    ).fetchone()
+    assignment = store.connection.execute(
+        "SELECT * FROM task_assignments WHERE task_assignment_id=?",
+        (receipt.get("task_assignment_id"),),
+    ).fetchone()
+    minimum_agent_version = expected_agent_version + 1
+    minimum_task_version = receipt_task_version
+    minimum_assignment_version = (
+        1
+        if receipt.get("created_assignment") is True
+        else expected_assignment_version + 1
+    )
+    minimum_callsign_version = expected_callsign_version + 1
+    if (
+        int(champion["version"]) < minimum_agent_version
+        or task is None
+        or task["champion_agent_id"] != champion["agent_id"]
+        or task["coordinator_agent_id"] != operation["successor_agent_id"]
+        or int(task["version"]) < minimum_task_version
+        or task["state"]
+        in {"completed", "complete", "failed", "cancelled", "canceled", "rejected"}
+        or assignment is None
+        or assignment["task_id"] != task_id
+        or assignment["champion_agent_id"] != champion["agent_id"]
+        or assignment["coordinator_agent_id"] != operation["successor_agent_id"]
+        or assignment["runtime_instance_id"] != runtime["runtime_instance_id"]
+        or assignment["callsign"] != champion["callsign"]
+        or assignment["assignment_role"] != "champion"
+        or assignment["state"] != "active"
+        or int(assignment["version"]) < minimum_assignment_version
+        or callsign_assignment["runtime_instance_id"] != runtime["runtime_instance_id"]
+        or int(callsign_assignment["version"]) < minimum_callsign_version
+    ):
+        raise StorageRefusal(
+            "snapshot_refresh_identity_changed",
+            "successor-owned descendant transfer no longer matches its receipt",
+        )
+    if receipt.get("created_assignment") is True:
+        try:
+            acceptance_receipt = json.loads(assignment["acceptance_receipt_json"])
+        except (json.JSONDecodeError, TypeError) as exc:
+            raise StorageRefusal(
+                "snapshot_refresh_identity_changed",
+                "created descendant assignment receipt is malformed",
+            ) from exc
+        if acceptance_receipt != receipt:
+            raise StorageRefusal(
+                "snapshot_refresh_identity_changed",
+                "created descendant assignment does not retain the exact reconciliation receipt",
+            )
+    declared_outboxes = receipt.get("retargeted_outbox_ids")
+    if (
+        not isinstance(declared_outboxes, list)
+        or any(not isinstance(item, str) or not item for item in declared_outboxes)
+        or declared_outboxes != sorted(set(declared_outboxes))
+    ):
+        raise StorageRefusal(
+            "snapshot_refresh_identity_changed",
+            "successor-owned descendant outbox receipt is malformed",
+        )
+    for outbox_id in declared_outboxes:
+        outbox = store.connection.execute(
+            """
+            SELECT o.recipient_agent_id,e.agent_id,e.task_id
+              FROM delivery_outbox o JOIN events e ON e.event_id=o.event_id
+             WHERE o.outbox_id=?
+            """,
+            (outbox_id,),
+        ).fetchone()
+        if (
+            outbox is None
+            or outbox["recipient_agent_id"] != operation["successor_agent_id"]
+            or (
+                outbox["agent_id"] != champion["agent_id"]
+                and outbox["task_id"] != task_id
+            )
+        ):
+            raise StorageRefusal(
+                "snapshot_refresh_identity_changed",
+                "successor-owned descendant outbox transfer is incomplete",
+            )
+    stale_outbox = store.connection.execute(
+        """
+        SELECT 1 FROM delivery_outbox o JOIN events e ON e.event_id=o.event_id
+         WHERE o.recipient_agent_id=?
+           AND o.state IN ('pending','in_flight','awaiting_receipt')
+           AND (e.agent_id=? OR e.task_id=?) LIMIT 1
+        """,
+        (operation["predecessor_agent_id"], champion["agent_id"], task_id),
+    ).fetchone()
+    if stale_outbox is not None:
+        raise StorageRefusal(
+            "snapshot_refresh_identity_changed",
+            "successor-owned descendant still has predecessor delivery ownership",
+        )
+    return {
+        "champion_agent_id": champion["agent_id"],
+        "task_id": task_id,
+        "state": "successor_reconciled",
+        "reconciliation_id": event["event_id"],
+        "receipt_digest": receipt_digest,
+    }
+
+
 def _descendant_context(
     store: Any,
-    squad_id: str,
-    predecessor_agent_id: str,
+    operation: Mapping[str, Any],
     current_rows: Sequence[Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
+    squad_id = operation["squad_id"]
+    predecessor_agent_id = operation["predecessor_agent_id"]
+    successor_agent_id = operation["successor_agent_id"]
     identities = store.connection.execute(
         """
         SELECT a.*,t.state AS task_state
@@ -110,7 +346,6 @@ def _descendant_context(
             or champion["role"] != "champion"
             or champion["task_id"] != task_id
             or champion["callsign"] != current_row["callsign"]
-            or champion["shotcaller_agent_id"] != predecessor_agent_id
             or champion["task_state"] is None
             or champion["task_state"]
             in {"completed", "complete", "failed", "cancelled", "canceled", "rejected"}
@@ -152,6 +387,30 @@ def _descendant_context(
                     "snapshot_refresh_runtime_mismatch",
                     "canonical descendant runtime differs from the exact agent binding",
                 )
+        if champion["shotcaller_agent_id"] == predecessor_agent_id:
+            progress = {
+                "champion_agent_id": champion_agent_id,
+                "task_id": task_id,
+                "state": "predecessor_pending",
+                "reconciliation_id": None,
+                "receipt_digest": None,
+            }
+        elif champion["shotcaller_agent_id"] == successor_agent_id and runtime is not None:
+            progress = _successor_progress(
+                store,
+                operation,
+                champion,
+                task_id,
+                callsigns[0],
+                runtime,
+                required_capabilities,
+                runtime_capabilities,
+            )
+        else:
+            raise StorageRefusal(
+                "snapshot_refresh_identity_changed",
+                "descendant owner is neither the switched predecessor nor a proved successor transfer",
+            )
         descendants.append(
             {
                 "champion_agent_id": champion_agent_id,
@@ -181,6 +440,7 @@ def _descendant_context(
                         "capabilities": list(runtime_capabilities),
                     }
                 ),
+                "progress": progress,
             }
         )
     return descendants
@@ -372,9 +632,7 @@ def _context(
             "snapshot_refresh_set_changed",
             "current active descendants differ from the expired frozen set",
         )
-    descendants = _descendant_context(
-        store, squad_id, predecessor_agent_id, current_rows
-    )
+    descendants = _descendant_context(store, operation, current_rows)
     canonical_digest = digest(
         {
             "operation_id": operation_id,
@@ -684,6 +942,9 @@ def refresh(
                         ),
                     }
                     for descendant in context["descendants"]
+                ],
+                "progress_bindings": [
+                    descendant["progress"] for descendant in context["descendants"]
                 ],
                 "canonical_digest": canonical_digest,
                 "observation_digest": observation_digest,

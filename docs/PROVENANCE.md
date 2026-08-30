@@ -644,3 +644,26 @@ so the owner-required 1/6/25 scaling matrix can execute. It does not change the
 per-prompt 32-item bound, 20-new-request plan bound, transaction shape, storage
 schema, migration set, journal policy, hooks, watcher, installation, or live
 state. The benchmark and focused test use explicit synthetic temporary roots.
+
+## Inline-triage and persistent-supervision provenance
+
+The issue-#66 successor keeps the completed Luna xhigh ablation receipt
+immutable and changes the production design rather than selecting a faster
+synchronous classifier. The active Shotcaller authors ordered semantic items
+for its existing one-process turn. The adapter validates, exact-deduplicates,
+version-links, and commits locally; no ordinary turn starts a second model.
+
+The deliberate source differences are a 12-row/24,576-byte deterministic
+same-owner candidate shortlist, complete-snapshot fencing before external
+dispatch, deterministic off-path candidate pages, schema-16 agent-authored
+duplicate reconciliation, and one persistent event-driven supervisor runtime
+with renewable/fenced ownership. Stop remains an omission backstop and does not
+merge requests. A source launchd template declares the intended owner boundary
+but is neither rendered nor installed.
+
+The 3×3 prompt-size/intent-count matrix measures exact capture, JSON sideband,
+candidate linking, SQLite commit, and one-process completion on synthetic
+temporary roots. Its gold sideband proves local mechanics only; it does not
+claim active-model split quality, installed prompt capture, live supervision,
+or the #23 owner-visible E2E. No global file, hook, service, model route,
+canonical database, or live runtime is changed.

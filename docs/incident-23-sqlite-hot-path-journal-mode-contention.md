@@ -678,6 +678,42 @@ are source-candidate results only. Installed 0.2.21 remains unchanged and the
 owner-visible successor-to-Champion lifecycle is still a post-merge,
 separately-authorized release gate.
 
+## Issue #66 successor: inline triage and persistent event supervision
+
+The owner-source issue-#66 investigation found two later live-path failures:
+canonical persistent supervision was off, and genuine owner steers were not
+appearing in the active Shotcaller's final intake boundary. The repository-local
+successor does not repair live state. It adds the source boundary required for
+a separately authorized repair:
+
+The current installed League version observed read-only for issue #66 is
+0.2.27. Its watcher command inventory does not include the source candidate's
+service lifecycle, and no persistent League service is live. Historical 0.2.21
+and 0.2.23 observations elsewhere in this incident remain explicitly scoped to
+those earlier releases.
+
+- UserPromptSubmit is a bounded exact-capture client of one persistent local
+  service, not a per-turn supervisor or foreground wait.
+- One renewable/fenced registration and same-user Unix socket carry exact user
+  priority and Champion events without idle snapshot polling.
+- The active Shotcaller authors semantic JSON during its normal reasoning turn;
+  ordinary `request turn` starts no second classifier.
+- Pre-decision intake automatically includes a 12-row/24,576-byte deterministic
+  same-owner candidate shortlist. Truncation cannot block a direct answer, but
+  incomplete or changed inventory fences external dispatch.
+- SQLite provides exact source-event idempotency, not fuzzy matching. Duplicate,
+  follow-up, and deferred decisions cite one supplied candidate/version.
+- Stop only reports bounded unresolved summaries. An explicit schema-16
+  compare-and-swap transition lets the active Shotcaller supersede one
+  same-owner duplicate while preserving both sources and refusing any request
+  with external execution evidence.
+
+The complete design, immutable Luna before-baseline, measured 27-cell inline
+matrix, limitations, and remaining install/live gates are in
+[`docs/research/issue-66-inline-triage-supervision-benchmark.md`](research/issue-66-inline-triage-supervision-benchmark.md).
+The service template remains inert. No install, hook edit, service load, model
+route, live import, or cutover occurred.
+
 ## Rollback
 
 The 0.2.23 candidate advances the database from schema 11 through the contiguous

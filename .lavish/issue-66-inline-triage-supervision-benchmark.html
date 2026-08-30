@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Issue 66 · Inline semantic triage and persistent supervision</title>
+  <style>
+    :root{--ink:#12212f;--muted:#607080;--paper:#f5f8f9;--panel:#fff;--line:#cbd8df;--blue:#1769aa;--blue-soft:#dcecf7;--amber:#ad6900;--amber-soft:#fff0c7;--jade:#167456;--jade-soft:#d9f0e7;--red:#a63b32;--red-soft:#f9dfdc;--shadow:0 16px 44px rgba(18,33,47,.12)}
+    *{box-sizing:border-box}html{background:var(--paper);color:var(--ink);font-family:"Avenir Next",Avenir,system-ui,sans-serif;scroll-behavior:smooth}body{margin:0;min-width:320px;background-image:linear-gradient(rgba(23,105,170,.05) 1px,transparent 1px),linear-gradient(90deg,rgba(23,105,170,.05) 1px,transparent 1px);background-size:24px 24px}code,.eyebrow,.pill,.mono{font-family:"SFMono-Regular",Consolas,monospace}main{width:min(1220px,calc(100% - 32px));margin:32px auto 64px}.panel{min-width:0;background:rgba(255,255,255,.97);border:1px solid var(--line);border-radius:14px;box-shadow:var(--shadow)}.masthead{display:grid;grid-template-columns:minmax(0,1.45fr) minmax(260px,.55fr);gap:18px}.title{padding:28px}.eyebrow{font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--blue);font-weight:800}.title h1{font-family:"Avenir Next Condensed","Arial Narrow",sans-serif;font-size:clamp(38px,6vw,68px);line-height:.94;letter-spacing:-.035em;margin:12px 0 18px;max-width:17ch}.lede{font-size:17px;line-height:1.6;max-width:72ch;color:#304555}.status{padding:22px;border-top:7px solid var(--amber);display:flex;flex-direction:column;justify-content:space-between}.status strong{display:block;color:var(--amber);font-family:"Avenir Next Condensed","Arial Narrow",sans-serif;font-size:31px;line-height:1}.status dl{display:grid;grid-template-columns:1fr auto;gap:9px 12px;margin:24px 0 0;font-size:12px}.status dt{color:var(--muted)}.status dd{margin:0;text-align:right;font-family:"SFMono-Regular",Consolas,monospace;overflow-wrap:anywhere}.section{padding:24px;margin-top:18px}.section h2{font-family:"Avenir Next Condensed","Arial Narrow",sans-serif;font-size:29px;margin:0 0 16px}.section h3{font-size:17px;margin:24px 0 10px}.section p,.section li{line-height:1.62}.notice{border-left:5px solid var(--red);background:var(--red-soft);padding:14px 16px;border-radius:8px;margin:16px 0}.notice strong{color:var(--red)}.good{border-left-color:var(--jade);background:var(--jade-soft)}.good strong{color:var(--jade)}.info{border-left-color:var(--blue);background:var(--blue-soft)}.info strong{color:var(--blue)}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px}.metric-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:18px 0}.metric{min-width:0;border:1px solid var(--line);background:#f8fafb;border-radius:11px;padding:14px}.metric .value{font:800 clamp(21px,3vw,31px)/1 "Avenir Next Condensed","Arial Narrow",sans-serif;color:var(--blue);overflow-wrap:anywhere}.metric .label{font-size:12px;color:var(--muted);margin-top:7px}.steps{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:12px;counter-reset:step;margin:18px 0}.step-card{min-width:0;border:1px solid var(--line);background:#f8fafb;border-radius:11px;padding:14px}.step-card:before{counter-increment:step;content:counter(step);display:grid;place-items:center;width:25px;height:25px;border-radius:50%;background:var(--blue);color:#fff;font:bold 12px/1 monospace;margin-bottom:10px}.step-card h3{margin:0 0 7px;font-size:15px}.step-card p{font-size:12px;color:#405565;margin:0}.table-wrap{overflow-x:auto;border:1px solid var(--line);border-radius:11px}table{width:100%;border-collapse:collapse;font-size:12px;line-height:1.45}th,td{text-align:left;vertical-align:top;padding:10px 9px;border-bottom:1px solid var(--line);overflow-wrap:anywhere}th{background:#edf3f6;font-size:10px;text-transform:uppercase;letter-spacing:.055em;position:sticky;top:0}tr:last-child td{border-bottom:0}.pill{display:inline-block;padding:4px 7px;border-radius:999px;font-size:10px;font-weight:800;text-transform:uppercase}.pass{background:var(--jade-soft);color:var(--jade)}.pending{background:var(--amber-soft);color:var(--amber)}.source{background:var(--blue-soft);color:var(--blue)}.list{padding-left:20px}.list li+li{margin-top:7px}.compact p{margin:.4em 0}.footer{color:var(--muted);font-size:12px}a{color:var(--blue)}@media(max-width:900px){.masthead,.grid{grid-template-columns:minmax(0,1fr)}.metric-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.steps{grid-template-columns:minmax(0,1fr)}}@media(max-width:560px){main{width:min(100% - 18px,1220px);margin-top:10px}.title,.status,.section{padding:18px}.metric-grid{grid-template-columns:minmax(0,1fr)}.title h1{font-size:40px}}@media print{body{background:#fff}.panel{box-shadow:none;break-inside:avoid}main{width:100%;margin:0}.section{margin-top:10px}}
+  </style>
+</head>
+<body>
+  <main>
+    <header class="masthead">
+      <section class="panel title">
+        <div class="eyebrow">League issue #66 · source benchmark · 2026-08-30</div>
+        <h1>Keep SQLite. Remove the second model.</h1>
+        <p class="lede">The active Shotcaller now supplies ordered semantic triage as a sideband of the same owner-response turn. League validates, version-links, exact-deduplicates, and commits locally. Persistent event supervision moves outside model turns.</p>
+      </section>
+      <aside class="panel status">
+        <div><div class="eyebrow">Current verdict</div><strong>Source candidate; live gate open</strong></div>
+        <dl><dt>Measured commit</dt><dd>01964ae…</dd><dt>Tree</dt><dd>48a9e13…</dd><dt>Source</dt><dd>0.2.24</dd><dt>Installed observed</dt><dd>0.2.27</dd><dt>Install / merge</dt><dd>none</dd></dl>
+      </aside>
+    </header>
+
+    <section class="panel section" id="decision">
+      <h2>Decision and authority boundary</h2>
+      <div class="notice good"><strong>Recommendation:</strong> keep SQLite and model-authored semantic triage; make the active Shotcaller emit the ordered JSON sideband in its existing turn. A second classifier is allowed only for asynchronous orphan/backlog recovery.</div>
+      <p>The owner-response path starts one <code>league request turn</code> process and zero classifier processes. League does mechanical work only: exact prompt capture, candidate inventory, schema validation, deterministic IDs, candidate-version checks, claims, routing validation, and atomic commits.</p>
+      <div class="notice"><strong>No live claim.</strong> This branch did not install files, edit hooks, render/load a launch service, change model routing, import canonical state, start supervision, or run the installed #23 lifecycle. Source tests are not installed proof.</div>
+    </section>
+
+    <section class="panel section" id="findings">
+      <h2>Owner-source P0 findings</h2>
+      <div class="grid">
+        <article><h3>Persistent supervision was off</h3><p>No League/watch service owned a renewable event-driven lease. The benchmark process was isolated evidence, not supervision.</p></article>
+        <article><h3>Live capture was broken</h3><p>Genuine owner steers arrived, yet the active turn's final canonical boundary still reported zero untriaged prompts. Earlier read-only preflight reached <code>state_root_unavailable</code>.</p></article>
+      </div>
+      <p>The currently installed 0.2.27 command inventory does not expose the new service lifecycle. Therefore nothing in this artifact should be read as installed or active behavior.</p>
+    </section>
+
+    <section class="panel section" id="flow">
+      <h2>Target source flow</h2>
+      <p>The question this flow answers: where does semantic judgment happen, and which work can delay the owner?</p>
+      <div class="steps">
+        <article class="step-card"><h3>Exact capture</h3><p>UserPromptSubmit publishes exact event identity and bytes.</p></article>
+        <article class="step-card"><h3>Persistent wake</h3><p>One fenced service socket accepts user priority outside model turns.</p></article>
+        <article class="step-card"><h3>Bounded intake</h3><p>One turn process emits prompts plus a small same-owner candidate shortlist.</p></article>
+        <article class="step-card"><h3>Inline semantics</h3><p>The already-active Shotcaller authors ordered items and routing JSON.</p></article>
+        <article class="step-card"><h3>Local commit</h3><p>League validates, links, exact-deduplicates, and commits SQLite atomically.</p></article>
+      </div>
+      <div class="notice info"><strong>Fallback:</strong> quarantined or ownerless backlog may be sent to an injected recovery adapter asynchronously after capture returns. This source slice selects no production recovery model.</div>
+    </section>
+
+    <section class="panel section" id="inventory">
+      <h2>Bounded candidate shortlist</h2>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Property</th><th>Source contract</th><th>Why it matters</th></tr></thead>
+        <tbody>
+          <tr><td>Default</td><td>12 rows / 24,576 encoded bytes</td><td>Low-tens-of-KiB critical-path bound</td></tr>
+          <tr><td>Fields</td><td>ID, 240-character summary, state, version, optional canonical project/repository key</td><td>No transcript or private reasoning projection</td></tr>
+          <tr><td>Ranking</td><td>Routing overlap, normalized lexical overlap, recency, stable ID</td><td>Deterministic and model-free</td></tr>
+          <tr><td>Truth</td><td>Total/returned counts, bytes, truncation, shortlist digest, full active-snapshot digest</td><td>No false completeness claim</td></tr>
+          <tr><td>Direct work</td><td>Proceeds even when truncated</td><td>Large owner history cannot block a direct answer</td></tr>
+          <tr><td>External work</td><td>Requires complete and unchanged inventory</td><td>Only dispatch is fenced; pages run off-path</td></tr>
+          <tr><td>Semantic link</td><td>Candidate ID + exact version, validated again atomically</td><td>Changed candidates fail with a retryable conflict</td></tr>
+        </tbody>
+      </table></div>
+      <p>SQLite performs exact source-event idempotency only. Paraphrase or follow-up matching remains an active-Shotcaller semantic decision. No embeddings or vector store were added.</p>
+    </section>
+
+    <section class="panel section" id="reconciliation">
+      <h2>Stop and post-creation reconciliation</h2>
+      <div class="grid">
+        <article><h3>Stop: omission only</h3><p>Stop surfaces bounded unresolved summaries. It never merges, cancels, or relinks a request.</p></article>
+        <article><h3>Shotcaller: explicit repair</h3><p><code>request reconcile-duplicate</code> may supersede B with canonical A under both expected versions.</p></article>
+      </div>
+      <p>The schema-16 transition preserves both source histories, creates no task/work/result, releases B's claim, prevents B dispatch, records one immutable event, and is exactly idempotent. It refuses self-links, chains/cycles, cross-owner/Squad links, stale or terminal state, and any B with external execution evidence.</p>
+    </section>
+
+    <section class="panel section" id="supervisor">
+      <h2>Persistent service boundary</h2>
+      <p>One service-manager-owned <code>agent-watcher --shotcaller &lt;callsign&gt; service-run</code> process owns a state-root lock, same-user Unix socket, and renewable monotonically fenced watcher registration. Hooks are short socket clients. User messages outrank Champion events. Startup replays pending delivery and schedules orphan/backlog recovery off-path; bounded stop releases only its exact registration and socket.</p>
+      <p>The repository carries an inert launchd template with placeholders. Rendering, installation, loading, live status, and rollback are separate owner-authorized gates.</p>
+    </section>
+
+    <section class="panel section" id="baseline">
+      <h2>Immutable Luna xhigh before-baseline</h2>
+      <p>Batch N means N prompts classified in one model call. The 120-case corpus was tiny: 20–77 characters, average 56.53. Payload sizes were 2,271 characters at batch 1, 2,713 at batch 6, and 4,363 at batch 25. It required one item per prompt and did not contain one long multi-intent prompt.</p>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Temp</th><th>Batch</th><th>OFF total p50/p95 ms</th><th>ON total p50/p95 ms</th><th>Semantic model p50/p95 ms</th><th>Added ON-OFF p50/p95 ms</th></tr></thead>
+        <tbody>
+          <tr><td>Cold</td><td>1</td><td>327.179 / 357.773</td><td>6,910.948 / 8,999.678</td><td>5,765.588 / 7,902.503</td><td>6,553.643 / 8,677.418</td></tr>
+          <tr><td>Cold</td><td>6</td><td>346.142 / 503.626</td><td>15,437.667 / 25,176.811</td><td>14,120.582 / 24,028.439</td><td>15,099.197 / 24,828.736</td></tr>
+          <tr><td>Cold</td><td>25</td><td>352.106 / 365.433</td><td>48,538.062 / 60,364.875</td><td>47,320.820 / 59,230.160</td><td>48,206.202 / 60,004.733</td></tr>
+          <tr><td>Warm</td><td>1</td><td>339.574 / 382.022</td><td>6,932.626 / 7,380.334</td><td>5,650.034 / 6,111.169</td><td>6,575.666 / 7,052.698</td></tr>
+          <tr><td>Warm</td><td>6</td><td>376.468 / 387.634</td><td>15,950.141 / 26,329.296</td><td>14,782.817 / 25,143.384</td><td>15,618.070 / 25,976.903</td></tr>
+          <tr><td>Warm</td><td>25</td><td>360.785 / 476.913</td><td>52,075.200 / 58,457.118</td><td>50,521.584 / 56,974.854</td><td>51,716.591 / 58,111.815</td></tr>
+        </tbody>
+      </table></div>
+      <p>Those seconds measure a diagnostic second classifier. They are not added production latency in the inline design. If an ordinary installed request turn launches a second model process, treat it as a P0 defect.</p>
+    </section>
+
+    <section class="panel section" id="inline-results">
+      <h2>Measured inline prompt-shape matrix</h2>
+      <p>Ten samples per cell ran at exact implementation commit <code>01964ae…</code>. Output SHA-256: <code>02fa117dfd86ae637abd9f5d46bdd34eee3a2858be361c00acd6a441e4cd5aa3</code>. Each cell uses a gold ordered sideband and zero classifier processes. Counts prove local split/link/commit mechanics—not active-model semantic accuracy.</p>
+      <div class="metric-grid">
+        <div class="metric"><div class="value">0.312–0.754 ms</div><div class="label">exact capture p50 range</div></div>
+        <div class="metric"><div class="value">1.344–4.094 ms</div><div class="label">validate/dedup/commit p50 range</div></div>
+        <div class="metric"><div class="value">161.377–276.756 ms</div><div class="label">first-output p50 range</div></div>
+        <div class="metric"><div class="value">183.343–305.416 ms</div><div class="label">whole-turn p50 range</div></div>
+      </div>
+      <p>All timings are p50/p95 milliseconds. <strong>C/L/N</strong> means items collapsed/linked/created. False merges and missed duplicates were zero because the gold semantic sideband named the intended links; this is not a paraphrase-model score.</p>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Cell</th><th>Arm</th><th>Chars / bytes</th><th>Mentions → items</th><th>C/L/N</th><th>False / missed</th><th>First output</th><th>Local commit</th><th>Total</th></tr></thead>
+        <tbody>
+          <tr><td>short-1</td><td>cold</td><td>148/148</td><td>1→1</td><td>0/0/1</td><td>0/0</td><td>188.212/249.497</td><td>2.240/2.377</td><td>211.767/273.034</td></tr>
+          <tr><td>short-1</td><td>exact</td><td>148/148</td><td>1→1</td><td>0/1/0</td><td>0/0</td><td>223.171/593.745</td><td>1.700/3.177</td><td>250.215/616.987</td></tr>
+          <tr><td>short-1</td><td>paraphrase</td><td>148/148</td><td>1→1</td><td>0/1/0</td><td>0/0</td><td>206.891/252.218</td><td>1.543/4.092</td><td>228.510/274.373</td></tr>
+          <tr><td>short-3</td><td>cold</td><td>172/172</td><td>3→2</td><td>1/0/2</td><td>0/0</td><td>203.626/371.891</td><td>2.824/8.909</td><td>230.996/395.935</td></tr>
+          <tr><td>short-3</td><td>exact</td><td>172/172</td><td>3→2</td><td>1/1/1</td><td>0/0</td><td>208.071/277.482</td><td>2.994/9.568</td><td>235.023/312.804</td></tr>
+          <tr><td>short-3</td><td>paraphrase</td><td>172/172</td><td>3→2</td><td>1/1/1</td><td>0/0</td><td>238.606/287.922</td><td>2.417/4.005</td><td>263.244/310.618</td></tr>
+          <tr><td>short-6</td><td>cold</td><td>170/170</td><td>6→6</td><td>0/0/6</td><td>0/0</td><td>276.756/357.599</td><td>4.028/6.967</td><td>305.416/382.708</td></tr>
+          <tr><td>short-6</td><td>exact</td><td>170/170</td><td>6→6</td><td>0/1/5</td><td>0/0</td><td>227.856/281.469</td><td>3.622/4.620</td><td>263.173/308.252</td></tr>
+          <tr><td>short-6</td><td>paraphrase</td><td>170/170</td><td>6→6</td><td>0/1/5</td><td>0/0</td><td>199.539/214.962</td><td>3.651/8.429</td><td>226.745/248.069</td></tr>
+          <tr><td>medium-1</td><td>cold</td><td>472/472</td><td>1→1</td><td>0/0/1</td><td>0/0</td><td>204.522/243.246</td><td>2.441/3.571</td><td>228.036/267.052</td></tr>
+          <tr><td>medium-1</td><td>exact</td><td>472/472</td><td>1→1</td><td>0/1/0</td><td>0/0</td><td>165.457/193.312</td><td>1.620/2.898</td><td>187.680/217.907</td></tr>
+          <tr><td>medium-1</td><td>paraphrase</td><td>472/472</td><td>1→1</td><td>0/1/0</td><td>0/0</td><td>161.377/171.098</td><td>1.532/2.371</td><td>183.343/192.979</td></tr>
+          <tr><td>medium-3</td><td>cold</td><td>590/590</td><td>3→3</td><td>0/0/3</td><td>0/0</td><td>205.095/241.568</td><td>3.024/4.160</td><td>230.733/265.264</td></tr>
+          <tr><td>medium-3</td><td>exact</td><td>590/590</td><td>3→3</td><td>0/1/2</td><td>0/0</td><td>207.091/290.659</td><td>2.573/3.079</td><td>231.266/315.885</td></tr>
+          <tr><td>medium-3</td><td>paraphrase</td><td>590/590</td><td>3→3</td><td>0/1/2</td><td>0/0</td><td>261.752/332.640</td><td>2.770/4.905</td><td>296.947/365.905</td></tr>
+          <tr><td>medium-6</td><td>cold</td><td>601/601</td><td>6→6</td><td>0/0/6</td><td>0/0</td><td>209.217/238.603</td><td>4.094/7.140</td><td>236.919/266.144</td></tr>
+          <tr><td>medium-6</td><td>exact</td><td>601/601</td><td>6→6</td><td>0/1/5</td><td>0/0</td><td>183.116/204.191</td><td>3.652/4.760</td><td>208.654/234.418</td></tr>
+          <tr><td>medium-6</td><td>paraphrase</td><td>601/601</td><td>6→6</td><td>0/1/5</td><td>0/0</td><td>186.451/222.965</td><td>3.086/3.349</td><td>210.710/248.031</td></tr>
+          <tr><td>long-1</td><td>cold</td><td>1200/1200</td><td>1→1</td><td>0/0/1</td><td>0/0</td><td>264.260/470.838</td><td>2.818/19.896</td><td>292.833/497.437</td></tr>
+          <tr><td>long-1</td><td>exact</td><td>1200/1200</td><td>1→1</td><td>0/1/0</td><td>0/0</td><td>250.166/295.424</td><td>1.958/3.100</td><td>271.456/320.897</td></tr>
+          <tr><td>long-1</td><td>paraphrase</td><td>1200/1200</td><td>1→1</td><td>0/1/0</td><td>0/0</td><td>169.915/243.026</td><td>1.344/2.632</td><td>190.782/267.252</td></tr>
+          <tr><td>long-3</td><td>cold</td><td>1193/1193</td><td>3→2</td><td>1/0/2</td><td>0/0</td><td>162.447/172.955</td><td>2.395/2.534</td><td>186.252/196.942</td></tr>
+          <tr><td>long-3</td><td>exact</td><td>1193/1193</td><td>3→2</td><td>1/1/1</td><td>0/0</td><td>168.274/201.515</td><td>2.214/3.407</td><td>191.659/225.431</td></tr>
+          <tr><td>long-3</td><td>paraphrase</td><td>1193/1193</td><td>3→2</td><td>1/1/1</td><td>0/0</td><td>181.247/248.160</td><td>2.173/3.244</td><td>204.281/270.761</td></tr>
+          <tr><td>long-6</td><td>cold</td><td>1558/1558</td><td>6→6</td><td>0/0/6</td><td>0/0</td><td>168.101/175.285</td><td>3.268/3.662</td><td>193.346/201.317</td></tr>
+          <tr><td>long-6</td><td>exact</td><td>1558/1558</td><td>6→6</td><td>0/1/5</td><td>0/0</td><td>162.030/197.967</td><td>2.985/3.834</td><td>185.886/225.656</td></tr>
+          <tr><td>long-6</td><td>paraphrase</td><td>1558/1558</td><td>6→6</td><td>0/1/5</td><td>0/0</td><td>164.201/182.710</td><td>3.360/4.155</td><td>191.558/206.552</td></tr>
+        </tbody>
+      </table></div>
+      <p>Sideband JSON serialization p50 was 0.068–0.130 ms. Whole-turn p95 ranged 192.979–616.987 ms. Local SQLite work is not the dominant latency.</p>
+    </section>
+
+    <section class="panel section" id="proof">
+      <h2>Proof ledger</h2>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Boundary</th><th>Status</th><th>What is actually proved</th></tr></thead>
+        <tbody>
+          <tr><td>One-process inline sideband</td><td><span class="pill pass">source pass</span></td><td>No classifier subprocess in request turn; every prompt receives an ordered decision.</td></tr>
+          <tr><td>Bounded shortlist</td><td><span class="pill pass">source pass</span></td><td>&gt;limit direct answers proceed; truncated external dispatch refuses/pages; changed candidates fence.</td></tr>
+          <tr><td>Exact capture and Stop</td><td><span class="pill pass">source pass</span></td><td>Exact retry collapses, distinct same-turn steer rearms, exact Stop feedback suppresses.</td></tr>
+          <tr><td>Persistent supervisor</td><td><span class="pill pass">source pass</span></td><td>Startup, lease renewal/fencing, stale recovery, event delivery, async recovery, bounded stop with temporary roots.</td></tr>
+          <tr><td>Duplicate reconciliation</td><td><span class="pill pass">source pass</span></td><td>Stop read-only; explicit B→A transition preserves provenance and is idempotent.</td></tr>
+          <tr><td>Migration/schema/export</td><td><span class="pill pass">source pass</span></td><td>Schema 16, backup/rollback, FK/integrity, output schemas, deterministic export and parity.</td></tr>
+          <tr><td>Active-model split quality</td><td><span class="pill pending">pending</span></td><td>Gold-sideband matrix is not a model-quality score.</td></tr>
+          <tr><td>Sol xhigh fallback</td><td><span class="pill pending">pending</span></td><td>Run only against asynchronous orphan/backlog recovery after primary path.</td></tr>
+          <tr><td>Installed service and hooks</td><td><span class="pill pending">not authorized</span></td><td>No install/load/hook mutation or owner-source live status.</td></tr>
+          <tr><td>#23 full E2E</td><td><span class="pill pending">pending</span></td><td>Prompt → semantic accounting → visible Champion → delivery → cleanup remains required.</td></tr>
+        </tbody>
+      </table></div>
+    </section>
+
+    <section class="panel section" id="sources">
+      <h2>Primary-source traceability</h2>
+      <ul class="list compact">
+        <li>Inline turn and candidate fence: <a href="../src/league/cli.py"><code>src/league/cli.py</code></a> and <a href="../src/league/sqlite_request_ops.py"><code>src/league/sqlite_request_ops.py</code></a>.</li>
+        <li>Service runtime and watcher state: <a href="../src/league/persistent_supervisor.py"><code>src/league/persistent_supervisor.py</code></a> and <a href="../src/league/sqlite_watcher_ops.py"><code>src/league/sqlite_watcher_ops.py</code></a>.</li>
+        <li>Service template: <a href="../config/league-supervisor.launchd.plist.in"><code>config/league-supervisor.launchd.plist.in</code></a>.</li>
+        <li>Reconciliation: <a href="../src/league/sqlite_request_reconciliation_schema.py"><code>src/league/sqlite_request_reconciliation_schema.py</code></a> and <a href="../schema/league-request-reconciliation.schema.json"><code>schema/league-request-reconciliation.schema.json</code></a>.</li>
+        <li>Corpus and harness: <a href="../tests/fixtures/semantic_prompt_shape_matrix.v1.json"><code>tests/fixtures/semantic_prompt_shape_matrix.v1.json</code></a> and <a href="../scripts/benchmark_inline_triage_prompt_shapes.py"><code>scripts/benchmark_inline_triage_prompt_shapes.py</code></a>.</li>
+        <li>SQLite: <a href="https://sqlite.org/wal.html">official WAL documentation</a>, <a href="https://sqlite.org/lang_transaction.html">official transaction documentation</a>, and <a href="https://sqlite.org/backup.html">official backup API</a>.</li>
+        <li>Service manager: <a href="https://developer.apple.com/library/archive/documentation/MacOSX/Conceptual/BPSystemStartup/Chapters/CreatingLaunchdJobs.html">Apple Daemons and Services Programming Guide</a>.</li>
+      </ul>
+    </section>
+
+    <section class="panel section" id="next">
+      <h2>Next authorized action</h2>
+      <ol class="list">
+        <li>Independent source review and exact-head CI.</li>
+        <li>Only with separate authority: merge, exact-source install with backup/rollback, render/load the service, then prove it live.</li>
+        <li>Run installed exact-once capture, same-turn steer, semantic accounting, Stop suppression, wake latency, and the full #23 lifecycle.</li>
+        <li>Run the bounded Sol xhigh fallback probe and a real active-Shotcaller prompt-shape quality pass without adding a second owner-path model.</li>
+      </ol>
+      <p class="footer"><strong>Open boundary:</strong> issue #66 and parent #23 remain open. This artifact is self-contained; it does not fetch a companion Markdown file or remote styling/script asset.</p>
+    </section>
+  </main>
+</body>
+</html>

@@ -1698,6 +1698,68 @@ def test_snapshot_refresh_refuses_inexact_historical_imported_receipts(
             assert after["version"] == before["version"]
 
 
+def test_snapshot_refresh_refuses_historical_unenumerated_pending_delivery(
+    root: Path,
+) -> None:
+    state, _ = migrated_state(root, "refresh-historical-pending-overcount")
+    with SQLiteStorage(state) as store:
+        partial = _seed_partially_reconciled_refresh(
+            store,
+            root,
+            "historical-pending-overcount",
+            outbox_count=2,
+            imported_legacy_partial=True,
+        )
+        historical = _rewrite_created_reconciliation_as_historical_imported_receipt(
+            store, partial
+        )
+        receipt = dict(historical["receipt"])
+        assert receipt["pending_delivery_count"] == 2
+        assert len(receipt["retargeted_outbox_ids"]) == 2
+        receipt["pending_delivery_count"] = 3
+        detail = {
+            "receipt": receipt,
+            "receipt_digest": hashlib.sha256(
+                json.dumps(receipt, sort_keys=True, separators=(",", ":")).encode(
+                    "utf-8"
+                )
+            ).hexdigest(),
+        }
+        store.connection.execute(
+            "UPDATE events SET detail_json=? WHERE event_id=?",
+            (
+                json.dumps(detail, sort_keys=True, separators=(",", ":")),
+                partial["reconciliation_id"],
+            ),
+        )
+        store.connection.execute(
+            "UPDATE task_assignments SET acceptance_receipt_json=? WHERE task_assignment_id=?",
+            (
+                json.dumps(receipt, sort_keys=True, separators=(",", ":")),
+                receipt["task_assignment_id"],
+            ),
+        )
+        before = store.rollover_status(partial["prepared"]["operation_id"])
+
+        try:
+            RolloverSnapshotRefreshService(
+                store, ExactSnapshotInventory()
+            ).refresh(
+                **_partial_refresh_inputs(partial, "historical-pending-overcount")
+            )
+        except StorageRefusal as exc:
+            assert exc.code == "snapshot_refresh_identity_changed"
+        else:
+            raise AssertionError("historical pending-delivery overcount refreshed snapshot")
+
+        after = store.rollover_status(partial["prepared"]["operation_id"])
+        assert after["snapshot"] == before["snapshot"]
+        assert after["version"] == before["version"]
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM events WHERE event_type='rollover_snapshot_refreshed'"
+        ).fetchone()[0] == 0
+
+
 def test_snapshot_refresh_refuses_ambiguous_historical_receipt_or_missing_acceptance(
     root: Path,
 ) -> None:
@@ -4139,6 +4201,7 @@ def main() -> None:
         test_snapshot_refresh_retry_returns_the_identical_receipt(root)
         test_snapshot_refresh_accepts_exact_historical_imported_progress(root)
         test_snapshot_refresh_refuses_inexact_historical_imported_receipts(root)
+        test_snapshot_refresh_refuses_historical_unenumerated_pending_delivery(root)
         test_snapshot_refresh_refuses_ambiguous_historical_receipt_or_missing_acceptance(root)
         test_snapshot_refresh_preserves_exact_mixed_progress_and_terminal_marker(root)
         test_snapshot_refresh_refuses_forged_or_missing_successor_receipt(root)

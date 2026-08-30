@@ -783,4 +783,8 @@ historical receipt's absent fields. A current receipt with deleted fields, a
 pre-existing assignment, a missing or duplicate event, a changed acceptance
 copy, malformed types, extra fields, or canonical/outbox drift still refuses
 before any refreshed snapshot row or pointer mutation. This source-only fix
-adds no schema migration and performs no live refresh or reconciliation.
+adds no schema migration and performs no live refresh or reconciliation. For
+the historical profile, `pending_delivery_count` must equal the sorted unique
+`retargeted_outbox_ids` count. Older receipts that counted unenumerated
+successor-pending deliveries remain unverifiable and refuse instead of being
+guessed from current state.

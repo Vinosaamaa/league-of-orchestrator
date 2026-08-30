@@ -272,6 +272,14 @@ def _successor_progress(
             "snapshot_refresh_identity_changed",
             "successor-owned descendant outbox receipt is malformed",
         )
+    if (
+        historical_imported_receipt
+        and receipt["pending_delivery_count"] != len(declared_outboxes)
+    ):
+        raise StorageRefusal(
+            "snapshot_refresh_identity_changed",
+            "historical descendant receipt contains unenumerated pending deliveries",
+        )
     for outbox_id in declared_outboxes:
         outbox = store.connection.execute(
             """

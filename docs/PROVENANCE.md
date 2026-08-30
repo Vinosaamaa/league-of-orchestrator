@@ -843,10 +843,16 @@ sidebar tokens, and other display metadata are not routing evidence. Optional
 explicit `routing_name` and `routing_alias` fields may be absent, null, or the
 empty string; every non-empty explicit route field must exactly equal the same
 lowercase callsign, while non-string, whitespace, or conflicting values refuse.
-Exact
-pane, route, session, cwd, foreground cwd, terminal, state sequence, live
-status, and deterministic runtime generation are observed twice. Any missing,
-mismatched, closed, unready, or overlapping endpoint refuses before mutation.
+Exact pane, route, session, cwd, foreground cwd, terminal, state sequence, live
+status, and deterministic runtime generation are observed twice. For older
+Herdr inventory revisions, an absent `interactive_ready` field is accepted only
+when the exact endpoint is settled at `done` or `idle`; explicit `false`, null,
+or malformed values refuse. Active, working, blocked, waiting, or unknown
+status with the field absent also refuses, while the existing affirmative
+`interactive_ready=true` contract remains valid for recognized live statuses.
+Any missing, mismatched, closed, unready, drifting, or overlapping endpoint
+refuses before mutation. Per-descendant refusals expose only the callsign or a
+stable opaque locator, never local paths or provider thread identifiers.
 
 After the final stable observation, League rechecks the frozen source binding,
 agent version, callsign assignment/version/requirements, and zero-or-one exact

@@ -7,7 +7,10 @@ import re
 import sqlite3
 from typing import Any, Callable, Mapping, Optional, Sequence
 
-from .rollover_descendant import _herdr_runtime_generation
+from .rollover_descendant import (
+    _herdr_runtime_generation,
+    _public_descendant_locator,
+)
 from .sqlite_callsign_ops import capabilities, digest, stable_json, timestamp
 from .sqlite_rollover_ops import (
     _descendant_source_shape,
@@ -987,7 +990,8 @@ def _observations(
         ):
             raise StorageRefusal(
                 "snapshot_refresh_live_proof_mismatch",
-                "live descendant observation differs from canonical identity",
+                f"{_public_descendant_locator(target)}: live observation differs "
+                "from canonical identity",
             )
     return ordered, digest(ordered)
 
@@ -1293,9 +1297,25 @@ def refresh(
                 key=lambda item: item.get("champion_agent_id", ""),
             )
             if normalized != final_candidate:
+                before_by_agent = {
+                    item.get("champion_agent_id"): item for item in normalized
+                }
+                after_by_agent = {
+                    item.get("champion_agent_id"): item for item in final_candidate
+                }
+                changed_target = next(
+                    (
+                        target
+                        for target in context["descendants"]
+                        if before_by_agent.get(target["champion_agent_id"])
+                        != after_by_agent.get(target["champion_agent_id"])
+                    ),
+                    context["descendants"][0],
+                )
                 raise StorageRefusal(
                     "snapshot_refresh_live_changed",
-                    "live descendant identity changed during snapshot refresh",
+                    f"{_public_descendant_locator(changed_target)}: live identity "
+                    "changed during snapshot refresh",
                 )
             final_normalized, final_observation_digest = _observations(
                 context["descendants"], final_candidate

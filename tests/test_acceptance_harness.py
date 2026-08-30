@@ -529,7 +529,7 @@ def test_schema_and_command_inventory() -> None:
     version = subprocess.run(
         [str(LEAGUE), "--version"], text=True, capture_output=True, check=True, timeout=10
     )
-    assert version.stdout.strip() == "league 0.2.28"
+    assert version.stdout.strip() == "league 0.2.29"
 
 
 def test_forbidden_universal_guide_manifest_precedes_install_mutation(root: Path) -> None:
@@ -547,8 +547,8 @@ def test_forbidden_universal_guide_manifest_precedes_install_mutation(root: Path
 
 def test_existing_release_identity_precedes_install_mutation(root: Path) -> None:
     for name, relative in (
-        ("release", Path("stage-prefix/releases/0.2.28")),
-        ("bundle", Path("release-bundle/0.2.28")),
+        ("release", Path("stage-prefix/releases/0.2.29")),
+        ("bundle", Path("release-bundle/0.2.29")),
     ):
         collision = root / name
         collision.mkdir(parents=True)
@@ -590,8 +590,8 @@ def test_version_staging_is_regular_and_exact(root: Path) -> None:
     assert stat.S_ISREG(source_version.lstat().st_mode)
     normal = root / "normal"
     receipt = _staged_install(normal, ROOT)
-    bundle_version = normal / "release-bundle/0.2.28/VERSION"
-    staged_version = normal / "stage-prefix/releases/0.2.28/VERSION"
+    bundle_version = normal / "release-bundle/0.2.29/VERSION"
+    staged_version = normal / "stage-prefix/releases/0.2.29/VERSION"
     for candidate in (bundle_version, staged_version):
         assert stat.S_ISREG(candidate.lstat().st_mode)
         assert candidate.read_bytes() == source_version.read_bytes()
@@ -662,11 +662,11 @@ def test_staging_crash_cleanup_and_retry(root: Path) -> None:
         pass
     else:
         raise AssertionError("expected injected staging crash")
-    assert not (retry_home / "release-bundle/0.2.28").exists()
-    assert not (retry_home / "stage-prefix/releases/0.2.28").exists()
+    assert not (retry_home / "release-bundle/0.2.29").exists()
+    assert not (retry_home / "stage-prefix/releases/0.2.29").exists()
     assert retry_universal.read_bytes() == universal_before
     retry = _staged_install(retry_home, ROOT)
-    retried_version = retry_home / "stage-prefix/releases/0.2.28/VERSION"
+    retried_version = retry_home / "stage-prefix/releases/0.2.29/VERSION"
     assert stat.S_ISREG(retried_version.lstat().st_mode)
     assert retried_version.read_bytes() == source_version.read_bytes()
     assert retry["source_release_staged_parity"] is True
@@ -714,8 +714,8 @@ _staged_install(Path(sys.argv[2]), Path(sys.argv[3]), fault=crash)
     )
     assert crashed.returncode == 73, crashed.stdout + crashed.stderr
     for candidate in (
-        crash_home / "release-bundle/0.2.28",
-        crash_home / "stage-prefix/releases/0.2.28",
+        crash_home / "release-bundle/0.2.29",
+        crash_home / "stage-prefix/releases/0.2.29",
     ):
         assert (candidate / STAGING_RESERVATION_FILENAME).is_file()
         assert (candidate / "VERSION").is_file()
@@ -758,7 +758,7 @@ _staged_install(Path(sys.argv[2]), Path(sys.argv[3]))
     )
     assert retried.returncode == 0, retried.stdout + retried.stderr
     assert (
-        crash_home / "stage-prefix/releases/0.2.28/VERSION"
+        crash_home / "stage-prefix/releases/0.2.29/VERSION"
     ).read_bytes() == (ROOT / "VERSION").read_bytes()
 
 
@@ -768,7 +768,7 @@ def test_partial_stage_recovery_mismatches_refuse(root: Path) -> None:
     marker_home = crash_staging_process(root, "marker-mismatch")
     marker_path = (
         marker_home
-        / "stage-prefix/releases/0.2.28"
+        / "stage-prefix/releases/0.2.29"
         / STAGING_RESERVATION_FILENAME
     )
     marker = json.loads(marker_path.read_text(encoding="utf-8"))
@@ -781,8 +781,8 @@ def test_partial_stage_recovery_mismatches_refuse(root: Path) -> None:
 
     source_home = crash_staging_process(root, "source-mismatch")
     for directory in (
-        source_home / "release-bundle/0.2.28",
-        source_home / "stage-prefix/releases/0.2.28",
+        source_home / "release-bundle/0.2.29",
+        source_home / "stage-prefix/releases/0.2.29",
     ):
         path = directory / STAGING_RESERVATION_FILENAME
         marker = json.loads(path.read_text(encoding="utf-8"))
@@ -794,7 +794,7 @@ def test_partial_stage_recovery_mismatches_refuse(root: Path) -> None:
     )
 
     inode_home = crash_staging_process(root, "inode-mismatch")
-    bundle = inode_home / "release-bundle/0.2.28"
+    bundle = inode_home / "release-bundle/0.2.29"
     displaced = root / "inode-mismatch-original"
     bundle.rename(displaced)
     shutil.copytree(displaced, bundle)
@@ -804,7 +804,7 @@ def test_partial_stage_recovery_mismatches_refuse(root: Path) -> None:
     )
 
     extra_home = crash_staging_process(root, "extra-content")
-    (extra_home / "release-bundle/0.2.28/extra-byte").write_bytes(b"unexpected\n")
+    (extra_home / "release-bundle/0.2.29/extra-byte").write_bytes(b"unexpected\n")
     refused(
         lambda: _staged_install(extra_home, ROOT),
         "staged_release_identity_exists",
@@ -822,7 +822,7 @@ def test_staging_cleanup_preserves_replacements_and_original_refusal(
     def swap_reserved_bundle(event: str) -> None:
         if event != "after_release_file:VERSION":
             return
-        bundle = swapped_home / "release-bundle/0.2.28"
+        bundle = swapped_home / "release-bundle/0.2.29"
         bundle.rename(moved_bundle)
         bundle.mkdir()
         (bundle / "replacement-byte").write_bytes(b"must remain\n")
@@ -834,11 +834,11 @@ def test_staging_cleanup_preserves_replacements_and_original_refusal(
         pass
     else:
         raise AssertionError("expected injected reservation swap")
-    assert (swapped_home / "release-bundle/0.2.28/replacement-byte").read_bytes() == (
+    assert (swapped_home / "release-bundle/0.2.29/replacement-byte").read_bytes() == (
         b"must remain\n"
     )
     assert (moved_bundle / "VERSION").read_bytes() == source_version.read_bytes()
-    assert not (swapped_home / "stage-prefix/releases/0.2.28").exists()
+    assert not (swapped_home / "stage-prefix/releases/0.2.29").exists()
 
     symlink_home = root / "symlink-swap"
     displaced_bundle = root / "symlink-displaced-bundle"
@@ -849,7 +849,7 @@ def test_staging_cleanup_preserves_replacements_and_original_refusal(
     def swap_reserved_bundle_to_symlink(event: str) -> None:
         if event != "after_release_file:VERSION":
             return
-        bundle = symlink_home / "release-bundle/0.2.28"
+        bundle = symlink_home / "release-bundle/0.2.29"
         bundle.rename(displaced_bundle)
         bundle.symlink_to(foreign_target, target_is_directory=True)
         raise InjectedStageCrash(event)
@@ -860,7 +860,7 @@ def test_staging_cleanup_preserves_replacements_and_original_refusal(
         pass
     else:
         raise AssertionError("expected injected symlink reservation swap")
-    restored_link = symlink_home / "release-bundle/0.2.28"
+    restored_link = symlink_home / "release-bundle/0.2.29"
     assert restored_link.is_symlink()
     assert restored_link.readlink() == foreign_target
     assert (foreign_target / "foreign-byte").read_bytes() == b"must remain\n"
@@ -875,10 +875,10 @@ def test_staging_cleanup_preserves_replacements_and_original_refusal(
     def swap_staged_subdirectories(event: str) -> None:
         if event != "after_release_file:VERSION":
             return
-        (subdirectory_home / "release-bundle/0.2.28/bin").symlink_to(
+        (subdirectory_home / "release-bundle/0.2.29/bin").symlink_to(
             foreign_bundle, target_is_directory=True
         )
-        (subdirectory_home / "stage-prefix/releases/0.2.28/bin").symlink_to(
+        (subdirectory_home / "stage-prefix/releases/0.2.29/bin").symlink_to(
             foreign_release, target_is_directory=True
         )
 

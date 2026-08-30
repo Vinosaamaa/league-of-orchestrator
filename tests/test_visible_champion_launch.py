@@ -648,7 +648,7 @@ def test_legacy_active_champion_display_is_reconciled_once_with_exact_receipt(
     options = _options(root)
     launch_runner = FakeHerdrRunner(worktree, routing_name="shaco")
     launch = VisibleChampionLaunchService(
-        store, _adapter(options, launch_runner), options, clock
+        store, _adapter(options, launch_runner, store), options, clock
     ).launch(_spec(worktree, "legacy-display"))
     assignment_id = launch["assignment_id"]
     receipt = store.assignment_launch_context(assignment_id)["acceptance_receipt"]
@@ -847,7 +847,7 @@ def test_legacy_display_reconciliation_refuses_user_title_race_before_write(
     options = _options(root)
     launched_runner = FakeHerdrRunner(worktree)
     launch = VisibleChampionLaunchService(
-        store, _adapter(options, launched_runner), options, clock
+        store, _adapter(options, launched_runner, store), options, clock
     ).launch(_spec(worktree, "legacy-user-race"))
     assignment_id = str(launch["assignment_id"])
     receipt = store.assignment_launch_context(assignment_id)["acceptance_receipt"]
@@ -903,7 +903,7 @@ def test_legacy_display_compare_and_set_does_not_overwrite_last_window_user_titl
     options = _options(root)
     launched_runner = FakeHerdrRunner(worktree)
     launch = VisibleChampionLaunchService(
-        store, _adapter(options, launched_runner), options, clock
+        store, _adapter(options, launched_runner, store), options, clock
     ).launch(_spec(worktree, "legacy-cas-race"))
     assignment_id = str(launch["assignment_id"])
     receipt = store.assignment_launch_context(assignment_id)["acceptance_receipt"]
@@ -965,7 +965,7 @@ def test_legacy_display_reconciliation_refuses_modern_receipt_before_live_write(
     options = _options(root)
     runner = FakeHerdrRunner(worktree)
     launch = VisibleChampionLaunchService(
-        store, _adapter(options, runner), options, clock
+        store, _adapter(options, runner, store), options, clock
     ).launch(_spec(worktree, "modern-display"))
     receipt = store.assignment_launch_context(str(launch["assignment_id"]))[
         "acceptance_receipt"
@@ -1000,7 +1000,7 @@ def test_legacy_display_reconciliation_refuses_ambiguous_runtime_and_wrong_route
     options = _options(root)
     launched_runner = FakeHerdrRunner(worktree)
     launch = VisibleChampionLaunchService(
-        store, _adapter(options, launched_runner), options, clock
+        store, _adapter(options, launched_runner, store), options, clock
     ).launch(_spec(worktree, "legacy-ambiguous"))
     assignment_id = str(launch["assignment_id"])
     receipt = store.assignment_launch_context(assignment_id)["acceptance_receipt"]
@@ -1078,7 +1078,7 @@ def _prepared_legacy_display(
     options = _options(root)
     launched_runner = FakeHerdrRunner(worktree)
     launch = VisibleChampionLaunchService(
-        store, _adapter(options, launched_runner), options, clock
+        store, _adapter(options, launched_runner, store), options, clock
     ).launch(_spec(worktree, name))
     assignment_id = str(launch["assignment_id"])
     receipt = store.assignment_launch_context(assignment_id)["acceptance_receipt"]

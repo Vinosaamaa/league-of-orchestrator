@@ -584,6 +584,8 @@ def test_exact_resume_uses_declared_thread_and_skips_fresh_handshake(root: Path)
         if call[:3] == ("herdr", "pane", "report-agent-session")
     )
     assert report[report.index("--agent-session-id") + 1] == THREAD_ID
+    assert report[report.index("--source") + 1] == "herdr:codex"
+    assert report[report.index("--seq") + 1] == "100"
     store.close()
 
 

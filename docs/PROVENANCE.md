@@ -617,8 +617,8 @@ other providers fail closed until an operational exact-resume driver exists.
 Live Herdr acceptance showed that a resumed Codex process does not republish its
 session identifier automatically. The `0.2.29` launch edge therefore verifies
 the exact foreground `codex resume` argv and worktree before reporting that
-opaque session identifier to Herdr; mismatched or ambiguous processes still
-fail before activation.
+opaque session identifier through Herdr's canonical Codex metadata source and
+next sequence; mismatched or ambiguous processes still fail before activation.
 The v16 target-version binding changes only the deterministic acceptance
 fixture's dry-run report digest; its source and imported-row parity digests are
 unchanged.

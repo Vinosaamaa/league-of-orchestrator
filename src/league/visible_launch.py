@@ -398,6 +398,7 @@ class HerdrCodexLaunchAdapter:
         self,
         spec: AssignmentSpec,
         pane_id: str,
+        state_change_seq: int,
     ) -> bool:
         """Publish Herdr session metadata only after the exact Codex resume process exists."""
 
@@ -462,7 +463,7 @@ class HerdrCodexLaunchAdapter:
                 "report-agent-session",
                 pane_id,
                 "--source",
-                "league-resume-" + _sha256(spec.assignment_id.encode("utf-8"))[:16],
+                "herdr:codex",
                 "--agent",
                 "codex",
                 "--agent-session-id",
@@ -470,7 +471,7 @@ class HerdrCodexLaunchAdapter:
                 "--session-start-source",
                 "codex-resume",
                 "--seq",
-                "1",
+                str(state_change_seq + 1),
             ),
             "Herdr Codex resume session report",
             allow_silent_success=True,
@@ -553,8 +554,14 @@ class HerdrCodexLaunchAdapter:
                 ):
                     break
                 if not session_reported:
+                    state_change_seq = published.get("state_change_seq")
+                    if not isinstance(state_change_seq, int) or state_change_seq < 0:
+                        raise StorageRefusal(
+                            "launch_identity_unverified",
+                            "Herdr resume endpoint has no exact metadata sequence",
+                        )
                     session_reported = self._report_verified_resume_session(
-                        spec, pane_id
+                        spec, pane_id, state_change_seq
                     )
                 time.sleep(0.1)
             raise StorageRefusal(

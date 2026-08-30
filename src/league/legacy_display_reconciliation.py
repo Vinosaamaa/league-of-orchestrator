@@ -6,7 +6,6 @@ import hashlib
 import json
 import os
 import re
-import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -34,6 +33,8 @@ OWNERSHIP_TOKENS = {
     "launch_title_applies_to",
     "legacy_display_owner",
     "legacy_display_assignment",
+    "legacy_display_source",
+    "legacy_display_applies_to",
 }
 
 
@@ -66,7 +67,6 @@ class LegacyDisplayReconciliationSpec:
     expected_presentation_source: str | None
     expected_title: str | None
     expected_state_change_seq: int | None
-    expected_presentation_digest: str | None
     target_task_label: str
     owner_authorized: bool
 
@@ -160,14 +160,58 @@ class HerdrLegacyDisplayAdapter:
         spec: LegacyDisplayReconciliationSpec,
         observation: Mapping[str, Any],
     ) -> bool:
-        if spec.expected_presentation_digest is not None:
-            return _digest(observation) == spec.expected_presentation_digest
         return bool(
             observation.get("presentation_source")
             == spec.expected_presentation_source
             and observation.get("title") == spec.expected_title
             and observation.get("state_change_seq")
             == spec.expected_state_change_seq
+        )
+
+    def _receipt(
+        self,
+        spec: LegacyDisplayReconciliationSpec,
+        reconciliation_id: str,
+        observation: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        target = f"{spec.callsign} · {spec.target_task_label}"
+        return {
+            "schema": "league.legacy-display-reconciliation.v1",
+            "reconciliation_id": reconciliation_id,
+            "assignment_id": spec.assignment_id,
+            "champion_agent_id": spec.champion_agent_id,
+            "runtime_instance_id": spec.runtime_instance_id,
+            "source": str(observation["presentation_source"]),
+            "applies_to_source": str(observation["authority_source"]),
+            "state_change_seq": int(observation["state_change_seq"]),
+            "sidebar_name": spec.callsign,
+            "task_label": spec.target_task_label,
+            "thread_title": target,
+            "terminal_title": target,
+            "observation_digest": _digest(observation),
+        }
+
+    def _pending_effect_exact(
+        self,
+        spec: LegacyDisplayReconciliationSpec,
+        reconciliation_id: str,
+        observation: Mapping[str, Any],
+        tokens: Mapping[str, str],
+    ) -> bool:
+        target = f"{spec.callsign} · {spec.target_task_label}"
+        owner = hashlib.sha256(spec.assignment_id.encode("utf-8")).hexdigest()[:16]
+        return bool(
+            observation.get("title") == target
+            and tokens.get("callsign") == spec.callsign
+            and tokens.get("sidebar_name") == spec.callsign
+            and tokens.get("task_label") == spec.target_task_label
+            and tokens.get("thread_title") == target
+            and tokens.get("legacy_display_owner") == owner
+            and tokens.get("legacy_display_assignment") == reconciliation_id
+            and tokens.get("legacy_display_source")
+            == observation.get("presentation_source")
+            and tokens.get("legacy_display_applies_to")
+            == observation.get("authority_source")
         )
 
     def reconcile(
@@ -177,6 +221,12 @@ class HerdrLegacyDisplayAdapter:
     ) -> dict[str, Any]:
         baseline, baseline_tokens = self._observe(spec)
         if not self._matches_expected(spec, baseline):
+            if self._pending_effect_exact(
+                spec, reconciliation_id, baseline, baseline_tokens
+            ):
+                observed, tokens = self._observe(spec)
+                if observed == baseline and tokens == baseline_tokens:
+                    return self._receipt(spec, reconciliation_id, observed)
             raise StorageRefusal(
                 "legacy_display_race",
                 "legacy Champion presentation changed after owner authorization",
@@ -201,40 +251,57 @@ class HerdrLegacyDisplayAdapter:
         source = str(current["presentation_source"])
         authority = str(current["authority_source"])
         sequence = int(current["state_change_seq"]) + 1
-        self._run(
-            (
-                "herdr",
-                "pane",
-                "report-metadata",
-                spec.pane_id,
-                "--source",
-                source,
-                "--applies-to-source",
-                authority,
-                "--agent",
-                "codex",
-                "--display-agent",
-                "codex",
-                "--title",
-                target,
-                "--token",
-                f"callsign={spec.callsign}",
-                "--token",
-                f"sidebar_name={spec.callsign}",
-                "--token",
-                f"task_label={spec.target_task_label}",
-                "--token",
-                f"thread_title={target}",
-                "--token",
-                f"legacy_display_owner={owner}",
-                "--token",
-                f"legacy_display_assignment={reconciliation_id}",
-                "--seq",
-                str(sequence),
-            ),
-            "legacy Champion display reconciliation",
-            silent=True,
+        report = (
+            "herdr",
+            "pane",
+            "report-metadata",
+            spec.pane_id,
+            "--source",
+            source,
+            "--applies-to-source",
+            authority,
+            "--agent",
+            "codex",
+            "--display-agent",
+            "codex",
+            "--title",
+            target,
+            "--token",
+            f"callsign={spec.callsign}",
+            "--token",
+            f"sidebar_name={spec.callsign}",
+            "--token",
+            f"task_label={spec.target_task_label}",
+            "--token",
+            f"thread_title={target}",
+            "--token",
+            f"legacy_display_owner={owner}",
+            "--token",
+            f"legacy_display_assignment={reconciliation_id}",
+            "--token",
+            f"legacy_display_source={source}",
+            "--token",
+            f"legacy_display_applies_to={authority}",
+            "--seq",
+            str(sequence),
         )
+        try:
+            self._run(
+                report,
+                "legacy Champion display reconciliation",
+                silent=True,
+            )
+        except StorageRefusal as exc:
+            observed, tokens = self._observe(spec)
+            if observed != baseline or tokens != baseline_tokens:
+                raise StorageRefusal(
+                    "legacy_display_race",
+                    "legacy Champion presentation changed during reconciliation",
+                ) from exc
+            raise StorageRefusal(
+                "legacy_display_unverified",
+                "legacy Champion compare-and-set metadata write was refused",
+            ) from exc
         expected_tokens = {
             **baseline_tokens,
             "callsign": spec.callsign,
@@ -243,6 +310,8 @@ class HerdrLegacyDisplayAdapter:
             "thread_title": target,
             "legacy_display_owner": owner,
             "legacy_display_assignment": reconciliation_id,
+            "legacy_display_source": source,
+            "legacy_display_applies_to": authority,
         }
         prior_digest: str | None = None
         stable = 0
@@ -271,21 +340,7 @@ class HerdrLegacyDisplayAdapter:
                 "legacy_display_unverified",
                 "legacy Champion final display did not become exact and stable",
             )
-        return {
-            "schema": "league.legacy-display-reconciliation.v1",
-            "reconciliation_id": reconciliation_id,
-            "assignment_id": spec.assignment_id,
-            "champion_agent_id": spec.champion_agent_id,
-            "runtime_instance_id": spec.runtime_instance_id,
-            "source": source,
-            "applies_to_source": authority,
-            "state_change_seq": int(final["state_change_seq"]),
-            "sidebar_name": spec.callsign,
-            "task_label": spec.target_task_label,
-            "thread_title": target,
-            "terminal_title": target,
-            "observation_digest": _digest(final),
-        }
+        return self._receipt(spec, reconciliation_id, final)
 
     def verify_receipt(
         self,
@@ -305,6 +360,9 @@ class HerdrLegacyDisplayAdapter:
             and tokens.get("thread_title") == target
             and tokens.get("legacy_display_assignment")
             == receipt.get("reconciliation_id")
+            and tokens.get("legacy_display_source") == receipt.get("source")
+            and tokens.get("legacy_display_applies_to")
+            == receipt.get("applies_to_source")
         )
         if not exact:
             raise StorageRefusal(

@@ -38,13 +38,17 @@ Nothing here installs files, changes hooks, or connects to live Roster state.
 - Recoverable visible-Champion assignment with exact acceptance receipts,
   settled post-context callsign/task title restoration bound to the exact
   metadata source and sequence, deterministic two-word display-task defaults,
+  and one owner-authorized compare-and-set legacy display reconciliation for
+  exact active pre-fix Champions without modern title receipts,
   source-bound transition outbox delivery, unique recipient effects, and fair
   backlog draining.
 - One role-aware bounded Shotcaller Stop decision with ordinary-message
   priority and separate request, dispatch, and watcher leases, plus in-place
   Shotcaller bootstrap that waits for a stable source-owned callsign title
   without creating layout/process state or overwriting a newer user title,
-  source, or unrelated token.
+  source, or unrelated token. Read-only identity queries retry bounded
+  transient malformed output; persistent malformed bytes still refuse before
+  callsign reservation, runtime registration, or Squad state.
 - Opaque capability-based harness/backend bindings, typed task resources, and
   canonical SQLite-backed recoverable teardown with immutable per-action/final
   receipts, exact shared-lease release, and persistent-resource retention.

@@ -540,3 +540,13 @@ prompt, and rollback preserves newer user-owned presentation metadata while
 restoring only League-owned sidebar/thread tokens to baseline and releasing the
 League route and callsign reservation. Focused fakes prove unrelated user
 tokens remain exact, zero layout/process creation, and no Squad registration.
+The reopened issue adds one deliberately separate legacy provenance path:
+owner-authorized reconciliation binds the exact canonical Champion identity to
+the expected live presentation, writes immutable intent before the external
+effect, uses the observed presentation sequence as a compare-and-set fence,
+and records a final receipt only after two stable observations. It refuses
+modern receipts, runtime ambiguity, route drift, and user-title races while
+preserving unrelated tokens; exact retry returns the same stored receipt
+without another metadata write. In-place Shotcaller identity inspection also
+retries only transient malformed read-only Herdr results, with persistent
+malformation still refusing before reservation or publication.

@@ -57,7 +57,6 @@ class LegacyDisplayReconciliationCommand:
     expected_presentation_source: Optional[str]
     expected_title: Optional[str]
     expected_state_change_seq: Optional[int]
-    expected_presentation_digest: Optional[str]
     target_task_label: str
     owner_authorized: bool
     at: str

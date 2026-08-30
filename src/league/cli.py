@@ -1067,9 +1067,7 @@ def _add_assignment_commands(groups: argparse._SubParsersAction) -> None:
     ):
         reconcile_display.add_argument(f"--{name}", required=True)
     reconcile_display.add_argument("--expected-version", type=int, required=True)
-    observation = reconcile_display.add_mutually_exclusive_group(required=True)
-    observation.add_argument("--expected-presentation-json")
-    observation.add_argument("--expected-presentation-digest")
+    reconcile_display.add_argument("--expected-presentation-json", required=True)
     reconcile_display.add_argument("--owner-authorized", action="store_true", required=True)
     block = commands.add_parser("block", help="Record a blocked or cleanup-pending failed launch.")
     block.add_argument("--assignment-id", required=True)
@@ -2558,22 +2556,21 @@ def _assign_reconcile_legacy_display(
     expected_source = None
     expected_title = None
     expected_sequence = None
-    if args.expected_presentation_json is not None:
-        expected = _decode_json(
-            args.expected_presentation_json, "legacy display expected presentation"
+    expected = _decode_json(
+        args.expected_presentation_json, "legacy display expected presentation"
+    )
+    if not isinstance(expected, dict) or set(expected) != {
+        "source",
+        "title",
+        "state_change_seq",
+    }:
+        raise StorageRefusal(
+            "legacy_display_invalid",
+            "expected presentation must contain only source, title, and state_change_seq",
         )
-        if not isinstance(expected, dict) or set(expected) != {
-            "source",
-            "title",
-            "state_change_seq",
-        }:
-            raise StorageRefusal(
-                "legacy_display_invalid",
-                "expected presentation must contain only source, title, and state_change_seq",
-            )
-        expected_source = expected["source"]
-        expected_title = expected["title"]
-        expected_sequence = expected["state_change_seq"]
+    expected_source = expected["source"]
+    expected_title = expected["title"]
+    expected_sequence = expected["state_change_seq"]
     spec = LegacyDisplayReconciliationSpec(
         assignment_id=args.assignment_id,
         expected_version=args.expected_version,
@@ -2588,7 +2585,6 @@ def _assign_reconcile_legacy_display(
         expected_presentation_source=expected_source,
         expected_title=expected_title,
         expected_state_change_seq=expected_sequence,
-        expected_presentation_digest=args.expected_presentation_digest,
         target_task_label=args.target_task_label,
         owner_authorized=args.owner_authorized,
     )

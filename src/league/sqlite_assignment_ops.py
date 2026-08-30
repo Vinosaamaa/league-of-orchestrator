@@ -1289,7 +1289,6 @@ def _legacy_display_detail(
         "expected_presentation_source": command.expected_presentation_source,
         "expected_title": command.expected_title,
         "expected_state_change_seq": command.expected_state_change_seq,
-        "expected_presentation_digest": command.expected_presentation_digest,
         "target_task_label": command.target_task_label,
         "target_title": f"{command.callsign} · {command.target_task_label}",
         "owner_authorized": command.owner_authorized,
@@ -1300,7 +1299,6 @@ def _validate_legacy_display_command(
     store: Any, command: LegacyDisplayReconciliationCommand
 ) -> tuple[Any, dict[str, Any], str, dict[str, Any]]:
     _time(command.at, "legacy display reconciliation time")
-    digest_pattern = re.compile(r"^[0-9a-f]{64}$")
     tuple_supplied = all(
         (
             isinstance(command.expected_presentation_source, str)
@@ -1309,10 +1307,6 @@ def _validate_legacy_display_command(
             isinstance(command.expected_state_change_seq, int)
             and command.expected_state_change_seq >= 0,
         )
-    )
-    digest_supplied = bool(
-        isinstance(command.expected_presentation_digest, str)
-        and digest_pattern.fullmatch(command.expected_presentation_digest)
     )
     identity = (
         command.assignment_id,
@@ -1326,12 +1320,13 @@ def _validate_legacy_display_command(
         command.routing_name,
     )
     if (
-        not command.owner_authorized
+        command.owner_authorized is not True
         or not all(identity)
         or command.expected_version < 1
-        or tuple_supplied == digest_supplied
+        or not tuple_supplied
         or len(command.target_task_label.split()) != 2
         or " ".join(command.target_task_label.split()) != command.target_task_label
+        or len(command.target_task_label) > 48
         or command.routing_name != command.callsign.lower()
     ):
         raise StorageRefusal(
@@ -1564,6 +1559,9 @@ def finalize_legacy_display_reconciliation(
                 and int(receipt["state_change_seq"]) >= 0
                 and isinstance(receipt.get("observation_digest"), str)
                 and bool(re.fullmatch(r"[0-9a-f]{64}", receipt["observation_digest"]))
+                and receipt.get("source") == command.expected_presentation_source
+                and int(receipt["state_change_seq"])
+                > int(command.expected_state_change_seq)
             )
             if not valid:
                 raise StorageRefusal(

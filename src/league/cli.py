@@ -18,6 +18,12 @@ from . import MAX_ACCEPTANCE_SENTINEL_PATHS, __version__
 from .adapters import builtin_contract_registry
 from .artifacts import ArtifactLifecycle
 from .cleanup import CleanupExecutor, CleanupFaultEvent, CleanupPlanner
+from .continuation import (
+    ContinuationIssueReopener,
+    GitHubIssueAdapter,
+    continuation_resume_thread,
+    verified_binding,
+)
 from .importer import build_import_plan
 from .orchestration import OrchestrationSignals
 from .routing import ModelRouter, load_routing_config
@@ -773,6 +779,45 @@ def _add_cleanup_commands(groups: argparse._SubParsersAction) -> None:
     )
 
 
+def _add_continuation_commands(groups: argparse._SubParsersAction) -> None:
+    continuation = groups.add_parser(
+        "continuation",
+        help="Claim one archived provider thread and reopen its exact owning issue.",
+    )
+    commands = continuation.add_subparsers(dest="action", required=True)
+    prepare = commands.add_parser(
+        "prepare",
+        help="Verify a new worktree and exclusively claim one exact archived thread.",
+    )
+    for name in (
+        "operation-id",
+        "archive-id",
+        "assignment-id",
+        "new-task-id",
+        "new-agent-id",
+        "repository",
+        "branch",
+        "worktree",
+        "instruction-digest",
+        "concrete-benefit",
+        "at",
+    ):
+        prepare.add_argument(f"--{name}", required=True)
+    prepare.add_argument("--issue", type=int, required=True)
+    prepare.add_argument("--expected-archive-version", type=int, required=True)
+    prepare.add_argument("--reconciliation-digest")
+    status = commands.add_parser("status", help="Read one exact continuation operation.")
+    status.add_argument("--operation-id", required=True)
+    reopen = commands.add_parser(
+        "reopen",
+        help="Reopen the exact archived owning issue under a recoverable fence.",
+    )
+    for name in ("operation-id", "executor-id", "leased-until", "at"):
+        reopen.add_argument(f"--{name}", required=True)
+    reopen.add_argument("--expected-version", type=int, required=True)
+    reopen.add_argument("--expected-fence", type=int, required=True)
+
+
 def _add_request_commands(groups: argparse._SubParsersAction) -> None:
     request = groups.add_parser(
         "request", help="Capture, triage, claim, route, resolve, answer, and reconcile requests."
@@ -1303,6 +1348,7 @@ def _parser() -> argparse.ArgumentParser:
         _add_routing_commands,
         _add_resource_commands,
         _add_cleanup_commands,
+        _add_continuation_commands,
         _add_request_commands,
         _add_assignment_commands,
         _add_hook_commands,
@@ -2029,6 +2075,53 @@ def _cleanup_reconcile(store: Storage, args: argparse.Namespace) -> CommandResul
     }, None
 
 
+def _continuation_prepare(store: Storage, args: argparse.Namespace) -> CommandResult:
+    worktree = str(Path(args.worktree).resolve())
+    binding = verified_binding(
+        repository=args.repository,
+        issue=args.issue,
+        branch=args.branch,
+        worktree=worktree,
+    )
+    return store.prepare_continuation(
+        {
+            "operation_id": args.operation_id,
+            "archive_id": args.archive_id,
+            "assignment_id": args.assignment_id,
+            "new_task_id": args.new_task_id,
+            "new_agent_id": args.new_agent_id,
+            "repository": args.repository,
+            "issue": args.issue,
+            "branch": args.branch,
+            "worktree": worktree,
+            "binding": binding,
+            "instruction_digest": args.instruction_digest,
+            "reconciliation_digest": args.reconciliation_digest,
+            "concrete_benefit": args.concrete_benefit,
+            "expected_archive_version": args.expected_archive_version,
+            "at": args.at,
+        }
+    ), None
+
+
+def _continuation_status(store: Storage, args: argparse.Namespace) -> CommandResult:
+    value = store.continuation_status(args.operation_id)
+    if value is None:
+        raise StorageRefusal("continuation_unknown", "continuation operation does not exist")
+    return value, None
+
+
+def _continuation_reopen(store: Storage, args: argparse.Namespace) -> CommandResult:
+    return ContinuationIssueReopener(store, GitHubIssueAdapter()).execute(
+        args.operation_id,
+        expected_version=args.expected_version,
+        expected_fence=args.expected_fence,
+        executor_id=args.executor_id,
+        leased_until=args.leased_until,
+        at=args.at,
+    ), None
+
+
 def _request_intake(store: Storage, args: argparse.Namespace) -> CommandResult:
     return store.intake_prompt(
         args.prompt_id,
@@ -2593,6 +2686,17 @@ def _assign_launch(store: Storage, args: argparse.Namespace) -> CommandResult:
     champion_agent_id = args.champion_agent_id or derived_champion_agent_id(
         assignment_id
     )
+    resume_thread_id = continuation_resume_thread(
+        store,
+        assignment_id=assignment_id,
+        task_id=args.task_id,
+        champion_agent_id=champion_agent_id,
+        repository=args.repository,
+        issue=args.issue,
+        branch=args.branch,
+        worktree=args.worktree,
+        at=_turn_time(),
+    )
     workspace_id = args.workspace_id or os.environ.get("HERDR_WORKSPACE_ID", "")
     league_command = str(
         Path(args.league_command).resolve()
@@ -2624,7 +2728,9 @@ def _assign_launch(store: Storage, args: argparse.Namespace) -> CommandResult:
         required_capabilities=tuple(args.requires),
     )
     runner = SubprocessRunner()
-    adapter = HerdrCodexLaunchAdapter(options, runner)
+    adapter = HerdrCodexLaunchAdapter(
+        options, runner, resume_thread_id=resume_thread_id
+    )
     verifier = GitHubIssueVerifier(
         runner,
         selection_receipt_digest=args.issue_selection_receipt_digest,
@@ -2964,6 +3070,9 @@ HANDLERS: dict[str, CommandHandler] = {
     "cleanup.execute": _cleanup_execute,
     "cleanup.reconcile": _cleanup_reconcile,
     "cleanup.status": _cleanup_status,
+    "continuation.prepare": _continuation_prepare,
+    "continuation.reopen": _continuation_reopen,
+    "continuation.status": _continuation_status,
     "request.intake": _request_intake,
     "request.triage": _request_triage,
     "request.bind-prompt": _request_bind_prompt,

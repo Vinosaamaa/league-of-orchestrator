@@ -587,3 +587,46 @@ temporary roots and fake GitHub/Herdr boundaries; they perform no live grant,
 merge, release, installation, deployment, production action, or teardown.
 The rules live in the League supplement; the toolkit-owned universal guide and
 the supplement's existing 16 KiB fail-closed staging bound remain unchanged.
+
+## Issue-coupled cleanup and exact-thread continuation provenance
+
+Issue #83 implements the continuation portion of the accepted issue-#15 policy
+as original League code; the integrated repository version remains `0.2.29`.
+Migration v16 is contiguous and named
+`issue-coupled-cleanup-and-exact-thread-continuation`. It deliberately replaces
+the historical all-row runtime-session uniqueness index with a live-row partial
+unique index, while adding permanent thread lineages, immutable cleanup
+archives, linked runtime incarnations, and exclusive fenced continuation
+operations. Historical runtime, task, assignment, cleanup, Git, callsign, and
+issue receipts remain separate and are never rewritten into a synthetic
+continuous runtime.
+
+The deliberate baseline differences are: eligible Champion cleanup may append
+one exact owning-issue close action after callsign release; archive availability
+requires that action's verified receipt and the final teardown receipt; and an
+explicit successor may claim that archive, reopen only its owning issue, and
+activate a new runtime carrying the same provider thread identity. The callsign
+queue remains unchanged and may allocate any currently compatible entry.
+
+The GitHub issue adapter, read-only Git binding check, Codex exact-resume launch
+argument, post-start thread equality check, storage protocols/operations, CLI
+commands, incident analysis, and focused synthetic tests are original to this
+repository. Provider thread values remain opaque in the canonical store. The
+current launch edge verifies the Codex UUID required by the installed Codex CLI;
+other providers fail closed until an operational exact-resume driver exists.
+Live Herdr acceptance showed that a resumed Codex process does not republish its
+session identifier automatically. The `0.2.29` launch edge therefore verifies
+the exact foreground `codex resume` argv and worktree before reporting that
+opaque session identifier through Herdr's canonical Codex metadata source and
+next sequence; mismatched or ambiguous processes still fail before activation.
+The `0.2.29` correction deliberately replaces the duplicated cleanup
+task-state/disposition rules with one shared matrix at both the atomic planning
+and pre-claim execution boundaries. An explicit owner cancellation or rejection
+may clean a `ready_to_land` task; truly incompatible combinations refuse before
+claiming a cleanup revision. Focused synthetic recovery persists a fence-zero
+cancelled plan, reopens the canonical store as the upgraded executor, executes
+without replanning or direct state edits, and proves the completed retry is
+idempotent.
+The v16 target-version binding changes only the deterministic acceptance
+fixture's dry-run report digest; its source and imported-row parity digests are
+unchanged.

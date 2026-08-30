@@ -38,6 +38,7 @@ from league.real_canary import (  # noqa: E402
 from league.sqlite_handoff_schema import CHAMPION_SEED, SHUFFLE_VERSION  # noqa: E402
 from league.sqlite_store import SQLiteStorage  # noqa: E402
 from league.storage import RuntimeRegistrationCommand, StorageRefusal  # noqa: E402
+from lifecycle_fakes import issue_bound_spec  # noqa: E402
 from storage_test_support import migrated_state  # noqa: E402
 
 
@@ -497,7 +498,9 @@ def test_real_canary_sqlite_setup_uses_explicit_root(root: Path) -> None:
     root.mkdir(parents=True)
     git = _create_git_canary(root)
     herdr = herdr_identity()
-    setup = _setup_sqlite(root, ROOT, git, herdr)
+    setup = _setup_sqlite(
+        root, ROOT, git, herdr, issue_spec_resolver=issue_bound_spec
+    )
     extended_git = {
         **git,
         "tested_tree": git["head"],
@@ -718,7 +721,9 @@ def test_cleanup_reconcile_resumes_in_a_new_process(root: Path) -> None:
     root.mkdir(parents=True)
     git = _create_git_canary(root)
     herdr = herdr_identity()
-    setup = _setup_sqlite(root, ROOT, git, herdr)
+    setup = _setup_sqlite(
+        root, ROOT, git, herdr, issue_spec_resolver=issue_bound_spec
+    )
     state = root / "league/state"
     with SQLiteStorage(state, request_wal=False) as store:
         transition = store.transition_task(

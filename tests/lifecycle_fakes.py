@@ -33,9 +33,15 @@ Use only temporary SQLite state and deterministic adapters.
 """
 
 
-def issue_bound_spec(store: Any, spec: AssignmentSpec, at: str) -> AssignmentSpec:
+def issue_bound_spec(
+    store: Any,
+    spec: AssignmentSpec,
+    at: str,
+    *,
+    repository: str | None = None,
+) -> AssignmentSpec:
     """Persist deterministic issue-selection evidence for one synthetic Champion."""
-    repository = SYNTHETIC_ISSUE_REPOSITORY
+    repository = repository or SYNTHETIC_ISSUE_REPOSITORY
     repository_key = canonical_repository(repository)[1]
     issue_title = spec.task_summary
     normalized_title = normalize_issue_title(issue_title)
@@ -102,7 +108,11 @@ def issue_bound_spec(store: Any, spec: AssignmentSpec, at: str) -> AssignmentSpe
             repository, bound.issue, bound.task_id, bound.task_summary
         ),
         "issue_selection_receipt_digest": selection["receipt_digest"],
-        "verifier_kind": "synthetic-fixture",
+        "verifier_kind": (
+            "synthetic-fixture"
+            if repository_key.partition("/")[0].endswith(".invalid")
+            else "github-api"
+        ),
         "verified_at": at,
     }
     receipt["receipt_digest"] = hashlib.sha256(

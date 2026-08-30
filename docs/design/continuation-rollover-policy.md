@@ -1,10 +1,11 @@
 # Continuation and rollover policy
 
-> **Status: accepted-policy candidate for issue #15; design only.** This policy
-> defines future behavior but does not implement thread resume, callsign queueing,
-> Champion or Shotcaller replacement, hooks, installation, cutover, or teardown.
-> Issue #8 owns guarded handoff and issue #13 owns the persistent shuffled
-> callsign queue. Issue #23 retains isolated acceptance and live-cutover gates.
+> **Status: accepted policy for issue #15.** Issue #8 implements guarded
+> Shotcaller handoff, issue #13 implements the persistent shuffled callsign
+> queue, and issue #83 implements issue-coupled Champion cleanup plus explicit
+> exact Codex-thread continuation. Automatic context rollover and other-provider
+> exact-resume drivers remain unimplemented. Issue #23 retains isolated
+> acceptance and live-cutover gates.
 
 Policy identifier: `league.continuation-policy.v1`. This Markdown document is
 the sole normative definition. The HTML and diagram are accessible,
@@ -42,18 +43,14 @@ is [the issue-#15 Lavish artifact](../../.lavish/issue-15-continuation-rollover-
 
 ![Continuation and rollover decision flow](continuation-rollover-policy.drawio.svg)
 
-### Current merged boundary
+### Issue #83 implementation boundary
 
-The merged runtime exposes a generic `RuntimeLifecycle.resume` operation, but
-the built-in Codex harness contract does not declare `resume`, Herdr/tmux
-drivers remain contract-only, and the acceptance receipt still labels real
-runtimes unverified. No current built-in therefore qualifies for exact-thread
-resume or automatic rollover. The current store also keeps
-`runtime_bindings.session_identity` unique and the current task cleanup planner
-refuses Shotcaller owners. The future #8 schema must preserve those safeguards:
-normalize one unique provider thread identity into the archive/lineage record,
-link incarnation-specific endpoint bindings to it, and add Shotcaller handoff
-cleanup without making a Shotcaller eligible for task teardown.
+The issue-#83 slice normalizes one unique opaque provider thread into a permanent
+lineage, links incarnation-specific runtime bindings and cleanup archives, and
+implements explicit Codex/Herdr exact resume into a verified new worktree. It
+does not implement automatic rollover or infer continuation from related tasks.
+Shotcaller handoff remains issue #8's separate guarded owner-switch lifecycle;
+the task cleanup planner still refuses an ordinary Shotcaller owner.
 
 ## Four independent lifecycles
 
@@ -295,7 +292,7 @@ receipts, digests, reference closure, or export proof refuse pruning. Space
 reclamation remains separately explicit; a crash resumes or rolls back the
 bounded maintenance unit without leaving a missing body and absent tombstone.
 
-## Minimal future implementation contract for #8 and #13
+## Minimal implementation contract for #8, #13, and #83
 
 Implementation should extend the current stable `league.command.v1` envelope,
 expected-version/fence rules, event/outbox atomicity, recoverable assignments,
@@ -307,7 +304,7 @@ state machine.
 
 | Owning issue | Command family | Contract |
 | --- | --- | --- |
-| #8 | `league continuation decide|status` | Record/read one evidence snapshot and `resume`, `fresh`, `rollover`, `awaiting_authority`, or `refuse` outcome. `decide` is side-effect free outside canonical state. |
+| #83 | `league continuation prepare|reopen|status` | Exclusively claim one exact healthy archive in a verified new binding, reopen only its owning issue under a recoverable fence, and read the complete operation/lineage/archive record. Fresh remains the default outside this explicit path. |
 | #8 | `league rollover prepare|acknowledge|commit|abort|status` | One fenced two-phase replacement for either role. `commit` requires exact acknowledgement and performs the single owner change; `abort` is pre-commit only. |
 | #8 | `league rollover bindings OPERATION_ID [--cursor CURSOR] [--limit COUNT]` | Read one frozen Shotcaller active-Champion snapshot in bounded stable pages. Each page repeats snapshot version/count/digest/expiry and returns an opaque next cursor; acknowledgement verifies the fully retrieved digest against the owner fence. |
 | #23 | `league rollover refresh-bindings --operation-id OP --refresh-id ID --squad-id SQUAD --predecessor-agent-id OLD --successor-agent-id NEW --expected-rollover-version N --expected-snapshot-version N --expected-snapshot-digest DIGEST --expires-at TIME --at TIME` | Replace only an expired snapshot for the exact already-switched operation after one full canonical read and two identical Herdr observations. The final observation runs inside the deferred transaction immediately before pointer CAS without reserving the writer lock; the prior revision and owner switch remain immutable. |
@@ -321,8 +318,9 @@ state machine.
   snapshot, and evidence/handoff references. Incarnation-specific runtime
   bindings reference this row and retain their own unique endpoint/generation;
   they do not duplicate the provider thread identity;
-- `continuation_decisions`: trigger, requested route, concrete benefit, signal
-  snapshot, policy/configuration digest, outcome, reason codes, and authority;
+- `continuation_operations`: archived thread, successor assignment/task/agent,
+  exact new binding digest, instruction/reconciliation digests, concrete benefit,
+  state, version/fence/lease, issue receipt, runtime incarnation, and callsign;
 - `rollover_operations`: role-neutral old/new incarnation references, stable
   scope/Squad reference, state, fence, owner versions, handoff digest,
   acknowledgement, active-Champion snapshot reference when applicable, and

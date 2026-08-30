@@ -36,6 +36,7 @@ RUNTIME_LIFECYCLE_TESTS := \
 	tests/test_production_cleanup.py \
 	tests/test_repository_artifacts.py \
 	tests/test_real_cleanup.py \
+	tests/test_issue_continuation.py \
 	tests/test_model_routing.py \
 	tests/test_visible_champion_launch.py
 

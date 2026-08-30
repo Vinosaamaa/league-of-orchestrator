@@ -802,9 +802,13 @@ def activate_assignment(
                 raise StorageRefusal(
                     "receipt_mismatch", "launch receipt does not match the reserved role identity"
                 )
-            runtime_conflict = store.connection.execute(
+            from .sqlite_continuation_ops import authorize_resumed_runtime
+
+            continuation = authorize_resumed_runtime(store, assignment_id, receipt)
+            runtime_conflicts = store.connection.execute(
                 """
-                SELECT 1 FROM runtime_instances
+                SELECT runtime_instance_id,harness_kind,session_ref
+                  FROM runtime_instances
                  WHERE runtime_instance_id=? OR (harness_kind=? AND session_ref=?)
                 """,
                 (
@@ -812,8 +816,13 @@ def activate_assignment(
                     receipt["harness_kind"],
                     receipt["thread_id"],
                 ),
-            ).fetchone()
-            if runtime_conflict is not None:
+            ).fetchall()
+            if any(
+                row["runtime_instance_id"] == receipt["runtime_instance_id"]
+                for row in runtime_conflicts
+            ) or (
+                runtime_conflicts and continuation is None
+            ):
                 raise StorageRefusal("runtime_conflict", "launch receipt runtime identity is already registered")
             agent_version = int(agent["version"]) + 1
             store.connection.execute(
@@ -971,6 +980,16 @@ def activate_assignment(
                 """,
                 (outbox_id, event_id, assignment["champion_agent_id"], at),
             )
+            if continuation is not None:
+                from .sqlite_continuation_ops import complete_resumed_runtime
+
+                complete_resumed_runtime(
+                    store,
+                    continuation,
+                    receipt["runtime_instance_id"],
+                    assignment["callsign"],
+                    at,
+                )
     except StorageRefusal:
         raise
     except sqlite3.DatabaseError as exc:

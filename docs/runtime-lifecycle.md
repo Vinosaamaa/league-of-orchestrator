@@ -3,7 +3,9 @@
 This slice implements issues
 [#7](https://github.com/Vinosaamaa/league-of-orchestrator/issues/7),
 [#11](https://github.com/Vinosaamaa/league-of-orchestrator/issues/11), and
-[#14](https://github.com/Vinosaamaa/league-of-orchestrator/issues/14) behind
+[#14](https://github.com/Vinosaamaa/league-of-orchestrator/issues/14), with
+issue [#83](https://github.com/Vinosaamaa/league-of-orchestrator/issues/83)
+implementing the accepted issue-#15 continuation policy behind
 the existing `Storage` facade. It does not install, migrate live records, or
 claim a real harness/backend canary. Issue
 [#23](https://github.com/Vinosaamaa/league-of-orchestrator/issues/23) owns that
@@ -107,6 +109,53 @@ this executor. Shotcaller cleanup is accepted only when the archived plan still
 matches the exact switched rollover predecessor and version. Completion derives
 the rollover drain receipt from immutable cleanup action receipts; retries reuse
 the same cleanup operation and rollover receipt.
+
+## Issue-coupled cleanup and exact-thread continuation
+
+Migration v16 is named
+`issue-coupled-cleanup-and-exact-thread-continuation`. It retains historical
+runtime rows while limiting `(harness_kind, session_ref)` uniqueness to live
+`active` or `idle` runtimes. This permits a later runtime incarnation to carry
+the same opaque provider thread identity only after every recorded incarnation
+in that lineage is closed. Unlinked reuse, multiple live rows, or a thread that
+appears outside its lineage refuses.
+
+Issue-coupled cleanup is opt-in and restricted to a completed Champion whose
+`pr_ci` or `deployed_service` proof is complete. The manifest adds an exact
+provider-thread archive and one final `issue_close` action. The planner checks
+that the archive matches the canonical task owner, runtime, callsign,
+repository, issue, branch, worktree, completed acceptance, cleanup proof,
+instruction/policy digests, context health, and declared durable/exact/safe
+resume capabilities. It inserts the lineage/archive/incarnation with the cleanup
+plan in one transaction. External action order remains proof archive, resources,
+session exit, endpoint close, Git cleanup, callsign release, then issue close.
+Any earlier retryable failure leaves the issue open. An already-closed exact
+issue is reconciled without repeating the external action. The provider-thread
+archive becomes `available` only after the issue-close action receipt and final
+teardown receipt commit together.
+
+Continuation is never automatic. `league continuation prepare` takes one
+archive ID plus the intended successor assignment/task/agent and exact new Git
+binding. The store exclusively claims it only when the archive is available,
+all linked runtimes are closed, context is healthy, exact resume and safe
+worktree rebinding are declared, no current agent owns the new worktree, and
+governing instruction drift has an explicit reconciliation digest. A concrete
+benefit must be one of same-task recovery, same-artifact revision, or an
+unresolved decision chain; otherwise the caller must choose a fresh thread.
+
+`league continuation reopen` uses version, fence, executor, and lease
+preconditions around the exact owning-issue reopen. A crash before recording the
+receipt is recovered by observing that same issue already open. Only then may
+the predeclared assignment run. The Codex/Herdr driver invokes `codex resume`
+with the archived thread UUID, binds the new worktree, skips the fresh-thread
+identity handshake, and refuses unless Herdr reports that exact thread on the
+new endpoint. Activation uses the normal callsign queue; it never reserves the
+historical callsign specially. It writes a new runtime incarnation and retains
+the prior task, cleanup, close, and reopen receipts permanently.
+
+The current operational exact-resume driver is Codex on Herdr. A provider with
+no exact durable resume or no safe worktree-rebind declaration fails closed;
+the core continues to store provider identifiers as opaque namespaced strings.
 
 Runtime exit uses the same recoverable shape: it atomically claims a binding
 version and monotonically increasing exit fence before sending exit or close,

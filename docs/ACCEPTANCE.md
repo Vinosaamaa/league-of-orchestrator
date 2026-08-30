@@ -390,6 +390,14 @@ External-effect failures settle blocked only after exact endpoint and
 reservation cleanup; otherwise the assignment and cleanup obligation remain
 `cleanup_pending`.
 
+In-place `league shotcaller create` uses the same effective-presentation-source
+rule in the already-calling Codex pane. Callsign publication is only a seed:
+activation requires two matching source/sequence observations after any owner
+prompt auto-title settles, with at most one same-authority restoration. Exact
+retry sends no prompt and creates no layout or process. A newer user-owned
+presentation source refuses metadata mutation; rollback clears the League route
+while preserving that title, releases the reservation, and creates no Squad.
+
 The release gate is one installed disposable flow: exact capture, one-process
 semantic begin, Champion `assign run`, Champion working and terminal
 transitions, registered-watcher delivery, one-process final commit/boundary,

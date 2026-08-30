@@ -82,6 +82,15 @@ class AssignmentStorage(Protocol):
         at: str,
     ) -> dict[str, Any]: ...
 
+    def record_assignment_title_revalidation(
+        self,
+        assignment_id: str,
+        expected_version: int,
+        display_receipt: dict[str, Any],
+        event_id: str,
+        at: str,
+    ) -> dict[str, Any]: ...
+
     def fail_assignment_context_delivery(
         self,
         assignment_id: str,

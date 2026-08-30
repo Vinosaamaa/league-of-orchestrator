@@ -438,7 +438,7 @@ not read or mutate the installed watcher, live SQLite state, a real terminal,
 the global resource registry, an active callsign, or any user worktree, and it
 performs no install, cutover, live teardown, or merge.
 
-## Champion launch title provenance
+## Launch title provenance
 
 Issue #85 deliberately changes visible Champion launch finalization. The
 pre-context metadata write remains an initial display seed, but successful
@@ -454,4 +454,9 @@ Generated labels now default deterministically to exactly two words and
 explicit labels obey the same maximum. Focused fake-Herdr coverage exercises a
 delayed context auto-title race, post-context restoration, retry deduplication,
 owned retry repair, unowned-metadata refusal, and two-word derivation without a
-live runtime.
+live runtime. The same provenance rule now covers in-place Shotcaller bootstrap:
+the allocated callsign title must settle for two effective-source and sequence
+observations, exact retry may restore same-authority drift once without a
+prompt, and rollback preserves newer user-owned presentation metadata while
+releasing only the League route and callsign reservation. Focused fakes prove
+zero layout/process creation and no Squad registration.

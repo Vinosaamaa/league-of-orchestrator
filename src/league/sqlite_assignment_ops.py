@@ -1179,6 +1179,16 @@ def assignment_launch_context(store: Any, assignment_id: str) -> dict[str, Any]:
         """,
         (assignment_id,),
     ).fetchall()
+    revalidation = store.connection.execute(
+        """
+        SELECT event_id,occurred_at,detail_json
+          FROM events
+         WHERE aggregate_kind='assignment' AND aggregate_id=?
+           AND event_type='assignment_title_revalidated'
+         ORDER BY event_seq DESC LIMIT 1
+        """,
+        (assignment_id,),
+    ).fetchone()
     if len(delivery) > 1:
         raise StorageRefusal(
             "assignment_context_ambiguous",
@@ -1197,6 +1207,18 @@ def assignment_launch_context(store: Any, assignment_id: str) -> dict[str, Any]:
             "at": delivery[0]["occurred_at"],
             **detail,
         }
+        if revalidation is not None:
+            revalidated = json.loads(revalidation["detail_json"])
+            if set(revalidated) != {"display_receipt"} or not isinstance(
+                revalidated["display_receipt"], dict
+            ):
+                raise StorageRefusal(
+                    "assignment_context_ambiguous",
+                    "assignment title revalidation receipt is malformed",
+                )
+            delivered["display_receipt"] = dict(
+                revalidated["display_receipt"]
+            )
     return {
         "assignment_id": assignment_id,
         "state": assignment["state"],
@@ -1411,6 +1433,123 @@ def record_assignment_context_delivery(
         "effect_sha256": effect_sha256,
         "display_receipt": dict(display_receipt),
         **activation,
+        "idempotent": False,
+    }
+
+
+def record_assignment_title_revalidation(
+    store: Any,
+    assignment_id: str,
+    expected_version: int,
+    display_receipt: dict[str, Any],
+    event_id: str,
+    at: str,
+) -> dict[str, Any]:
+    """Append one idempotent fresh visible-title observation after context delivery."""
+
+    _time(at, "assignment title revalidation time")
+    display_keys = {
+        "source",
+        "applies_to_source",
+        "state_change_seq",
+        "sidebar_name",
+        "task_label",
+        "thread_title",
+        "terminal_title",
+    }
+    if (
+        not event_id
+        or set(display_receipt) != display_keys
+        or not all(
+            isinstance(display_receipt[key], str) and display_receipt[key]
+            for key in display_keys - {"state_change_seq"}
+        )
+        or not isinstance(display_receipt["state_change_seq"], int)
+        or display_receipt["state_change_seq"] < 0
+    ):
+        raise StorageRefusal(
+            "assignment_context_invalid",
+            "assignment title revalidation receipt is invalid",
+        )
+    detail = {"display_receipt": dict(display_receipt)}
+    try:
+        with store._transaction():
+            assignment = store.connection.execute(
+                "SELECT task_id,state,version FROM task_assignments WHERE task_assignment_id=?",
+                (assignment_id,),
+            ).fetchone()
+            if (
+                assignment is None
+                or assignment["state"] != "active"
+                or int(assignment["version"]) != expected_version
+            ):
+                raise StorageRefusal(
+                    "assignment_conflict",
+                    "title revalidation requires the exact active assignment version",
+                )
+            context = store.connection.execute(
+                """
+                SELECT 1 FROM events
+                 WHERE aggregate_kind='assignment' AND aggregate_id=?
+                   AND event_type='assignment_context_delivered'
+                """,
+                (assignment_id,),
+            ).fetchall()
+            if len(context) != 1:
+                raise StorageRefusal(
+                    "assignment_incomplete",
+                    "title revalidation requires one exact context receipt",
+                )
+            existing = store.connection.execute(
+                "SELECT aggregate_kind,aggregate_id,event_type,detail_json FROM events WHERE event_id=?",
+                (event_id,),
+            ).fetchone()
+            if existing is not None:
+                if (
+                    existing["aggregate_kind"] != "assignment"
+                    or existing["aggregate_id"] != assignment_id
+                    or existing["event_type"] != "assignment_title_revalidated"
+                    or existing["detail_json"] != _json(detail)
+                ):
+                    raise StorageRefusal(
+                        "assignment_context_conflict",
+                        "assignment title revalidation event conflicts with history",
+                    )
+                return {
+                    "assignment_id": assignment_id,
+                    "version": expected_version,
+                    "event_id": event_id,
+                    "display_receipt": dict(display_receipt),
+                    "idempotent": True,
+                }
+            store.connection.execute(
+                """
+                INSERT INTO events
+                  (event_id,agent_id,task_id,entity_version,event_type,status,update_text,
+                   occurred_at,detail_json,aggregate_kind,aggregate_id)
+                VALUES(?,NULL,?,?,'assignment_title_revalidated','active',
+                       'Champion display metadata revalidated',?,?,'assignment',?)
+                """,
+                (
+                    event_id,
+                    assignment["task_id"],
+                    expected_version,
+                    at,
+                    _json(detail),
+                    assignment_id,
+                ),
+            )
+    except StorageRefusal:
+        raise
+    except sqlite3.DatabaseError as exc:
+        raise store._translate_database_error(
+            exc, "assignment title revalidation conflicted with canonical state"
+        ) from exc
+    return {
+        "assignment_id": assignment_id,
+        "version": expected_version,
+        "event_id": event_id,
+        "display_receipt": dict(display_receipt),
         "idempotent": False,
     }
 

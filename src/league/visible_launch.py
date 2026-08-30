@@ -541,6 +541,7 @@ class HerdrCodexLaunchAdapter:
         tokens = agent.get("tokens")
         return bool(
             isinstance(tokens, Mapping)
+            and agent.get("metadata_source") == self._title_source(assignment_id)
             and tokens.get("sidebar_name") == callsign
             and tokens.get("task_label") == self.options.task_label
             and tokens.get("thread_title") == expected
@@ -565,17 +566,22 @@ class HerdrCodexLaunchAdapter:
         for _ in range(50):
             agent = self._get_agent(routing_name)
             if self._title_exact(agent, callsign, assignment_id):
-                source = _session_source(agent)
+                source = agent.get("metadata_source")
+                applies_to_source = _session_source(agent)
                 sequence = agent.get("state_change_seq")
-                if source is not None and isinstance(sequence, int):
+                if (
+                    isinstance(source, str)
+                    and isinstance(applies_to_source, str)
+                    and isinstance(sequence, int)
+                ):
                     key = (source, sequence)
                     consecutive = consecutive + 1 if key == prior_key else 1
                     prior_key = key
                     if consecutive >= stable_observations:
                         expected = f"{callsign} · {self.options.task_label}"
                         return {
-                            "source": self._title_source(assignment_id),
-                            "applies_to_source": source,
+                            "source": source,
+                            "applies_to_source": applies_to_source,
                             "state_change_seq": sequence,
                             "sidebar_name": callsign,
                             "task_label": self.options.task_label,
@@ -606,6 +612,7 @@ class HerdrCodexLaunchAdapter:
         tokens = agent.get("tokens")
         observed_thread = _session_id(agent)
         applies_to_source = _session_source(agent)
+        presentation_source = agent.get("metadata_source")
         sequence = agent.get("state_change_seq")
         owned = bool(
             agent.get("name") == routing_name
@@ -616,6 +623,9 @@ class HerdrCodexLaunchAdapter:
             and agent.get("foreground_cwd") == self._created.get("worktree")
             and observed_thread == receipt.get("thread_id")
             and isinstance(applies_to_source, str)
+            and isinstance(presentation_source, str)
+            and presentation_source
+            in {applies_to_source, self._title_source(assignment_id)}
             and isinstance(sequence, int)
             and isinstance(tokens, Mapping)
             and tokens.get("launch_title_owner")
@@ -1047,6 +1057,17 @@ class VisibleChampionLaunchService:
                     exc.code,
                     f"event:{spec.assignment_id}:title-validation-failed",
                     f"outbox:{spec.assignment_id}:title-validation-failed",
+                    self.clock.now(),
+                )
+            if prior["context_delivery"].get("display_receipt") != observation:
+                observation_digest = _sha256(
+                    _stable_json(observation).encode("utf-8")
+                )[:16]
+                self.store.record_assignment_title_revalidation(
+                    spec.assignment_id,
+                    prior["version"],
+                    observation,
+                    f"event:{spec.assignment_id}:title-revalidated:{observation_digest}",
                     self.clock.now(),
                 )
             return {

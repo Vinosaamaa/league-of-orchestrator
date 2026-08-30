@@ -377,6 +377,32 @@ def test_real_adapter_one_command_success_and_retry(root: Path) -> None:
     assert runner.tokens["launch_title_source"] == display_receipt["source"]
     assert runner.metadata_source == display_receipt["source"]
     assert len(runner.contexts) == contexts_before_retry == 1
+    durable_display_receipt = store.assignment_launch_context(
+        spec.assignment_id
+    )["context_delivery"]["display_receipt"]
+    assert durable_display_receipt == restore_retry["context_delivery"]["display_receipt"]
+    assert durable_display_receipt["source"] == runner.metadata_source
+    assert durable_display_receipt["state_change_seq"] == runner.state_change_seq
+    revalidation_events = store.connection.execute(
+        "SELECT COUNT(*) FROM events WHERE event_type='assignment_title_revalidated' AND aggregate_id=?",
+        (spec.assignment_id,),
+    ).fetchone()[0]
+    assert revalidation_events == 1
+    calls_before_exact_revalidation = len(runner.calls)
+    exact_revalidation = service.launch(spec)
+    assert exact_revalidation["context_delivery"]["display_receipt"] == durable_display_receipt
+    assert store.connection.execute(
+        "SELECT COUNT(*) FROM events WHERE event_type='assignment_title_revalidated' AND aggregate_id=?",
+        (spec.assignment_id,),
+    ).fetchone()[0] == revalidation_events
+    assert not any(
+        call[:3]
+        in {
+            ("herdr", "pane", "report-metadata"),
+            ("herdr", "agent", "prompt"),
+        }
+        for call in runner.calls[calls_before_exact_revalidation:]
+    )
     assert store.connection.execute(
         "SELECT COUNT(*) FROM events WHERE event_type='assignment_context_delivered' AND aggregate_id=?",
         (spec.assignment_id,),
@@ -455,7 +481,7 @@ def test_active_retry_refuses_newer_user_metadata(root: Path) -> None:
     runner.metadata_source = "user-selected"
     runner.state_change_seq += 1
     runner.title = "User selected title"
-    runner.tokens["launch_title_owner"] = "user-selected"
+    stale_launch_tokens = dict(runner.tokens)
     calls_before_retry = len(runner.calls)
     contexts_before_retry = len(runner.contexts)
     result = service.launch(spec)
@@ -467,6 +493,8 @@ def test_active_retry_refuses_newer_user_metadata(root: Path) -> None:
         call[:3] == ("herdr", "pane", "report-metadata") for call in retry_calls
     )
     assert runner.metadata_source == "user-selected"
+    assert runner.title == "User selected title"
+    assert runner.tokens == stale_launch_tokens
     assert len(runner.contexts) == contexts_before_retry == 1
     launch = store.assignment_launch_context(spec.assignment_id)
     assert launch["runtime_instance_id"] == f"runtime:{LUX_ID}"

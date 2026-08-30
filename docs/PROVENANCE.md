@@ -420,10 +420,13 @@ unchanged universal guide or League supplement.
 The release-staging boundary now opens every manifest path component relative
 to one root descriptor without following symlinks, binds the opened file to one
 regular identity, and checks
-that both staged copies are regular files with exact source bytes. A staging
+that both staged copies are regular files with exact source bytes. Release
+reads use bounded buffers and reject oversized sources before allocation. A
+staging
 crash atomically quarantines a candidate path, verifies its recorded
 device/inode identity, and removes only identities newly reserved by that
-attempt before retry;
+attempt before retry. Cleanup failures cannot replace the original staging
+refusal;
 focused temporary-root coverage proves VERSION regular-file identity, symlink
 refusal before mutation, byte parity, retry, guide-hash preservation, and
 rollback without changing any retained release or live pointer.

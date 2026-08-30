@@ -2101,7 +2101,7 @@ def _migration_and_install_phase(
     live_shadow = _read_only_shadow(home, plan)
     if fault is not None:
         fault("after_live_shadow")
-    staged = _staged_install(home / "staged", source)
+    staged = _staged_install(home / "staged", source, fault=fault)
     staged["inactive_after_checks"] = staged["rollback"]["completed"]
     staged["global_install_performed"] = False
     staged["supervision"] = _staged_supervision_check(staged, home)

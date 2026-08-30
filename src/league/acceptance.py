@@ -58,6 +58,8 @@ PENDING_SLICES = (
 )
 UNVERIFIED_RUNTIMES = ("codex", "cursor", "pi", "herdr", "tmux")
 FIXTURE_RUNTIME_ROOT = Path("/synthetic/league-acceptance-runtime")
+MAX_RELEASE_FILE_BYTES = 4 * 1024 * 1024
+RELEASE_READ_CHUNK_BYTES = 64 * 1024
 
 
 def _stable_bytes(value: Any) -> bytes:
@@ -431,13 +433,19 @@ def _release_files(source_root: Path) -> list[Path]:
     files.extend(_release_directory_files(source_root, Path("src/league"), ".py"))
     files.extend(_release_directory_files(source_root, Path("schema"), ".json"))
     for path in files:
-        _read_regular_bytes(
+        _regular_file_digest(
             path, root=source_root, refusal_code="release_incomplete"
         )
     return files
 
 
-def _read_regular_bytes(path: Path, *, root: Path, refusal_code: str) -> bytes:
+def _read_regular_file(
+    path: Path,
+    *,
+    root: Path,
+    refusal_code: str,
+    capture: bool,
+) -> tuple[Optional[bytes], str]:
     descriptor: Optional[int] = None
     verification_descriptor: Optional[int] = None
     try:
@@ -459,9 +467,24 @@ def _read_regular_bytes(path: Path, *, root: Path, refusal_code: str) -> bytes:
             raise StorageRefusal(
                 refusal_code, "release bytes must come from a regular file"
             )
+        if opened.st_size > MAX_RELEASE_FILE_BYTES:
+            raise StorageRefusal(
+                refusal_code, "release file exceeds the bounded staging size"
+            )
+        digest = hashlib.sha256()
+        chunks: list[bytes] = []
+        byte_count = 0
         with os.fdopen(descriptor, "rb") as handle:
             descriptor = None
-            payload = handle.read()
+            while chunk := handle.read(RELEASE_READ_CHUNK_BYTES):
+                byte_count += len(chunk)
+                if byte_count > MAX_RELEASE_FILE_BYTES:
+                    raise StorageRefusal(
+                        refusal_code, "release file exceeds the bounded staging size"
+                    )
+                digest.update(chunk)
+                if capture:
+                    chunks.append(chunk)
             after_descriptor = os.fstat(handle.fileno())
         verification_descriptor = _open_release_descriptor(
             root,
@@ -476,12 +499,12 @@ def _read_regular_bytes(path: Path, *, root: Path, refusal_code: str) -> bytes:
             or (current.st_dev, current.st_ino) != identity
             or after_descriptor.st_size != opened.st_size
             or after_descriptor.st_mtime_ns != opened.st_mtime_ns
-            or len(payload) != opened.st_size
+            or byte_count != opened.st_size
         ):
             raise StorageRefusal(
                 refusal_code, "release file identity changed while it was read"
             )
-        return payload
+        return (b"".join(chunks) if capture else None), digest.hexdigest()
     except StorageRefusal:
         raise
     except OSError as exc:
@@ -495,6 +518,22 @@ def _read_regular_bytes(path: Path, *, root: Path, refusal_code: str) -> bytes:
             os.close(verification_descriptor)
 
 
+def _read_regular_bytes(path: Path, *, root: Path, refusal_code: str) -> bytes:
+    payload, _ = _read_regular_file(
+        path, root=root, refusal_code=refusal_code, capture=True
+    )
+    if payload is None:
+        raise AssertionError("captured release bytes are required")
+    return payload
+
+
+def _regular_file_digest(path: Path, *, root: Path, refusal_code: str) -> str:
+    _, digest = _read_regular_file(
+        path, root=root, refusal_code=refusal_code, capture=False
+    )
+    return digest
+
+
 def _directory_identity(path: Path) -> tuple[int, int]:
     status = path.lstat()
     if not stat.S_ISDIR(status.st_mode):
@@ -503,8 +542,14 @@ def _directory_identity(path: Path) -> tuple[int, int]:
 
 
 def _remove_reserved_directory(
-    path: Path, identity: tuple[int, int], *, recursive: bool
+    path: Path,
+    identity: tuple[int, int],
+    *,
+    recursive: bool,
+    fault: Optional[FaultInjector] = None,
 ) -> None:
+    if fault is not None:
+        fault(f"before_reserved_cleanup:{path.name}")
     quarantine = path.with_name(
         f".{path.name}.cleanup-{secrets.token_hex(16)}"
     )
@@ -572,19 +617,15 @@ def _stage_release_bytes(
         destination = release / relative
         _atomic_write(bundle_file, payload, mode=mode)
         _atomic_write(destination, payload, mode=mode)
-        release_hashes[name] = _sha256(
-            _read_regular_bytes(
-                bundle_file,
-                root=release_bundle,
-                refusal_code="staged_parity_failed",
-            )
+        release_hashes[name] = _regular_file_digest(
+            bundle_file,
+            root=release_bundle,
+            refusal_code="staged_parity_failed",
         )
-        staged_hashes[name] = _sha256(
-            _read_regular_bytes(
-                destination,
-                root=release,
-                refusal_code="staged_parity_failed",
-            )
+        staged_hashes[name] = _regular_file_digest(
+            destination,
+            root=release,
+            refusal_code="staged_parity_failed",
         )
         if fault is not None:
             fault(f"after_release_file:{name}")
@@ -864,7 +905,15 @@ def _staged_install(
             )
     except BaseException:
         for directory, identity in reversed(reserved):
-            _remove_reserved_directory(directory, identity, recursive=True)
+            try:
+                _remove_reserved_directory(
+                    directory,
+                    identity,
+                    recursive=True,
+                    fault=fault,
+                )
+            except BaseException:
+                pass
         raise
     legacy.mkdir(mode=0o700)
     (legacy / "bin").mkdir(mode=0o700)

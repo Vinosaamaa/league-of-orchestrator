@@ -24,6 +24,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from league import MAX_ACCEPTANCE_SENTINEL_PATHS  # noqa: E402
 from league.acceptance import (  # noqa: E402
+    MAX_RELEASE_FILE_BYTES,
     POINTER_STAGES,
     PROCESS_SENTINEL_SCHEMA,
     SentinelSet,
@@ -575,10 +576,17 @@ def copy_release_source(destination: Path) -> None:
         shutil.copy2(source, target)
 
 
-def test_version_staging_is_regular_symlink_safe_and_retryable(root: Path) -> None:
+def refusal_home(root: Path, name: str) -> tuple[Path, dict[str, tuple[str, bytes | str]]]:
+    home = root / name
+    home.mkdir()
+    (home / "AGENTS.md").write_bytes(b"toolkit-owned universal guide\n")
+    return home, tree_snapshot(home)
+
+
+def test_version_staging_is_regular_and_exact(root: Path) -> None:
+    root.mkdir()
     source_version = ROOT / "VERSION"
     assert stat.S_ISREG(source_version.lstat().st_mode)
-
     normal = root / "normal"
     receipt = _staged_install(normal, ROOT)
     bundle_version = normal / "release-bundle/0.2.28/VERSION"
@@ -590,38 +598,53 @@ def test_version_staging_is_regular_symlink_safe_and_retryable(root: Path) -> No
     assert receipt["guidance"]["universal_unchanged"] is True
     assert receipt["guidance"]["rollback_completed"] is True
 
+
+def test_release_source_symlinks_and_oversize_refuse_before_mutation(
+    root: Path,
+) -> None:
+    root.mkdir()
+    source_version = ROOT / "VERSION"
     linked_source = root / "linked-source"
     copy_release_source(linked_source)
     version_target = root / "untrusted-version-target"
     version_target.write_bytes(source_version.read_bytes())
     (linked_source / "VERSION").unlink()
     (linked_source / "VERSION").symlink_to(version_target)
-    refused_home = root / "symlink-refusal"
-    refused_home.mkdir()
-    universal = refused_home / "AGENTS.md"
-    universal.write_bytes(b"toolkit-owned universal guide\n")
-    before = tree_snapshot(refused_home)
+    linked_home, linked_before = refusal_home(root, "symlink-refusal")
     refused(
-        lambda: _staged_install(refused_home, linked_source),
+        lambda: _staged_install(linked_home, linked_source),
         "release_incomplete",
     )
-    assert tree_snapshot(refused_home) == before
+    assert tree_snapshot(linked_home) == linked_before
 
     ancestor_source = root / "ancestor-source"
     copy_release_source(ancestor_source)
     schema_target = root / "untrusted-schema-target"
     (ancestor_source / "schema").rename(schema_target)
     (ancestor_source / "schema").symlink_to(schema_target)
-    ancestor_home = root / "ancestor-refusal"
-    ancestor_home.mkdir()
-    (ancestor_home / "AGENTS.md").write_bytes(b"toolkit-owned universal guide\n")
-    ancestor_before = tree_snapshot(ancestor_home)
+    ancestor_home, ancestor_before = refusal_home(root, "ancestor-refusal")
     refused(
         lambda: _staged_install(ancestor_home, ancestor_source),
         "release_incomplete",
     )
     assert tree_snapshot(ancestor_home) == ancestor_before
 
+    oversized_source = root / "oversized-source"
+    copy_release_source(oversized_source)
+    (oversized_source / "src/league/report_template.html").write_bytes(
+        b"x" * (MAX_RELEASE_FILE_BYTES + 1)
+    )
+    oversized_home, oversized_before = refusal_home(root, "oversized-refusal")
+    refused(
+        lambda: _staged_install(oversized_home, oversized_source),
+        "release_incomplete",
+    )
+    assert tree_snapshot(oversized_home) == oversized_before
+
+
+def test_staging_crash_cleanup_and_retry(root: Path) -> None:
+    root.mkdir()
+    source_version = ROOT / "VERSION"
     retry_home = root / "crash-retry"
     retry_home.mkdir()
     retry_universal = retry_home / "AGENTS.md"
@@ -650,6 +673,12 @@ def test_version_staging_is_regular_symlink_safe_and_retryable(root: Path) -> No
     assert retry["guidance"]["rollback_completed"] is True
     assert retry_universal.read_bytes() == universal_before
 
+
+def test_staging_cleanup_preserves_replacements_and_original_refusal(
+    root: Path,
+) -> None:
+    root.mkdir()
+    source_version = ROOT / "VERSION"
     swapped_home = root / "swapped-reservation"
     moved_bundle = root / "original-reserved-bundle"
 
@@ -673,6 +702,21 @@ def test_version_staging_is_regular_symlink_safe_and_retryable(root: Path) -> No
     )
     assert (moved_bundle / "VERSION").read_bytes() == source_version.read_bytes()
     assert not (swapped_home / "stage-prefix/releases/0.2.28").exists()
+
+    failure_home = root / "cleanup-failure"
+
+    def fail_stage_and_cleanup(event: str) -> None:
+        if event == "after_release_file:VERSION":
+            raise StorageRefusal(
+                "synthetic_staging_refusal", "synthetic staging refusal"
+            )
+        if event.startswith("before_reserved_cleanup:"):
+            raise PermissionError("synthetic cleanup failure")
+
+    refused(
+        lambda: _staged_install(failure_home, ROOT, fault=fail_stage_and_cleanup),
+        "synthetic_staging_refusal",
+    )
 
 
 def test_issue_23_incident_artifacts_are_complete_and_public_safe() -> None:
@@ -721,8 +765,13 @@ def main() -> None:
         test_existing_release_identity_precedes_install_mutation(
             root / "release-identity-collision"
         )
-        test_version_staging_is_regular_symlink_safe_and_retryable(
-            root / "version-regular-file"
+        test_version_staging_is_regular_and_exact(root / "version-regular-file")
+        test_release_source_symlinks_and_oversize_refuse_before_mutation(
+            root / "release-source-refusal"
+        )
+        test_staging_crash_cleanup_and_retry(root / "staging-crash-retry")
+        test_staging_cleanup_preserves_replacements_and_original_refusal(
+            root / "staging-cleanup"
         )
         test_schema_and_command_inventory()
         test_issue_23_incident_artifacts_are_complete_and_public_safe()

@@ -83,14 +83,12 @@ def _options(root: Path) -> VisibleLaunchOptions:
 
 
 class FakeHerdrRunner:
-    def __init__(
-        self, worktree: Path, *, wrong_thread: bool = False, title_only: bool = False
-    ) -> None:
+    def __init__(self, worktree: Path, *, wrong_thread: bool = False) -> None:
         self.worktree = str(worktree.resolve())
         self.wrong_thread = wrong_thread
-        self.title_only = title_only
         self.started = False
         self.renamed = False
+        self.session_reported = False
         self.closed = False
         self.contexts: list[str] = []
         self.calls: list[tuple[str, ...]] = []
@@ -109,6 +107,7 @@ class FakeHerdrRunner:
         agent = {
             "agent": "codex",
             "agent_status": "idle",
+            "interactive_ready": True,
             "cwd": self.worktree,
             "foreground_cwd": self.worktree,
             "name": "lux",
@@ -119,13 +118,7 @@ class FakeHerdrRunner:
             "tokens": tokens,
             "workspace_id": "w1",
         }
-        if self.title_only:
-            if self.renamed:
-                tokens["identity_thread_id"] = thread
-            else:
-                agent["terminal_title_stripped"] = f"{thread} | codex"
-        else:
-            agent["agent_session"] = {"value": thread}
+        agent["agent_session"] = {"value": thread}
         return agent
 
     def run(
@@ -151,11 +144,12 @@ class FakeHerdrRunner:
             result = {"agent": self._agent()}
         elif command[:3] == ("herdr", "agent", "get"):
             result = {"agent": self._agent()}
+        elif command[:3] == ("herdr", "pane", "report-metadata"):
+            self.renamed = True
+            result = {"accepted": True}
         elif command[:3] == ("herdr", "agent", "prompt"):
             prompt = command[4]
-            if prompt.startswith("/rename "):
-                self.renamed = True
-            elif prompt == "/exit":
+            if prompt == "/exit":
                 self.closed = True
             else:
                 self.contexts.append(prompt)
@@ -237,18 +231,47 @@ def test_real_adapter_one_command_success_and_retry(root: Path) -> None:
     store.close()
 
 
-def test_real_adapter_observes_generated_thread_before_session_metadata(root: Path) -> None:
-    store, clock, worktree = _context(root, "title-session")
+class DeferredSessionRunner(FakeHerdrRunner):
+    def _agent(self) -> dict[str, object]:
+        agent = super()._agent()
+        if not self.session_reported:
+            agent.pop("agent_session", None)
+        return agent
+
+    def run(
+        self, arguments, *, timeout_seconds: int = 30
+    ) -> subprocess.CompletedProcess[str]:
+        command = tuple(arguments)
+        if command[:3] == ("herdr", "agent", "prompt") and "identity handshake" in command[4]:
+            self.session_reported = True
+        return super().run(arguments, timeout_seconds=timeout_seconds)
+
+
+def test_real_adapter_persists_exact_initial_codex_session(root: Path) -> None:
+    store, clock, worktree = _context(root, "deferred-session")
     options = _options(root)
-    runner = FakeHerdrRunner(worktree, title_only=True)
-    service = VisibleChampionLaunchService(store, _adapter(options, runner), options, clock)
-    spec = _spec(worktree, "title-session")
-    result = service.launch(spec)
+    runner = DeferredSessionRunner(worktree)
+    result = VisibleChampionLaunchService(
+        store, _adapter(options, runner), options, clock
+    ).launch(_spec(worktree, "deferred-session"))
     assert result["state"] == "active"
-    assert store.assignment_launch_context(spec.assignment_id)["acceptance_receipt"][
-        "thread_id"
-    ] == THREAD_ID
-    assert len(runner.contexts) == 1
+    launch = store.assignment_launch_context("assignment:deferred-session")
+    assert launch["acceptance_receipt"]["thread_id"] == THREAD_ID
+    assert runner.session_reported is True
+    assert any(
+        "identity handshake" in call[4]
+        for call in runner.calls
+        if call[:3] == ("herdr", "agent", "prompt")
+    )
+    assert any(
+        call[:3] == ("herdr", "pane", "report-metadata") for call in runner.calls
+    )
+    assert not any(
+        call[:3] == ("herdr", "agent", "prompt")
+        and len(call) > 4
+        and call[4].startswith("/rename ")
+        for call in runner.calls
+    )
     store.close()
 
 
@@ -448,7 +471,7 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="league-visible-launch-") as temporary:
         root = Path(temporary)
         test_real_adapter_one_command_success_and_retry(root)
-        test_real_adapter_observes_generated_thread_before_session_metadata(root)
+        test_real_adapter_persists_exact_initial_codex_session(root)
         test_pre_session_launch_failure_closes_exact_pending_pane(root)
         test_linked_worktree_trust_binds_owning_repository(root)
         test_unproven_partial_launch_stays_cleanup_pending(root)

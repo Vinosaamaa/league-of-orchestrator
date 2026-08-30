@@ -8,6 +8,7 @@ import fcntl
 import hashlib
 import json
 import os
+import secrets
 import sys
 import time
 from datetime import datetime, timedelta
@@ -238,6 +239,27 @@ def _prompt_identity(
     return f"prompt:hook:{digest}", f"hook:{digest}"
 
 
+def _codex_prompt_invocation_id() -> str:
+    """Mint one opaque identity for one provider hook invocation.
+
+    Codex deliberately reuses ``turn_id`` for queued steers in the same active
+    turn.  The invocation identity is therefore created once in the hook
+    process and carried unchanged through broker retry or direct fallback.
+    """
+
+    return f"codex-user-prompt:{secrets.token_hex(16)}"
+
+
+def _valid_codex_prompt_invocation_id(value: Any) -> bool:
+    prefix = "codex-user-prompt:"
+    return (
+        isinstance(value, str)
+        and len(value) == len(prefix) + 32
+        and value.startswith(prefix)
+        and all(character in "0123456789abcdef" for character in value[len(prefix):])
+    )
+
+
 def _capture_prompt(
     store: SQLiteStorage,
     scope: str | None,
@@ -246,14 +268,24 @@ def _capture_prompt(
     payload: dict[str, Any],
     *,
     adapter_kind: str,
+    capture_event_id: str | None = None,
 ) -> dict[str, Any]:
     if adapter_kind == "codex":
         event_name = "UserPromptSubmit"
         session_ref = payload.get("session_id")
-        raw_source_event_key = payload.get("turn_id")
+        provider_turn_id = payload.get("turn_id")
+        raw_source_event_key = (
+            f"{provider_turn_id}\0{capture_event_id}"
+            if isinstance(provider_turn_id, str)
+            and provider_turn_id
+            and isinstance(capture_event_id, str)
+            and capture_event_id
+            else None
+        )
     else:
         event_name = "beforeSubmitPrompt"
         session_ref = payload.get("conversation_id")
+        provider_turn_id = payload.get("generation_id")
         raw_source_event_key = payload.get("generation_id")
     body = payload.get("prompt")
     if (
@@ -280,7 +312,7 @@ def _capture_prompt(
         and store.consume_stop_feedback(
             scope,
             actor_id,
-            _codex_turn_generation(session_ref, raw_source_event_key),
+            _codex_turn_generation(session_ref, provider_turn_id),
             body,
         )
     ):
@@ -289,7 +321,9 @@ def _capture_prompt(
             "prompt_id": None,
             "idempotent": False,
         }
-    now = datetime.now().astimezone().isoformat(timespec="seconds")
+    # Preserve provider invocation order for multiple steers accepted inside
+    # one Codex turn; second precision collapses ordinary queued submissions.
+    now = datetime.now().astimezone().isoformat(timespec="microseconds")
     if actor_id is None:
         return store.quarantine_prompt(
             prompt_id, adapter_kind, session_ref, source_event_key, body, now
@@ -461,11 +495,16 @@ def handle_brokered_hook(
     payload = hook.get("payload")
     shotcaller = hook.get("shotcaller")
     session_id = hook.get("session_id")
+    capture_event_id = hook.get("capture_event_id")
     if (
         command not in BROKERED_HOOK_COMMANDS
         or not isinstance(payload, dict)
         or (shotcaller is not None and not isinstance(shotcaller, str))
         or (session_id is not None and not isinstance(session_id, str))
+        or (
+            command == "codex-user-prompt-hook"
+            and not _valid_codex_prompt_invocation_id(capture_event_id)
+        )
     ):
         raise StorageRefusal("prompt_hook_invalid", "brokered hook request is invalid")
     args = argparse.Namespace(shotcaller=shotcaller, session_id=session_id)
@@ -494,7 +533,7 @@ def handle_brokered_hook(
             actor_id,
             terminal,
             datetime.now().astimezone().isoformat(timespec="seconds"),
-            block_on_fresh_terminal=True,
+            block_on_fresh_terminal=False,
         )
         output = (
             {
@@ -516,6 +555,7 @@ def handle_brokered_hook(
         actor_role,
         payload,
         adapter_kind="codex" if command == "codex-user-prompt-hook" else "cursor",
+        capture_event_id=capture_event_id,
     )
     return {
         "hook_output": {},
@@ -534,6 +574,7 @@ def _broker_hook(
     payload: dict[str, Any],
     *,
     timeout_seconds: float = 0.1,
+    capture_event_id: str | None = None,
 ) -> dict[str, Any]:
     locator = f"unix:{PersistentSupervisor(_state_root()).socket_path}"
     return send_supervisor_message(
@@ -545,6 +586,7 @@ def _broker_hook(
                 "shotcaller": args.shotcaller,
                 "session_id": args.session_id,
                 "payload": payload,
+                "capture_event_id": capture_event_id,
             },
         },
         timeout_seconds=timeout_seconds,
@@ -879,16 +921,28 @@ def main(argv: list[str] | None = None) -> int:
         _emit(pause_supervisor(_state_root(), args.shotcaller))
         return 0
     payload = _payload() if args.command.endswith("-hook") else {}
+    capture_event_id = (
+        _codex_prompt_invocation_id()
+        if args.command == "codex-user-prompt-hook"
+        else None
+    )
     fallback_store = None
     if args.command in BROKERED_HOOK_COMMANDS:
         try:
-            response = _broker_hook(args, payload)
+            response = _broker_hook(
+                args, payload, capture_event_id=capture_event_id
+            )
         except StorageRefusal:
             raise
         except SupervisorUnavailable:
             if _persistent_service_lock_held(_state_root()):
                 try:
-                    response = _broker_hook(args, payload, timeout_seconds=0.4)
+                    response = _broker_hook(
+                        args,
+                        payload,
+                        timeout_seconds=0.4,
+                        capture_event_id=capture_event_id,
+                    )
                 except SupervisorUnavailable:
                     pass
                 else:
@@ -933,6 +987,7 @@ def main(argv: list[str] | None = None) -> int:
                 adapter_kind=(
                     "codex" if args.command == "codex-user-prompt-hook" else "cursor"
                 ),
+                capture_event_id=capture_event_id,
             )
             if (
                 actor_role == "shotcaller"
@@ -996,7 +1051,7 @@ def main(argv: list[str] | None = None) -> int:
                         actor_id,
                         terminal,
                         datetime.now().astimezone().isoformat(timespec="seconds"),
-                        block_on_fresh_terminal=args.command == "codex-stop-hook",
+                        block_on_fresh_terminal=False,
                     )
             except StorageRefusal as exc:
                 if exc.code != "busy":

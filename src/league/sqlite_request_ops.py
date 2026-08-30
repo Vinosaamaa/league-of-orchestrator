@@ -350,12 +350,13 @@ def intake_prompt(
                     UPDATE watcher_scopes
                        SET user_message_generation=user_message_generation+1,
                            wait_generation=wait_generation+1,stop_blocked=0,wait_active=0,
+                           last_event_id=?,
                            pending_stop_feedback_digest=NULL,
                            pending_stop_terminal_generation=NULL,
                            pending_stop_wait_generation=NULL
                      WHERE scope_id=?
                     """,
-                    (wake_scope_id,),
+                    (prompt_id, wake_scope_id),
                 )
     except StorageRefusal:
         raise
@@ -436,12 +437,13 @@ def quarantine_prompt(
                     UPDATE watcher_scopes
                        SET user_message_generation=user_message_generation+1,
                            wait_generation=wait_generation+1,stop_blocked=0,wait_active=0,
+                           last_event_id=?,
                            pending_stop_feedback_digest=NULL,
                            pending_stop_terminal_generation=NULL,
                            pending_stop_wait_generation=NULL
                      WHERE scope_id=? AND actor_agent_id=?
                     """,
-                    (wake_scope_id, wake_actor_id),
+                    (prompt_id, wake_scope_id, wake_actor_id),
                 )
                 store.connection.execute(
                     """

@@ -1592,9 +1592,10 @@ def stop_decision(
                     "priority": "explicit_allow_stop_once",
                 }
             wait_generation = int(scope["wait_generation"])
-            should_block = int(scope["last_blocked_wait_generation"]) < wait_generation or (
-                block_on_fresh_terminal and terminal_fresh
-            )
+            # A provider terminal identifier scopes Stop retries; it is not a
+            # user-event identity.  Only a durable wait rearm (including a
+            # newly captured prompt event) earns another one-shot block.
+            should_block = int(scope["last_blocked_wait_generation"]) < wait_generation
             if should_block:
                 reason_digest = hashlib.sha256(
                     stop_feedback_reason(

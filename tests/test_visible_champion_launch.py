@@ -15,6 +15,7 @@ sys.path[:0] = [str(ROOT / "src"), str(ROOT / "tests")]
 
 from league.request_services import AssignmentSpec, LaunchAdapterError  # noqa: E402
 from league.storage import StorageRefusal  # noqa: E402
+import league.visible_launch as visible_launch  # noqa: E402
 from league.visible_launch import (  # noqa: E402
     HerdrCodexLaunchAdapter,
     VisibleChampionLaunchService,
@@ -83,16 +84,66 @@ def _options(root: Path) -> VisibleLaunchOptions:
     )
 
 
+def test_generated_task_labels_are_deterministic_two_word_names() -> None:
+    examples = {
+        "Make Cursor and Pi operational across the full League lifecycle": "Cursor Pi",
+        "Research and implement cross-provider agent usage metering": "Usage Meter",
+        "Add YOLO mode for one bounded launch": "YOLO Mode",
+        "Implement issue-coupled Champion cleanup and exact-thread reopen": "Thread Reopen",
+        "Preserve Champion title after launch context delivery": "Title Repair",
+    }
+    for summary, expected in examples.items():
+        assert visible_launch.derive_task_label(summary) == expected
+        assert len(expected.split()) == 2
+
+
+def test_task_label_defaults_and_explicit_labels_stay_two_words(root: Path) -> None:
+    help_result = subprocess.run(
+        (str(ROOT / "bin/league"), "assign", "run", "--help"),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert help_result.returncode == 0
+    assert "[--task-label TASK_LABEL]" in help_result.stdout
+
+    options = _options(root)
+    too_many_words = VisibleLaunchOptions(
+        workspace_id=options.workspace_id,
+        task_label="Too Many Words",
+        model=options.model,
+        effort=options.effort,
+        league_command=options.league_command,
+        state_root=options.state_root,
+    )
+    try:
+        _adapter(too_many_words, FakeHerdrRunner(root))
+    except StorageRefusal as exc:
+        assert exc.code == "launch_scope_invalid"
+    else:
+        raise AssertionError("three-word Champion task label was accepted")
+
+
 class FakeHerdrRunner:
-    def __init__(self, worktree: Path, *, wrong_thread: bool = False) -> None:
+    def __init__(
+        self,
+        worktree: Path,
+        *,
+        wrong_thread: bool = False,
+        delayed_context_title_reads: int | None = None,
+    ) -> None:
         self.worktree = str(worktree.resolve())
         self.wrong_thread = wrong_thread
+        self.delayed_context_title_reads = delayed_context_title_reads
         self.started = False
-        self.renamed = False
         self.session_reported = False
         self.closed = False
         self.title = ""
         self.tokens: dict[str, str] = {}
+        self.metadata_source = "herdr:codex"
+        self.source_sequences: dict[str, int] = {}
+        self.state_change_seq = 99
+        self.pending_title_reads: int | None = None
         self.contexts: list[str] = []
         self.calls: list[tuple[str, ...]] = []
 
@@ -106,7 +157,8 @@ class FakeHerdrRunner:
             "foreground_cwd": self.worktree,
             "name": "lux",
             "pane_id": "w1:p99",
-            "state_change_seq": 99,
+            "metadata_source": self.metadata_source,
+            "state_change_seq": self.state_change_seq,
             "tab_id": "w1:t99",
             "terminal_id": "term_test_99",
             "terminal_title": self.title,
@@ -114,8 +166,42 @@ class FakeHerdrRunner:
             "tokens": dict(self.tokens),
             "workspace_id": "w1",
         }
-        agent["agent_session"] = {"value": thread}
+        agent["agent_session"] = {
+            "agent": "codex",
+            "kind": "id",
+            "source": "herdr:codex",
+            "value": thread,
+        }
         return agent
+
+    def _advance_delayed_title(self) -> None:
+        if self.pending_title_reads is None:
+            return
+        self.pending_title_reads -= 1
+        if self.pending_title_reads > 0:
+            return
+        self.pending_title_reads = None
+        self.metadata_source = "herdr:codex"
+        self.state_change_seq += 1
+        self.title = "League assignment context | codex"
+        self.tokens.update(
+            {
+                "callsign": "League",
+                "sidebar_name": "League assignment context",
+                "task_label": "assignment context",
+                "thread_title": "League assignment context",
+            }
+        )
+
+    def active_copy(self) -> "FakeHerdrRunner":
+        copied = FakeHerdrRunner(Path(self.worktree))
+        copied.started = True
+        copied.title = self.title
+        copied.tokens = dict(self.tokens)
+        copied.metadata_source = self.metadata_source
+        copied.source_sequences = dict(self.source_sequences)
+        copied.state_change_seq = self.state_change_seq
+        return copied
 
     def run(
         self, arguments, *, timeout_seconds: int = 30
@@ -140,8 +226,23 @@ class FakeHerdrRunner:
             result = {"agent": self._agent()}
         elif command[:3] == ("herdr", "agent", "get"):
             result = {"agent": self._agent()}
+            self._advance_delayed_title()
         elif command[:3] == ("herdr", "pane", "report-metadata"):
-            self.renamed = True
+            source = command[command.index("--source") + 1]
+            if "--applies-to-source" in command:
+                applies_to = command[command.index("--applies-to-source") + 1]
+                if applies_to != "herdr:codex":
+                    return subprocess.CompletedProcess(
+                        command, 1, "", "metadata source mismatch"
+                    )
+            sequence = int(command[command.index("--seq") + 1])
+            if sequence <= self.source_sequences.get(source, 0):
+                return subprocess.CompletedProcess(
+                    command, 1, "", "metadata sequence conflict"
+                )
+            self.source_sequences[source] = sequence
+            self.metadata_source = source
+            self.state_change_seq += 1
             self.title = command[command.index("--title") + 1]
             self.tokens = {}
             for index, value in enumerate(command):
@@ -155,6 +256,14 @@ class FakeHerdrRunner:
                 self.closed = True
             else:
                 self.contexts.append(prompt)
+                if (
+                    prompt.startswith("League assignment:")
+                    and self.delayed_context_title_reads is not None
+                ):
+                    self.pending_title_reads = self.delayed_context_title_reads
+                    if "--wait" in command:
+                        while self.pending_title_reads is not None:
+                            self._advance_delayed_title()
             result = {"accepted": True}
         elif command[:3] == ("herdr", "pane", "close"):
             self.closed = True
@@ -173,30 +282,26 @@ def _adapter(options: VisibleLaunchOptions, runner: FakeHerdrRunner):
     )
 
 
-class AutoTitleContextRunner(FakeHerdrRunner):
-    def run(
-        self, arguments, *, timeout_seconds: int = 30
-    ) -> subprocess.CompletedProcess[str]:
-        command = tuple(arguments)
-        completed = super().run(arguments, timeout_seconds=timeout_seconds)
-        if (
-            command[:3] == ("herdr", "agent", "prompt")
-            and command[4].startswith("League assignment:")
-        ):
-            self.title = "League assignment context"
-            self.tokens["thread_title"] = self.title
-        return completed
-
-
 def test_real_adapter_one_command_success_and_retry(root: Path) -> None:
     store, clock, worktree = _context(root, "success")
     options = _options(root)
-    runner = AutoTitleContextRunner(worktree)
+    runner = FakeHerdrRunner(worktree, delayed_context_title_reads=2)
     service = VisibleChampionLaunchService(store, _adapter(options, runner), options, clock)
     spec = _spec(worktree, "success")
     result = service.launch(spec)
     assert result["state"] == "active" and result["version"] == 4
     assert result["context_delivery"]["bytes"] <= 4096
+    display_receipt = result["context_delivery"]["display_receipt"]
+    assert display_receipt == {
+        "source": next(iter(runner.source_sequences)),
+        "applies_to_source": "herdr:codex",
+        "state_change_seq": runner.state_change_seq,
+        "sidebar_name": "Lux",
+        "task_label": "Tiny Gate",
+        "thread_title": "Lux · Tiny Gate",
+        "terminal_title": "Lux · Tiny Gate",
+    }
+    assert runner.metadata_source == display_receipt["source"]
     assert len(runner.contexts) == 1
     context = runner.contexts[0]
     assert "Use only the stable League SQLite commands" in context
@@ -210,7 +315,7 @@ def test_real_adapter_one_command_success_and_retry(root: Path) -> None:
         if call[:3] == ("herdr", "pane", "report-metadata")
     ]
     assert tab_index < start_index < context_index
-    assert metadata_indexes[0] < context_index < metadata_indexes[1]
+    assert metadata_indexes[0] < context_index
     assert runner.title == "Lux · Tiny Gate"
     assert runner.tokens["sidebar_name"] == "Lux"
     assert runner.tokens["thread_title"] == "Lux · Tiny Gate"
@@ -231,12 +336,47 @@ def test_real_adapter_one_command_success_and_retry(root: Path) -> None:
         (spec.assignment_id,),
     ).fetchone()
     assert tuple(row) == ("active", 4, f"runtime:{LUX_ID}")
-    retry_runner = FakeHerdrRunner(worktree)
+    retry_runner = runner.active_copy()
+    contexts_before_retry = len(runner.contexts)
     retry = VisibleChampionLaunchService(
         store, _adapter(options, retry_runner), options, clock
     ).launch(spec)
     assert retry["idempotent"] is True
-    assert retry_runner.calls == [] and len(runner.contexts) == 1
+    retry_calls = retry_runner.calls
+    assert retry_calls
+    assert all(call[:3] == ("herdr", "agent", "get") for call in retry_calls)
+    assert retry_runner.contexts == []
+    assert len(runner.contexts) == contexts_before_retry == 1
+
+    runner.metadata_source = "herdr:codex"
+    runner.state_change_seq += 1
+    runner.title = "League assignment context | codex"
+    runner.tokens.update(
+        {
+            "callsign": "League",
+            "sidebar_name": "League assignment context",
+            "task_label": "assignment context",
+            "thread_title": "League assignment context",
+        }
+    )
+    calls_before_restore_retry = len(runner.calls)
+    restore_retry = service.launch(spec)
+    restore_retry_calls = runner.calls[calls_before_restore_retry:]
+    assert restore_retry["state"] == "active" and restore_retry["idempotent"] is True
+    assert len(
+        [
+            call
+            for call in restore_retry_calls
+            if call[:3] == ("herdr", "pane", "report-metadata")
+        ]
+    ) == 1
+    assert not any(
+        call[:3] == ("herdr", "agent", "prompt") for call in restore_retry_calls
+    )
+    assert runner.title == "Lux · Tiny Gate"
+    assert runner.tokens["launch_title_source"] == display_receipt["source"]
+    assert runner.metadata_source == display_receipt["source"]
+    assert len(runner.contexts) == contexts_before_retry == 1
     assert store.connection.execute(
         "SELECT COUNT(*) FROM events WHERE event_type='assignment_context_delivered' AND aggregate_id=?",
         (spec.assignment_id,),
@@ -261,7 +401,7 @@ def test_real_adapter_one_command_success_and_retry(root: Path) -> None:
     store.close()
 
 
-class UnownedContextTitleRunner(AutoTitleContextRunner):
+class UnownedContextTitleRunner(FakeHerdrRunner):
     def run(
         self, arguments, *, timeout_seconds: int = 30
     ) -> subprocess.CompletedProcess[str]:
@@ -298,6 +438,43 @@ def test_post_context_title_restoration_refuses_unowned_metadata(root: Path) -> 
     assert store.connection.execute(
         "SELECT state FROM callsign_queue WHERE callsign='Lux'"
     ).fetchone()[0] == "available"
+    store.close()
+
+
+def test_active_retry_refuses_newer_user_metadata(root: Path) -> None:
+    store, clock, worktree = _context(root, "retry-unowned-title")
+    options = _options(root)
+    runner = FakeHerdrRunner(worktree, delayed_context_title_reads=2)
+    service = VisibleChampionLaunchService(
+        store, _adapter(options, runner), options, clock
+    )
+    spec = _spec(worktree, "retry-unowned-title")
+    first = service.launch(spec)
+    assert first["state"] == "active"
+
+    runner.metadata_source = "user-selected"
+    runner.state_change_seq += 1
+    runner.title = "User selected title"
+    runner.tokens["launch_title_owner"] = "user-selected"
+    calls_before_retry = len(runner.calls)
+    contexts_before_retry = len(runner.contexts)
+    result = service.launch(spec)
+
+    assert result["state"] == "cleanup_pending" and result["version"] == 5
+    retry_calls = runner.calls[calls_before_retry:]
+    assert retry_calls
+    assert not any(
+        call[:3] == ("herdr", "pane", "report-metadata") for call in retry_calls
+    )
+    assert runner.metadata_source == "user-selected"
+    assert len(runner.contexts) == contexts_before_retry == 1
+    launch = store.assignment_launch_context(spec.assignment_id)
+    assert launch["runtime_instance_id"] == f"runtime:{LUX_ID}"
+    assert launch["failure_class"] == "launch_title_restore_refused"
+    assert store.connection.execute(
+        "SELECT cleanup_state FROM cleanup_obligations WHERE task_id=?",
+        (spec.task_id,),
+    ).fetchone()[0] == "pending"
     store.close()
 
 
@@ -566,8 +743,11 @@ def test_post_launch_activation_refusal_closes_owned_tab_and_blocks(root: Path) 
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="league-visible-launch-") as temporary:
         root = Path(temporary)
+        test_generated_task_labels_are_deterministic_two_word_names()
+        test_task_label_defaults_and_explicit_labels_stay_two_words(root)
         test_real_adapter_one_command_success_and_retry(root)
         test_post_context_title_restoration_refuses_unowned_metadata(root)
+        test_active_retry_refuses_newer_user_metadata(root)
         test_real_adapter_persists_exact_initial_codex_session(root)
         test_pre_session_launch_failure_closes_exact_pending_pane(root)
         test_metadata_silent_success_is_exact_and_failure_stays_closed(root)

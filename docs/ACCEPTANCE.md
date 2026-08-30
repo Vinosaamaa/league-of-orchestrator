@@ -376,9 +376,16 @@ UUID, verify routing/display/backend/workspace/pane/terminal/cwd/title identity,
 activate, and deliver one bounded SQLite-only context. Because handshake and
 context prompts may trigger provider auto-title behavior, the adapter then
 restores and verifies the exact `<Callsign> · <Task>` sidebar, thread, and
-terminal title before recording context delivery. Restoration requires the
-same launch-owned endpoint, thread, routing name, task metadata, and ownership
-token; changed or unowned metadata refuses instead of being overwritten.
+terminal title before recording context delivery. The context prompt uses its
+settled wait as the ordering barrier; final acceptance requires two fresh,
+identical observations and records the launch metadata source, exact agent
+authority source, and endpoint state-change sequence in the context receipt.
+Restoration requires the same launch-owned endpoint, thread, routing name, and
+ownership/source tokens; changed or unowned metadata refuses instead of being
+overwritten. An exact retry sends no prompt, re-observes the live endpoint, and
+performs at most one ownership-safe restoration. Generated task labels derive
+deterministically from the task summary as exactly two words; explicit labels
+remain limited to at most two words.
 External-effect failures settle blocked only after exact endpoint and
 reservation cleanup; otherwise the assignment and cleanup obligation remain
 `cleanup_pending`.

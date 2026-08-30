@@ -36,9 +36,10 @@ Nothing here installs files, changes hooks, or connects to live Roster state.
 - Prompt-once intake, complete bounded triage, request claims and states,
   explicit direct/hidden/Champion dispatch, and unresolved reconciliation.
 - Recoverable visible-Champion assignment with exact acceptance receipts,
-  post-context callsign/task title restoration and verification, source-bound
-  transition outbox delivery, unique recipient effects, and fair backlog
-  draining.
+  settled post-context callsign/task title restoration bound to the exact
+  metadata source and sequence, deterministic two-word display-task defaults,
+  source-bound transition outbox delivery, unique recipient effects, and fair
+  backlog draining.
 - One role-aware bounded Shotcaller Stop decision with ordinary-message
   priority and separate request, dispatch, and watcher leases.
 - Opaque capability-based harness/backend bindings, typed task resources, and

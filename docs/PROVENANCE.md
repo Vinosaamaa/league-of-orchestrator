@@ -444,8 +444,14 @@ Issue #85 deliberately changes visible Champion launch finalization. The
 pre-context metadata write remains an initial display seed, but successful
 context delivery is no longer sufficient by itself: the same launch-owned
 adapter must restore and verify the exact callsign/task sidebar, thread, and
-terminal title after the context prompt. A retry after the recorded delivery is
-still read-only and idempotent. Changed ownership metadata refuses restoration
-and retains the existing cleanup-gated failure behavior. Focused fake-Herdr
-coverage exercises context auto-title overwrite, post-context restoration,
-retry deduplication, and unowned-metadata refusal without a live runtime.
+terminal title after the context prompt settles. The final context receipt is
+bound to the launch metadata source, agent authority source, and a stable
+post-context state-change sequence. A retry sends no second prompt: it freshly
+observes the exact live endpoint and may perform at most one ownership-safe
+restoration. Changed ownership metadata refuses restoration and records a
+cleanup-pending title-validation failure without overwriting the display.
+Generated labels now default deterministically to exactly two words and
+explicit labels obey the same maximum. Focused fake-Herdr coverage exercises a
+delayed context auto-title race, post-context restoration, retry deduplication,
+owned retry repair, unowned-metadata refusal, and two-word derivation without a
+live runtime.

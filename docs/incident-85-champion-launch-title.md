@@ -12,30 +12,41 @@ drifted to prompt text.
 ## Owning-layer correction
 
 `league assign run` now treats the initial metadata report as a seed, not the
-final acceptance gate. The real launch adapter applies an assignment-scoped
-title ownership token, delivers the bounded context, restores the exact
-callsign/task metadata when provider auto-title changes it, and verifies all
-three visible title surfaces before context delivery is recorded.
+final acceptance gate. The real launch adapter applies assignment-scoped title
+ownership and source tokens, waits for the bounded context turn to settle,
+restores the exact callsign/task metadata with a sequence derived from the
+fresh endpoint observation, and requires two identical final observations of
+all three visible title surfaces before context delivery is recorded.
 
 The final ordering invariant is:
 
 1. verify the generated runtime and exact endpoint;
 2. seed launch-owned routing and display metadata;
-3. activate and deliver the bounded assignment context;
-4. require the same endpoint, thread, routing name, task metadata, and title
-   ownership token;
-5. restore and verify `<Callsign> · <Task>` on the sidebar, thread, and
-   terminal;
-6. only then record successful context delivery.
+3. activate and deliver the bounded assignment context with a settled wait;
+4. require the same endpoint, thread, routing name, metadata source, agent
+   authority source, and ownership token;
+5. restore `<Callsign> · <Task>` with the fresh observed sequence;
+6. require two consecutive matching sidebar, task-label, thread-title, and
+   terminal-title observations at one state-change sequence;
+7. bind that source/sequence observation into the successful context receipt.
 
-An exact completed retry performs no adapter mutation. If the endpoint or title
-ownership changed before restoration, League refuses to overwrite it and uses
-the existing exact-runtime cleanup path. Unproven cleanup remains a truthful
-cleanup obligation.
+An exact completed retry sends no handshake or context prompt. It re-observes
+the live endpoint and either accepts the stable title or performs one
+ownership-safe restoration. If a newer user-owned or unowned write is present,
+League performs no metadata mutation and records `cleanup_pending` against the
+exact runtime. Unproven cleanup remains a truthful cleanup obligation.
+
+Generated Champion task labels use a deterministic two-word default derived
+from the task summary. Explicit labels remain limited to at most two words, so
+the generated visible contract has no vague one-word fallback.
 
 ## Regression boundary
 
-Focused fake-Herdr coverage makes context delivery auto-title the runtime,
-proves the assigned title is restored afterward, proves completed retry is
-idempotent, and proves changed ownership metadata refuses restoration. The
-fixtures use temporary repositories and synthetic identities only.
+Focused fake-Herdr coverage schedules a prompt-derived write after prompt
+acceptance and after the early League metadata seed. The fake exposes display
+source, source sequence, and endpoint state-change sequence. Coverage proves
+the assigned title survives the settling window, the stored receipt matches the
+final observation, exact retry sends no prompt, same-owner drift gets at most
+one restoration, newer user metadata is not overwritten, and the five owner
+examples derive deterministic two-word labels. The fixtures use temporary
+repositories and synthetic identities only.

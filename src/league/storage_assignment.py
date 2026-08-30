@@ -77,11 +77,22 @@ class AssignmentStorage(Protocol):
         context_sha256: str,
         byte_count: int,
         effect_sha256: str,
+        display_receipt: dict[str, Any],
         event_id: str,
         at: str,
     ) -> dict[str, Any]: ...
 
     def fail_assignment_context_delivery(
+        self,
+        assignment_id: str,
+        expected_version: int,
+        failure_class: str,
+        event_id: str,
+        outbox_id: str,
+        at: str,
+    ) -> dict[str, Any]: ...
+
+    def fail_assignment_title_validation(
         self,
         assignment_id: str,
         expected_version: int,

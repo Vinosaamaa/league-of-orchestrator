@@ -36,10 +36,15 @@ Nothing here installs files, changes hooks, or connects to live Roster state.
 - Prompt-once intake, complete bounded triage, request claims and states,
   explicit direct/hidden/Champion dispatch, and unresolved reconciliation.
 - Recoverable visible-Champion assignment with exact acceptance receipts,
+  settled post-context callsign/task title restoration bound to the exact
+  metadata source and sequence, deterministic two-word display-task defaults,
   source-bound transition outbox delivery, unique recipient effects, and fair
   backlog draining.
 - One role-aware bounded Shotcaller Stop decision with ordinary-message
-  priority and separate request, dispatch, and watcher leases.
+  priority and separate request, dispatch, and watcher leases, plus in-place
+  Shotcaller bootstrap that waits for a stable source-owned callsign title
+  without creating layout/process state or overwriting a newer user title,
+  source, or unrelated token.
 - Opaque capability-based harness/backend bindings, typed task resources, and
   canonical SQLite-backed recoverable teardown with immutable per-action/final
   receipts, exact shared-lease release, and persistent-resource retention.
@@ -210,6 +215,8 @@ fake adapters.
 - [Reversible migration and install boundary](docs/MIGRATION.md)
 - [Guarded rollover and shuffled callsign queue](docs/HANDOFF_CALLSIGNS.md)
 - [Isolated acceptance and reversible cutover foundation](docs/ACCEPTANCE.md)
+- [Champion launch title incident and ordering
+  invariant](docs/incident-85-champion-launch-title.md)
 - [Exact source provenance](docs/PROVENANCE.md)
 - [Repository-local request lifecycle](docs/REQUEST_LIFECYCLE.md)
 - [Repository-local runtime lifecycle](docs/runtime-lifecycle.md)

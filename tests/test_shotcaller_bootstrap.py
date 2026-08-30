@@ -36,14 +36,24 @@ LEAGUE = ROOT / "bin/league"
 
 class RecordingHerdr:
     def __init__(
-        self, worktree: Path, *, thread_id: str = THREAD_ID, publish_mismatch: bool = False
+        self,
+        worktree: Path,
+        *,
+        thread_id: str = THREAD_ID,
+        publish_mismatch: bool = False,
+        delayed_auto_title_reads: int | None = None,
     ) -> None:
         self.worktree = str(worktree.resolve())
         self.thread_id = thread_id
         self.publish_mismatch = publish_mismatch
+        self.delayed_auto_title_reads = delayed_auto_title_reads
         self.name: str | None = None
         self.tokens: dict[str, str] = {}
         self.title = ""
+        self.metadata_source = "herdr:codex"
+        self.source_sequences: dict[str, int] = {}
+        self.pending_auto_title_reads: int | None = None
+        self.auto_title_scheduled = False
         self.terminal_title_override: str | None = None
         self.terminal_title_stripped_override: str | None = None
         self.state_change_seq = 7
@@ -53,9 +63,10 @@ class RecordingHerdr:
         value: dict[str, object] = {
             "agent": "codex",
             "agent_status": "working",
-            "agent_session": {"value": self.thread_id},
+            "agent_session": {"source": "herdr:codex", "value": self.thread_id},
             "cwd": self.worktree,
             "foreground_cwd": self.worktree,
+            "metadata_source": self.metadata_source,
             "pane_id": "w1:p1",
             "state_change_seq": self.state_change_seq,
             "tab_id": "w1:t1",
@@ -77,6 +88,17 @@ class RecordingHerdr:
             value["name"] = self.name
         return value
 
+    def _advance_auto_title(self) -> None:
+        if self.pending_auto_title_reads is None:
+            return
+        self.pending_auto_title_reads -= 1
+        if self.pending_auto_title_reads > 0:
+            return
+        self.pending_auto_title_reads = None
+        self.metadata_source = "herdr:codex"
+        self.state_change_seq += 1
+        self.title = "Create the Shotcaller for this pane | codex"
+
     def run(
         self, arguments, *, timeout_seconds: int = 30
     ) -> subprocess.CompletedProcess[str]:
@@ -85,15 +107,31 @@ class RecordingHerdr:
         self.calls.append(command)
         if command == ("herdr", "pane", "current", "--current"):
             result = {"pane": self._agent()}
+            self._advance_auto_title()
         elif command == ("herdr", "agent", "list"):
             result = {"agents": [self._agent()]}
+            self._advance_auto_title()
         elif command[:3] == ("herdr", "agent", "rename"):
             self.name = None if command[-1] == "--clear" else command[-1]
             self.state_change_seq += 1
             result = {"agent": self._agent()}
         elif command[:3] == ("herdr", "pane", "report-metadata"):
+            source = command[command.index("--source") + 1]
+            sequence = int(command[command.index("--seq") + 1])
+            if sequence <= self.source_sequences.get(source, 0):
+                return subprocess.CompletedProcess(
+                    command, 1, "", "metadata sequence conflict"
+                )
+            if "--applies-to-source" in command:
+                applies_to = command[command.index("--applies-to-source") + 1]
+                if applies_to != "herdr:codex":
+                    return subprocess.CompletedProcess(
+                        command, 1, "", "metadata source mismatch"
+                    )
+            self.source_sequences[source] = sequence
             self.state_change_seq += 1
             if "--title" in command:
+                self.metadata_source = source
                 title = command[command.index("--title") + 1]
                 if not self.publish_mismatch or not title:
                     self.title = title
@@ -106,6 +144,14 @@ class RecordingHerdr:
                     self.tokens[key] = value
                 else:
                     self.tokens.pop(key, None)
+            if (
+                self.delayed_auto_title_reads is not None
+                and not self.auto_title_scheduled
+                and source.startswith("league-shotcaller-")
+                and source != "league-shotcaller-rollback"
+            ):
+                self.auto_title_scheduled = True
+                self.pending_auto_title_reads = self.delayed_auto_title_reads
             return subprocess.CompletedProcess(command, 0, "", "")
         else:
             raise AssertionError(f"unexpected Herdr command: {command}")
@@ -125,12 +171,18 @@ class PersistentRecordingHerdr(RecordingHerdr):
         else:
             self._save()
 
+
     def _load(self) -> None:
         value = json.loads(self.state_path.read_text(encoding="utf-8"))
         self.thread_id = value["thread_id"]
         self.name = value["name"]
         self.tokens = dict(value["tokens"])
         self.title = value["title"]
+        self.metadata_source = value["metadata_source"]
+        self.source_sequences = {
+            str(key): int(sequence)
+            for key, sequence in value["source_sequences"].items()
+        }
         self.state_change_seq = int(value["state_change_seq"])
 
     def _save(self) -> None:
@@ -141,6 +193,8 @@ class PersistentRecordingHerdr(RecordingHerdr):
                     "name": self.name,
                     "tokens": self.tokens,
                     "title": self.title,
+                    "metadata_source": self.metadata_source,
+                    "source_sequences": self.source_sequences,
                     "state_change_seq": self.state_change_seq,
                 },
                 sort_keys=True,
@@ -158,6 +212,38 @@ class PersistentRecordingHerdr(RecordingHerdr):
             return super().run(arguments, timeout_seconds=timeout_seconds)
         finally:
             self._save()
+
+
+class RepeatingAutoTitleHerdr(RecordingHerdr):
+    """Codex rewrites the owner-prompt title after both bootstrap reports."""
+
+    def run(
+        self, arguments, *, timeout_seconds: int = 30
+    ) -> subprocess.CompletedProcess[str]:
+        command = tuple(arguments)
+        if (
+            command[:3] == ("herdr", "pane", "report-metadata")
+            and "--source" in command
+            and command[command.index("--source") + 1]
+            != "league-shotcaller-rollback"
+        ):
+            self.auto_title_scheduled = False
+        return super().run(arguments, timeout_seconds=timeout_seconds)
+
+
+class UserTitleAfterPublishHerdr(RecordingHerdr):
+    """A newer user presentation write lands after bootstrap publication."""
+
+    def _advance_auto_title(self) -> None:
+        if self.pending_auto_title_reads is None:
+            return
+        self.pending_auto_title_reads -= 1
+        if self.pending_auto_title_reads > 0:
+            return
+        self.pending_auto_title_reads = None
+        self.metadata_source = "user-selected"
+        self.state_change_seq += 1
+        self.title = "User selected title"
 
 
 class InjectedBootstrapFault(RuntimeError):
@@ -239,14 +325,17 @@ def test_in_place_bootstrap_creates_shotcaller_without_layout_or_squad_registrat
         assert created["idempotent"] is False
         assert created["callsign"] == "Ashe"
         assert created["runtime_instance_id"] == "runtime:shotcaller:ashe"
-        assert [call[:3] for call in runner.calls[:6]] == [
-            ("herdr", "pane", "current"),
-            ("herdr", "agent", "list"),
-            ("herdr", "agent", "rename"),
-            ("herdr", "pane", "report-metadata"),
+        assert [call[:3] for call in runner.calls[:2]] == [
             ("herdr", "pane", "current"),
             ("herdr", "agent", "list"),
         ]
+        assert any(
+            call[:3] == ("herdr", "agent", "rename") for call in runner.calls
+        )
+        assert any(
+            call[:3] == ("herdr", "pane", "report-metadata")
+            for call in runner.calls
+        )
         forbidden = {
             ("herdr", "tab", "create"),
             ("herdr", "pane", "split"),
@@ -292,11 +381,12 @@ def test_in_place_bootstrap_creates_shotcaller_without_layout_or_squad_registrat
             "callsign_activated",
             "shotcaller_created",
         ]
+        calls_before_retry = len(runner.calls)
         retry = service.bootstrap(_spec())
         assert retry == {**created, "idempotent": True}
         assert not any(
             call[:3] in {("herdr", "agent", "rename"), ("herdr", "pane", "report-metadata")}
-            for call in runner.calls[6:]
+            for call in runner.calls[calls_before_retry:]
         )
         assert store.connection.execute(
             "SELECT COUNT(*) FROM events WHERE agent_id=?", (AGENT_ID,)
@@ -466,6 +556,56 @@ def test_in_place_bootstrap_creates_shotcaller_without_layout_or_squad_registrat
         assert tuple(scope) == (AGENT_ID, 2, 3)
 
 
+def test_bootstrap_reasserts_owned_title_after_auto_title_settles(root: Path) -> None:
+    state, _ = migrated_state(root, "shotcaller-auto-title-settling")
+    worktree = root / "shotcaller-auto-title-settling" / "worktree"
+    worktree.mkdir()
+    clock = FakeClock()
+    runner = RecordingHerdr(worktree, delayed_auto_title_reads=2)
+    with SQLiteStorage(state) as store:
+        _seed_available_ashe(store, clock)
+        service = ShotcallerBootstrapService(
+            store,
+            HerdrShotcallerBootstrapAdapter(
+                _options(worktree),
+                runner,
+                environment={
+                    "HERDR_ENV": "1",
+                    "HERDR_WORKSPACE_ID": "w1",
+                    "HERDR_TAB_ID": "w1:t1",
+                    "HERDR_PANE_ID": "w1:p1",
+                },
+            ),
+            clock,
+        )
+
+        created = service.bootstrap(_spec())
+
+        assert created["state"] == "active"
+        assert runner.name == "ashe"
+        assert runner.metadata_source.startswith("league-shotcaller-")
+        assert runner.title == "Ashe"
+        assert runner.tokens["sidebar_name"] == "Ashe"
+        assert runner.tokens["thread_title"] == "Ashe"
+        metadata_calls = [
+            call
+            for call in runner.calls
+            if call[:3] == ("herdr", "pane", "report-metadata")
+        ]
+        assert len(metadata_calls) == 2
+        assert not any(
+            call[:3]
+            in {
+                ("herdr", "tab", "create"),
+                ("herdr", "pane", "split"),
+                ("herdr", "workspace", "create"),
+                ("herdr", "agent", "start"),
+                ("herdr", "agent", "prompt"),
+            }
+            for call in runner.calls
+        )
+
+
 def test_bootstrap_identity_mismatch_makes_no_canonical_mutation(root: Path) -> None:
     state, _ = migrated_state(root, "shotcaller-identity-mismatch")
     worktree = root / "shotcaller-identity-mismatch" / "worktree"
@@ -583,7 +723,7 @@ def test_preexisting_reserved_bootstrap_rejects_residual_metadata_without_baseli
     )
 
 
-def test_completed_bootstrap_retry_refuses_changed_spec_or_metadata(root: Path) -> None:
+def test_completed_bootstrap_retry_restores_owned_title_without_prompt(root: Path) -> None:
     state, _ = migrated_state(root, "shotcaller-completed-retry")
     worktree = root / "shotcaller-completed-retry" / "worktree"
     worktree.mkdir()
@@ -636,29 +776,92 @@ def test_completed_bootstrap_retry_refuses_changed_spec_or_metadata(root: Path) 
                 assert exc.code in {"receipt_conflict", "receipt_mismatch"}
             else:
                 raise AssertionError("completed bootstrap retry accepted changed identity")
-        for token in ("sidebar_name", "thread_title"):
-            original = runner.tokens[token]
-            runner.tokens[token] = "Tampered"
-            try:
-                service.bootstrap(_spec())
-            except StorageRefusal as exc:
-                assert exc.code == "shotcaller_metadata_unverified"
-            else:
-                raise AssertionError(
-                    "completed bootstrap retry accepted changed display metadata"
-                )
-            runner.tokens[token] = original
-        for field in ("terminal_title_override", "terminal_title_stripped_override"):
-            setattr(runner, field, "Tampered")
-            try:
-                service.bootstrap(_spec())
-            except StorageRefusal as exc:
-                assert exc.code == "shotcaller_metadata_unverified"
-            else:
-                raise AssertionError(
-                    f"completed bootstrap retry accepted changed {field}"
-                )
-            setattr(runner, field, None)
+        runner.metadata_source = "herdr:codex"
+        runner.state_change_seq += 1
+        runner.title = "Create the Shotcaller for this pane | codex"
+        calls_before_retry = len(runner.calls)
+
+        retry = service.bootstrap(_spec())
+
+        assert retry == {**created, "idempotent": True}
+        retry_calls = runner.calls[calls_before_retry:]
+        assert len(
+            [
+                call
+                for call in retry_calls
+                if call[:3] == ("herdr", "pane", "report-metadata")
+            ]
+        ) == 1
+        assert not any(
+            call[:3]
+            in {
+                ("herdr", "agent", "rename"),
+                ("herdr", "agent", "prompt"),
+                ("herdr", "tab", "create"),
+                ("herdr", "pane", "split"),
+                ("herdr", "agent", "start"),
+            }
+            for call in retry_calls
+        )
+        assert runner.metadata_source.startswith("league-shotcaller-")
+        assert runner.title == "Ashe"
+        assert store.shotcaller_bootstrap_status(_spec().assignment_id) == {
+            **created,
+            "idempotent": True,
+        }
+
+
+def test_completed_bootstrap_retry_refuses_newer_user_title_with_stale_tokens(
+    root: Path,
+) -> None:
+    state, _ = migrated_state(root, "shotcaller-completed-user-title")
+    worktree = root / "shotcaller-completed-user-title" / "worktree"
+    worktree.mkdir()
+    clock = FakeClock()
+    runner = RecordingHerdr(worktree)
+    with SQLiteStorage(state) as store:
+        _seed_available_ashe(store, clock)
+        service = ShotcallerBootstrapService(
+            store,
+            HerdrShotcallerBootstrapAdapter(
+                _options(worktree),
+                runner,
+                environment={
+                    "HERDR_ENV": "1",
+                    "HERDR_WORKSPACE_ID": "w1",
+                    "HERDR_TAB_ID": "w1:t1",
+                    "HERDR_PANE_ID": "w1:p1",
+                },
+            ),
+            clock,
+        )
+        created = service.bootstrap(_spec())
+        stale_tokens = dict(runner.tokens)
+        runner.metadata_source = "user-selected"
+        runner.state_change_seq += 1
+        runner.title = "User selected title"
+        calls_before_retry = len(runner.calls)
+
+        try:
+            service.bootstrap(_spec())
+        except StorageRefusal as exc:
+            assert exc.code == "shotcaller_metadata_unverified"
+        else:
+            raise AssertionError("completed bootstrap retry overwrote a newer user title")
+
+        retry_calls = runner.calls[calls_before_retry:]
+        assert not any(
+            call[:3]
+            in {
+                ("herdr", "pane", "report-metadata"),
+                ("herdr", "agent", "rename"),
+                ("herdr", "agent", "prompt"),
+            }
+            for call in retry_calls
+        )
+        assert runner.metadata_source == "user-selected"
+        assert runner.title == "User selected title"
+        assert runner.tokens == stale_tokens
         assert store.shotcaller_bootstrap_status(_spec().assignment_id) == {
             **created,
             "idempotent": True,
@@ -730,6 +933,134 @@ def test_bootstrap_metadata_and_atomic_finalization_failures_restore_exact_state
             }
             for call in runner.calls
         )
+
+
+def test_bootstrap_rolls_back_when_owned_auto_title_never_settles(root: Path) -> None:
+    state, _ = migrated_state(root, "shotcaller-auto-title-rollback")
+    worktree = root / "shotcaller-auto-title-rollback" / "worktree"
+    worktree.mkdir()
+    clock = FakeClock()
+    runner = RepeatingAutoTitleHerdr(worktree, delayed_auto_title_reads=2)
+    with SQLiteStorage(state) as store:
+        _seed_available_ashe(store, clock)
+        service = ShotcallerBootstrapService(
+            store,
+            HerdrShotcallerBootstrapAdapter(
+                _options(worktree),
+                runner,
+                environment={
+                    "HERDR_ENV": "1",
+                    "HERDR_WORKSPACE_ID": "w1",
+                    "HERDR_TAB_ID": "w1:t1",
+                    "HERDR_PANE_ID": "w1:p1",
+                },
+            ),
+            clock,
+        )
+
+        try:
+            service.bootstrap(_spec())
+        except StorageRefusal as exc:
+            assert exc.code == "shotcaller_metadata_unverified"
+        else:
+            raise AssertionError("bootstrap accepted an auto-title that never settled")
+
+        assignment = store.callsign_assignment_status(_spec().assignment_id)
+        assert assignment is not None and assignment["state"] == "rolled_back"
+        assert store.connection.execute(
+            "SELECT state FROM callsign_queue WHERE callsign='Ashe'"
+        ).fetchone()[0] == "available"
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM runtime_instances WHERE actor_agent_id=?", (AGENT_ID,)
+        ).fetchone()[0] == 0
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM squads WHERE shotcaller_agent_id=?", (AGENT_ID,)
+        ).fetchone()[0] == 0
+    assert runner.name is None and runner.tokens == {} and runner.title == ""
+    assert not any(
+        call[:3]
+        in {
+            ("herdr", "tab", "create"),
+            ("herdr", "pane", "split"),
+            ("herdr", "workspace", "create"),
+            ("herdr", "agent", "start"),
+            ("herdr", "agent", "prompt"),
+        }
+        for call in runner.calls
+    )
+
+
+def test_bootstrap_rolls_back_without_overwriting_newer_user_title(root: Path) -> None:
+    state, _ = migrated_state(root, "shotcaller-user-title-rollback")
+    worktree = root / "shotcaller-user-title-rollback" / "worktree"
+    worktree.mkdir()
+    clock = FakeClock()
+    runner = UserTitleAfterPublishHerdr(worktree, delayed_auto_title_reads=2)
+    runner.tokens = {"user_badge": "favorite"}
+    with SQLiteStorage(state) as store:
+        _seed_available_ashe(store, clock)
+        service = ShotcallerBootstrapService(
+            store,
+            HerdrShotcallerBootstrapAdapter(
+                _options(worktree),
+                runner,
+                environment={
+                    "HERDR_ENV": "1",
+                    "HERDR_WORKSPACE_ID": "w1",
+                    "HERDR_TAB_ID": "w1:t1",
+                    "HERDR_PANE_ID": "w1:p1",
+                },
+            ),
+            clock,
+        )
+
+        try:
+            service.bootstrap(_spec())
+        except StorageRefusal as exc:
+            assert exc.code == "shotcaller_metadata_unverified"
+        else:
+            raise AssertionError("bootstrap accepted a newer user-owned title")
+
+        assignment = store.callsign_assignment_status(_spec().assignment_id)
+        assert assignment is not None and assignment["state"] == "rolled_back"
+        assert store.connection.execute(
+            "SELECT state FROM callsign_queue WHERE callsign='Ashe'"
+        ).fetchone()[0] == "available"
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM runtime_instances WHERE actor_agent_id=?", (AGENT_ID,)
+        ).fetchone()[0] == 0
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM squads WHERE shotcaller_agent_id=?", (AGENT_ID,)
+        ).fetchone()[0] == 0
+    assert runner.name is None
+    assert runner.metadata_source == "user-selected"
+    assert runner.title == "User selected title"
+    assert runner.tokens == {"user_badge": "favorite"}
+    metadata_calls = [
+        call
+        for call in runner.calls
+        if call[:3] == ("herdr", "pane", "report-metadata")
+    ]
+    assert len(metadata_calls) == 2
+    rollback_metadata = metadata_calls[-1]
+    assert "--title" not in rollback_metadata
+    rollback_tokens = {
+        rollback_metadata[index + 1]
+        for index, value in enumerate(rollback_metadata)
+        if value == "--token"
+    }
+    assert rollback_tokens == {"sidebar_name=", "thread_title="}
+    assert not any(
+        call[:3]
+        in {
+            ("herdr", "tab", "create"),
+            ("herdr", "pane", "split"),
+            ("herdr", "workspace", "create"),
+            ("herdr", "agent", "start"),
+            ("herdr", "agent", "prompt"),
+        }
+        for call in runner.calls
+    )
 
 
 def _bootstrap_process_child(
@@ -839,11 +1170,15 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="league-shotcaller-bootstrap-") as temporary:
         root = Path(temporary)
         test_in_place_bootstrap_creates_shotcaller_without_layout_or_squad_registration(root)
+        test_bootstrap_reasserts_owned_title_after_auto_title_settles(root)
         test_bootstrap_identity_mismatch_makes_no_canonical_mutation(root)
         test_preexisting_reserved_bootstrap_requires_durable_baseline_when_alias_empty(root)
         test_preexisting_reserved_bootstrap_rejects_residual_metadata_without_baseline(root)
-        test_completed_bootstrap_retry_refuses_changed_spec_or_metadata(root)
+        test_completed_bootstrap_retry_restores_owned_title_without_prompt(root)
+        test_completed_bootstrap_retry_refuses_newer_user_title_with_stale_tokens(root)
         test_bootstrap_metadata_and_atomic_finalization_failures_restore_exact_state(root)
+        test_bootstrap_rolls_back_when_owned_auto_title_never_settles(root)
+        test_bootstrap_rolls_back_without_overwriting_newer_user_title(root)
         test_publish_crash_then_retry_fault_restores_original_unbound_metadata(root)
     print(
         "PASS: Shotcaller bootstrap stays in-place, Squad registration stays separate, "

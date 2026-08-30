@@ -469,3 +469,27 @@ only explicit temporary roots and fake Herdr/process state. This successor does
 not read or mutate the installed watcher, live SQLite state, a real terminal,
 the global resource registry, an active callsign, or any user worktree, and it
 performs no install, cutover, live teardown, or merge.
+
+## Launch title provenance
+
+Issue #85 deliberately changes visible Champion launch finalization. The
+pre-context metadata write remains an initial display seed, but successful
+context delivery is no longer sufficient by itself: the same launch-owned
+adapter must restore and verify the exact callsign/task sidebar, thread, and
+terminal title after the context prompt settles. The final context receipt is
+bound to the launch metadata source, agent authority source, and a stable
+post-context state-change sequence. A retry sends no second prompt: it freshly
+observes the exact live endpoint and may perform at most one ownership-safe
+restoration. Changed ownership metadata refuses restoration and records a
+cleanup-pending title-validation failure without overwriting the display.
+Generated labels now default deterministically to exactly two words and
+explicit labels obey the same maximum. Focused fake-Herdr coverage exercises a
+delayed context auto-title race, post-context restoration, retry deduplication,
+owned retry repair, unowned-metadata refusal, and two-word derivation without a
+live runtime. The same provenance rule now covers in-place Shotcaller bootstrap:
+the allocated callsign title must settle for two effective-source and sequence
+observations, exact retry may restore same-authority drift once without a
+prompt, and rollback preserves newer user-owned presentation metadata while
+restoring only League-owned sidebar/thread tokens to baseline and releasing the
+League route and callsign reservation. Focused fakes prove unrelated user
+tokens remain exact, zero layout/process creation, and no Squad registration.

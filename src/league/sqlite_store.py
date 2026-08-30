@@ -3158,6 +3158,7 @@ class SQLiteStorage(SQLiteTransactionCore):
         context_sha256: str,
         byte_count: int,
         effect_sha256: str,
+        display_receipt: dict[str, Any],
         event_id: str,
         at: str,
     ) -> dict[str, Any]:
@@ -3168,6 +3169,24 @@ class SQLiteStorage(SQLiteTransactionCore):
             context_sha256,
             byte_count,
             effect_sha256,
+            display_receipt,
+            event_id,
+            at,
+        )
+
+    def record_assignment_title_revalidation(
+        self,
+        assignment_id: str,
+        expected_version: int,
+        display_receipt: dict[str, Any],
+        event_id: str,
+        at: str,
+    ) -> dict[str, Any]:
+        return sqlite_assignment_ops.record_assignment_title_revalidation(
+            self,
+            assignment_id,
+            expected_version,
+            display_receipt,
             event_id,
             at,
         )
@@ -3182,6 +3201,25 @@ class SQLiteStorage(SQLiteTransactionCore):
         at: str,
     ) -> dict[str, Any]:
         return sqlite_assignment_ops.fail_assignment_context_delivery(
+            self,
+            assignment_id,
+            expected_version,
+            failure_class,
+            event_id,
+            outbox_id,
+            at,
+        )
+
+    def fail_assignment_title_validation(
+        self,
+        assignment_id: str,
+        expected_version: int,
+        failure_class: str,
+        event_id: str,
+        outbox_id: str,
+        at: str,
+    ) -> dict[str, Any]:
+        return sqlite_assignment_ops.fail_assignment_title_validation(
             self,
             assignment_id,
             expected_version,

@@ -999,10 +999,16 @@ def reconcile_assignment_runtime(
                 """,
                 (next_version, at, assignment_id),
             )
-            store.connection.execute(
-                "UPDATE tasks SET state='blocked',version=version+1,updated_at=? WHERE task_id=?",
-                (at, assignment["task_id"]),
-            )
+            task = store.connection.execute(
+                "SELECT state FROM tasks WHERE task_id=?", (assignment["task_id"],)
+            ).fetchone()
+            if task is None:
+                raise StorageRefusal("task_unknown", "assignment task does not exist")
+            if task["state"] not in TASK_TERMINAL_STATES:
+                store.connection.execute(
+                    "UPDATE tasks SET state='blocked',version=version+1,updated_at=? WHERE task_id=?",
+                    (at, assignment["task_id"]),
+                )
             store.connection.execute(
                 """
                 INSERT INTO cleanup_obligations
@@ -1173,6 +1179,16 @@ def assignment_launch_context(store: Any, assignment_id: str) -> dict[str, Any]:
         """,
         (assignment_id,),
     ).fetchall()
+    revalidation = store.connection.execute(
+        """
+        SELECT event_id,occurred_at,detail_json
+          FROM events
+         WHERE aggregate_kind='assignment' AND aggregate_id=?
+           AND event_type='assignment_title_revalidated'
+         ORDER BY event_seq DESC LIMIT 1
+        """,
+        (assignment_id,),
+    ).fetchone()
     if len(delivery) > 1:
         raise StorageRefusal(
             "assignment_context_ambiguous",
@@ -1191,6 +1207,18 @@ def assignment_launch_context(store: Any, assignment_id: str) -> dict[str, Any]:
             "at": delivery[0]["occurred_at"],
             **detail,
         }
+        if revalidation is not None:
+            revalidated = json.loads(revalidation["detail_json"])
+            if set(revalidated) != {"display_receipt"} or not isinstance(
+                revalidated["display_receipt"], dict
+            ):
+                raise StorageRefusal(
+                    "assignment_context_ambiguous",
+                    "assignment title revalidation receipt is malformed",
+                )
+            delivered["display_receipt"] = dict(
+                revalidated["display_receipt"]
+            )
     return {
         "assignment_id": assignment_id,
         "state": assignment["state"],
@@ -1281,17 +1309,34 @@ def record_assignment_context_delivery(
     context_sha256: str,
     byte_count: int,
     effect_sha256: str,
+    display_receipt: dict[str, Any],
     event_id: str,
     at: str,
 ) -> dict[str, Any]:
     _time(at, "assignment context delivery time")
     digest_pattern = re.compile(r"^[0-9a-f]{64}$")
+    display_keys = {
+        "source",
+        "applies_to_source",
+        "state_change_seq",
+        "sidebar_name",
+        "task_label",
+        "thread_title",
+        "terminal_title",
+    }
     if (
         not digest_pattern.fullmatch(context_sha256)
         or not digest_pattern.fullmatch(effect_sha256)
         or not event_id
         or byte_count < 1
         or byte_count > 4096
+        or set(display_receipt) != display_keys
+        or not all(
+            isinstance(display_receipt[key], str) and display_receipt[key]
+            for key in display_keys - {"state_change_seq"}
+        )
+        or not isinstance(display_receipt["state_change_seq"], int)
+        or display_receipt["state_change_seq"] < 0
     ):
         raise StorageRefusal(
             "assignment_context_invalid",
@@ -1301,6 +1346,7 @@ def record_assignment_context_delivery(
         "bytes": byte_count,
         "context_sha256": context_sha256,
         "effect_sha256": effect_sha256,
+        "display_receipt": dict(display_receipt),
     }
     try:
         with store._transaction():
@@ -1329,6 +1375,7 @@ def record_assignment_context_delivery(
                     "context_sha256": context_sha256,
                     "bytes": byte_count,
                     "effect_sha256": effect_sha256,
+                    "display_receipt": dict(display_receipt),
                     **activation,
                     "idempotent": True,
                 }
@@ -1384,7 +1431,125 @@ def record_assignment_context_delivery(
         "context_sha256": context_sha256,
         "bytes": byte_count,
         "effect_sha256": effect_sha256,
+        "display_receipt": dict(display_receipt),
         **activation,
+        "idempotent": False,
+    }
+
+
+def record_assignment_title_revalidation(
+    store: Any,
+    assignment_id: str,
+    expected_version: int,
+    display_receipt: dict[str, Any],
+    event_id: str,
+    at: str,
+) -> dict[str, Any]:
+    """Append one idempotent fresh visible-title observation after context delivery."""
+
+    _time(at, "assignment title revalidation time")
+    display_keys = {
+        "source",
+        "applies_to_source",
+        "state_change_seq",
+        "sidebar_name",
+        "task_label",
+        "thread_title",
+        "terminal_title",
+    }
+    if (
+        not event_id
+        or set(display_receipt) != display_keys
+        or not all(
+            isinstance(display_receipt[key], str) and display_receipt[key]
+            for key in display_keys - {"state_change_seq"}
+        )
+        or not isinstance(display_receipt["state_change_seq"], int)
+        or display_receipt["state_change_seq"] < 0
+    ):
+        raise StorageRefusal(
+            "assignment_context_invalid",
+            "assignment title revalidation receipt is invalid",
+        )
+    detail = {"display_receipt": dict(display_receipt)}
+    try:
+        with store._transaction():
+            assignment = store.connection.execute(
+                "SELECT task_id,state,version FROM task_assignments WHERE task_assignment_id=?",
+                (assignment_id,),
+            ).fetchone()
+            if (
+                assignment is None
+                or assignment["state"] != "active"
+                or int(assignment["version"]) != expected_version
+            ):
+                raise StorageRefusal(
+                    "assignment_conflict",
+                    "title revalidation requires the exact active assignment version",
+                )
+            context = store.connection.execute(
+                """
+                SELECT 1 FROM events
+                 WHERE aggregate_kind='assignment' AND aggregate_id=?
+                   AND event_type='assignment_context_delivered'
+                """,
+                (assignment_id,),
+            ).fetchall()
+            if len(context) != 1:
+                raise StorageRefusal(
+                    "assignment_incomplete",
+                    "title revalidation requires one exact context receipt",
+                )
+            existing = store.connection.execute(
+                "SELECT aggregate_kind,aggregate_id,event_type,detail_json FROM events WHERE event_id=?",
+                (event_id,),
+            ).fetchone()
+            if existing is not None:
+                if (
+                    existing["aggregate_kind"] != "assignment"
+                    or existing["aggregate_id"] != assignment_id
+                    or existing["event_type"] != "assignment_title_revalidated"
+                    or existing["detail_json"] != _json(detail)
+                ):
+                    raise StorageRefusal(
+                        "assignment_context_conflict",
+                        "assignment title revalidation event conflicts with history",
+                    )
+                return {
+                    "assignment_id": assignment_id,
+                    "version": expected_version,
+                    "event_id": event_id,
+                    "display_receipt": dict(display_receipt),
+                    "idempotent": True,
+                }
+            store.connection.execute(
+                """
+                INSERT INTO events
+                  (event_id,agent_id,task_id,entity_version,event_type,status,update_text,
+                   occurred_at,detail_json,aggregate_kind,aggregate_id)
+                VALUES(?,NULL,?,?,'assignment_title_revalidated','active',
+                       'Champion display metadata revalidated',?,?,'assignment',?)
+                """,
+                (
+                    event_id,
+                    assignment["task_id"],
+                    expected_version,
+                    at,
+                    _json(detail),
+                    assignment_id,
+                ),
+            )
+    except StorageRefusal:
+        raise
+    except sqlite3.DatabaseError as exc:
+        raise store._translate_database_error(
+            exc, "assignment title revalidation conflicted with canonical state"
+        ) from exc
+    return {
+        "assignment_id": assignment_id,
+        "version": expected_version,
+        "event_id": event_id,
+        "display_receipt": dict(display_receipt),
         "idempotent": False,
     }
 
@@ -1507,6 +1672,131 @@ def fail_assignment_context_delivery(
         "version": next_version,
         "event_id": event_id,
         "outbox_id": outbox_id,
+        "idempotent": False,
+    }
+
+
+def fail_assignment_title_validation(
+    store: Any,
+    assignment_id: str,
+    expected_version: int,
+    failure_class: str,
+    event_id: str,
+    outbox_id: str,
+    at: str,
+) -> dict[str, Any]:
+    _time(at, "assignment title validation failure time")
+    if not all((failure_class, event_id, outbox_id)):
+        raise StorageRefusal(
+            "invalid_assignment_failure",
+            "assignment title validation failure identity is incomplete",
+        )
+    try:
+        with store._transaction():
+            assignment = store.connection.execute(
+                "SELECT * FROM task_assignments WHERE task_assignment_id=?",
+                (assignment_id,),
+            ).fetchone()
+            if assignment is None:
+                raise StorageRefusal("assignment_unknown", "assignment does not exist")
+            if (
+                assignment["state"] == "cleanup_pending"
+                and assignment["failure_class"] == failure_class
+            ):
+                return {
+                    "assignment_id": assignment_id,
+                    "state": "cleanup_pending",
+                    "version": int(assignment["version"]),
+                    "event_id": event_id,
+                    "outbox_id": outbox_id,
+                    "idempotent": True,
+                }
+            delivered = store.connection.execute(
+                """
+                SELECT 1 FROM events
+                 WHERE aggregate_kind='assignment' AND aggregate_id=?
+                   AND event_type='assignment_context_delivered'
+                """,
+                (assignment_id,),
+            ).fetchone()
+            if (
+                assignment["state"] != "active"
+                or int(assignment["version"]) != expected_version
+                or delivered is None
+            ):
+                raise StorageRefusal(
+                    "assignment_conflict",
+                    "title validation failure does not match a delivered active assignment",
+                )
+            next_version = expected_version + 1
+            store.connection.execute(
+                """
+                UPDATE task_assignments
+                   SET state='cleanup_pending',failure_class=?,cleanup_required=1,
+                       version=?,updated_at=?
+                 WHERE task_assignment_id=?
+                """,
+                (failure_class, next_version, at, assignment_id),
+            )
+            store.connection.execute(
+                "UPDATE tasks SET state='blocked',version=version+1,updated_at=? WHERE task_id=?",
+                (at, assignment["task_id"]),
+            )
+            store.connection.execute(
+                """
+                INSERT INTO cleanup_obligations
+                  (cleanup_obligation_id,task_id,cleanup_state,required_policy,next_action,
+                   version,updated_at)
+                VALUES(?,?,'pending','failed_launch_title_validation',
+                       'Preserve and reconcile only the exact active runtime display owner',1,?)
+                ON CONFLICT(task_id) DO UPDATE SET
+                  cleanup_state='pending',required_policy='failed_launch_title_validation',
+                  next_action='Preserve and reconcile only the exact active runtime display owner',
+                  version=cleanup_obligations.version+1,updated_at=excluded.updated_at
+                """,
+                (f"cleanup:{assignment['task_id']}", assignment["task_id"], at),
+            )
+            store.connection.execute(
+                """
+                INSERT INTO events
+                  (event_id,agent_id,task_id,entity_version,event_type,status,update_text,
+                   occurred_at,detail_json,request_id,aggregate_kind,aggregate_id)
+                VALUES(?,NULL,?,?,'assignment_title_validation_failed','cleanup_pending',
+                       ?,?,?,?,'assignment',?)
+                """,
+                (
+                    event_id,
+                    assignment["task_id"],
+                    next_version,
+                    failure_class,
+                    at,
+                    _json({"failure_class": failure_class}),
+                    assignment["request_id"],
+                    assignment_id,
+                ),
+            )
+            store.connection.execute(
+                """
+                INSERT INTO delivery_outbox
+                  (outbox_id,event_id,recipient_agent_id,state,available_at,attempt_count)
+                VALUES(?,?,?,'pending',?,0)
+                """,
+                (outbox_id, event_id, assignment["coordinator_agent_id"], at),
+            )
+    except StorageRefusal:
+        raise
+    except sqlite3.DatabaseError as exc:
+        raise store._translate_database_error(
+            exc, "assignment title validation failure conflicted with canonical state"
+        ) from exc
+    return {
+        "assignment_id": assignment_id,
+        "state": "cleanup_pending",
+        "version": next_version,
+        "event_id": event_id,
+        "outbox_id": outbox_id,
+        "failure_class": failure_class,
+        "cleanup_required": True,
         "idempotent": False,
     }
 

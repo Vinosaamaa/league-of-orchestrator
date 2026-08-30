@@ -27,6 +27,31 @@ SAFE_EFFORT = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 THREAD_UUID = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
 )
+TASK_LABEL_WORD = re.compile(r"[A-Za-z0-9]+")
+TASK_LABEL_NOISE = {
+    "a",
+    "across",
+    "add",
+    "after",
+    "and",
+    "champion",
+    "create",
+    "exact",
+    "for",
+    "fix",
+    "full",
+    "implement",
+    "issue",
+    "league",
+    "make",
+    "one",
+    "research",
+    "repair",
+    "restore",
+    "preserve",
+    "the",
+    "through",
+}
 
 
 class CommandRunner(Protocol):
@@ -111,6 +136,64 @@ def derived_champion_agent_id(assignment_id: str) -> str:
     return str(uuid.uuid5(uuid.NAMESPACE_URL, f"league.champion\0{assignment_id}"))
 
 
+def derive_task_label(task_summary: str) -> str:
+    if (
+        not isinstance(task_summary, str)
+        or not task_summary.strip()
+        or task_summary.strip() != task_summary
+        or any(character in task_summary for character in "\r\n\0")
+    ):
+        raise StorageRefusal(
+            "launch_scope_invalid", "Champion task summary cannot derive a display label"
+        )
+    words = TASK_LABEL_WORD.findall(task_summary.replace("-", " "))
+    lowered = [word.lower() for word in words]
+    proper = [
+        word
+        for index, word in enumerate(words)
+        if index > 0
+        and (word.isupper() or word[:1].isupper())
+        and word.lower() not in TASK_LABEL_NOISE
+    ]
+    if len(proper) >= 2:
+        selected = proper[:2]
+    else:
+        meaningful = [
+            word
+            for word in words
+            if word.lower() not in TASK_LABEL_NOISE and not word.isdigit()
+        ]
+        repair_actions = {"fix", "preserve", "repair", "restore"}
+        if len(proper) == 1:
+            proper_index = words.index(proper[0])
+            following = [
+                word
+                for word in words[proper_index + 1 :]
+                if word.lower() not in TASK_LABEL_NOISE and not word.isdigit()
+            ]
+            selected = [proper[0], following[0] if following else "Work"]
+        elif lowered and lowered[0] in repair_actions and meaningful:
+            selected = [meaningful[0], "Repair"]
+        elif len(meaningful) >= 2:
+            selected = meaningful[-2:]
+        elif meaningful:
+            selected = [meaningful[0], "Work"]
+        else:
+            selected = ["Scoped", "Work"]
+    normalized = [
+        "Meter" if word.lower() == "metering" else word for word in selected
+    ]
+    label = " ".join(
+        word if word.isupper() else word[:1].upper() + word[1:]
+        for word in normalized
+    )
+    if len(label.split()) != 2 or len(label) > 48:
+        raise StorageRefusal(
+            "launch_scope_invalid", "derived Champion display task must be two words"
+        )
+    return label
+
+
 def _stable_json(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
 
@@ -149,6 +232,12 @@ def _session_id(agent: Mapping[str, Any]) -> str | None:
     session = agent.get("agent_session")
     value = session.get("value") if isinstance(session, Mapping) else None
     return str(value) if isinstance(value, str) else None
+
+
+def _session_source(agent: Mapping[str, Any]) -> str | None:
+    session = agent.get("agent_session")
+    value = session.get("source") if isinstance(session, Mapping) else None
+    return str(value) if isinstance(value, str) and value else None
 
 
 def _validate_options(options: VisibleLaunchOptions) -> None:
@@ -390,24 +479,219 @@ class HerdrCodexLaunchAdapter:
             "Codex did not publish one authoritative session after the launch handshake",
         )
 
-    def _verify_title(self, routing_name: str, callsign: str) -> None:
+    def _title_owner(self, assignment_id: str) -> str:
+        return _sha256(assignment_id.encode("utf-8"))[:16]
+
+    def _title_source(self, assignment_id: str) -> str:
+        return "league-launch-" + self._title_owner(assignment_id)
+
+    def _report_title(
+        self,
+        *,
+        pane_id: str,
+        assignment_id: str,
+        callsign: str,
+        applies_to_source: str,
+        sequence: int,
+    ) -> None:
+        title = f"{callsign} · {self.options.task_label}"
+        self._command(
+            (
+                "herdr",
+                "pane",
+                "report-metadata",
+                pane_id,
+                "--source",
+                self._title_source(assignment_id),
+                "--applies-to-source",
+                applies_to_source,
+                "--agent",
+                "codex",
+                "--display-agent",
+                "codex",
+                "--title",
+                title,
+                "--token",
+                f"sidebar_name={callsign}",
+                "--token",
+                f"task_label={self.options.task_label}",
+                "--token",
+                f"thread_title={title}",
+                "--token",
+                f"launch_title_owner={self._title_owner(assignment_id)}",
+                "--token",
+                f"launch_title_source={self._title_source(assignment_id)}",
+                "--token",
+                f"launch_title_applies_to={applies_to_source}",
+                "--seq",
+                str(sequence),
+            ),
+            "Herdr Champion metadata",
+            allow_silent_success=True,
+        )
+
+    def _title_exact(
+        self, agent: Mapping[str, Any], callsign: str, assignment_id: str
+    ) -> bool:
         expected = f"{callsign} · {self.options.task_label}"
+        terminal_titles = {
+            agent.get("terminal_title"),
+            agent.get("terminal_title_stripped"),
+        }
+        tokens = agent.get("tokens")
+        return bool(
+            isinstance(tokens, Mapping)
+            and agent.get("metadata_source") == self._title_source(assignment_id)
+            and tokens.get("sidebar_name") == callsign
+            and tokens.get("task_label") == self.options.task_label
+            and tokens.get("thread_title") == expected
+            and tokens.get("launch_title_owner")
+            == self._title_owner(assignment_id)
+            and tokens.get("launch_title_source")
+            == self._title_source(assignment_id)
+            and tokens.get("launch_title_applies_to") == _session_source(agent)
+            and terminal_titles <= {expected, f"{expected} | codex"}
+        )
+
+    def _verify_title(
+        self,
+        routing_name: str,
+        callsign: str,
+        assignment_id: str,
+        *,
+        stable_observations: int,
+    ) -> dict[str, Any]:
+        prior_key: tuple[str, int] | None = None
+        consecutive = 0
         for _ in range(50):
             agent = self._get_agent(routing_name)
-            tokens = agent.get("tokens")
-            title = agent.get("terminal_title_stripped", agent.get("terminal_title"))
-            if isinstance(tokens, Mapping) and (
-                tokens.get("sidebar_name") == callsign
-                and tokens.get("task_label") == self.options.task_label
-                and tokens.get("thread_title") == expected
-            ):
-                return
-            if title == f"{expected} | codex":
-                return
+            if self._title_exact(agent, callsign, assignment_id):
+                source = agent.get("metadata_source")
+                applies_to_source = _session_source(agent)
+                sequence = agent.get("state_change_seq")
+                if (
+                    isinstance(source, str)
+                    and isinstance(applies_to_source, str)
+                    and isinstance(sequence, int)
+                ):
+                    key = (source, sequence)
+                    consecutive = consecutive + 1 if key == prior_key else 1
+                    prior_key = key
+                    if consecutive >= stable_observations:
+                        expected = f"{callsign} · {self.options.task_label}"
+                        return {
+                            "source": source,
+                            "applies_to_source": applies_to_source,
+                            "state_change_seq": sequence,
+                            "sidebar_name": callsign,
+                            "task_label": self.options.task_label,
+                            "thread_title": expected,
+                            "terminal_title": expected,
+                        }
+            else:
+                prior_key = None
+                consecutive = 0
             time.sleep(0.1)
         raise StorageRefusal(
-            "launch_title_unverified", "Champion sidebar and thread title did not verify"
+            "launch_title_unverified",
+            "Champion sidebar, thread, and terminal title did not verify",
         )
+
+    def _stabilize_title_after_context(
+        self, receipt: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        if self._created is None:
+            raise StorageRefusal(
+                "launch_title_restore_refused",
+                "Champion title restoration has no owned launch endpoint",
+            )
+        routing_name = str(receipt.get("routing_name", ""))
+        callsign = str(receipt.get("callsign", ""))
+        assignment_id = str(receipt.get("assignment_id", ""))
+        agent = self._get_agent(routing_name)
+        tokens = agent.get("tokens")
+        observed_thread = _session_id(agent)
+        applies_to_source = _session_source(agent)
+        presentation_source = agent.get("metadata_source")
+        sequence = agent.get("state_change_seq")
+        owned = bool(
+            agent.get("name") == routing_name
+            and agent.get("agent") == "codex"
+            and agent.get("pane_id") == self._created.get("pane_id")
+            and agent.get("terminal_id") == self._created.get("terminal_id")
+            and agent.get("cwd") == self._created.get("worktree")
+            and agent.get("foreground_cwd") == self._created.get("worktree")
+            and observed_thread == receipt.get("thread_id")
+            and isinstance(applies_to_source, str)
+            and isinstance(presentation_source, str)
+            and presentation_source
+            in {applies_to_source, self._title_source(assignment_id)}
+            and isinstance(sequence, int)
+            and isinstance(tokens, Mapping)
+            and tokens.get("launch_title_owner")
+            == self._title_owner(assignment_id)
+            and tokens.get("launch_title_source")
+            == self._title_source(assignment_id)
+            and tokens.get("launch_title_applies_to") == applies_to_source
+        )
+        if not owned:
+            raise StorageRefusal(
+                "launch_title_restore_refused",
+                "Champion display metadata changed outside the owned launch transaction",
+            )
+        if not self._title_exact(agent, callsign, assignment_id):
+            self._report_title(
+                pane_id=str(self._created["pane_id"]),
+                assignment_id=assignment_id,
+                callsign=callsign,
+                applies_to_source=str(applies_to_source),
+                sequence=int(sequence) + 1,
+            )
+        observation = self._verify_title(
+            routing_name,
+            callsign,
+            assignment_id,
+            stable_observations=2,
+        )
+        self._created["state_change_seq"] = str(observation["state_change_seq"])
+        return observation
+
+    def verify_active_title(self, receipt: Mapping[str, Any]) -> dict[str, Any]:
+        routing_name = str(receipt.get("routing_name", ""))
+        agent = self._get_agent(routing_name)
+        terminal_id = agent.get("terminal_id")
+        thread_id = _session_id(agent)
+        worktree = str(Path(str(receipt.get("worktree", ""))).resolve())
+        generation = (
+            "herdr:"
+            + _sha256(f"{terminal_id}\0{thread_id}".encode("utf-8"))[:24]
+            if isinstance(terminal_id, str) and isinstance(thread_id, str)
+            else ""
+        )
+        exact = bool(
+            agent.get("name") == routing_name
+            and agent.get("agent") == "codex"
+            and agent.get("pane_id") == receipt.get("endpoint")
+            and agent.get("cwd") == worktree
+            and agent.get("foreground_cwd") == worktree
+            and thread_id == receipt.get("thread_id")
+            and generation == receipt.get("runtime_generation")
+            and isinstance(agent.get("state_change_seq"), int)
+        )
+        if not exact:
+            raise StorageRefusal(
+                "launch_title_restore_refused",
+                "active Champion endpoint no longer matches the launch receipt",
+            )
+        self._created = {
+            "pane_id": str(receipt["endpoint"]),
+            "terminal_id": str(terminal_id),
+            "thread_id": str(thread_id),
+            "routing_name": routing_name,
+            "worktree": worktree,
+            "state_change_seq": str(agent["state_change_seq"]),
+        }
+        return self._stabilize_title_after_context(receipt)
 
     def launch(self, spec: AssignmentSpec) -> dict[str, Any]:
         worktree = Path(spec.worktree)
@@ -490,34 +774,31 @@ class HerdrCodexLaunchAdapter:
                 agent, spec, str(pane_id), str(terminal_id)
             )
             self._created.update(identity)
-            title = f"{spec.callsign} · {self.options.task_label}"
-            self._command(
-                (
-                    "herdr",
-                    "pane",
-                    "report-metadata",
-                    str(pane_id),
-                    "--source",
-                    "league-launch-" + _sha256(spec.assignment_id.encode("utf-8"))[:16],
-                    "--agent",
-                    "codex",
-                    "--display-agent",
-                    "codex",
-                    "--title",
-                    title,
-                    "--token",
-                    f"sidebar_name={spec.callsign}",
-                    "--token",
-                    f"task_label={self.options.task_label}",
-                    "--token",
-                    f"thread_title={title}",
-                    "--seq",
-                    "2",
-                ),
-                "Herdr Champion metadata",
-                allow_silent_success=True,
+            applies_to_source = _session_source(agent)
+            observed_sequence = agent.get("state_change_seq")
+            if not isinstance(applies_to_source, str) or not isinstance(
+                observed_sequence, int
+            ):
+                raise StorageRefusal(
+                    "launch_title_unverified",
+                    "Champion metadata authority source or sequence is missing",
+                )
+            self._report_title(
+                pane_id=str(pane_id),
+                assignment_id=spec.assignment_id,
+                callsign=str(spec.callsign),
+                applies_to_source=applies_to_source,
+                sequence=observed_sequence + 1,
             )
-            self._verify_title(routing_name, str(spec.callsign))
+            observation = self._verify_title(
+                routing_name,
+                str(spec.callsign),
+                spec.assignment_id,
+                stable_observations=1,
+            )
+            self._created["state_change_seq"] = str(
+                observation["state_change_seq"]
+            )
         except LaunchAdapterError:
             raise
         except Exception as exc:
@@ -589,17 +870,41 @@ class HerdrCodexLaunchAdapter:
             raise LaunchAdapterError("launch_context_identity_mismatch", cleanup_required=True)
         try:
             _, completed = self._command(
-                ("herdr", "agent", "prompt", routing_name, context),
+                (
+                    "herdr",
+                    "agent",
+                    "prompt",
+                    routing_name,
+                    context,
+                    "--wait",
+                    "--timeout",
+                    "30000",
+                ),
                 "Herdr Champion context delivery",
+                timeout_seconds=35,
             )
         except StorageRefusal as exc:
             raise LaunchAdapterError(
                 "launch_context_delivery_failed", cleanup_required=True
             ) from exc
+        try:
+            display_receipt = self._stabilize_title_after_context(receipt)
+        except StorageRefusal as exc:
+            raise LaunchAdapterError(exc.code, cleanup_required=True) from exc
         return {
             "context_sha256": _sha256(body),
             "bytes": len(body),
-            "effect_sha256": _sha256(completed.stdout.encode("utf-8")),
+            "effect_sha256": _sha256(
+                _stable_json(
+                    {
+                        "prompt_effect_sha256": _sha256(
+                            completed.stdout.encode("utf-8")
+                        ),
+                        "display_receipt": display_receipt,
+                    }
+                ).encode("utf-8")
+            ),
+            "display_receipt": display_receipt,
         }
 
     def cleanup(self, receipt: Mapping[str, Any] | None) -> bool:
@@ -743,6 +1048,28 @@ class VisibleChampionLaunchService:
                     "assignment_context_conflict",
                     "assignment retry produced different bounded context",
                 )
+            try:
+                observation = self.adapter.verify_active_title(receipt)
+            except StorageRefusal as exc:
+                return self.store.fail_assignment_title_validation(
+                    spec.assignment_id,
+                    prior["version"],
+                    exc.code,
+                    f"event:{spec.assignment_id}:title-validation-failed",
+                    f"outbox:{spec.assignment_id}:title-validation-failed",
+                    self.clock.now(),
+                )
+            if prior["context_delivery"].get("display_receipt") != observation:
+                observation_digest = _sha256(
+                    _stable_json(observation).encode("utf-8")
+                )[:16]
+                self.store.record_assignment_title_revalidation(
+                    spec.assignment_id,
+                    prior["version"],
+                    observation,
+                    f"event:{spec.assignment_id}:title-revalidated:{observation_digest}",
+                    self.clock.now(),
+                )
             return {
                 "assignment_id": spec.assignment_id,
                 "task_id": spec.task_id,
@@ -750,7 +1077,10 @@ class VisibleChampionLaunchService:
                 "version": prior["version"],
                 "runtime_instance_id": prior["runtime_instance_id"],
                 "callsign": prior["callsign"],
-                "context_delivery": prior["context_delivery"],
+                "context_delivery": {
+                    **prior["context_delivery"],
+                    "display_receipt": observation,
+                },
                 "idempotent": True,
             }
         try:
@@ -861,6 +1191,7 @@ class VisibleChampionLaunchService:
             effect["context_sha256"],
             effect["bytes"],
             effect["effect_sha256"],
+            effect["display_receipt"],
             f"event:{spec.assignment_id}:context-delivered",
             self.clock.now(),
         )
@@ -882,5 +1213,6 @@ __all__ = [
     "VisibleLaunchOptions",
     "derived_assignment_id",
     "derived_champion_agent_id",
+    "derive_task_label",
     "render_launch_context",
 ]

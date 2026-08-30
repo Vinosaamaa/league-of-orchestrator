@@ -373,9 +373,32 @@ existing assignment service and real Herdr/Codex adapter: reserve, mark
 launching, create one unfocused exact-worktree endpoint, start workspace-write
 Codex with only the canonical League root added, observe the generated thread
 UUID, verify routing/display/backend/workspace/pane/terminal/cwd/title identity,
-activate, and deliver one bounded SQLite-only context. External-effect failures
-settle blocked only after exact endpoint and reservation cleanup; otherwise the
-assignment and cleanup obligation remain `cleanup_pending`.
+activate, and deliver one bounded SQLite-only context. Because handshake and
+context prompts may trigger provider auto-title behavior, the adapter then
+restores and verifies the exact `<Callsign> · <Task>` sidebar, thread, and
+terminal title before recording context delivery. The context prompt uses its
+settled wait as the ordering barrier; final acceptance requires two fresh,
+identical observations and records the launch metadata source, exact agent
+authority source, and endpoint state-change sequence in the context receipt.
+Restoration requires the same launch-owned endpoint, thread, routing name, and
+ownership/source tokens; changed or unowned metadata refuses instead of being
+overwritten. An exact retry sends no prompt, re-observes the live endpoint, and
+performs at most one ownership-safe restoration. Generated task labels derive
+deterministically from the task summary as exactly two words; explicit labels
+remain limited to at most two words.
+External-effect failures settle blocked only after exact endpoint and
+reservation cleanup; otherwise the assignment and cleanup obligation remain
+`cleanup_pending`.
+
+In-place `league shotcaller create` uses the same effective-presentation-source
+rule in the already-calling Codex pane. Callsign publication is only a seed:
+activation requires two matching source/sequence observations after any owner
+prompt auto-title settles, with at most one same-authority restoration. Exact
+retry sends no prompt and creates no layout or process. A newer user-owned
+presentation source refuses metadata mutation; rollback clears the League route
+while preserving that title/source and unrelated tokens, restores only the
+League-owned sidebar/thread tokens to baseline, releases the reservation, and
+creates no Squad.
 
 The release gate is one installed disposable flow: exact capture, one-process
 semantic begin, Champion `assign run`, Champion working and terminal

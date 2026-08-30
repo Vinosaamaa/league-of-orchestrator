@@ -62,6 +62,7 @@ from .visible_launch import (
     VisibleLaunchOptions,
     derived_assignment_id,
     derived_champion_agent_id,
+    derive_task_label,
 )
 
 
@@ -978,11 +979,11 @@ def _add_assignment_commands(groups: argparse._SubParsersAction) -> None:
         "repository",
         "branch",
         "worktree",
-        "task-label",
         "model",
         "effort",
     ):
         launch.add_argument(f"--{name}", required=True)
+    launch.add_argument("--task-label")
     launch.add_argument("--issue", type=int, required=True)
     launch.add_argument("--assignment-id")
     launch.add_argument("--champion-agent-id")
@@ -2403,7 +2404,7 @@ def _assign_launch(store: Storage, args: argparse.Namespace) -> CommandResult:
     )
     options = VisibleLaunchOptions(
         workspace_id=workspace_id,
-        task_label=args.task_label,
+        task_label=args.task_label or derive_task_label(args.task_summary),
         model=args.model,
         effort=args.effort,
         league_command=league_command,

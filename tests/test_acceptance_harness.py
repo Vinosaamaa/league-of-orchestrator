@@ -607,6 +607,21 @@ def test_version_staging_is_regular_symlink_safe_and_retryable(root: Path) -> No
     )
     assert tree_snapshot(refused_home) == before
 
+    ancestor_source = root / "ancestor-source"
+    copy_release_source(ancestor_source)
+    schema_target = root / "untrusted-schema-target"
+    (ancestor_source / "schema").rename(schema_target)
+    (ancestor_source / "schema").symlink_to(schema_target)
+    ancestor_home = root / "ancestor-refusal"
+    ancestor_home.mkdir()
+    (ancestor_home / "AGENTS.md").write_bytes(b"toolkit-owned universal guide\n")
+    ancestor_before = tree_snapshot(ancestor_home)
+    refused(
+        lambda: _staged_install(ancestor_home, ancestor_source),
+        "release_incomplete",
+    )
+    assert tree_snapshot(ancestor_home) == ancestor_before
+
     retry_home = root / "crash-retry"
     retry_home.mkdir()
     retry_universal = retry_home / "AGENTS.md"
@@ -634,6 +649,30 @@ def test_version_staging_is_regular_symlink_safe_and_retryable(root: Path) -> No
     assert retry["guidance"]["universal_unchanged"] is True
     assert retry["guidance"]["rollback_completed"] is True
     assert retry_universal.read_bytes() == universal_before
+
+    swapped_home = root / "swapped-reservation"
+    moved_bundle = root / "original-reserved-bundle"
+
+    def swap_reserved_bundle(event: str) -> None:
+        if event != "after_release_file:VERSION":
+            return
+        bundle = swapped_home / "release-bundle/0.2.28"
+        bundle.rename(moved_bundle)
+        bundle.mkdir()
+        (bundle / "replacement-byte").write_bytes(b"must remain\n")
+        raise InjectedStageCrash(event)
+
+    try:
+        _staged_install(swapped_home, ROOT, fault=swap_reserved_bundle)
+    except InjectedStageCrash:
+        pass
+    else:
+        raise AssertionError("expected injected reservation swap")
+    assert (swapped_home / "release-bundle/0.2.28/replacement-byte").read_bytes() == (
+        b"must remain\n"
+    )
+    assert (moved_bundle / "VERSION").read_bytes() == source_version.read_bytes()
+    assert not (swapped_home / "stage-prefix/releases/0.2.28").exists()
 
 
 def test_issue_23_incident_artifacts_are_complete_and_public_safe() -> None:

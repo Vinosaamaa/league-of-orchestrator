@@ -8,6 +8,7 @@ import sqlite3
 from datetime import datetime
 from typing import Any, Mapping, Optional
 
+from .cleanup import require_cleanup_task_disposition, select_cleanup_policy
 from .storage_types import StorageRefusal
 
 
@@ -486,6 +487,17 @@ def task_resources(store: Any, task_id: str) -> list[dict[str, Any]]:
 def plan_cleanup(store: Any, plan: Mapping[str, Any]) -> dict[str, Any]:
     try:
         with store._transaction():
+            task = store.connection.execute(
+                "SELECT state FROM tasks WHERE task_id=?", (plan["task_id"],)
+            ).fetchone()
+            if task is None:
+                raise StorageRefusal(
+                    "cleanup_owner_refused",
+                    "cleanup owner is not the exact terminal task owner",
+                )
+            require_cleanup_task_disposition(
+                str(task["state"]), str(plan["disposition"])
+            )
             obligation = store.connection.execute(
                 "SELECT * FROM cleanup_obligations WHERE task_id=?", (plan["task_id"],)
             ).fetchone()
@@ -760,8 +772,6 @@ def cleanup_execution_context(store: Any, operation_id: str) -> dict[str, Any]:
     archive = actions[0]["intended_state"]
     if not isinstance(archive, dict):
         raise StorageRefusal("cleanup_operation_invalid", "cleanup archive payload is malformed")
-    from .cleanup import select_cleanup_policy
-
     expected_policy = select_cleanup_policy(str(row["task_class"]), str(row["disposition"]))
     owner = archive.get("owner")
     proof = archive.get("proof")
@@ -801,12 +811,6 @@ def cleanup_execution_context(store: Any, operation_id: str) -> dict[str, Any]:
         if observed_rollover != rollover:
             raise StorageRefusal("cleanup_owner_refused", "rollover predecessor cleanup identity changed")
     else:
-        terminal_task_states = {
-            "completed": {"completed", "complete", "ready_to_land"},
-            "rejected": {"rejected", "blocked", "cancelled", "canceled"},
-            "cancelled": {"cancelled", "canceled"},
-            "failed": {"failed", "blocked"},
-        }
         if (
             row["owner_role"] != owner.get("role")
             or row["owner_task_id"] != row["task_id"]
@@ -814,9 +818,11 @@ def cleanup_execution_context(store: Any, operation_id: str) -> dict[str, Any]:
                 row["owner_retired_at"] is not None
                 and operation["state"] != "completed"
             )
-            or row["task_state"] not in terminal_task_states.get(str(row["disposition"]), set())
         ):
             raise StorageRefusal("cleanup_owner_refused", "cleanup owner is not the exact terminal task owner")
+        require_cleanup_task_disposition(
+            str(row["task_state"]), str(row["disposition"])
+        )
     resources = []
     for resource in store.connection.execute(
         "SELECT * FROM task_resources WHERE task_id=? ORDER BY resource_id",

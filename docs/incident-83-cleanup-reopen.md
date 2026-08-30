@@ -42,6 +42,10 @@ failed by absence rather than by silently guessing a continuation.
    cleanup released them.
 5. There was no exclusive continuation claim. Two successors could therefore
    have raced if resume had been added only at the launcher layer.
+6. Cleanup planning and production execution encoded task-state/disposition
+   compatibility separately. Planning could persist an owner-cancelled
+   `ready_to_land` operation at fence zero, while execution's narrower table
+   refused that immutable operation before claiming it.
 
 ## Corrective design
 
@@ -70,11 +74,22 @@ refuses unless the new endpoint publishes that same UUID. Activation creates a
 new runtime incarnation and never restores the old endpoint, worktree, branch,
 agent identity, runtime identity, or callsign reservation.
 
+Planning and execution now consume one exact task-state/disposition matrix.
+`ready_to_land` permits `completed`, `rejected`, or `cancelled`; the latter two
+represent an explicit owner rejection/cancellation after implementation became
+landable. Other historical terminal combinations remain unchanged. Planning
+checks the matrix inside its transaction before creating or advancing a cleanup
+obligation revision, and execution checks the same matrix before claiming the
+operation fence. This makes incompatible new plans fail early while allowing a
+compatible fence-zero plan persisted by an older release to recover unchanged.
+
 ## Fail-closed matrix
 
 | Observation | Result |
 | --- | --- |
 | Acceptance or cleanup proof incomplete | Cleanup plan refused; issue remains open |
+| Task state and requested disposition are incompatible | Plan refused before a cleanup revision is claimed |
+| Existing fence-zero plan is `ready_to_land + cancelled` | Execution proceeds under the shared owner-decision rule |
 | Cleanup action fails before issue close | Operation remains retryable; issue remains open |
 | Exact issue already closed | Close records `already_applied`; no duplicate mutation |
 | Provider lacks durable exact resume or safe rebinding | Continuation refused |
@@ -107,9 +122,10 @@ Focused synthetic coverage exercises an earlier cleanup failure, issue-close
 failure/retry, already-closed reconciliation, exact reopen/resume with a new
 callsign and runtime incarnation, successor cleanup, unsupported resume,
 incomplete gates, stale binding, instruction/thread ambiguity, exclusive claims,
-and partial external failure recovery. The existing migration, cleanup,
-assignment, and visible-launch tests cover the neighboring contracts and schema
-rollback.
+partial external failure recovery, exact state/disposition compatibility,
+plan-time mismatch refusal, and fence-zero post-upgrade cleanup recovery. The
+existing migration, cleanup, assignment, and visible-launch tests cover the
+neighboring contracts and schema rollback.
 
 Only Codex on Herdr has an operational exact-resume launcher in this slice.
 Other providers remain fail-closed until their own exact durable resume and safe

@@ -557,7 +557,7 @@ def test_existing_release_identity_precedes_install_mutation(root: Path) -> None
         (candidate / "retained-byte").write_bytes(b"existing release identity\n")
         pointer = collision / "stage-prefix/current"
         pointer.parent.mkdir(parents=True, exist_ok=True)
-        pointer.symlink_to("releases/0.2.27")
+        pointer.symlink_to("releases/0.2.28")
         before = tree_snapshot(collision)
         refused(
             lambda collision=collision: _staged_install(collision, ROOT),

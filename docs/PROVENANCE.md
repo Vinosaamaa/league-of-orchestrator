@@ -619,6 +619,14 @@ session identifier automatically. The `0.2.29` launch edge therefore verifies
 the exact foreground `codex resume` argv and worktree before reporting that
 opaque session identifier through Herdr's canonical Codex metadata source and
 next sequence; mismatched or ambiguous processes still fail before activation.
+The `0.2.29` correction deliberately replaces the duplicated cleanup
+task-state/disposition rules with one shared matrix at both the atomic planning
+and pre-claim execution boundaries. An explicit owner cancellation or rejection
+may clean a `ready_to_land` task; truly incompatible combinations refuse before
+claiming a cleanup revision. Focused synthetic recovery persists a fence-zero
+cancelled plan, reopens the canonical store as the upgraded executor, executes
+without replanning or direct state edits, and proves the completed retry is
+idempotent.
 The v16 target-version binding changes only the deterministic acceptance
 fixture's dry-run report digest; its source and imported-row parity digests are
 unchanged.

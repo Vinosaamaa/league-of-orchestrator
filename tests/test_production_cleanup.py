@@ -388,6 +388,93 @@ def test_production_cleanup_crash_resume_and_lease_scope(root: Path) -> None:
         ).fetchone()[0] == 1
 
 
+def test_ready_to_land_owner_cancellation_recovers_planned_fence_zero_after_reopen(
+    root: Path,
+) -> None:
+    root.mkdir(parents=True, exist_ok=True)
+    git = _create_git_canary(root)
+    herdr = herdr_identity()
+    setup = _setup_sqlite(root, ROOT, git, herdr)
+    state = root / "league/state"
+    manifest_path, _ = _cleanup_files(
+        root,
+        git,
+        herdr,
+        f"callsign-assignment:{setup['assignment']['assignment_id']}",
+        "Lux",
+    )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["disposition"] = "cancelled"
+    operation_id = "operation:ready-to-land-owner-cancelled"
+
+    with SQLiteStorage(state, request_wal=False) as store:
+        store.transition_task(
+            LIFECYCLE_TASK_ID,
+            herdr["runtime_instance_id"],
+            3,
+            "ready_to_land",
+            "Synthetic optional task is ready to land.",
+            "Honor the owner's explicit cancellation and execute exact cleanup.",
+            None,
+            "transition:ready-to-land-cancelled",
+            "transition-key:ready-to-land-cancelled",
+            "event:ready-to-land-cancelled",
+            "outbox:ready-to-land-cancelled",
+            SHOTCALLER_ID,
+            "2026-01-01T01:01:00Z",
+        )
+        incompatible = dict(manifest)
+        incompatible["disposition"] = "failed"
+        incompatible["proof"] = {
+            **manifest["proof"],
+            "failure": {"preserved": True},
+        }
+        try:
+            CleanupPlanner(store).plan(
+                incompatible,
+                operation_id="operation:ready-to-land-incompatible",
+                at=AT_PLAN,
+            )
+        except StorageRefusal as exc:
+            assert exc.code == "cleanup_owner_refused"
+        else:
+            raise AssertionError("incompatible ready-to-land cleanup was planned")
+        assert store.cleanup_operation("operation:ready-to-land-incompatible") is None
+
+        planned = CleanupPlanner(store).plan(
+            manifest,
+            operation_id=operation_id,
+            at=AT_PLAN,
+        )
+        persisted = store.cleanup_operation(operation_id)
+        assert planned["fence"] == 0
+        assert persisted is not None
+        assert persisted["state"] == "planned" and persisted["fence"] == 0
+
+    # Reopen the canonical store before constructing the executor: execution
+    # must recover the immutable pre-upgrade operation without replanning or
+    # editing its task, obligation, operation, or fence rows.
+    runner = FakeHerdrRunner()
+    with SQLiteStorage(state, request_wal=False) as store:
+        service = ProductionCleanup(store, runner=HybridRunner(runner))
+        completed = service.execute(
+            operation_id,
+            expected_fence=0,
+            executor_id="executor:upgraded",
+            leased_until=LEASE_FIRST,
+            at=AT_PLAN,
+        )
+        assert completed["execution"]["state"] == "cleanup_completed"
+        duplicate = service.execute(
+            operation_id,
+            expected_fence=1,
+            executor_id="executor:upgraded-retry",
+            leased_until=LEASE_RESUME,
+            at=AT_RESUME,
+        )
+        assert duplicate["execution"]["idempotent"] is True
+
+
 def test_stable_execute_command_refuses_unknown_operation(root: Path) -> None:
     root.mkdir(parents=True, exist_ok=True)
     state, _ = migrated_state(root, "unknown-operation", request_wal=False)
@@ -457,6 +544,9 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="league-production-cleanup-") as temporary:
         root = Path(temporary)
         test_production_cleanup_crash_resume_and_lease_scope(root / "e2e")
+        test_ready_to_land_owner_cancellation_recovers_planned_fence_zero_after_reopen(
+            root / "ready-to-land-cancelled"
+        )
         test_stable_execute_command_refuses_unknown_operation(root / "cli")
     print(
         "PASS: canonical SQLite production cleanup, exact shared-lease release, "

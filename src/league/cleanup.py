@@ -12,6 +12,16 @@ from .storage_types import StorageRefusal
 
 TASK_CLASSES = frozenset({"analysis", "local_git", "pr_ci", "deployed_service"})
 DISPOSITIONS = frozenset({"completed", "rejected", "cancelled", "failed"})
+CLEANUP_DISPOSITIONS_BY_TASK_STATE: dict[str, frozenset[str]] = {
+    "completed": frozenset({"completed"}),
+    "complete": frozenset({"completed"}),
+    "ready_to_land": frozenset({"completed", "rejected", "cancelled"}),
+    "rejected": frozenset({"rejected"}),
+    "blocked": frozenset({"rejected", "failed"}),
+    "cancelled": frozenset({"rejected", "cancelled"}),
+    "canceled": frozenset({"rejected", "cancelled"}),
+    "failed": frozenset({"failed"}),
+}
 RESOURCE_LIFETIMES = frozenset({"task_owned", "shared_lease", "persistent_retain"})
 CLEANUP_ADAPTER_KINDS = frozenset(
     {"archive", "harness", "backend", "git", "callsign", "process", "lease", "retain", "issue"}
@@ -118,6 +128,16 @@ def select_cleanup_policy(task_class: str, disposition: str) -> dict[str, Any]:
         "disposition": disposition,
         "requirements": requirements,
     }
+
+
+def require_cleanup_task_disposition(task_state: str, disposition: str) -> None:
+    """Fail closed unless one canonical task state permits the requested disposition."""
+
+    if disposition not in CLEANUP_DISPOSITIONS_BY_TASK_STATE.get(task_state, frozenset()):
+        raise StorageRefusal(
+            "cleanup_owner_refused",
+            "cleanup owner is not the exact terminal task owner",
+        )
 
 
 @dataclass(frozen=True)

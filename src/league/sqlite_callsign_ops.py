@@ -39,6 +39,7 @@ RUNTIME_RECEIPT_KEYS = {
 }
 SHOTCALLER_BASELINE_KEY = "shotcaller_bootstrap_baseline"
 SHOTCALLER_PUBLICATION_KEY = "shotcaller_bootstrap_publication"
+SHOTCALLER_RUNTIME_KEY = "shotcaller_bootstrap_runtime_id"
 SHOTCALLER_BASELINE_V1_KEYS = {
     "schema",
     "terminal_id",
@@ -1518,6 +1519,107 @@ def shotcaller_bootstrap_publication(
             "receipt_conflict", "Shotcaller publication baseline is not exact"
         )
     return normalized
+
+
+def bind_shotcaller_bootstrap_runtime(
+    store: Any,
+    assignment_id: str,
+    expected_version: int,
+    runtime_instance_id: str,
+) -> dict[str, Any]:
+    """Bind the runtime identity before a recoverable Shotcaller publication."""
+
+    if (
+        not isinstance(runtime_instance_id, str)
+        or not runtime_instance_id
+        or len(runtime_instance_id.encode("utf-8")) > 512
+    ):
+        raise StorageRefusal(
+            "runtime_conflict", "Shotcaller bootstrap runtime identity is invalid"
+        )
+    try:
+        with store._transaction():
+            assignment = store.connection.execute(
+                "SELECT * FROM callsign_assignments WHERE callsign_assignment_id=?",
+                (assignment_id,),
+            ).fetchone()
+            if (
+                assignment is None
+                or assignment["role"] != "shotcaller"
+                or assignment["scope_kind"] != "shotcaller"
+                or assignment["scope_id"] != assignment["agent_id"]
+                or assignment["state"] != "reserved"
+                or int(assignment["version"]) != expected_version
+                or assignment["runtime_instance_id"] is not None
+            ):
+                raise StorageRefusal(
+                    "assignment_conflict",
+                    "Shotcaller runtime binding requires the exact reservation",
+                )
+            agent = store.connection.execute(
+                "SELECT metadata_json FROM agent_instances "
+                "WHERE agent_id=? AND retired_at IS NULL",
+                (assignment["agent_id"],),
+            ).fetchone()
+            if agent is None:
+                raise StorageRefusal(
+                    "agent_conflict", "Shotcaller runtime binding agent is not live"
+                )
+            try:
+                metadata = json.loads(agent["metadata_json"])
+            except (TypeError, json.JSONDecodeError) as exc:
+                raise StorageRefusal(
+                    "receipt_conflict", "Shotcaller runtime metadata is malformed"
+                ) from exc
+            if not isinstance(metadata, dict):
+                raise StorageRefusal(
+                    "receipt_conflict", "Shotcaller runtime metadata is not an object"
+                )
+            baseline = metadata.get(SHOTCALLER_BASELINE_KEY)
+            publication = metadata.get(SHOTCALLER_PUBLICATION_KEY)
+            if baseline is None or publication is None:
+                raise StorageRefusal(
+                    "receipt_conflict",
+                    "Shotcaller runtime binding requires durable publication proof",
+                )
+            normalized_baseline = _shotcaller_baseline(baseline)
+            normalized_publication = _shotcaller_publication(publication)
+            if (
+                normalized_publication["assignment_id"] != assignment_id
+                or normalized_publication["agent_id"] != assignment["agent_id"]
+                or normalized_publication["callsign"] != assignment["callsign"]
+                or normalized_publication["baseline_digest"]
+                != digest(normalized_baseline)
+            ):
+                raise StorageRefusal(
+                    "receipt_conflict",
+                    "Shotcaller runtime binding publication is not exact",
+                )
+            existing = metadata.get(SHOTCALLER_RUNTIME_KEY)
+            if existing is not None:
+                if existing != runtime_instance_id:
+                    raise StorageRefusal(
+                        "runtime_conflict",
+                        "Shotcaller bootstrap retry changed the durable runtime",
+                    )
+                return {"runtime_instance_id": runtime_instance_id, "idempotent": True}
+            metadata[SHOTCALLER_RUNTIME_KEY] = runtime_instance_id
+            changed = store.connection.execute(
+                "UPDATE agent_instances SET metadata_json=? "
+                "WHERE agent_id=? AND metadata_json=?",
+                (stable_json(metadata), assignment["agent_id"], agent["metadata_json"]),
+            )
+            if changed.rowcount != 1:
+                raise StorageRefusal(
+                    "version_conflict", "Shotcaller runtime binding changed concurrently"
+                )
+            return {"runtime_instance_id": runtime_instance_id, "idempotent": False}
+    except StorageRefusal:
+        raise
+    except sqlite3.DatabaseError as exc:
+        raise store._translate_database_error(
+            exc, "Shotcaller runtime binding conflicted with canonical state"
+        ) from exc
 
 
 def record_shotcaller_bootstrap(

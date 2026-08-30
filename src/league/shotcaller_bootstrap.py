@@ -95,6 +95,7 @@ class HerdrShotcallerBootstrapAdapter:
         self._resume_owned_metadata = False
         self._publication_attempt: dict[str, Any] | None = None
         self._expected_published_sequence: int | None = None
+        self._provider_route_only_alias: str | None = None
         worktree = Path(options.worktree)
         if (
             self.environment.get("HERDR_ENV") != "1"
@@ -181,7 +182,12 @@ class HerdrShotcallerBootstrapAdapter:
         suffix = f" | {agent_kind}" if isinstance(agent_kind, str) else ""
         return value[: -len(suffix)] if suffix and value.endswith(suffix) else value
 
-    def _presentation_source(self, agent: Mapping[str, Any]) -> str | None:
+    def _presentation_source(
+        self,
+        agent: Mapping[str, Any],
+        *,
+        provider_route_only_alias: str | None = None,
+    ) -> str | None:
         """Return an explicit source or a fully proven Herdr provider presentation."""
 
         source = agent.get("metadata_source")
@@ -231,19 +237,130 @@ class HerdrShotcallerBootstrapAdapter:
         elif (
             token_route != route
             or orchestrator_identity != f"codex · {route}"
-            or str(labels[0]).casefold() != route.casefold()
+            or (
+                str(labels[0]).casefold() != route.casefold()
+                and provider_route_only_alias != route
+                and self._provider_route_only_alias != route
+            )
         ):
             return None
         return authority_source
+
+    def _route_only_recovery_source(
+        self,
+        spec: ShotcallerBootstrapSpec,
+        pane: Mapping[str, Any],
+        agent: Mapping[str, Any],
+        expected_alias: str | None,
+        recovery: Mapping[str, Any] | None,
+    ) -> str | None:
+        if expected_alias is None or not isinstance(recovery, Mapping):
+            return None
+        assignment = recovery.get("assignment")
+        baseline = recovery.get("baseline")
+        publication = recovery.get("publication")
+        tokens = agent.get("tokens")
+        title = self._presentation_title(agent)
+        source = self._presentation_source(
+            agent, provider_route_only_alias=expected_alias
+        )
+        source_less_provider = "metadata_source" not in agent
+        endpoint_generation = "herdr:" + hashlib.sha256(
+            f"{agent.get('terminal_id')}\0{spec.thread_id}".encode("utf-8")
+        ).hexdigest()[:24]
+        if (
+            not isinstance(assignment, Mapping)
+            or not isinstance(baseline, Mapping)
+            or not isinstance(publication, Mapping)
+            or not isinstance(tokens, Mapping)
+            or not isinstance(source, str)
+            or not self._exact(spec, pane, agent)
+            or self._routing_name(agent) != expected_alias
+            or assignment.get("assignment_id") != spec.assignment_id
+            or assignment.get("agent_id") != spec.agent_id
+            or assignment.get("callsign", "").lower() != expected_alias
+            or assignment.get("role") != "shotcaller"
+            or assignment.get("scope")
+            != {"kind": "shotcaller", "id": spec.agent_id}
+            or assignment.get("state") != "reserved"
+            or assignment.get("version") != 1
+            or assignment.get("runtime_instance_id") not in {
+                None,
+                spec.runtime_instance_id,
+            }
+            or baseline.get("schema")
+            != "league.shotcaller-bootstrap-baseline.v2"
+            or baseline.get("routing_name") is not None
+            or baseline.get("terminal_id") != agent.get("terminal_id")
+            or baseline.get("endpoint_generation") != endpoint_generation
+            or baseline.get("presentation_source") != source
+            or baseline.get("title") != title
+            or baseline.get("sidebar_name")
+            != str(tokens.get("sidebar_name", ""))
+            or baseline.get("thread_title")
+            != str(tokens.get("thread_title", ""))
+            or publication.get("schema")
+            != "league.shotcaller-bootstrap-publication.v1"
+            or publication.get("assignment_id") != spec.assignment_id
+            or publication.get("agent_id") != spec.agent_id
+            or publication.get("callsign") != assignment.get("callsign")
+            or publication.get("routing_name") != expected_alias
+            or publication.get("terminal_id") != agent.get("terminal_id")
+            or publication.get("endpoint_generation") != endpoint_generation
+            or publication.get("session_identity") != spec.thread_id
+            or publication.get("worktree")
+            != str(Path(self.options.worktree).resolve())
+            or publication.get("presentation_source") != source
+            or publication.get("title") != title
+            or publication.get("sidebar_name")
+            != str(tokens.get("sidebar_name", ""))
+            or publication.get("thread_title")
+            != str(tokens.get("thread_title", ""))
+            or publication.get("baseline_digest") != digest(baseline)
+            or type(publication.get("observed_state_change_seq")) is not int
+            or not isinstance(agent.get("state_change_seq"), int)
+            or agent["state_change_seq"]
+            < publication["observed_state_change_seq"]
+            or (
+                source_less_provider
+                and (
+                    tokens.get("callsign") != title
+                    or tokens.get("harness") != "codex"
+                    or tokens.get("identity_thread_id") != spec.thread_id
+                    or tokens.get("identity_title") != f"Codex | {title}"
+                    or not (
+                        (
+                            tokens.get("routing_alias") in {None, ""}
+                            and tokens.get("orchestrator_identity") in {None, ""}
+                        )
+                        or (
+                            tokens.get("routing_alias") == expected_alias
+                            and tokens.get("orchestrator_identity")
+                            == f"codex · {expected_alias}"
+                        )
+                    )
+                )
+            )
+            or tokens.get(TITLE_OWNER_TOKEN) not in (None, "")
+            or tokens.get(TITLE_SOURCE_TOKEN) not in (None, "")
+        ):
+            return None
+        return source
 
     def _owned_presentation_source(
         self, spec: ShotcallerBootstrapSpec, agent: Mapping[str, Any], route: str | None
     ) -> str | None:
         tokens = agent.get("tokens")
         title = self._presentation_title(agent)
+        explicit_source = agent.get("metadata_source")
         if (
             route is None
             or not isinstance(tokens, Mapping)
+            or (
+                "metadata_source" in agent
+                and explicit_source
+                not in {self._title_source(spec), _session_source(agent)}
+            )
             or tokens.get(TITLE_OWNER_TOKEN) != self._title_owner(spec)
             or tokens.get(TITLE_SOURCE_TOKEN) != self._title_source(spec)
             or not isinstance(title, str)
@@ -292,6 +409,7 @@ class HerdrShotcallerBootstrapAdapter:
         *,
         expected_alias: str | None = None,
         allow_unpublished: bool = False,
+        route_only_recovery: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         if not THREAD_UUID.fullmatch(spec.thread_id):
             raise StorageRefusal(
@@ -300,11 +418,23 @@ class HerdrShotcallerBootstrapAdapter:
         pane, agent = self._current()
         tokens = agent.get("tokens")
         routing_name = self._routing_name(agent)
-        presentation_source = self._presentation_source(agent)
-        if presentation_source is None:
-            presentation_source = self._owned_presentation_source(
-                spec, agent, routing_name
+        owned_source = self._owned_presentation_source(spec, agent, routing_name)
+        route_only_candidate = bool(
+            allow_unpublished
+            and expected_alias is not None
+            and routing_name == expected_alias
+            and owned_source is None
+        )
+        if route_only_candidate:
+            presentation_source = self._route_only_recovery_source(
+                spec, pane, agent, expected_alias, route_only_recovery
             )
+            if presentation_source is not None:
+                self._provider_route_only_alias = expected_alias
+        else:
+            presentation_source = self._presentation_source(agent)
+        if presentation_source is None:
+            presentation_source = owned_source
         routing_exact = (
             routing_name is None
             if expected_alias is None
@@ -499,6 +629,8 @@ class HerdrShotcallerBootstrapAdapter:
         if (
             not isinstance(sequence, int)
             or sequence < self._publication_attempt["observed_state_change_seq"]
+            or self._observed is None
+            or sequence != self._observed["state_change_seq"]
             or not (
                 baseline_exact and route in {None, callsign.lower()}
                 or owned_exact and route == callsign.lower()
@@ -772,6 +904,26 @@ class HerdrShotcallerBootstrapAdapter:
                 ("herdr", "agent", "rename", self.options.pane_id, "--clear"),
                 "Herdr Shotcaller routing rollback",
             )
+            if baseline_exact:
+                pane, agent = self._current()
+                current_tokens = agent.get("tokens")
+                expected_tokens = dict(protected["tokens"])
+                if expected_tokens.get("routing_alias") == routing_name:
+                    expected_tokens.pop("routing_alias", None)
+                if expected_tokens.get("orchestrator_identity") == (
+                    f"codex · {routing_name}"
+                ):
+                    expected_tokens.pop("orchestrator_identity", None)
+                if (
+                    self._exact_placeholder(pane, agent)
+                    and self._routing_name(agent) is None
+                    and self._presentation_source(agent)
+                    == protected["metadata_source"]
+                    and (self._presentation_title(agent) or "")
+                    == protected["title"]
+                    and current_tokens == expected_tokens
+                ):
+                    return True
             if preserve_newer_presentation:
                 pane, agent = self._current()
                 current_tokens = agent.get("tokens")
@@ -967,7 +1119,28 @@ class ShotcallerBootstrapService:
             spec,
             expected_alias=expected_alias,
             allow_unpublished=existing is not None and existing["state"] == "reserved",
+            route_only_recovery=(
+                {
+                    "assignment": existing,
+                    "baseline": baseline,
+                    "publication": publication,
+                }
+                if existing is not None
+                and existing["state"] == "reserved"
+                and baseline is not None
+                and publication is not None
+                else None
+            ),
         )
+        if (
+            existing is not None
+            and existing["state"] == "reserved"
+            and baseline is not None
+            and publication is not None
+        ):
+            self.store.bind_shotcaller_bootstrap_runtime(
+                spec.assignment_id, 1, spec.runtime_instance_id
+            )
         if baseline is not None:
             self.adapter.use_restoration_baseline(baseline)
         elif (
@@ -1014,6 +1187,9 @@ class ShotcallerBootstrapService:
                     publication = self.store.record_shotcaller_bootstrap_publication(
                         spec.assignment_id, 1, candidate
                     )["publication"]
+                self.store.bind_shotcaller_bootstrap_runtime(
+                    spec.assignment_id, 1, spec.runtime_instance_id
+                )
                 self.adapter.use_publication_attempt(
                     spec, baseline, publication, str(reserved["callsign"])
                 )

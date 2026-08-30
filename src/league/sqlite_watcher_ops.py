@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from typing import Any, Optional
@@ -9,6 +10,45 @@ from typing import Any, Optional
 from .sqlite_request_ops import _time
 from .storage_watcher import RuntimeRegistrationCommand
 from .storage_types import StorageRefusal
+
+
+def stop_feedback_reason(callsign: str, wait_generation: int) -> str:
+    return (
+        f"League has unresolved obligations for {callsign} "
+        f"at wait generation {wait_generation}."
+    )
+
+
+def consume_stop_feedback(
+    store: Any,
+    scope_id: str,
+    actor_agent_id: str,
+    terminal_generation: str,
+    body: str,
+) -> bool:
+    """Consume only the exact one-time feedback emitted by the last Stop block."""
+
+    body_digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
+    try:
+        with store._transaction():
+            changed = store.connection.execute(
+                """
+                UPDATE watcher_scopes
+                   SET pending_stop_feedback_digest=NULL,
+                       pending_stop_terminal_generation=NULL,
+                       pending_stop_wait_generation=NULL
+                 WHERE scope_id=? AND actor_agent_id=?
+                   AND pending_stop_feedback_digest=?
+                   AND pending_stop_terminal_generation=?
+                   AND pending_stop_wait_generation=last_blocked_wait_generation
+                """,
+                (scope_id, actor_agent_id, body_digest, terminal_generation),
+            )
+    except sqlite3.DatabaseError as exc:
+        raise store._translate_database_error(
+            exc, "Stop feedback suppression conflicted with canonical state"
+        ) from exc
+    return changed.rowcount == 1
 
 
 def register_runtime(
@@ -269,7 +309,10 @@ def note_user_message(store: Any, scope_id: str, actor_agent_id: str, at: str) -
                 """
                 UPDATE watcher_scopes
                    SET user_message_generation=user_message_generation+1,
-                       wait_generation=wait_generation+1,stop_blocked=0,wait_active=0
+                       wait_generation=wait_generation+1,stop_blocked=0,wait_active=0,
+                       pending_stop_feedback_digest=NULL,
+                       pending_stop_terminal_generation=NULL,
+                       pending_stop_wait_generation=NULL
                  WHERE scope_id=?
                 """,
                 (scope_id,),
@@ -368,7 +411,7 @@ def _obligation_counts(store: Any, actor_agent_id: str) -> dict[str, int]:
           (SELECT COUNT(*) FROM requests
             WHERE owner_agent_id=? AND state NOT IN ('answered','cancelled'))
           + (SELECT COUNT(*) FROM prompts
-              WHERE intake_actor_id=? AND triage_state='untriaged') unresolved_requests,
+              WHERE current_owner_agent_id=? AND triage_state='untriaged') unresolved_requests,
           (SELECT COUNT(*) FROM delivery_outbox
             WHERE recipient_agent_id=?
               AND state IN ('pending','in_flight','awaiting_receipt')) pending_deliveries,
@@ -396,7 +439,7 @@ def stop_decision(
     try:
         with store._transaction():
             actor = store.connection.execute(
-                "SELECT role FROM agent_instances WHERE agent_id=? AND retired_at IS NULL",
+                "SELECT role,callsign FROM agent_instances WHERE agent_id=? AND retired_at IS NULL",
                 (actor_agent_id,),
             ).fetchone()
             if actor is None or actor["role"] != "shotcaller":
@@ -437,7 +480,13 @@ def stop_decision(
                 )
             if total == 0:
                 store.connection.execute(
-                    "UPDATE watcher_scopes SET stop_blocked=0,wait_active=0 WHERE scope_id=?",
+                    """
+                    UPDATE watcher_scopes SET stop_blocked=0,wait_active=0,
+                           pending_stop_feedback_digest=NULL,
+                           pending_stop_terminal_generation=NULL,
+                           pending_stop_wait_generation=NULL
+                     WHERE scope_id=?
+                    """,
                     (scope_id,),
                 )
                 return {**common, "status": "allowed", "decision": "allow", "priority": None}
@@ -445,7 +494,13 @@ def stop_decision(
                 return {**common, "status": "unavailable", "decision": "allow", "priority": None}
             if scope["allow_stop_once"]:
                 store.connection.execute(
-                    "UPDATE watcher_scopes SET allow_stop_once=0,stop_blocked=0 WHERE scope_id=?",
+                    """
+                    UPDATE watcher_scopes SET allow_stop_once=0,stop_blocked=0,
+                           pending_stop_feedback_digest=NULL,
+                           pending_stop_terminal_generation=NULL,
+                           pending_stop_wait_generation=NULL
+                     WHERE scope_id=?
+                    """,
                     (scope_id,),
                 )
                 return {
@@ -455,21 +510,39 @@ def stop_decision(
                     "priority": "explicit_allow_stop_once",
                 }
             wait_generation = int(scope["wait_generation"])
-            if (
-                (block_on_fresh_terminal and terminal_fresh)
-                or int(scope["last_blocked_wait_generation"]) < wait_generation
-            ):
+            should_block = int(scope["last_blocked_wait_generation"]) < wait_generation or (
+                block_on_fresh_terminal and terminal_fresh
+            )
+            if should_block:
+                reason_digest = hashlib.sha256(
+                    stop_feedback_reason(actor["callsign"], wait_generation).encode("utf-8")
+                ).hexdigest()
                 store.connection.execute(
                     """
                     UPDATE watcher_scopes
-                       SET last_blocked_wait_generation=?,stop_blocked=1,wait_active=1
+                       SET last_blocked_wait_generation=?,stop_blocked=1,wait_active=1,
+                           pending_stop_feedback_digest=?,
+                           pending_stop_terminal_generation=?,
+                           pending_stop_wait_generation=?
                      WHERE scope_id=?
                     """,
-                    (wait_generation, scope_id),
+                    (
+                        wait_generation,
+                        reason_digest,
+                        terminal_generation,
+                        wait_generation,
+                        scope_id,
+                    ),
                 )
                 return {**common, "status": "blocked_once", "decision": "block", "priority": None}
             store.connection.execute(
-                "UPDATE watcher_scopes SET stop_blocked=0,wait_active=0 WHERE scope_id=?",
+                """
+                UPDATE watcher_scopes SET stop_blocked=0,wait_active=0,
+                       pending_stop_feedback_digest=NULL,
+                       pending_stop_terminal_generation=NULL,
+                       pending_stop_wait_generation=NULL
+                 WHERE scope_id=?
+                """,
                 (scope_id,),
             )
             return {**common, "status": "allowed", "decision": "allow", "priority": None}

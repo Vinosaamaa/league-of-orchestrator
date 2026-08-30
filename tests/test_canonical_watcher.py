@@ -31,7 +31,10 @@ from league.request_services import AssignmentService, AssignmentSpec  # noqa: E
 from league.sqlite_store import SQLiteStorage  # noqa: E402
 from league.sqlite_watcher_ops import _obligation_counts  # noqa: E402
 from league.storage import RuntimeRegistrationCommand  # noqa: E402
-from league.canonical_watcher import _supervision_snapshot  # noqa: E402
+from league.canonical_watcher import (  # noqa: E402
+    _codex_stop_reason,
+    _supervision_snapshot,
+)
 
 
 WATCHER = ROOT / "bin/agent-watcher"
@@ -92,6 +95,13 @@ def _hook_source_event_key(adapter_kind: str, payload: dict[str, str]) -> str:
         f"{adapter_kind}\0{session_ref}\0{raw_key}\0{body_hash}".encode("utf-8")
     ).hexdigest()
     return f"hook:{digest}"
+
+
+def test_stop_reason_uses_resolved_callsign_not_provider_turn_identity() -> None:
+    provider_turn = "11111111-2222-4333-8444-555555555555"
+    reason = _codex_stop_reason("Ashe", 4)
+    assert reason == "League has unresolved obligations for Ashe at wait generation 4."
+    assert provider_turn not in reason
 
 
 def _league(state: Path, *arguments: str) -> dict[str, object]:
@@ -217,6 +227,13 @@ def test_explicit_and_session_stop_dispatch(root: Path) -> None:
         stop = _watcher(env, *arguments, payload=payload)
         assert stop["decision"] == "block"
         assert "unresolved obligations" in str(stop["reason"])
+
+
+def test_codex_stop_reason_uses_resolved_callsign_not_turn_uuid() -> None:
+    turn_id = "01a0503e-1b77-7c21-be2b-1cf6d52cf047"
+    reason = _codex_stop_reason("Ashe", 4)
+    assert reason == "League has unresolved obligations for Ashe at wait generation 4."
+    assert turn_id not in reason
 
 
 def test_supervise_wakes_and_stop_allows_after_settlement(root: Path) -> None:
@@ -717,12 +734,13 @@ def test_queued_prompts_reusing_turn_id_are_unique_and_conflicts_quarantine(
                 """
                 INSERT INTO prompts
                   (prompt_id,intake_actor_id,runtime_instance_id,adapter_kind,session_ref,
-                   source_event_key,triage_state,triage_digest,created_at)
-                VALUES(?,?,?,?,?,?,'untriaged',NULL,?)
+                   source_event_key,triage_state,triage_digest,created_at,
+                   current_owner_agent_id,current_owner_runtime_instance_id)
+                VALUES(?,?,?,?,?,?,'untriaged',NULL,?,?,?)
                 """,
                 (
                     prompt_id, CHAMPION_ID, champion_runtime, "codex",
-                    SHOTCALLER_ID, source_key, AT2,
+                    SHOTCALLER_ID, source_key, AT2, CHAMPION_ID, champion_runtime,
                 ),
             )
             store.connection.execute(
@@ -1049,6 +1067,16 @@ def test_quarantined_prompt_rearms_one_shot_stop(root: Path) -> None:
 def test_real_codex_stop_payload_blocks_once_per_turn(root: Path) -> None:
     _, state, _ = seeded_state(root, "real-codex-stop-generation")
     env = _environment(root / "real-codex-stop-generation", state)
+    _register_garen_runtime(
+        state, "real-codex-stop-generation", session_ref=SHOTCALLER_ID
+    )
+    prompt_a = {
+        "session_id": SHOTCALLER_ID,
+        "turn_id": "turn:owner-visible-one",
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": "Synthetic first real steer in the active turn.",
+    }
+    assert _watcher(env, "codex-user-prompt-hook", payload=prompt_a) == {}
     first = {
         "session_id": SHOTCALLER_ID,
         "turn_id": "turn:owner-visible-one",
@@ -1058,7 +1086,41 @@ def test_real_codex_stop_payload_blocks_once_per_turn(root: Path) -> None:
     }
     blocked = _watcher(env, "codex-stop-hook", payload=first)
     assert blocked["decision"] == "block"
-    assert "turn:owner-visible-one" in str(blocked["reason"])
+    assert blocked["reason"] == (
+        "League has unresolved obligations for Garen at wait generation 2."
+    ), blocked
+    assert "turn:owner-visible-one" not in str(blocked["reason"])
+
+    with SQLiteStorage(state, request_wal=False) as store:
+        before_feedback = tuple(
+            store.connection.execute(
+                "SELECT user_message_generation,wait_generation FROM watcher_scopes "
+                "WHERE actor_agent_id=?",
+                (SHOTCALLER_ID,),
+            ).fetchone()
+        )
+
+    # Codex feeds League's exact reason into the same turn. That one durable
+    # pending digest is consumed without becoming prompt intake or rearming.
+    feedback = {
+        "session_id": SHOTCALLER_ID,
+        "turn_id": "turn:owner-visible-one",
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": str(blocked["reason"]),
+    }
+    assert _watcher(env, "codex-user-prompt-hook", payload=feedback) == {}
+    with SQLiteStorage(state, request_wal=False) as store:
+        after_feedback = tuple(
+            store.connection.execute(
+                "SELECT user_message_generation,wait_generation FROM watcher_scopes "
+                "WHERE actor_agent_id=?",
+                (SHOTCALLER_ID,),
+            ).fetchone()
+        )
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM prompt_payloads WHERE body=?", (feedback["prompt"],)
+        ).fetchone()[0] == 0
+    assert after_feedback == before_feedback
 
     retry = {
         **first,
@@ -1066,17 +1128,19 @@ def test_real_codex_stop_payload_blocks_once_per_turn(root: Path) -> None:
         "last_assistant_message": "Continuation end attempt.",
     }
     assert _watcher(env, "codex-stop-hook", payload=retry) == {}
+    assert _watcher(env, "codex-stop-hook", payload=retry) == {}
 
-    # A new Codex turn is a fresh terminal generation even if prompt intake was
-    # temporarily unavailable and therefore did not increment wait_generation.
-    next_turn = {
-        **first,
-        "turn_id": "turn:owner-visible-two",
-        "last_assistant_message": "Next real user turn end attempt.",
+    # A genuine second user steer in the same active Codex turn is not the exact
+    # self-feedback digest, so it durably rearms the omission backstop.
+    prompt_b = {
+        **prompt_a,
+        "prompt": "Synthetic second real steer in the same active turn.",
     }
-    next_block = _watcher(env, "codex-stop-hook", payload=next_turn)
+    assert _watcher(env, "codex-user-prompt-hook", payload=prompt_b) == {}
+    next_block = _watcher(env, "codex-stop-hook", payload=retry)
     assert next_block["decision"] == "block"
-    assert "turn:owner-visible-two" in str(next_block["reason"])
+    assert "Garen" in str(next_block["reason"])
+    assert "turn:owner-visible-one" not in str(next_block["reason"])
 
 
 def test_transition_contention_keeps_stop_safe_and_prompt_durable(root: Path) -> None:
@@ -1440,6 +1504,7 @@ def test_task_transition_cli_dispatches_exact_watcher_receipt(root: Path) -> Non
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="league-canonical-watcher-") as temporary:
         root = Path(temporary)
+        test_stop_reason_uses_resolved_callsign_not_provider_turn_identity()
         test_explicit_and_session_stop_dispatch(root)
         test_supervise_wakes_and_stop_allows_after_settlement(root)
         test_working_and_progress_tasks_remain_supervised(root)

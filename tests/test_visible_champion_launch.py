@@ -33,6 +33,7 @@ from storage_fixture import REPOSITORY, SHOTCALLER_ID  # noqa: E402
 
 
 THREAD_ID = "33333333-3333-4333-8333-333333333333"
+SHOTCALLER_PANE_ID = "w1:p1"
 
 
 def _context(root: Path, name: str):
@@ -189,6 +190,10 @@ def test_real_adapter_one_command_success_and_retry(root: Path) -> None:
     context_index = max(i for i, call in enumerate(runner.calls) if call[:3] == ("herdr", "agent", "prompt"))
     assert tab_index < start_index < context_index
     start = runner.calls[start_index]
+    assert start[start.index("--pane") + 1] == "w1:p99"
+    assert start[start.index("--pane") + 1] != SHOTCALLER_PANE_ID
+    assert not any(call[:3] == ("herdr", "pane", "split") for call in runner.calls)
+    assert not any(call[:3] == ("herdr", "workspace", "create") for call in runner.calls)
     assert start[start.index("--add-dir") + 1] == str(root / "league")
     assert "--sandbox" not in start
     assert not any(value.startswith("sandbox_mode=") for value in start)

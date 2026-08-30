@@ -29,6 +29,13 @@ $HOME/.local/bin/league --state-root "$HOME/.local/state/league"
 - Every delegate -> notify its owner when blocked or `ready_to_land`; durable state does not replace delivery.
 - Champion issue assignment -> implementation, focused tests, commit, push, PR/update, and exact-head CI only unless the user separately authorizes merge, release, installation, deployment, or teardown.
 
+## Creation and placement contracts
+
+- Shotcaller -> `league shotcaller create` converts the calling live Codex pane in place. League allocates the callsign, verifies exact workspace/tab/pane/terminal/thread/worktree/live state and an absent route, then renames and atomically activates that same pane.
+- Shotcaller failure -> create no layout or process. Restore the prior unnamed route/display and roll back only the reservation; unproven rollback fails closed.
+- Squad -> `league squad register`/`accept` attach a Squad only to an already-created live Shotcaller; they are not creation.
+- Champion -> `league assign run` creates a distinct Codex runtime in a new Herdr tab root; never split or reuse the Shotcaller pane.
+
 ## Prompt intake and one-process turn contract
 
 - UserPromptSubmit and beforeSubmitPrompt -> capture the exact local prompt bytes once and wake the verified Shotcaller; never rewrite the body, inject control text, mine transcripts, infer a split, or fabricate missed prompts.
@@ -51,7 +58,9 @@ $HOME/.local/bin/league --state-root "$HOME/.local/state/league" request turn \
 - Non-ordinary action -> acknowledgement-gated cross-Squad route, defer, awaiting-user, block, cancel, Champion assignment, transition, and cleanup retain their dedicated stable one-command operations; preserve claims and expected versions and reflect their result in the open turn's final commit/boundary.
 - Before reply, wait, handoff, or end -> require the turn process's final boundary to account for every request, untriaged prompt, delivery, assignment, task, Champion, and cleanup obligation; do not shell out to a second unresolved query.
 - Omission backstop -> an untriaged prompt remains unresolved and the installed Stop hook blocks one end attempt for the current generation; do not treat Stop as the normal triage mechanism.
+- Stop self-feedback -> only the exact durable League-emitted Stop reason for the same scope, turn, and generation is consumed without rearming. Any genuine user steer, including a second message in the same Codex turn, increments the user/wait generation and rearms one block.
 - User priority -> an accepted user prompt rearms the current Shotcaller generation and wakes an active supervisor; ordinary user input outranks material-event waits.
+- User responsiveness -> Codex native steer owns model-visible user priority. The prompt hook performs only bounded exact capture and wake publication; it never waits for a foreground checkpoint or supervision poll.
 - Hook budget -> UserPromptSubmit and Stop each open canonical storage once and perform one bounded in-process operation; they never shell through `league` subcommands.
 
 ## Visible Champion launch
@@ -88,6 +97,13 @@ $HOME/.local/bin/league --state-root "$HOME/.local/state/league" assign run \
 - Supervision -> delivery uses the already registered event-driven SQLite watcher or exact-once direct fallback. An active Shotcaller turn never starts or polls `agent-watcher supervise` or status; supervisor process lifecycle belongs to installed runtime wiring outside the model turn.
 - Duplicate delivery -> exact event/outbox retry is idempotent and must not prompt twice.
 - Ready to land -> preserve the Champion, endpoint, worktree, branch, callsign, task, receipts, and unpublished state until the Shotcaller proves every authorized gate.
+
+## Shotcaller rollover reconciliation
+
+- Switch -> freeze active Champions and commit only the Squad owner fence; do not broadly rewrite descendants or delivery.
+- Descendant -> `rollover reconcile-descendant` verifies the frozen live Herdr pane/thread/worktree/route/terminal/generation. It may create one exact missing imported runtime while atomically CAS-moving task, assignment, callsign, Champion owner, and exact pending outboxes. Stale, ambiguous, closed, broad, missing, or claimed state refuses.
+- Intake -> get each exact bounded `rollover intake-plan`, apply `reconcile-intake`, and repeat while `has_more`. Change only mutable current ownership; capture actor/runtime/session/source/body/time remain immutable and inherited requests retain the original requester.
+- Drain -> retire only after all intake, descendant, delivery, runtime, resource, callsign, and cleanup evidence settles; never fabricate proof.
 
 ## Landing and cleanup
 

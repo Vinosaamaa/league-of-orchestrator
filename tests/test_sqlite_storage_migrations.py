@@ -105,20 +105,19 @@ def test_transactional_upgrade_backup_and_rollback(root: Path) -> None:
         assert [migration.version for migration in MIGRATIONS] == list(
             range(1, CURRENT_SCHEMA_VERSION + 1)
         )
-        assert MIGRATIONS[-7].name == "advisory-project-catalog-and-roster-indexes"
-        assert MIGRATIONS[-7].checksum == "5477db9879d6a4a9a29bb8188b398bd6db9a7a786e40e86ab819a0a938790faf"
-        assert MIGRATIONS[-6].name == "guarded-rollover-and-shuffled-callsign-queue"
-        assert MIGRATIONS[-6].checksum == "879ef4addfe6725e31c31a5aa1db9078d7c066a26610eaa2753f749c6e53ab75"
-        assert MIGRATIONS[-5].name == "bounded-reporting-and-outbound-privacy"
-        assert MIGRATIONS[-5].checksum == "bebe90eb841eac2a0b42d3f89e321cb4f3f8b23b02d92febf5a4ea2a50727cde"
-        assert MIGRATIONS[-4].name == "bounded-routing-policy-and-request-progress"
-        assert MIGRATIONS[-4].checksum == "593e2cf05d0200463800b6be7cbf5918a9b5fc3304f793d2ec3fad30b538e80c"
-        assert MIGRATIONS[-3].name == "repository-owned-artifact-publication"
-        assert MIGRATIONS[-3].checksum == "9231da781de45a8e912cd7193034a0b1b56f3a13e5e737e5681f18f6c6e3c852"
-        assert MIGRATIONS[-2].name == "prompt-runtime-quarantine"
-        assert MIGRATIONS[-2].checksum == "b2f75ee64473d8be4188052258c4e69c9cd5f12df1adb8535d55c1b523633df5"
-        assert MIGRATIONS[-1].name == "prompt-quarantine-watcher-generation"
-        assert MIGRATIONS[-1].checksum == "211fb5b225a63065a4607bebf38171f57d182d12e32701ad882d47b7ce5845e4"
+        assert [(item.version, item.name, item.checksum) for item in MIGRATIONS[4:]] == [
+            (5, "advisory-project-catalog-and-roster-indexes", "5477db9879d6a4a9a29bb8188b398bd6db9a7a786e40e86ab819a0a938790faf"),
+            (6, "guarded-rollover-and-shuffled-callsign-queue", "879ef4addfe6725e31c31a5aa1db9078d7c066a26610eaa2753f749c6e53ab75"),
+            (7, "bounded-reporting-and-outbound-privacy", "bebe90eb841eac2a0b42d3f89e321cb4f3f8b23b02d92febf5a4ea2a50727cde"),
+            (8, "bounded-routing-policy-and-request-progress", "593e2cf05d0200463800b6be7cbf5918a9b5fc3304f793d2ec3fad30b538e80c"),
+            (9, "repository-owned-artifact-publication", "9231da781de45a8e912cd7193034a0b1b56f3a13e5e737e5681f18f6c6e3c852"),
+            (10, "prompt-runtime-quarantine", "b2f75ee64473d8be4188052258c4e69c9cd5f12df1adb8535d55c1b523633df5"),
+            (11, "prompt-quarantine-watcher-generation", "211fb5b225a63065a4607bebf38171f57d182d12e32701ad882d47b7ce5845e4"),
+            (12, "nullable-request-rollover-descendant-assignments", "65dbbea863761a0157e14fd2c15b8a09eb67e10ae89c71d7e4e9315d7dc1b8d2"),
+            (13, "standalone-shotcaller-callsign-scope", "f429a924be1e26331d6f5535410bc390cd66bcd92f2890f231f4c2f08f3ef1cc"),
+            (14, "immutable-prompt-provenance-current-owner", "e9afa0921c02d7464453b6fc24a4c73defb952d6cfc6d7829a7b502e81ff178c"),
+            (15, "exact-stop-feedback-suppression", "5c7fed923ba5684c209350dab248d813fa313647229be2d373ff8cef78e91574"),
+        ]
         assert store.connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
 
 

@@ -8,6 +8,20 @@ from .storage_types import FaultInjector
 
 
 class CallsignQueueStorage(Protocol):
+    def callsign_assignment_status(self, assignment_id: str) -> Optional[dict[str, Any]]: ...
+
+    def record_shotcaller_bootstrap(
+        self,
+        assignment_id: str,
+        expected_version: int,
+        receipt: Mapping[str, Any],
+        at: str,
+        *,
+        fault: Optional[FaultInjector] = None,
+    ) -> dict[str, Any]: ...
+
+    def shotcaller_bootstrap_status(self, assignment_id: str) -> Optional[dict[str, Any]]: ...
+
     def reconcile_callsign_pool(
         self,
         role: str,

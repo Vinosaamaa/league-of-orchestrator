@@ -58,6 +58,57 @@ class RolloverStorage(Protocol):
         fault: Optional[FaultInjector] = None,
     ) -> dict[str, Any]: ...
 
+    def reconcile_rollover_descendant(
+        self,
+        operation_id: str,
+        reconciliation_id: str,
+        champion_agent_id: str,
+        task_id: str,
+        runtime_instance_id: str,
+        snapshot_digest: str,
+        snapshot_row_digest: str,
+        expected_rollover_version: int,
+        expected_agent_version: int,
+        expected_task_version: int,
+        expected_assignment_version: int,
+        expected_callsign_assignment_version: int,
+        runtime_receipt: Optional[Mapping[str, Any]],
+        pending_outbox_ids: Sequence[str],
+        at: str,
+    ) -> dict[str, Any]: ...
+
+    def rollover_descendant_target(
+        self,
+        operation_id: str,
+        reconciliation_id: str,
+        champion_agent_id: str,
+        task_id: str,
+        snapshot_digest: str,
+        snapshot_row_digest: str,
+        expected_rollover_version: int,
+        expected_agent_version: int,
+        expected_task_version: int,
+        expected_assignment_version: int,
+        expected_callsign_assignment_version: int,
+    ) -> dict[str, Any]: ...
+
+    def reconcile_rollover_intake(
+        self,
+        operation_id: str,
+        reconciliation_id: str,
+        snapshot_digest: str,
+        expected_rollover_version: int,
+        plan: Mapping[str, Any],
+        at: str,
+    ) -> dict[str, Any]: ...
+
+    def rollover_intake_plan(
+        self,
+        operation_id: str,
+        snapshot_digest: str,
+        expected_rollover_version: int,
+    ) -> dict[str, Any]: ...
+
     def abort_rollover(
         self,
         operation_id: str,

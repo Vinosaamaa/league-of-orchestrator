@@ -17,6 +17,7 @@ STORAGE_TESTS := \
 
 REQUEST_LIFECYCLE_TESTS := \
 	tests/test_request_lifecycle.py \
+	tests/test_request_turn_batch.py \
 	tests/test_assignment_dispatch.py \
 	tests/test_request_concurrency.py \
 	tests/test_transition_delivery.py \
@@ -33,7 +34,8 @@ RUNTIME_LIFECYCLE_TESTS := \
 	tests/test_production_cleanup.py \
 	tests/test_repository_artifacts.py \
 	tests/test_real_cleanup.py \
-	tests/test_model_routing.py
+	tests/test_model_routing.py \
+	tests/test_visible_champion_launch.py
 
 ROUTING_POLICY_TESTS := \
 	tests/test_routing_policy.py \
@@ -46,7 +48,9 @@ SKILL_CONTRACT_TESTS := \
 
 HANDOFF_CALLSIGN_TESTS := \
 	tests/test_callsign_queue.py \
-	tests/test_shotcaller_rollover.py
+	tests/test_shotcaller_rollover.py \
+	tests/test_shotcaller_bootstrap.py \
+	tests/test_placement_policy.py
 
 ACCEPTANCE_TESTS := \
 	tests/test_acceptance_harness.py \

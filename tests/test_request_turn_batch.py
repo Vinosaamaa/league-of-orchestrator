@@ -288,6 +288,108 @@ def test_partial_duplicate_or_reordered_decisions_refuse(root: Path) -> None:
     store.close()
 
 
+def test_one_process_persists_all_dispositions_without_minting_deferred_requests(
+    root: Path,
+) -> None:
+    state, store, clock = create_context(root, "turn-all-dispositions")
+    _capture(store, clock, "prompt:seed", "Seed one existing request")
+    store.triage_prompt(
+        "prompt:seed",
+        [_decision("prompt:seed", "request:existing", "Existing work")["items"][0]],
+        clock.now(),
+    )
+    _capture(store, clock, "prompt:all", "Exercise every semantic disposition")
+    store.close()
+
+    process = _start_turn(state, clock.now())
+    turn_pid = process.pid
+    assert process.stdin is not None and process.stdout is not None
+    intake = json.loads(process.stdout.readline())
+    assert [row["prompt_id"] for row in intake["result"]["prompts"]] == ["prompt:all"]
+    process.stdin.write(
+        json.dumps(
+            {
+                "decisions": [
+                    {
+                        "items": [
+                            {"summary": "New work", "disposition": "new_request"},
+                            {
+                                "summary": "Follow existing work",
+                                "disposition": "follow_up",
+                                "related_request_id": "request:existing",
+                            },
+                            {"summary": "Context only", "disposition": "context"},
+                            {
+                                "summary": "Acknowledged only",
+                                "disposition": "acknowledgement",
+                            },
+                            {
+                                "summary": "Duplicate of existing work",
+                                "disposition": "duplicate",
+                                "related_request_id": "request:existing",
+                            },
+                            {
+                                "summary": "Defer existing work",
+                                "disposition": "deferred",
+                                "related_request_id": "request:existing",
+                                "defer_seconds": 60,
+                            },
+                        ]
+                    }
+                ],
+                "plans": [_semantic_plan()],
+            },
+            separators=(",", ":"),
+        )
+        + "\n"
+    )
+    process.stdin.flush()
+    begun = json.loads(process.stdout.readline())
+    assert process.pid == turn_pid and process.poll() is None
+    assert begun["result"]["phase"] == "begun"
+    assert begun["result"]["batch"]["triage"][0]["request_count"] == 1
+    process.stdin.write(
+        json.dumps(
+            {
+                "actions": [
+                    {
+                        "kind": "answer",
+                        "request_index": 1,
+                        "content": "Synthetic answer.",
+                        "resolution_summary": "Answered the only newly minted request.",
+                    }
+                ]
+            },
+            separators=(",", ":"),
+        )
+        + "\n"
+    )
+    process.stdin.flush()
+    committed = json.loads(process.stdout.readline())
+    assert committed["result"]["phase"] == "committed"
+    assert process.wait(timeout=10) == 0 and process.pid == turn_pid
+
+    from league.sqlite_store import SQLiteStorage
+
+    with SQLiteStorage(state) as observer:
+        rows = observer.connection.execute(
+            "SELECT request_id,state FROM requests ORDER BY request_id"
+        ).fetchall()
+        assert len(rows) == 2
+        assert {row[0]: row[1] for row in rows}["request:existing"] == "deferred"
+        dispositions = observer.connection.execute(
+            "SELECT disposition FROM prompt_items WHERE prompt_id='prompt:all' ORDER BY ordinal"
+        ).fetchall()
+        assert [row[0] for row in dispositions] == [
+            "new_request",
+            "follow_up",
+            "context",
+            "acknowledgement",
+            "duplicate",
+            "deferred",
+        ]
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="league-request-turn-") as temporary:
         root = Path(temporary)
@@ -295,6 +397,7 @@ def main() -> None:
         test_turn_handler_never_spawns_a_second_process(root)
         test_batch_failure_is_atomic_and_exact_retry_is_idempotent(root)
         test_partial_duplicate_or_reordered_decisions_refuse(root)
+        test_one_process_persists_all_dispositions_without_minting_deferred_requests(root)
     print(
         "PASS: one request-turn process emits exact intake, atomically begins ordered model "
         "triage/routing, commits answers, and returns the final unresolved boundary"

@@ -438,10 +438,10 @@ make test-reporting-privacy
 
 The staged migration assertion and strict receipt schema follow
 `CURRENT_SCHEMA_VERSION`; the current contiguous sequence is
-`[1,2,3,4,5,6,7,8,9]`. Version 8 adds the provider-neutral routing and
-orchestration policy. Version 9 adds repository-owned artifact declarations and
-exact merged-publication receipts without changing the acceptance operation or
-sentinel contract.
+`[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15]`. Versions 12 through 15 add the
+bounded rollover-reconciliation, in-place Shotcaller-bootstrap, immutable prompt
+provenance/current-owner, and exact Stop-feedback suppression contracts. The
+acceptance operation and source-sentinel contract remain unchanged.
 
 The skill-contract suite uses only synthetic temporary custom roots and fake
 capability profiles. The current machine inventory was audited separately in a

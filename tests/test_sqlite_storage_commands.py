@@ -56,7 +56,7 @@ def test_launcher_help_and_schemas() -> None:
     )
     assert "SQL is not exposed" in " ".join(launcher.stdout.split())
     assert (
-        "{storage,agent,callsign,rollover,delivery,project,roster,evidence,artifact,report,squad,task,runtime,skill,routing,resource,cleanup,request,assign,hook,help,acceptance}"
+        "{storage,agent,callsign,shotcaller,rollover,delivery,project,roster,evidence,artifact,report,squad,task,runtime,skill,routing,resource,cleanup,request,assign,hook,help,acceptance}"
         in launcher.stdout
     )
     parser = cli._parser()
@@ -73,8 +73,12 @@ def test_launcher_help_and_schemas() -> None:
     rollover_help = groups.choices["rollover"].format_help()
     assert all(
         name in rollover_help
-        for name in ("prepare", "bindings", "acknowledge", "commit", "abort", "drain", "status")
+        for name in (
+            "prepare", "bindings", "acknowledge", "commit", "intake-plan",
+            "reconcile-intake", "reconcile-descendant", "abort", "drain", "status",
+        )
     )
+    assert "create" in groups.choices["shotcaller"].format_help()
     squad_help = groups.choices["squad"].format_help()
     assert all(name in squad_help for name in ("register", "accept", "status"))
     request_actions = next(

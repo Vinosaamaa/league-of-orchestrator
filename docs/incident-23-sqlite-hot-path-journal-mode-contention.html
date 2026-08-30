@@ -19,7 +19,7 @@
       </section>
       <aside class="panel status">
         <div><div class="eyebrow">Current verdict</div><strong>Candidate passed; install pending</strong></div>
-        <dl><dt>Date</dt><dd>2026-08-29</dd><dt>Severity</dt><dd>P0</dd><dt>Installed</dt><dd>League 0.2.21</dd><dt>Candidate</dt><dd>League 0.2.22</dd><dt>Issue</dt><dd>#23 open</dd></dl>
+        <dl><dt>Date</dt><dd>2026-08-29</dd><dt>Severity</dt><dd>P0</dd><dt>Installed</dt><dd>League 0.2.21</dd><dt>Candidate</dt><dd>League 0.2.23 source</dd><dt>Issue</dt><dd>#23 open</dd></dl>
       </aside>
     </header>
 
@@ -30,7 +30,7 @@
       <p>The installed journal correction passed the real long-lived-supervisor gate without increasing timeouts. That success exposed the next release boundary: stable <code>league assign</code> had only internal phases, the global guide still prescribed retired JSON writers, the Shotcaller could not query exact retained untriaged bodies, and a default Champion sandbox could not open the canonical League root.</p>
       <p>The successor adds one <code>league request turn</code> process that emits exact intake, atomically accepts model-authored triage/claims/routing, stays open without a transaction while the model works, atomically accepts answers/results and delivery effects, returns the full obligation boundary, and exits. It also adds one recoverable <code>league assign run</code> and only the exact canonical state root as an additional Champion writable root.</p>
       <p>UserPromptSubmit still only captures and wakes. It never rewrites the owner body, injects control text, chooses a semantic split, or starts the turn process.</p>
-      <div class="notice"><strong>Installed gate remains open.</strong> Installed 0.2.21 matched all 104 source release files and preserved WAL integrity, but rejected Herdr's successful empty metadata response and cleaned the disposable launch. The staged 0.2.22 correction passed the complete lifecycle; merge, installation, and installed acceptance remain pending. UserPromptSubmit remains owner-controlled.</div>
+      <div class="notice"><strong>Installed gate remains open.</strong> Installed 0.2.21 remains the stable pointer. Merged 0.2.22 is not installed. The 0.2.23 source candidate adds generic successor rollover, current-pane Shotcaller creation, immutable prompt provenance, and exact Stop-feedback suppression; PR/CI, installation, and installed acceptance remain pending. UserPromptSubmit remains owner-controlled.</div>
     </section>
 
     <section class="panel section" id="architecture">
@@ -349,10 +349,11 @@
           <tr><td>Low-level request triage/claim/dispatch/answer/result/unresolved</td><td>Recovery, inspection, non-model automation</td><td>Supported but deferred from normal turns</td></tr>
           <tr><td>Route, defer, awaiting-user, block, cancel</td><td>Explicit non-ordinary owner decisions</td><td>Never inferred by the adapter</td></tr>
           <tr><td><code>assign run</code></td><td>Visible Champion reservation through verified context</td><td>Manual phases are recovery-only</td></tr>
+          <tr><td><code>shotcaller create</code></td><td>In-place creation on the exact current unnamed Codex/Herdr pane</td><td>No Squad, layout, or process creation</td></tr>
           <tr><td><code>task transition</code></td><td>Material state plus event/outbox</td><td>One command per material transition</td></tr>
           <tr><td>Delivery and watcher adapter</td><td>Event-driven watcher or direct fallback</td><td>No active-turn polling</td></tr>
           <tr><td>Cleanup plan/execute/status/reconcile</td><td>Proof-gated teardown and crash resume</td><td>Disposable reconcile remains narrowly scoped</td></tr>
-          <tr><td>Rollover prepare/bindings/acknowledge/commit/abort/drain/status</td><td>Explicit Shotcaller replacement</td><td>Separate reliability workflow</td></tr>
+          <tr><td>Rollover prepare/bindings/acknowledge/commit/intake-plan/reconcile-intake/reconcile-descendant/abort/drain/status</td><td>Explicit Shotcaller replacement and bounded reconciliation</td><td>Separate reliability workflow</td></tr>
           <tr><td>Storage migrate/backup/import/integrity/export</td><td>Explicit maintenance</td><td>Only migrate changes journal mode; import defaults no-apply</td></tr>
           <tr><td>Retired writer surfaces</td><td>None</td><td>The historical guide artifact is non-installable and read-only</td></tr>
         </tbody>
@@ -387,16 +388,54 @@
           <tr><td>Stop safety</td><td>Normal block; no raw busy error</td><td><span class="pill pass">Synthetic pass</span></td></tr>
           <tr><td>Supervisor wake</td><td>Foreground wait exits for user priority</td><td><span class="pill pass">Synthetic pass</span></td></tr>
           <tr><td>Focused affected suites</td><td>Watcher, migration, concurrency, request, acceptance, live-cutover, safety</td><td><span class="pill pass">Local pass</span></td></tr>
-          <tr><td>Exact-head CI</td><td>Hosted checks bind to published successor PR head</td><td><span class="pill pending">Refreshed PR #77 pending</span></td></tr>
-          <tr><td>Installed release</td><td>Tested merge tree and source-managed guide installed; prior release retained</td><td><span class="pill pending">0.2.21 exact parity; 0.2.22 pending</span></td></tr>
+          <tr><td>Exact-head CI</td><td>Hosted checks bind to published successor PR head</td><td><span class="pill pending">0.2.23 successor PR pending</span></td></tr>
+          <tr><td>Installed release</td><td>Tested merge tree and source-managed guide installed; prior release retained</td><td><span class="pill pending">0.2.21 remains installed; 0.2.23 has no install authority</span></td></tr>
           <tr><td>Whole direct turn</td><td>One PID emits two bodies, begins atomic triage/claims/routing, remains alive, commits outcome/delivery, returns full boundary, then exits without another League spawn</td><td><span class="pill pass">Focused pass</span></td></tr>
           <tr><td>Performance layers</td><td>Mock, real candidate CLI+SQLite, variable Garen reasoning, and installed combined path remain separate</td><td><span class="pill pass">Passed separately</span></td></tr>
           <tr><td>Visible launch</td><td>One command reserves, starts, observes UUID, verifies, activates, and briefs</td><td><span class="pill pending">0.2.21 failed; 0.2.22 candidate passed</span></td></tr>
           <tr><td>Sandbox access</td><td>Champion receives only the exact League root and runs stable commands</td><td><span class="pill pass">Installed pass</span></td></tr>
           <tr><td>Failure cleanup</td><td>Pending is preserved until endpoint, runtime, and callsign proof agree</td><td><span class="pill pass">Focused pass</span></td></tr>
-          <tr><td>Disposable E2E</td><td>Capture, triage, assign run, transition, Garen delivery, cleanup, zero residue, integrity</td><td><span class="pill pending">Staged 0.2.22 passed; install gate pending</span></td></tr>
+          <tr><td>Disposable E2E</td><td>Capture, triage, assign run, transition, current-owner delivery, cleanup, zero residue, integrity</td><td><span class="pill pending">Staged 0.2.22 passed; corrected 0.2.23 installed gate pending</span></td></tr>
         </tbody>
       </table>
+    </section>
+
+    <section class="panel section" id="successor-regression">
+      <h2>0.2.23 successor rollover and placement correction</h2>
+      <p>Installed 0.2.21 remains unchanged. Post-rollover inspection showed that a valid successor turn did not prove successor prompt capture, inherited prompt ownership, frozen Champion task ownership, or descendant delivery. The source candidate fixes those boundaries generically; it is not installed proof.</p>
+      <div class="grid">
+        <div>
+          <h3>Three separate creation contracts</h3>
+          <ol class="list">
+            <li><strong>Shotcaller create:</strong> allocate internally and convert the exact current unnamed Codex pane in place; create no layout or process.</li>
+            <li><strong>Squad register:</strong> attach a Squad only to an already-created live Shotcaller.</li>
+            <li><strong>Champion assign run:</strong> create a distinct Codex runtime in a new Herdr tab root; never split or reuse the Shotcaller pane.</li>
+          </ol>
+        </div>
+        <div>
+          <h3>Exact rollover transaction</h3>
+          <p>Each frozen Champion moves agent owner, task coordinator/version, task assignment/version, callsign assignment/version, verified runtime, and only the exact still-pending descendant deliveries together. Claimed, stale, broad, ambiguous, missing, mismatched, or closed state refuses.</p>
+          <p>Prompt reconciliation changes only the mutable current owner. Original actor, runtime, session, source key, body identity, and creation time remain immutable.</p>
+        </div>
+      </div>
+      <table>
+        <thead><tr><th>Ticket</th><th>Regression boundary</th><th>Candidate proof</th></tr></thead>
+        <tbody>
+          <tr><td>#3</td><td>Exact material delivery to current owner</td><td>Delivery moves only inside descendant CAS; claim race refuses</td></tr>
+          <tr><td>#5</td><td>One Stop block without self-feedback loop</td><td>Callsign-only text, exact one-time suppression, genuine steer rearm</td></tr>
+          <tr><td>#7</td><td>Provider-bound runtime identity</td><td>Exact current-pane bootstrap and fake-only imported runtime verification</td></tr>
+          <tr><td>#17</td><td>Prompt durability before semantic action</td><td>First successor prompt binds with zero quarantine; capture provenance stays immutable</td></tr>
+          <tr><td>#66</td><td>One-process turn and responsive steering</td><td>Same PID spans begin and commit; concurrent hook capture does not wait for process exit</td></tr>
+        </tbody>
+      </table>
+      <h3>Four clocks, never one timeout</h3>
+      <div class="grid">
+        <article class="notice"><span class="tag">1</span><h3>Native steer</h3><p>Codex provider delivery to the active model turn. League does not poll for it.</p></article>
+        <article class="notice"><span class="tag">2</span><h3>Event wake</h3><p>Bounded prompt publication or exact Champion material-event delivery.</p></article>
+        <article class="notice"><span class="tag">3</span><h3>Checkpoint lifetime</h3><p>Optional yielded and interruptible fallback, never an ordinary-turn foreground wait.</p></article>
+        <article class="notice"><span class="tag">4</span><h3>Stale health</h3><p>Independent heartbeat grace for classifying watcher health.</p></article>
+      </div>
+      <p>Schemas 12–15 cover imported assignment reconciliation, standalone Shotcaller scope, immutable prompt provenance with mutable current ownership, and exact Stop-feedback suppression. Migration, staged receipt, cutover receipt, backup, integrity, and rollback must all identify schema 15.</p>
     </section>
 
     <section class="panel section" id="rollback-risks">
@@ -422,7 +461,7 @@
             <li>A model that never sends the commit line leaves the bounded turn process waiting; Stop and owner interruption remain recovery boundaries.</li>
             <li>Cross-Squad route and defer/block/cancel remain dedicated commands to preserve semantic authority.</li>
             <li>UserPromptSubmit remained owner-disabled during release; the implementation does not change that owner-controlled setting.</li>
-            <li>The 0.2.22 lifecycle is staged-candidate evidence, not installed proof. The stable pointer remains 0.2.21 until separately authorized installation and rollback verification.</li>
+            <li>The 0.2.22 lifecycle is staged-candidate evidence, not installed proof. The 0.2.23 successor correction is source-only. The stable pointer remains 0.2.21 until separately authorized installation and rollback verification.</li>
           </ul>
         </div>
       </div>
@@ -439,9 +478,9 @@
           <tr><td>P0</td><td>Add adapter-backed <code>league assign run</code> with narrow canonical-root access</td><td>Issue #23 implementer</td><td><span class="pill pass">Candidate complete</span></td></tr>
           <tr><td>P0</td><td>Archive the retired JSON guide contract and install only SQLite-native guidance from exact merged source bytes</td><td>Issue #23 implementer</td><td><span class="pill pass">Installed parity</span></td></tr>
           <tr><td>P0</td><td>Publish sanitized Markdown and HTML incident artifacts</td><td>Issue #23 implementer</td><td><span class="pill pass">Candidate complete</span></td></tr>
-          <tr><td>P0</td><td>Run focused tests, public safety, and exact-head CI</td><td>Issue #23 implementer</td><td><span class="pill pending">Refreshed PR #77 pending</span></td></tr>
-          <tr><td>P0</td><td>Install exact tested release with rollback retained</td><td>Release owner</td><td><span class="pill pending">0.2.22 pending; pointer preserved</span></td></tr>
-          <tr><td>P0</td><td>Run one installed disposable capture-to-cleanup E2E</td><td>Issue #23 implementer</td><td><span class="pill pending">Candidate passed; install gate pending</span></td></tr>
+          <tr><td>P0</td><td>Run focused tests, public safety, and exact-head CI</td><td>Issue #23 implementer</td><td><span class="pill pending">0.2.23 successor PR pending</span></td></tr>
+          <tr><td>P0</td><td>Install exact tested release with rollback retained</td><td>Release owner</td><td><span class="pill pending">No 0.2.23 authority; 0.2.21 pointer preserved</span></td></tr>
+          <tr><td>P0</td><td>Run one installed disposable capture-to-cleanup E2E</td><td>Issue #23 implementer</td><td><span class="pill pending">Staged 0.2.22 passed; corrected installed gate pending</span></td></tr>
           <tr><td>P0</td><td>Measure retired JSON versus installed SQLite startup, intake, begin, commit, total, p95, and command count</td><td>Issue #23 implementer</td><td><span class="pill pass">Installed comparison passed</span></td></tr>
           <tr><td>P0</td><td>Re-enable UserPromptSubmit only after installed disposable acceptance</td><td>Owner</td><td><span class="pill pending">Not yet safe</span></td></tr>
           <tr><td>P1</td><td>Keep journal-mode changes maintenance-only</td><td>League maintainers</td><td><span class="pill pass">Invariant</span></td></tr>
@@ -450,7 +489,7 @@
     </section>
 
     <footer class="panel section footer">
-      <strong>Resolution criterion pending:</strong> staged 0.2.22 proved two captures, one stable turn PID, explicit triage/routing/commit, visible Champion launch, watcher delivery, exact cleanup, zero residue, and integrity. The same proof must pass after exact-head merge and authorized installation.
+      <strong>Resolution criterion pending:</strong> staged 0.2.22 proved two captures, one stable turn PID, explicit triage/routing/commit, visible Champion launch, watcher delivery, exact cleanup, zero residue, and integrity. The corrected 0.2.23 successor bytes must pass exact-head PR/CI before any separately authorized merge, installation, and installed proof.
     </footer>
   </main>
 </body>

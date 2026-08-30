@@ -31,6 +31,9 @@ from .sqlite_assignment_ops import prepare_assignment as prepare_assignment_oper
 from .sqlite_assignment_ops import reconcile_assignment_runtime as reconcile_assignment_runtime_operation
 from .sqlite_assignment_ops import transition_task as transition_task_operation
 from .sqlite_callsign_ops import activate_callsign as activate_callsign_operation
+from .sqlite_callsign_ops import callsign_assignment_status as callsign_assignment_status_operation
+from .sqlite_callsign_ops import record_shotcaller_bootstrap as record_shotcaller_bootstrap_operation
+from .sqlite_callsign_ops import shotcaller_bootstrap_status as shotcaller_bootstrap_status_operation
 from .sqlite_callsign_ops import allocate_callsign as allocate_callsign_operation
 from .sqlite_callsign_ops import callsign_status as callsign_status_operation
 from .sqlite_callsign_ops import initialize_imported_callsign_state
@@ -74,9 +77,17 @@ from .sqlite_rollover_ops import acknowledge_rollover as acknowledge_rollover_op
 from .sqlite_rollover_ops import commit_rollover as commit_rollover_operation
 from .sqlite_rollover_ops import complete_rollover_drain as complete_rollover_drain_operation
 from .sqlite_rollover_ops import prepare_rollover as prepare_rollover_operation
+from .sqlite_rollover_ops import (
+    reconcile_rollover_descendant as reconcile_rollover_descendant_operation,
+)
+from .sqlite_rollover_ops import reconcile_rollover_intake as reconcile_rollover_intake_operation
+from .sqlite_rollover_ops import rollover_intake_plan as rollover_intake_plan_operation
 from .sqlite_rollover_ops import rollover_bindings as rollover_bindings_operation
 from .sqlite_rollover_ops import rollover_status as rollover_status_operation
 from .sqlite_rollover_ops import rollover_cleanup_target as rollover_cleanup_target_operation
+from .sqlite_rollover_ops import (
+    rollover_descendant_target as rollover_descendant_target_operation,
+)
 from .sqlite_roster_ops import roster_snapshot as roster_snapshot_operation
 from .sqlite_report_ops import generate_report as generate_report_operation
 from .sqlite_report_ops import record_activity_evidence as record_activity_evidence_operation
@@ -90,6 +101,7 @@ from .sqlite_transfer_ops import (
     export_bytes as export_operation,
 )
 from .sqlite_watcher_ops import note_user_message as note_user_message_operation
+from .sqlite_watcher_ops import consume_stop_feedback as consume_stop_feedback_operation
 from .sqlite_watcher_ops import rearm_wait as rearm_wait_operation
 from .sqlite_watcher_ops import register_runtime as register_runtime_operation
 from .sqlite_watcher_ops import register_watcher as register_watcher_operation
@@ -110,10 +122,26 @@ from .sqlite_handoff_schema import MIGRATION_NAME as HANDOFF_MIGRATION_NAME
 from .sqlite_handoff_schema import STATEMENTS as HANDOFF_MIGRATION_STATEMENTS
 from .sqlite_routing_policy_schema import MIGRATION_NAME as ROUTING_POLICY_MIGRATION_NAME
 from .sqlite_routing_policy_schema import STATEMENTS as ROUTING_POLICY_MIGRATION_STATEMENTS
+from .sqlite_rollover_reconciliation_schema import (
+    MIGRATION_NAME as ROLLOVER_RECONCILIATION_MIGRATION_NAME,
+)
+from .sqlite_rollover_reconciliation_schema import (
+    STATEMENTS as ROLLOVER_RECONCILIATION_MIGRATION_STATEMENTS,
+)
+from .sqlite_shotcaller_bootstrap_schema import (
+    MIGRATION_NAME as SHOTCALLER_BOOTSTRAP_MIGRATION_NAME,
+)
+from .sqlite_shotcaller_bootstrap_schema import (
+    STATEMENTS as SHOTCALLER_BOOTSTRAP_MIGRATION_STATEMENTS,
+)
+from .sqlite_prompt_owner_schema import MIGRATION_NAME as PROMPT_OWNER_MIGRATION_NAME
+from .sqlite_prompt_owner_schema import STATEMENTS as PROMPT_OWNER_MIGRATION_STATEMENTS
+from .sqlite_stop_feedback_schema import MIGRATION_NAME as STOP_FEEDBACK_MIGRATION_NAME
+from .sqlite_stop_feedback_schema import STATEMENTS as STOP_FEEDBACK_MIGRATION_STATEMENTS
 
 
 WAL_MINIMUM = (3, 51, 3)
-CURRENT_SCHEMA_VERSION = 11
+CURRENT_SCHEMA_VERSION = 15
 DATABASE_NAME = "league.sqlite3"
 DEFAULT_BUSY_TIMEOUT_MS = 500
 MAX_BUSY_TIMEOUT_MS = 10_000
@@ -1107,6 +1135,20 @@ MIGRATIONS = (
             "ALTER TABLE prompt_quarantine ADD COLUMN wake_committed INTEGER NOT NULL DEFAULT 0 CHECK (wake_committed IN (0,1))",
         ),
     ),
+    Migration(
+        12,
+        ROLLOVER_RECONCILIATION_MIGRATION_NAME,
+        ROLLOVER_RECONCILIATION_MIGRATION_STATEMENTS,
+        rebuilds_foreign_keys=True,
+    ),
+    Migration(
+        13,
+        SHOTCALLER_BOOTSTRAP_MIGRATION_NAME,
+        SHOTCALLER_BOOTSTRAP_MIGRATION_STATEMENTS,
+        rebuilds_foreign_keys=True,
+    ),
+    Migration(14, PROMPT_OWNER_MIGRATION_NAME, PROMPT_OWNER_MIGRATION_STATEMENTS),
+    Migration(15, STOP_FEEDBACK_MIGRATION_NAME, STOP_FEEDBACK_MIGRATION_STATEMENTS),
 )
 
 
@@ -1960,6 +2002,25 @@ class SQLiteStorage(SQLiteTransactionCore):
             fault=fault,
         )
 
+    def callsign_assignment_status(self, assignment_id: str) -> Optional[dict[str, Any]]:
+        return callsign_assignment_status_operation(self, assignment_id)
+
+    def record_shotcaller_bootstrap(
+        self,
+        assignment_id: str,
+        expected_version: int,
+        receipt: dict[str, Any],
+        at: str,
+        *,
+        fault: Optional[FaultInjector] = None,
+    ) -> dict[str, Any]:
+        return record_shotcaller_bootstrap_operation(
+            self, assignment_id, expected_version, receipt, at, fault=fault
+        )
+
+    def shotcaller_bootstrap_status(self, assignment_id: str) -> Optional[dict[str, Any]]:
+        return shotcaller_bootstrap_status_operation(self, assignment_id)
+
     def activate_callsign(
         self,
         assignment_id: str,
@@ -2092,6 +2153,104 @@ class SQLiteStorage(SQLiteTransactionCore):
             owner_outbox_id,
             at,
             fault=fault,
+        )
+
+    def reconcile_rollover_descendant(
+        self,
+        operation_id: str,
+        reconciliation_id: str,
+        champion_agent_id: str,
+        task_id: str,
+        runtime_instance_id: str,
+        snapshot_digest: str,
+        snapshot_row_digest: str,
+        expected_rollover_version: int,
+        expected_agent_version: int,
+        expected_task_version: int,
+        expected_assignment_version: int,
+        expected_callsign_assignment_version: int,
+        runtime_receipt: Optional[dict[str, Any]],
+        pending_outbox_ids: Sequence[str],
+        at: str,
+    ) -> dict[str, Any]:
+        return reconcile_rollover_descendant_operation(
+            self,
+            operation_id,
+            reconciliation_id,
+            champion_agent_id,
+            task_id,
+            runtime_instance_id,
+            snapshot_digest,
+            snapshot_row_digest,
+            expected_rollover_version,
+            expected_agent_version,
+            expected_task_version,
+            expected_assignment_version,
+            expected_callsign_assignment_version,
+            runtime_receipt,
+            pending_outbox_ids,
+            at,
+        )
+
+    def rollover_descendant_target(
+        self,
+        operation_id: str,
+        reconciliation_id: str,
+        champion_agent_id: str,
+        task_id: str,
+        snapshot_digest: str,
+        snapshot_row_digest: str,
+        expected_rollover_version: int,
+        expected_agent_version: int,
+        expected_task_version: int,
+        expected_assignment_version: int,
+        expected_callsign_assignment_version: int,
+    ) -> dict[str, Any]:
+        return rollover_descendant_target_operation(
+            self,
+            operation_id,
+            reconciliation_id,
+            champion_agent_id,
+            task_id,
+            snapshot_digest,
+            snapshot_row_digest,
+            expected_rollover_version,
+            expected_agent_version,
+            expected_task_version,
+            expected_assignment_version,
+            expected_callsign_assignment_version,
+        )
+
+    def reconcile_rollover_intake(
+        self,
+        operation_id: str,
+        reconciliation_id: str,
+        snapshot_digest: str,
+        expected_rollover_version: int,
+        plan: dict[str, Any],
+        at: str,
+    ) -> dict[str, Any]:
+        return reconcile_rollover_intake_operation(
+            self,
+            operation_id,
+            reconciliation_id,
+            snapshot_digest,
+            expected_rollover_version,
+            plan,
+            at,
+        )
+
+    def rollover_intake_plan(
+        self,
+        operation_id: str,
+        snapshot_digest: str,
+        expected_rollover_version: int,
+    ) -> dict[str, Any]:
+        return rollover_intake_plan_operation(
+            self,
+            operation_id,
+            snapshot_digest,
+            expected_rollover_version,
         )
 
     def abort_rollover(
@@ -2792,6 +2951,17 @@ class SQLiteStorage(SQLiteTransactionCore):
         self, scope_id: str, actor_agent_id: str, at: str
     ) -> dict[str, Any]:
         return note_user_message_operation(self, scope_id, actor_agent_id, at)
+
+    def consume_stop_feedback(
+        self,
+        scope_id: str,
+        actor_agent_id: str,
+        terminal_generation: str,
+        body: str,
+    ) -> bool:
+        return consume_stop_feedback_operation(
+            self, scope_id, actor_agent_id, terminal_generation, body
+        )
 
     def rearm_wait(
         self, scope_id: str, actor_agent_id: str, event_id: str, at: str

@@ -17,7 +17,7 @@ from .storage_types import FaultInjector, StorageRefusal
 
 
 ROLES = {"shotcaller", "champion", "hidden-worker"}
-SCOPES = {"squad", "task", "worker"}
+SCOPES = {"shotcaller", "squad", "task", "worker"}
 CAPABILITY = re.compile(r"^[a-z][a-z0-9._-]{0,63}$")
 CALLSIGN = re.compile(r"^[A-Za-z][A-Za-z0-9._-]{0,63}$")
 RUNTIME_RECEIPT_KEYS = {
@@ -268,6 +268,14 @@ def callsign_status(store: Any, role: str) -> dict[str, Any]:
         "counts": counts,
         "entries": entries,
     }
+
+
+def callsign_assignment_status(store: Any, assignment_id: str) -> Optional[dict[str, Any]]:
+    row = store.connection.execute(
+        "SELECT * FROM callsign_assignments WHERE callsign_assignment_id=?",
+        (assignment_id,),
+    ).fetchone()
+    return None if row is None else _assignment_value(row, idempotent=True)
 
 
 def reconcile_callsign_pool(
@@ -664,6 +672,156 @@ def _runtime_receipt(receipt: Mapping[str, Any], assignment: Any) -> tuple[dict[
     return value, digest(value)
 
 
+def _activate_in_transaction(
+    store: Any,
+    assignment_id: str,
+    expected_version: int,
+    receipt: Mapping[str, Any],
+    at: str,
+) -> tuple[dict[str, Any], dict[str, Any], str]:
+    assignment = store.connection.execute(
+        "SELECT * FROM callsign_assignments WHERE callsign_assignment_id=?",
+        (assignment_id,),
+    ).fetchone()
+    if assignment is None:
+        raise StorageRefusal("assignment_unknown", "callsign assignment does not exist")
+    normalized, receipt_digest = _runtime_receipt(receipt, assignment)
+    if assignment["state"] == "active":
+        if assignment["acceptance_digest"] != receipt_digest:
+            raise StorageRefusal("receipt_conflict", "active callsign has another receipt")
+        return _assignment_value(assignment, idempotent=True), normalized, receipt_digest
+    if assignment["state"] != "reserved" or int(assignment["version"]) != expected_version:
+        raise StorageRefusal("assignment_conflict", "callsign is not reserved at expected version")
+    queue = store.connection.execute(
+        "SELECT * FROM callsign_queue WHERE callsign=?", (assignment["callsign"],)
+    ).fetchone()
+    if (
+        queue is None
+        or queue["state"] != "reserved"
+        or queue["reservation_assignment_id"] != assignment_id
+    ):
+        raise StorageRefusal("queue_conflict", "callsign queue reservation is not exact")
+    runtime_conflict = store.connection.execute(
+        """
+        SELECT 1 FROM runtime_instances
+         WHERE runtime_instance_id=? OR (harness_kind=? AND session_ref=?)
+        """,
+        (
+            normalized["runtime_instance_id"],
+            normalized["harness_kind"],
+            normalized["session_identity"],
+        ),
+    ).fetchone()
+    if runtime_conflict is not None:
+        raise StorageRefusal("runtime_conflict", "runtime or thread identity is already bound")
+    store.connection.execute(
+        """
+        INSERT INTO runtime_instances
+          (runtime_instance_id,actor_agent_id,harness_kind,backend_kind,session_ref,endpoint,
+           runtime_generation,status,verified,last_seen_at,capabilities_json)
+        VALUES(?,?,?,?,?,?,?,'active',1,?,?)
+        """,
+        (
+            normalized["runtime_instance_id"],
+            assignment["agent_id"],
+            normalized["harness_kind"],
+            normalized["backend_kind"],
+            normalized["session_identity"],
+            normalized["endpoint_identity"],
+            normalized["endpoint_generation"],
+            at,
+            stable_json(normalized["capabilities"]),
+        ),
+    )
+    agent = store.connection.execute(
+        "SELECT version FROM agent_instances WHERE agent_id=? AND retired_at IS NULL",
+        (assignment["agent_id"],),
+    ).fetchone()
+    if agent is None:
+        raise StorageRefusal("agent_conflict", "reserved agent identity is not live")
+    agent_version = int(agent["version"]) + 1
+    store.connection.execute(
+        """
+        UPDATE agent_instances SET kind=?,address=?,thread_id=?,backend=?,routing_name=?,
+               display_agent=?,status='working',version=?,updated_at=?,
+               update_text='runtime accepted',next_action='Accept assigned intake'
+         WHERE agent_id=?
+        """,
+        (
+            normalized["harness_kind"],
+            normalized["endpoint_identity"],
+            normalized["session_identity"],
+            (
+                normalized["backend_kind"]
+                if normalized["backend_kind"] in {"herdr", "tmux"}
+                else None
+            ),
+            normalized["routing_name"],
+            normalized["display_agent"],
+            agent_version,
+            at,
+            assignment["agent_id"],
+        ),
+    )
+    meta = _meta(store, assignment["role"])
+    queue_version = int(meta["queue_version"]) + 1
+    store.connection.execute(
+        """
+        UPDATE callsign_queue SET state='active',queue_position=NULL,
+               reservation_assignment_id=NULL,version=version+1,updated_at=?
+         WHERE callsign=?
+        """,
+        (at, assignment["callsign"]),
+    )
+    store.connection.execute(
+        "UPDATE callsign_queue_meta SET queue_version=? WHERE pool_role=?",
+        (queue_version, assignment["role"]),
+    )
+    next_version = expected_version + 1
+    store.connection.execute(
+        """
+        UPDATE callsign_assignments SET state='active',runtime_instance_id=?,
+               acceptance_digest=?,version=?,queue_version=?,activated_at=?
+         WHERE callsign_assignment_id=?
+        """,
+        (
+            normalized["runtime_instance_id"],
+            receipt_digest,
+            next_version,
+            queue_version,
+            at,
+            assignment_id,
+        ),
+    )
+    store.connection.execute(
+        """
+        INSERT INTO events
+          (event_id,agent_id,task_id,squad_id,entity_version,event_type,status,update_text,
+           occurred_at,detail_json,aggregate_kind,aggregate_id)
+        VALUES(?, ?,NULL,NULL,?,'callsign_activated','active','callsign activated',?,?,
+               'agent',?)
+        """,
+        (
+            f"callsign:{assignment_id}:active",
+            assignment["agent_id"],
+            agent_version,
+            at,
+            stable_json(
+                {
+                    "assignment_id": assignment_id,
+                    "acceptance_digest": receipt_digest,
+                    "queue_version": queue_version,
+                }
+            ),
+            assignment["agent_id"],
+        ),
+    )
+    row = store.connection.execute(
+        "SELECT * FROM callsign_assignments WHERE callsign_assignment_id=?", (assignment_id,)
+    ).fetchone()
+    return _assignment_value(row, idempotent=False), normalized, receipt_digest
+
+
 def activate_callsign(
     store: Any,
     assignment_id: str,
@@ -674,153 +832,150 @@ def activate_callsign(
     timestamp(at, "callsign activation time")
     try:
         with store._transaction():
-            assignment = store.connection.execute(
-                "SELECT * FROM callsign_assignments WHERE callsign_assignment_id=?",
-                (assignment_id,),
-            ).fetchone()
-            if assignment is None:
-                raise StorageRefusal("assignment_unknown", "callsign assignment does not exist")
-            normalized, receipt_digest = _runtime_receipt(receipt, assignment)
-            if assignment["state"] == "active":
-                if assignment["acceptance_digest"] != receipt_digest:
-                    raise StorageRefusal("receipt_conflict", "active callsign has another receipt")
-                return _assignment_value(assignment, idempotent=True)
-            if assignment["state"] != "reserved" or int(assignment["version"]) != expected_version:
-                raise StorageRefusal("assignment_conflict", "callsign is not reserved at expected version")
-            queue = store.connection.execute(
-                "SELECT * FROM callsign_queue WHERE callsign=?", (assignment["callsign"],)
-            ).fetchone()
-            if (
-                queue is None
-                or queue["state"] != "reserved"
-                or queue["reservation_assignment_id"] != assignment_id
-            ):
-                raise StorageRefusal("queue_conflict", "callsign queue reservation is not exact")
-            runtime_conflict = store.connection.execute(
-                """
-                SELECT 1 FROM runtime_instances
-                 WHERE runtime_instance_id=? OR (harness_kind=? AND session_ref=?)
-                """,
-                (
-                    normalized["runtime_instance_id"],
-                    normalized["harness_kind"],
-                    normalized["session_identity"],
-                ),
-            ).fetchone()
-            if runtime_conflict is not None:
-                raise StorageRefusal("runtime_conflict", "runtime or thread identity is already bound")
-            store.connection.execute(
-                """
-                INSERT INTO runtime_instances
-                  (runtime_instance_id,actor_agent_id,harness_kind,backend_kind,session_ref,endpoint,
-                   runtime_generation,status,verified,last_seen_at,capabilities_json)
-                VALUES(?,?,?,?,?,?,?,'active',1,?,?)
-                """,
-                (
-                    normalized["runtime_instance_id"],
-                    assignment["agent_id"],
-                    normalized["harness_kind"],
-                    normalized["backend_kind"],
-                    normalized["session_identity"],
-                    normalized["endpoint_identity"],
-                    normalized["endpoint_generation"],
-                    at,
-                    stable_json(normalized["capabilities"]),
-                ),
+            result, _, _ = _activate_in_transaction(
+                store, assignment_id, expected_version, receipt, at
             )
-            agent = store.connection.execute(
-                "SELECT version FROM agent_instances WHERE agent_id=? AND retired_at IS NULL",
-                (assignment["agent_id"],),
-            ).fetchone()
-            if agent is None:
-                raise StorageRefusal("agent_conflict", "reserved agent identity is not live")
-            agent_version = int(agent["version"]) + 1
-            store.connection.execute(
-                """
-                UPDATE agent_instances SET kind=?,address=?,thread_id=?,backend=?,routing_name=?,
-                       display_agent=?,status='working',version=?,updated_at=?,
-                       update_text='runtime accepted',next_action='Accept assigned intake'
-                 WHERE agent_id=?
-                """,
-                (
-                    normalized["harness_kind"],
-                    normalized["endpoint_identity"],
-                    normalized["session_identity"],
-                    (
-                        normalized["backend_kind"]
-                        if normalized["backend_kind"] in {"herdr", "tmux"}
-                        else None
-                    ),
-                    normalized["routing_name"],
-                    normalized["display_agent"],
-                    agent_version,
-                    at,
-                    assignment["agent_id"],
-                ),
-            )
-            meta = _meta(store, assignment["role"])
-            queue_version = int(meta["queue_version"]) + 1
-            store.connection.execute(
-                """
-                UPDATE callsign_queue SET state='active',queue_position=NULL,
-                       reservation_assignment_id=NULL,version=version+1,updated_at=?
-                 WHERE callsign=?
-                """,
-                (at, assignment["callsign"]),
-            )
-            store.connection.execute(
-                "UPDATE callsign_queue_meta SET queue_version=? WHERE pool_role=?",
-                (queue_version, assignment["role"]),
-            )
-            next_version = expected_version + 1
-            store.connection.execute(
-                """
-                UPDATE callsign_assignments SET state='active',runtime_instance_id=?,
-                       acceptance_digest=?,version=?,queue_version=?,activated_at=?
-                 WHERE callsign_assignment_id=?
-                """,
-                (
-                    normalized["runtime_instance_id"],
-                    receipt_digest,
-                    next_version,
-                    queue_version,
-                    at,
-                    assignment_id,
-                ),
-            )
-            store.connection.execute(
-                """
-                INSERT INTO events
-                  (event_id,agent_id,task_id,squad_id,entity_version,event_type,status,update_text,
-                   occurred_at,detail_json,aggregate_kind,aggregate_id)
-                VALUES(?, ?,NULL,NULL,?,'callsign_activated','active','callsign activated',?,?,
-                       'agent',?)
-                """,
-                (
-                    f"callsign:{assignment_id}:active",
-                    assignment["agent_id"],
-                    agent_version,
-                    at,
-                    stable_json(
-                        {
-                            "assignment_id": assignment_id,
-                            "acceptance_digest": receipt_digest,
-                            "queue_version": queue_version,
-                        }
-                    ),
-                    assignment["agent_id"],
-                ),
-            )
+            return result
     except StorageRefusal:
         raise
     except sqlite3.DatabaseError as exc:
         raise store._translate_database_error(
             exc, "callsign activation conflicted with canonical state"
         ) from exc
-    row = store.connection.execute(
+
+
+def record_shotcaller_bootstrap(
+    store: Any,
+    assignment_id: str,
+    expected_version: int,
+    receipt: Mapping[str, Any],
+    at: str,
+    *,
+    fault: Optional[FaultInjector] = None,
+) -> dict[str, Any]:
+    """Atomically activate and receipt one in-place Shotcaller creation."""
+
+    timestamp(at, "Shotcaller creation receipt time")
+    try:
+        with store._transaction():
+            assignment = store.connection.execute(
+                "SELECT * FROM callsign_assignments WHERE callsign_assignment_id=?",
+                (assignment_id,),
+            ).fetchone()
+            if (
+                assignment is None
+                or assignment["role"] != "shotcaller"
+                or assignment["scope_kind"] != "shotcaller"
+                or assignment["scope_id"] != assignment["agent_id"]
+            ):
+                raise StorageRefusal(
+                    "assignment_conflict", "Shotcaller creation reservation is not exact"
+                )
+            active, normalized, receipt_digest = _activate_in_transaction(
+                store, assignment_id, expected_version, receipt, at
+            )
+            if fault:
+                fault("after_shotcaller_activation")
+            assignment = store.connection.execute(
+                "SELECT * FROM callsign_assignments WHERE callsign_assignment_id=?",
+                (assignment_id,),
+            ).fetchone()
+            assert assignment is not None
+            event_id = f"shotcaller:{assignment_id}:created"
+            detail = {
+                "assignment_id": assignment_id,
+                "agent_id": assignment["agent_id"],
+                "runtime_instance_id": normalized["runtime_instance_id"],
+                "acceptance_digest": receipt_digest,
+                "placement": "existing-current-pane",
+            }
+            existing = store.connection.execute(
+                "SELECT detail_json FROM events WHERE event_id=?", (event_id,)
+            ).fetchone()
+            idempotent = existing is not None
+            if existing is None:
+                store.connection.execute(
+                    """
+                    INSERT INTO events
+                      (event_id,agent_id,task_id,squad_id,entity_version,event_type,status,
+                       update_text,occurred_at,detail_json,aggregate_kind,aggregate_id)
+                    VALUES(?,?,NULL,NULL,2,'shotcaller_created','working',
+                           'Shotcaller created in the verified calling runtime',?,?,'agent',?)
+                    """,
+                    (event_id, assignment["agent_id"], at, stable_json(detail), assignment["agent_id"]),
+                )
+                if fault:
+                    fault("after_shotcaller_created_event")
+            elif existing["detail_json"] != stable_json(detail):
+                raise StorageRefusal(
+                    "receipt_conflict", "Shotcaller creation retry changed its receipt"
+                )
+    except StorageRefusal:
+        raise
+    except sqlite3.DatabaseError as exc:
+        raise store._translate_database_error(
+            exc, "Shotcaller creation receipt conflicted with canonical state"
+        ) from exc
+    return {
+        "assignment_id": assignment_id,
+        "agent_id": assignment["agent_id"],
+        "callsign": assignment["callsign"],
+        "runtime_instance_id": normalized["runtime_instance_id"],
+        "state": "active",
+        "version": int(active["version"]),
+        "receipt_digest": receipt_digest,
+        "idempotent": idempotent,
+    }
+
+
+def shotcaller_bootstrap_status(store: Any, assignment_id: str) -> Optional[dict[str, Any]]:
+    """Return only a complete durable Shotcaller creation receipt."""
+
+    assignment = store.connection.execute(
         "SELECT * FROM callsign_assignments WHERE callsign_assignment_id=?", (assignment_id,)
     ).fetchone()
-    return _assignment_value(row, idempotent=False)
+    if assignment is None:
+        return None
+    event = store.connection.execute(
+        "SELECT detail_json FROM events WHERE event_id=?",
+        (f"shotcaller:{assignment_id}:created",),
+    ).fetchone()
+    if event is None:
+        return None
+    try:
+        detail = json.loads(event["detail_json"])
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise StorageRefusal(
+            "receipt_conflict", "stored Shotcaller creation receipt is malformed"
+        ) from exc
+    exact = (
+        assignment["role"] == "shotcaller"
+        and assignment["scope_kind"] == "shotcaller"
+        and assignment["scope_id"] == assignment["agent_id"]
+        and assignment["state"] == "active"
+        and detail
+        == {
+            "assignment_id": assignment_id,
+            "agent_id": assignment["agent_id"],
+            "runtime_instance_id": assignment["runtime_instance_id"],
+            "acceptance_digest": assignment["acceptance_digest"],
+            "placement": "existing-current-pane",
+        }
+    )
+    if not exact:
+        raise StorageRefusal(
+            "receipt_conflict", "stored Shotcaller creation state is not exact"
+        )
+    return {
+        "assignment_id": assignment_id,
+        "agent_id": assignment["agent_id"],
+        "callsign": assignment["callsign"],
+        "runtime_instance_id": assignment["runtime_instance_id"],
+        "state": "active",
+        "version": int(assignment["version"]),
+        "receipt_digest": assignment["acceptance_digest"],
+        "idempotent": True,
+    }
 
 
 def _rollback_reserved_in_transaction(

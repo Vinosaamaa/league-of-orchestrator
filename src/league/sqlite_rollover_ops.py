@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
 import hmac
 import json
 import re
@@ -57,6 +58,86 @@ DRAIN_RECEIPT_KEYS = {
     "resource_receipt_digest",
     "callsign_release_receipt_digest",
 }
+
+
+def _descendant_source_shape(
+    store: Any,
+    task: Any,
+    champion_agent_id: str,
+    predecessor_agent_id: str,
+    callsign_assignment: Any,
+    task_assignment: Any,
+) -> tuple[str, Optional[str]]:
+    """Classify the modern binding or one exact importer-produced task shell."""
+
+    if (
+        task["champion_agent_id"] == champion_agent_id
+        and task["coordinator_agent_id"] == predecessor_agent_id
+    ):
+        return "modern", None
+    imported_assignment_id = "imported:" + hashlib.sha256(
+        f"champion\0{callsign_assignment['callsign']}".encode("utf-8")
+    ).hexdigest()[:24]
+    exact_shell = (
+        task["request_id"] is None
+        and task["champion_agent_id"] is None
+        and task["coordinator_agent_id"] is None
+        and task["current_owner_agent_id"] == champion_agent_id
+        and task["current_owner_squad_id"] is None
+        and task["state"] == "active"
+        and int(task["version"]) == 1
+        and task_assignment is None
+        and callsign_assignment["callsign_assignment_id"] == imported_assignment_id
+        and callsign_assignment["runtime_instance_id"] is None
+        and int(callsign_assignment["version"]) == 1
+        and json.loads(callsign_assignment["requirements_json"]) == []
+    )
+    if not exact_shell:
+        raise StorageRefusal(
+            "descendant_identity_stale",
+            "descendant task is neither a modern binding nor an exact imported legacy partial",
+        )
+    runs = store.connection.execute(
+        "SELECT run_id,report_digest,source_digest,applied_at FROM import_runs ORDER BY run_id"
+    ).fetchall()
+    roster_artifacts = store.connection.execute(
+        """
+        SELECT artifact_id,digest,record_count,source_order,import_run_id
+          FROM imported_artifacts WHERE kind='roster'
+         ORDER BY source_order,artifact_id
+        """
+    ).fetchall()
+    legacy_events = store.connection.execute(
+        """
+        SELECT a.legacy_event_id,a.source_order,e.event_id,e.entity_version
+          FROM legacy_event_aliases a JOIN events e ON e.event_id=a.event_id
+         WHERE e.agent_id=? AND e.event_type='legacy_transition'
+         ORDER BY a.source_order,a.legacy_event_id
+        """,
+        (champion_agent_id,),
+    ).fetchall()
+    if (
+        len(runs) != 1
+        or not roster_artifacts
+        or any(row["import_run_id"] != runs[0]["run_id"] for row in roster_artifacts)
+        or not legacy_events
+    ):
+        raise StorageRefusal(
+            "descendant_import_provenance_unverified",
+            "imported descendant task shell lacks exact canonical import provenance",
+        )
+    proof = {
+        "shape": "imported_legacy_partial",
+        "task_id": task["task_id"],
+        "champion_agent_id": champion_agent_id,
+        "callsign_assignment_id": imported_assignment_id,
+        "import_run": dict(runs[0]),
+        "roster_artifacts": [dict(row) for row in roster_artifacts],
+        "legacy_events": [dict(row) for row in legacy_events],
+    }
+    return "imported_legacy_partial", digest(proof)
+
+
 TERMINAL_REQUESTS = {"answered", "cancelled"}
 MAX_ACTIVE_CHAMPIONS = 10_000
 PRIVATE_KEY = re.compile(
@@ -397,8 +478,6 @@ def rollover_descendant_target(
         or champion["shotcaller_agent_id"] != operation["predecessor_agent_id"]
         or int(champion["version"]) != expected_agent_version
         or task is None
-        or task["champion_agent_id"] != champion_agent_id
-        or task["coordinator_agent_id"] != operation["predecessor_agent_id"]
         or int(task["version"]) != expected_task_version
         or task["state"]
         in {"completed", "complete", "failed", "cancelled", "canceled", "rejected"}
@@ -442,7 +521,7 @@ def rollover_descendant_target(
         )
     callsigns = store.connection.execute(
         """
-        SELECT callsign_assignment_id,requirements_json,version FROM callsign_assignments
+        SELECT * FROM callsign_assignments
          WHERE agent_id=? AND callsign=? AND role='champion'
            AND scope_kind='task' AND scope_id=? AND state='active'
          ORDER BY callsign_assignment_id
@@ -464,6 +543,14 @@ def rollover_descendant_target(
         raise StorageRefusal(
             "version_conflict", "descendant assignment or callsign version changed"
         )
+    source_shape, import_provenance_digest = _descendant_source_shape(
+        store,
+        task,
+        champion_agent_id,
+        operation["predecessor_agent_id"],
+        callsigns[0],
+        assignment,
+    )
     return {
         "reconciled": False,
         "champion_agent_id": champion_agent_id,
@@ -482,6 +569,8 @@ def rollover_descendant_target(
         "capabilities": json.loads(callsigns[0]["requirements_json"]),
         "task_assignment_id": None if assignment is None else assignment["task_assignment_id"],
         "callsign_assignment_id": callsigns[0]["callsign_assignment_id"],
+        "source_shape": source_shape,
+        "import_provenance_digest": import_provenance_digest,
     }
 
 
@@ -1264,6 +1353,8 @@ def reconcile_rollover_descendant(
     runtime_receipt: Optional[Mapping[str, Any]],
     pending_outbox_ids: Sequence[str],
     at: str,
+    *,
+    fault: Optional[FaultInjector] = None,
 ) -> dict[str, Any]:
     """Bind one exact frozen descendant to its committed successor.
 
@@ -1449,8 +1540,6 @@ def reconcile_rollover_descendant(
             ).fetchone()
             if (
                 task is None
-                or task["champion_agent_id"] != champion_agent_id
-                or task["coordinator_agent_id"] != operation["predecessor_agent_id"]
                 or int(task["version"]) != expected_task_version
                 or task["state"] in {"completed", "complete", "failed", "cancelled", "canceled", "rejected"}
             ):
@@ -1553,6 +1642,28 @@ def reconcile_rollover_descendant(
                     "descendant_runtime_mismatch",
                     "live runtime capabilities differ from the canonical callsign contract",
                 )
+            assignment = store.connection.execute(
+                "SELECT * FROM task_assignments WHERE task_id=?", (task_id,)
+            ).fetchone()
+            created_assignment = assignment is None
+            if (
+                (created_assignment and expected_assignment_version != 0)
+                or (
+                    assignment is not None
+                    and int(assignment["version"]) != expected_assignment_version
+                )
+            ):
+                raise StorageRefusal(
+                    "version_conflict", "descendant task assignment version changed"
+                )
+            source_shape, import_provenance_digest = _descendant_source_shape(
+                store,
+                task,
+                champion_agent_id,
+                operation["predecessor_agent_id"],
+                callsign_assignment,
+                assignment,
+            )
             created_runtime = not runtimes
             if runtimes:
                 runtime = runtimes[0]
@@ -1596,20 +1707,8 @@ def reconcile_rollover_descendant(
                         stable_json(required_capabilities),
                     ),
                 )
-            assignment = store.connection.execute(
-                "SELECT * FROM task_assignments WHERE task_id=?", (task_id,)
-            ).fetchone()
-            created_assignment = assignment is None
-            if (
-                (created_assignment and expected_assignment_version != 0)
-                or (
-                    assignment is not None
-                    and int(assignment["version"]) != expected_assignment_version
-                )
-            ):
-                raise StorageRefusal(
-                    "version_conflict", "descendant task assignment version changed"
-                )
+                if fault:
+                    fault("after_descendant_runtime")
             if assignment is not None and (
                 assignment["champion_agent_id"] != champion_agent_id
                 or assignment["callsign"] != snapshot_row["callsign"]
@@ -1655,6 +1754,17 @@ def reconcile_rollover_descendant(
                     "descendant_delivery_set_stale",
                     "declared pending descendant deliveries are missing, broad, or stale",
                 )
+            pending_delivery_count = len(declared_outboxes) + int(
+                store.connection.execute(
+                    """
+                    SELECT COUNT(*)
+                      FROM delivery_outbox o JOIN events e ON e.event_id=o.event_id
+                     WHERE o.recipient_agent_id=? AND o.state='pending'
+                       AND (e.agent_id=? OR e.task_id=?)
+                    """,
+                    (operation["successor_agent_id"], champion_agent_id, task_id),
+                ).fetchone()[0]
+            )
 
             assignment_id = (
                 f"assignment:rollover:{digest({'operation_id': operation_id, 'champion_agent_id': champion_agent_id, 'task_id': task_id})[:32]}"
@@ -1680,6 +1790,8 @@ def reconcile_rollover_descendant(
                 "callsign_assignment_id": callsign_assignment["callsign_assignment_id"],
                 "task_assignment_id": assignment_id,
                 "created_assignment": created_assignment,
+                "source_shape": source_shape,
+                "import_provenance_digest": import_provenance_digest,
                 "expected_rollover_version": expected_rollover_version,
                 "expected_agent_version": expected_agent_version,
                 "expected_task_version": expected_task_version,
@@ -1687,8 +1799,12 @@ def reconcile_rollover_descendant(
                 "expected_callsign_assignment_version": expected_callsign_assignment_version,
                 "task_version": expected_task_version + 1,
                 "retargeted_outbox_ids": list(declared_outboxes),
-                "pending_delivery_count": 0,
-                "reason": "committed_rollover_descendant_binding",
+                "pending_delivery_count": pending_delivery_count,
+                "reason": (
+                    "committed_rollover_imported_legacy_partial_binding"
+                    if source_shape == "imported_legacy_partial"
+                    else "committed_rollover_descendant_binding"
+                ),
                 "result": "reconciled",
                 "at": at,
             }
@@ -1714,18 +1830,25 @@ def reconcile_rollover_descendant(
                         at,
                     ),
                 )
+                if fault:
+                    fault("after_descendant_assignment")
             else:
                 changed_assignment = store.connection.execute(
                     """
                     UPDATE task_assignments
                        SET coordinator_agent_id=?,runtime_instance_id=?,version=version+1,updated_at=?
-                     WHERE task_assignment_id=? AND coordinator_agent_id=? AND version=?
+                     WHERE task_assignment_id=? AND task_id=? AND champion_agent_id=?
+                       AND callsign=? AND assignment_role='champion' AND state='active'
+                       AND coordinator_agent_id=? AND version=?
                     """,
                     (
                         operation["successor_agent_id"],
                         runtime_instance_id,
                         at,
                         assignment_id,
+                        task_id,
+                        champion_agent_id,
+                        snapshot_row["callsign"],
                         operation["predecessor_agent_id"],
                         expected_assignment_version,
                     ),
@@ -1735,33 +1858,63 @@ def reconcile_rollover_descendant(
                         "descendant_assignment_conflict",
                         "descendant assignment coordinator changed during reconciliation",
                     )
-            changed_task = store.connection.execute(
-                """
-                UPDATE tasks SET coordinator_agent_id=?,version=version+1,updated_at=?
-                 WHERE task_id=? AND coordinator_agent_id=? AND version=?
-                """,
-                (
-                    operation["successor_agent_id"],
-                    at,
-                    task_id,
-                    operation["predecessor_agent_id"],
-                    expected_task_version,
-                ),
-            )
+                if fault:
+                    fault("after_descendant_assignment")
+            if source_shape == "imported_legacy_partial":
+                changed_task = store.connection.execute(
+                    """
+                    UPDATE tasks
+                       SET champion_agent_id=?,coordinator_agent_id=?,version=version+1,updated_at=?
+                     WHERE task_id=? AND request_id IS NULL AND champion_agent_id IS NULL
+                       AND coordinator_agent_id IS NULL AND current_owner_agent_id=?
+                       AND current_owner_squad_id IS NULL AND state='active' AND version=?
+                    """,
+                    (
+                        champion_agent_id,
+                        operation["successor_agent_id"],
+                        at,
+                        task_id,
+                        champion_agent_id,
+                        expected_task_version,
+                    ),
+                )
+            else:
+                changed_task = store.connection.execute(
+                    """
+                    UPDATE tasks SET coordinator_agent_id=?,version=version+1,updated_at=?
+                     WHERE task_id=? AND champion_agent_id=? AND coordinator_agent_id=?
+                       AND version=?
+                    """,
+                    (
+                        operation["successor_agent_id"],
+                        at,
+                        task_id,
+                        champion_agent_id,
+                        operation["predecessor_agent_id"],
+                        expected_task_version,
+                    ),
+                )
             if changed_task.rowcount != 1:
                 raise StorageRefusal(
                     "descendant_task_stale",
                     "descendant task coordinator changed during reconciliation",
                 )
+            if fault:
+                fault("after_descendant_task")
             changed_callsign = store.connection.execute(
                 """
                 UPDATE callsign_assignments
                    SET runtime_instance_id=?,version=version+1
-                 WHERE callsign_assignment_id=? AND version=?
+                 WHERE callsign_assignment_id=? AND agent_id=? AND role='champion'
+                   AND scope_kind='task' AND scope_id=? AND state='active'
+                   AND (runtime_instance_id IS NULL OR runtime_instance_id=?) AND version=?
                 """,
                 (
                     runtime_instance_id,
                     callsign_assignment["callsign_assignment_id"],
+                    champion_agent_id,
+                    task_id,
+                    runtime_instance_id,
                     expected_callsign_assignment_version,
                 ),
             )
@@ -1769,16 +1922,21 @@ def reconcile_rollover_descendant(
                 raise StorageRefusal(
                     "version_conflict", "descendant callsign assignment CAS failed"
                 )
+            if fault:
+                fault("after_descendant_callsign")
             changed_agent = store.connection.execute(
                 """
                 UPDATE agent_instances
                    SET shotcaller_agent_id=?,version=version+1,updated_at=?
-                 WHERE agent_id=? AND version=?
+                 WHERE agent_id=? AND task_id=? AND shotcaller_agent_id=?
+                   AND retired_at IS NULL AND version=?
                 """,
                 (
                     operation["successor_agent_id"],
                     at,
                     champion_agent_id,
+                    task_id,
+                    operation["predecessor_agent_id"],
                     expected_agent_version,
                 ),
             )
@@ -1786,6 +1944,8 @@ def reconcile_rollover_descendant(
                 raise StorageRefusal(
                     "descendant_identity_stale", "descendant agent CAS failed"
                 )
+            if fault:
+                fault("after_descendant_agent")
             for outbox_id in declared_outboxes:
                 changed_outbox = store.connection.execute(
                     """
@@ -1803,7 +1963,9 @@ def reconcile_rollover_descendant(
                         "descendant_delivery_set_stale",
                         "descendant pending delivery changed during reconciliation",
                     )
-            pending_delivery_count = int(
+                if fault:
+                    fault("after_descendant_outbox")
+            observed_pending_delivery_count = int(
                 store.connection.execute(
                     """
                     SELECT COUNT(*)
@@ -1814,8 +1976,14 @@ def reconcile_rollover_descendant(
                     (operation["successor_agent_id"], champion_agent_id, task_id),
                 ).fetchone()[0]
             )
-            receipt["pending_delivery_count"] = pending_delivery_count
+            if observed_pending_delivery_count != pending_delivery_count:
+                raise StorageRefusal(
+                    "descendant_delivery_set_stale",
+                    "descendant pending delivery count changed during reconciliation",
+                )
             receipt_digest = digest(receipt)
+            if fault:
+                fault("before_descendant_event")
             store.connection.execute(
                 """
                 INSERT INTO events
@@ -1836,6 +2004,8 @@ def reconcile_rollover_descendant(
                     operation["owner_event_id"],
                 ),
             )
+            if fault:
+                fault("after_descendant_event")
     except StorageRefusal:
         raise
     except sqlite3.DatabaseError as exc:

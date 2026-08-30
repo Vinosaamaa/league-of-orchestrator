@@ -75,6 +75,8 @@ class RolloverStorage(Protocol):
         runtime_receipt: Optional[Mapping[str, Any]],
         pending_outbox_ids: Sequence[str],
         at: str,
+        *,
+        fault: Optional[FaultInjector] = None,
     ) -> dict[str, Any]: ...
 
     def rollover_descendant_target(

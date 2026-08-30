@@ -309,6 +309,18 @@ def test_archive_git_and_scope(root: Path) -> None:
     assert archive.inspect(archive_action) == archive_action["intended_state"]
 
     git = validated["git"]
+    run(("git", "-C", git["repository"], "switch", "--orphan", "unrelated-primary"))
+    run(
+        (
+            "git",
+            "-C",
+            git["repository"],
+            "commit",
+            "--allow-empty",
+            "-m",
+            "Synthetic unrelated primary checkout",
+        )
+    )
     adapter = GitAdapter(git, SubprocessRunner())
     worktree_action = {
         "action_kind": "worktree_remove",

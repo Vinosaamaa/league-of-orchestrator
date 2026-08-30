@@ -68,6 +68,11 @@ from .visible_launch import (
     derived_champion_agent_id,
     derive_task_label,
 )
+from .legacy_display_reconciliation import (
+    HerdrLegacyDisplayAdapter,
+    LegacyDisplayReconciliationService,
+    LegacyDisplayReconciliationSpec,
+)
 
 
 COMMAND_SCHEMA = "league.command.v1"
@@ -80,6 +85,14 @@ REQUEST_STATE_COMMANDS = {
 }
 CommandResult = tuple[Any, Optional[bytes]]
 CommandHandler = Callable[[Storage, argparse.Namespace], CommandResult]
+
+
+class _ProvidedClock:
+    def __init__(self, at: str) -> None:
+        self.at = at
+
+    def now(self) -> str:
+        return self.at
 
 
 class _BoundedSentinelPath(argparse.Action):
@@ -1035,6 +1048,29 @@ def _add_assignment_commands(groups: argparse._SubParsersAction) -> None:
     )
     reconcile_runtime.add_argument("--assignment-id", required=True)
     reconcile_runtime.add_argument("--at", required=True)
+    reconcile_display = commands.add_parser(
+        "reconcile-legacy-display",
+        help="Owner-authorized CAS-safe repair of one exact pre-fix active Champion display.",
+    )
+    for name in (
+        "assignment-id",
+        "champion-agent-id",
+        "runtime-instance-id",
+        "callsign",
+        "pane-id",
+        "terminal-id",
+        "thread-id",
+        "worktree",
+        "routing-name",
+        "target-task-label",
+        "at",
+    ):
+        reconcile_display.add_argument(f"--{name}", required=True)
+    reconcile_display.add_argument("--expected-version", type=int, required=True)
+    observation = reconcile_display.add_mutually_exclusive_group(required=True)
+    observation.add_argument("--expected-presentation-json")
+    observation.add_argument("--expected-presentation-digest")
+    reconcile_display.add_argument("--owner-authorized", action="store_true", required=True)
     block = commands.add_parser("block", help="Record a blocked or cleanup-pending failed launch.")
     block.add_argument("--assignment-id", required=True)
     block.add_argument("--expected-version", type=int, required=True)
@@ -2516,6 +2552,51 @@ def _assign_reconcile_runtime(store: Storage, args: argparse.Namespace) -> Comma
     return store.reconcile_assignment_runtime(args.assignment_id, args.at), None
 
 
+def _assign_reconcile_legacy_display(
+    store: Storage, args: argparse.Namespace
+) -> CommandResult:
+    expected_source = None
+    expected_title = None
+    expected_sequence = None
+    if args.expected_presentation_json is not None:
+        expected = _decode_json(
+            args.expected_presentation_json, "legacy display expected presentation"
+        )
+        if not isinstance(expected, dict) or set(expected) != {
+            "source",
+            "title",
+            "state_change_seq",
+        }:
+            raise StorageRefusal(
+                "legacy_display_invalid",
+                "expected presentation must contain only source, title, and state_change_seq",
+            )
+        expected_source = expected["source"]
+        expected_title = expected["title"]
+        expected_sequence = expected["state_change_seq"]
+    spec = LegacyDisplayReconciliationSpec(
+        assignment_id=args.assignment_id,
+        expected_version=args.expected_version,
+        champion_agent_id=args.champion_agent_id,
+        runtime_instance_id=args.runtime_instance_id,
+        callsign=args.callsign,
+        pane_id=args.pane_id,
+        terminal_id=args.terminal_id,
+        thread_id=args.thread_id,
+        worktree=str(Path(args.worktree).resolve()),
+        routing_name=args.routing_name,
+        expected_presentation_source=expected_source,
+        expected_title=expected_title,
+        expected_state_change_seq=expected_sequence,
+        expected_presentation_digest=args.expected_presentation_digest,
+        target_task_label=args.target_task_label,
+        owner_authorized=args.owner_authorized,
+    )
+    return LegacyDisplayReconciliationService(
+        store, HerdrLegacyDisplayAdapter(), _ProvidedClock(args.at)
+    ).reconcile(spec), None
+
+
 def _assign_block(store: Storage, args: argparse.Namespace) -> CommandResult:
     return store.block_assignment(
         args.assignment_id,
@@ -2715,6 +2796,7 @@ HANDLERS: dict[str, CommandHandler] = {
     "assign.launching": _assign_launching,
     "assign.activate": _assign_activate,
     "assign.reconcile-runtime": _assign_reconcile_runtime,
+    "assign.reconcile-legacy-display": _assign_reconcile_legacy_display,
     "assign.block": _assign_block,
     "assign.finish-hidden": _assign_finish_hidden,
     "hook.register-runtime": _hook_register_runtime,

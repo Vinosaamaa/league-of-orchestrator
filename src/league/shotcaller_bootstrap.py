@@ -106,12 +106,27 @@ class HerdrShotcallerBootstrapAdapter:
             return {}
         return _result(completed, label)
 
+    def _read(self, arguments: tuple[str, ...], label: str) -> dict[str, Any]:
+        """Retry only a transient malformed read; never replay a mutation."""
+
+        for attempt in range(3):
+            try:
+                return self._run(arguments, label)
+            except StorageRefusal as exc:
+                malformed = (
+                    exc.code == "shotcaller_identity_unverified"
+                    and str(exc) == f"{label} returned malformed JSON"
+                )
+                if not malformed or attempt == 2:
+                    raise
+        raise AssertionError("bounded Herdr identity read retry exhausted")
+
     def _current(self) -> tuple[dict[str, Any], dict[str, Any]]:
-        pane_result = self._run(
+        pane_result = self._read(
             ("herdr", "pane", "current", "--current"), "current Herdr pane"
         )
         pane = pane_result.get("pane")
-        inventory = self._run(("herdr", "agent", "list"), "Herdr agent inventory")
+        inventory = self._read(("herdr", "agent", "list"), "Herdr agent inventory")
         agents = inventory.get("agents")
         if not isinstance(pane, Mapping) or not isinstance(agents, list):
             raise StorageRefusal(

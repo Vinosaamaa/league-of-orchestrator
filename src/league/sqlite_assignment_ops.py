@@ -6,6 +6,7 @@ import json
 import hashlib
 import re
 import sqlite3
+from pathlib import Path
 from typing import Any, Optional
 
 from .sqlite_request_ops import _active_claim, _bounded_public_text, _request_row, _time
@@ -16,7 +17,11 @@ from .sqlite_callsign_ops import (
     capabilities,
     stable_json,
 )
-from .storage_assignment import FinishHiddenAssignmentCommand, PrepareAssignmentCommand
+from .storage_assignment import (
+    FinishHiddenAssignmentCommand,
+    LegacyDisplayReconciliationCommand,
+    PrepareAssignmentCommand,
+)
 from .storage_types import LIFECYCLE_STATES, StorageRefusal
 
 
@@ -1189,6 +1194,29 @@ def assignment_launch_context(store: Any, assignment_id: str) -> dict[str, Any]:
         """,
         (assignment_id,),
     ).fetchone()
+    legacy_intents = store.connection.execute(
+        """
+        SELECT event_id,occurred_at,detail_json FROM events
+         WHERE aggregate_kind='assignment' AND aggregate_id=?
+           AND event_type='assignment_legacy_display_reconciliation_intent'
+         ORDER BY event_seq
+        """,
+        (assignment_id,),
+    ).fetchall()
+    legacy_results = store.connection.execute(
+        """
+        SELECT event_id,occurred_at,detail_json FROM events
+         WHERE aggregate_kind='assignment' AND aggregate_id=?
+           AND event_type='assignment_legacy_display_reconciled'
+         ORDER BY event_seq
+        """,
+        (assignment_id,),
+    ).fetchall()
+    if len(legacy_intents) > 1 or len(legacy_results) > 1:
+        raise StorageRefusal(
+            "legacy_display_ambiguous",
+            "assignment has ambiguous legacy display reconciliation history",
+        )
     if len(delivery) > 1:
         raise StorageRefusal(
             "assignment_context_ambiguous",
@@ -1228,6 +1256,366 @@ def assignment_launch_context(store: Any, assignment_id: str) -> dict[str, Any]:
         "failure_class": assignment["failure_class"],
         "acceptance_receipt": receipt,
         "context_delivery": delivered,
+        "legacy_display_reconciliation": (
+            {
+                "intent": json.loads(legacy_intents[0]["detail_json"]),
+                "receipt": (
+                    json.loads(legacy_results[0]["detail_json"])["receipt"]
+                    if legacy_results
+                    else None
+                ),
+            }
+            if legacy_intents
+            else None
+        ),
+    }
+
+
+def _legacy_display_detail(
+    command: LegacyDisplayReconciliationCommand,
+) -> dict[str, Any]:
+    return {
+        "schema": "league.legacy-display-reconciliation-intent.v1",
+        "assignment_id": command.assignment_id,
+        "expected_version": command.expected_version,
+        "champion_agent_id": command.champion_agent_id,
+        "runtime_instance_id": command.runtime_instance_id,
+        "callsign": command.callsign,
+        "pane_id": command.pane_id,
+        "terminal_id": command.terminal_id,
+        "thread_id": command.thread_id,
+        "worktree": command.worktree,
+        "routing_name": command.routing_name,
+        "expected_presentation_source": command.expected_presentation_source,
+        "expected_title": command.expected_title,
+        "expected_state_change_seq": command.expected_state_change_seq,
+        "expected_presentation_digest": command.expected_presentation_digest,
+        "target_task_label": command.target_task_label,
+        "target_title": f"{command.callsign} · {command.target_task_label}",
+        "owner_authorized": command.owner_authorized,
+    }
+
+
+def _validate_legacy_display_command(
+    store: Any, command: LegacyDisplayReconciliationCommand
+) -> tuple[Any, dict[str, Any], str, dict[str, Any]]:
+    _time(command.at, "legacy display reconciliation time")
+    digest_pattern = re.compile(r"^[0-9a-f]{64}$")
+    tuple_supplied = all(
+        (
+            isinstance(command.expected_presentation_source, str)
+            and bool(command.expected_presentation_source),
+            isinstance(command.expected_title, str) and bool(command.expected_title),
+            isinstance(command.expected_state_change_seq, int)
+            and command.expected_state_change_seq >= 0,
+        )
+    )
+    digest_supplied = bool(
+        isinstance(command.expected_presentation_digest, str)
+        and digest_pattern.fullmatch(command.expected_presentation_digest)
+    )
+    identity = (
+        command.assignment_id,
+        command.champion_agent_id,
+        command.runtime_instance_id,
+        command.callsign,
+        command.pane_id,
+        command.terminal_id,
+        command.thread_id,
+        command.worktree,
+        command.routing_name,
+    )
+    if (
+        not command.owner_authorized
+        or not all(identity)
+        or command.expected_version < 1
+        or tuple_supplied == digest_supplied
+        or len(command.target_task_label.split()) != 2
+        or " ".join(command.target_task_label.split()) != command.target_task_label
+        or command.routing_name != command.callsign.lower()
+    ):
+        raise StorageRefusal(
+            "legacy_display_invalid",
+            "legacy display reconciliation requires exact owner-authorized identity, observation, and two-word target",
+        )
+    assignment = store.connection.execute(
+        "SELECT * FROM task_assignments WHERE task_assignment_id=?",
+        (command.assignment_id,),
+    ).fetchone()
+    if (
+        assignment is None
+        or assignment["assignment_role"] != "champion"
+        or assignment["state"] != "active"
+        or int(assignment["version"]) != command.expected_version
+        or assignment["champion_agent_id"] != command.champion_agent_id
+        or assignment["runtime_instance_id"] != command.runtime_instance_id
+        or assignment["callsign"] != command.callsign
+    ):
+        raise StorageRefusal(
+            "legacy_display_conflict",
+            "legacy display reconciliation requires the exact active Champion assignment",
+        )
+    agent = store.connection.execute(
+        "SELECT * FROM agent_instances WHERE agent_id=? AND retired_at IS NULL",
+        (command.champion_agent_id,),
+    ).fetchone()
+    runtime_rows = store.connection.execute(
+        "SELECT * FROM runtime_instances WHERE actor_agent_id=? AND status IN ('active','idle')",
+        (command.champion_agent_id,),
+    ).fetchall()
+    receipt = (
+        json.loads(assignment["acceptance_receipt_json"])
+        if assignment["acceptance_receipt_json"] is not None
+        else None
+    )
+    expected_generation = "herdr:" + hashlib.sha256(
+        f"{command.terminal_id}\0{command.thread_id}".encode("utf-8")
+    ).hexdigest()[:24]
+    runtime = runtime_rows[0] if len(runtime_rows) == 1 else None
+    exact = bool(
+        agent is not None
+        and runtime is not None
+        and isinstance(receipt, dict)
+        and agent["role"] == "champion"
+        and agent["callsign"] == command.callsign
+        and agent["address"] == command.pane_id
+        and agent["thread_id"] == command.thread_id
+        and Path(str(agent["worktree"])).resolve() == Path(command.worktree).resolve()
+        and agent["routing_name"] == command.routing_name
+        and agent["backend"] == "herdr"
+        and runtime["runtime_instance_id"] == command.runtime_instance_id
+        and runtime["session_ref"] == command.thread_id
+        and runtime["endpoint"] == command.pane_id
+        and runtime["runtime_generation"] == expected_generation
+        and bool(runtime["verified"])
+        and receipt.get("champion_agent_id") == command.champion_agent_id
+        and receipt.get("runtime_instance_id") == command.runtime_instance_id
+        and receipt.get("callsign") == command.callsign
+        and receipt.get("endpoint") == command.pane_id
+        and receipt.get("thread_id") == command.thread_id
+        and Path(str(receipt.get("worktree", ""))).resolve()
+        == Path(command.worktree).resolve()
+        and receipt.get("routing_name") == command.routing_name
+        and receipt.get("runtime_generation") == expected_generation
+        and receipt.get("backend_kind") == "herdr"
+    )
+    if not exact:
+        raise StorageRefusal(
+            "legacy_display_conflict",
+            "legacy display reconciliation identity or route is ambiguous or mismatched",
+        )
+    contexts = store.connection.execute(
+        """
+        SELECT detail_json FROM events
+         WHERE aggregate_kind='assignment' AND aggregate_id=?
+           AND event_type='assignment_context_delivered'
+        """,
+        (command.assignment_id,),
+    ).fetchall()
+    revalidations = store.connection.execute(
+        """
+        SELECT 1 FROM events
+         WHERE aggregate_kind='assignment' AND aggregate_id=?
+           AND event_type='assignment_title_revalidated'
+        """,
+        (command.assignment_id,),
+    ).fetchall()
+    if len(contexts) != 1:
+        raise StorageRefusal(
+            "legacy_display_ambiguous",
+            "legacy display reconciliation requires one exact context history",
+        )
+    context_detail = json.loads(contexts[0]["detail_json"])
+    modern = context_detail.get("display_receipt")
+    if revalidations or (
+        isinstance(modern, dict)
+        and isinstance(modern.get("source"), str)
+        and modern["source"].startswith("league-launch-")
+        and isinstance(modern.get("state_change_seq"), int)
+    ):
+        raise StorageRefusal(
+            "legacy_display_modern",
+            "modern launch-title ownership receipts must use normal exact retry",
+        )
+    detail = _legacy_display_detail(command)
+    reconciliation_id = "legacy-display:" + hashlib.sha256(
+        _json(detail).encode("utf-8")
+    ).hexdigest()[:24]
+    return assignment, detail, reconciliation_id, receipt
+
+
+def begin_legacy_display_reconciliation(
+    store: Any, command: LegacyDisplayReconciliationCommand
+) -> dict[str, Any]:
+    try:
+        with store._transaction():
+            assignment, detail, reconciliation_id, _ = _validate_legacy_display_command(
+                store, command
+            )
+            intents = store.connection.execute(
+                "SELECT event_id,detail_json FROM events WHERE aggregate_kind='assignment' AND aggregate_id=? AND event_type='assignment_legacy_display_reconciliation_intent'",
+                (command.assignment_id,),
+            ).fetchall()
+            if intents:
+                if len(intents) != 1 or json.loads(intents[0]["detail_json"]) != detail:
+                    raise StorageRefusal(
+                        "legacy_display_conflict",
+                        "legacy display reconciliation retry changed its exact intent",
+                    )
+            else:
+                store.connection.execute(
+                    """
+                    INSERT INTO events
+                      (event_id,agent_id,task_id,entity_version,event_type,status,update_text,
+                       occurred_at,detail_json,aggregate_kind,aggregate_id)
+                    VALUES(?,?,?,?,'assignment_legacy_display_reconciliation_intent','active',
+                           'owner-authorized legacy Champion display reconciliation intent',?,?,'assignment',?)
+                    """,
+                    (
+                        f"event:{reconciliation_id}:intent",
+                        None,
+                        assignment["task_id"],
+                        command.expected_version,
+                        command.at,
+                        _json(detail),
+                        command.assignment_id,
+                    ),
+                )
+            results = store.connection.execute(
+                "SELECT detail_json FROM events WHERE aggregate_kind='assignment' AND aggregate_id=? AND event_type='assignment_legacy_display_reconciled'",
+                (command.assignment_id,),
+            ).fetchall()
+            if len(results) > 1:
+                raise StorageRefusal(
+                    "legacy_display_ambiguous",
+                    "legacy display reconciliation has ambiguous final receipts",
+                )
+            final_receipt = (
+                json.loads(results[0]["detail_json"])["receipt"] if results else None
+            )
+    except StorageRefusal:
+        raise
+    except sqlite3.DatabaseError as exc:
+        raise store._translate_database_error(
+            exc, "legacy display reconciliation intent conflicted with canonical state"
+        ) from exc
+    return {
+        "assignment_id": command.assignment_id,
+        "reconciliation_id": reconciliation_id,
+        "state": "reconciled" if final_receipt is not None else "intent_recorded",
+        "receipt": final_receipt,
+        "idempotent": bool(intents),
+    }
+
+
+def finalize_legacy_display_reconciliation(
+    store: Any,
+    command: LegacyDisplayReconciliationCommand,
+    receipt: dict[str, Any],
+    at: str,
+) -> dict[str, Any]:
+    _time(at, "legacy display reconciliation final observation time")
+    try:
+        with store._transaction():
+            assignment, detail, reconciliation_id, _ = _validate_legacy_display_command(
+                store, command
+            )
+            intents = store.connection.execute(
+                "SELECT detail_json FROM events WHERE aggregate_kind='assignment' AND aggregate_id=? AND event_type='assignment_legacy_display_reconciliation_intent'",
+                (command.assignment_id,),
+            ).fetchall()
+            if len(intents) != 1 or json.loads(intents[0]["detail_json"]) != detail:
+                raise StorageRefusal(
+                    "legacy_display_conflict",
+                    "legacy display reconciliation has no exact durable intent",
+                )
+            expected_keys = {
+                "schema",
+                "reconciliation_id",
+                "assignment_id",
+                "champion_agent_id",
+                "runtime_instance_id",
+                "source",
+                "applies_to_source",
+                "state_change_seq",
+                "sidebar_name",
+                "task_label",
+                "thread_title",
+                "terminal_title",
+                "observation_digest",
+            }
+            target = f"{command.callsign} · {command.target_task_label}"
+            valid = bool(
+                set(receipt) == expected_keys
+                and receipt.get("schema") == "league.legacy-display-reconciliation.v1"
+                and receipt.get("reconciliation_id") == reconciliation_id
+                and receipt.get("assignment_id") == command.assignment_id
+                and receipt.get("champion_agent_id") == command.champion_agent_id
+                and receipt.get("runtime_instance_id") == command.runtime_instance_id
+                and receipt.get("sidebar_name") == command.callsign
+                and receipt.get("task_label") == command.target_task_label
+                and receipt.get("thread_title") == target
+                and receipt.get("terminal_title") == target
+                and isinstance(receipt.get("source"), str)
+                and bool(receipt.get("source"))
+                and isinstance(receipt.get("applies_to_source"), str)
+                and bool(receipt.get("applies_to_source"))
+                and isinstance(receipt.get("state_change_seq"), int)
+                and int(receipt["state_change_seq"]) >= 0
+                and isinstance(receipt.get("observation_digest"), str)
+                and bool(re.fullmatch(r"[0-9a-f]{64}", receipt["observation_digest"]))
+            )
+            if not valid:
+                raise StorageRefusal(
+                    "legacy_display_unverified",
+                    "legacy display reconciliation final observation is invalid",
+                )
+            final_detail = {
+                "schema": "league.legacy-display-reconciliation-result.v1",
+                "intent_digest": hashlib.sha256(_json(detail).encode("utf-8")).hexdigest(),
+                "receipt": dict(receipt),
+            }
+            results = store.connection.execute(
+                "SELECT event_id,detail_json FROM events WHERE aggregate_kind='assignment' AND aggregate_id=? AND event_type='assignment_legacy_display_reconciled'",
+                (command.assignment_id,),
+            ).fetchall()
+            if results:
+                if len(results) != 1 or json.loads(results[0]["detail_json"]) != final_detail:
+                    raise StorageRefusal(
+                        "legacy_display_conflict",
+                        "legacy display reconciliation final receipt conflicts with history",
+                    )
+            else:
+                store.connection.execute(
+                    """
+                    INSERT INTO events
+                      (event_id,agent_id,task_id,entity_version,event_type,status,update_text,
+                       occurred_at,detail_json,aggregate_kind,aggregate_id)
+                    VALUES(?,?,?,?,'assignment_legacy_display_reconciled','active',
+                           'legacy Champion display reconciled with stable final observation',?,?,'assignment',?)
+                    """,
+                    (
+                        f"event:{reconciliation_id}:final",
+                        None,
+                        assignment["task_id"],
+                        command.expected_version,
+                        at,
+                        _json(final_detail),
+                        command.assignment_id,
+                    ),
+                )
+    except StorageRefusal:
+        raise
+    except sqlite3.DatabaseError as exc:
+        raise store._translate_database_error(
+            exc, "legacy display reconciliation final receipt conflicted with canonical state"
+        ) from exc
+    return {
+        "assignment_id": command.assignment_id,
+        "reconciliation_id": reconciliation_id,
+        "state": "reconciled",
+        "receipt": dict(receipt),
+        "idempotent": bool(results),
     }
 
 

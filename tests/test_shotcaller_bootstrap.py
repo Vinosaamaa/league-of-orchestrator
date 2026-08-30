@@ -246,6 +246,27 @@ class UserTitleAfterPublishHerdr(RecordingHerdr):
         self.title = "User selected title"
 
 
+class TransientMalformedCurrentHerdr(RecordingHerdr):
+    """The exact in-place pane briefly returns non-JSON before a valid read."""
+
+    def __init__(self, worktree: Path, malformed_reads: int = 1) -> None:
+        super().__init__(worktree)
+        self.malformed_current_reads = malformed_reads
+
+    def run(
+        self, arguments, *, timeout_seconds: int = 30
+    ) -> subprocess.CompletedProcess[str]:
+        command = tuple(arguments)
+        if (
+            command == ("herdr", "pane", "current", "--current")
+            and self.malformed_current_reads
+        ):
+            self.malformed_current_reads -= 1
+            self.calls.append(command)
+            return subprocess.CompletedProcess(command, 0, "", "")
+        return super().run(arguments, timeout_seconds=timeout_seconds)
+
+
 class InjectedBootstrapFault(RuntimeError):
     pass
 
@@ -494,6 +515,7 @@ def test_in_place_bootstrap_creates_shotcaller_without_layout_or_squad_registrat
     assert begun["result"]["phase"] == "begun"
     assert turn.poll() is None and turn.pid == turn_pid
 
+
     # The open request-turn process has yielded to the model here. A genuine
     # native steer is accepted by Codex independently; League's hook only makes
     # the exact message durable and must not wait for this process to exit.
@@ -554,6 +576,91 @@ def test_in_place_bootstrap_creates_shotcaller_without_layout_or_squad_registrat
             "FROM watcher_scopes WHERE scope_id='watcher:Ashe'"
         ).fetchone()
         assert tuple(scope) == (AGENT_ID, 2, 3)
+
+
+def test_in_place_bootstrap_retries_transient_malformed_identity_read_without_layout(
+    root: Path,
+) -> None:
+    state, _ = migrated_state(root, "transient-malformed-current")
+    worktree = root / "transient-malformed-current" / "worktree"
+    worktree.mkdir()
+    clock = FakeClock()
+    runner = TransientMalformedCurrentHerdr(worktree)
+    with SQLiteStorage(state) as store:
+        _seed_available_ashe(store, clock)
+        service = ShotcallerBootstrapService(
+            store,
+            HerdrShotcallerBootstrapAdapter(
+                _options(worktree),
+                runner,
+                environment={
+                    "HERDR_ENV": "1",
+                    "HERDR_WORKSPACE_ID": "w1",
+                    "HERDR_TAB_ID": "w1:t1",
+                    "HERDR_PANE_ID": "w1:p1",
+                },
+            ),
+            clock,
+        )
+        created = service.bootstrap(_spec())
+        assert created["state"] == "active"
+        assert runner.malformed_current_reads == 0
+        assert sum(
+            call == ("herdr", "pane", "current", "--current")
+            for call in runner.calls
+        ) >= 2
+        forbidden = {
+            ("herdr", "tab", "create"),
+            ("herdr", "pane", "split"),
+            ("herdr", "workspace", "create"),
+            ("herdr", "agent", "start"),
+        }
+        assert not any(call[:3] in forbidden for call in runner.calls)
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM squads"
+        ).fetchone()[0] == 0
+
+
+def test_in_place_bootstrap_refuses_persistently_malformed_identity_without_mutation(
+    root: Path,
+) -> None:
+    state, _ = migrated_state(root, "persistent-malformed-current")
+    worktree = root / "persistent-malformed-current" / "worktree"
+    worktree.mkdir()
+    clock = FakeClock()
+    runner = TransientMalformedCurrentHerdr(worktree, malformed_reads=3)
+    with SQLiteStorage(state) as store:
+        _seed_available_ashe(store, clock)
+        before = store.callsign_status("shotcaller")
+        service = ShotcallerBootstrapService(
+            store,
+            HerdrShotcallerBootstrapAdapter(
+                _options(worktree),
+                runner,
+                environment={
+                    "HERDR_ENV": "1",
+                    "HERDR_WORKSPACE_ID": "w1",
+                    "HERDR_TAB_ID": "w1:t1",
+                    "HERDR_PANE_ID": "w1:p1",
+                },
+            ),
+            clock,
+        )
+        try:
+            service.bootstrap(_spec())
+        except StorageRefusal as exc:
+            assert exc.code == "shotcaller_identity_unverified"
+        else:
+            raise AssertionError("persistent malformed Herdr identity was accepted")
+        assert store.callsign_status("shotcaller") == before
+        assert runner.calls == [
+            ("herdr", "pane", "current", "--current"),
+            ("herdr", "pane", "current", "--current"),
+            ("herdr", "pane", "current", "--current"),
+        ]
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM squads"
+        ).fetchone()[0] == 0
 
 
 def test_bootstrap_reasserts_owned_title_after_auto_title_settles(root: Path) -> None:
@@ -1170,6 +1277,8 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="league-shotcaller-bootstrap-") as temporary:
         root = Path(temporary)
         test_in_place_bootstrap_creates_shotcaller_without_layout_or_squad_registration(root)
+        test_in_place_bootstrap_retries_transient_malformed_identity_read_without_layout(root)
+        test_in_place_bootstrap_refuses_persistently_malformed_identity_without_mutation(root)
         test_bootstrap_reasserts_owned_title_after_auto_title_settles(root)
         test_bootstrap_identity_mismatch_makes_no_canonical_mutation(root)
         test_preexisting_reserved_bootstrap_requires_durable_baseline_when_alias_empty(root)

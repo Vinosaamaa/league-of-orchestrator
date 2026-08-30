@@ -3277,6 +3277,14 @@ class SQLiteStorage(SQLiteTransactionCore):
             at,
         )
 
+    def begin_legacy_display_reconciliation(self, command):
+        return sqlite_assignment_ops.begin_legacy_display_reconciliation(self, command)
+
+    def finalize_legacy_display_reconciliation(self, command, receipt, at):
+        return sqlite_assignment_ops.finalize_legacy_display_reconciliation(
+            self, command, receipt, at
+        )
+
     def fail_assignment_context_delivery(
         self,
         assignment_id: str,

@@ -42,6 +42,27 @@ class FinishHiddenAssignmentCommand:
     at: str
 
 
+@dataclass(frozen=True)
+class LegacyDisplayReconciliationCommand:
+    assignment_id: str
+    expected_version: int
+    champion_agent_id: str
+    runtime_instance_id: str
+    callsign: str
+    pane_id: str
+    terminal_id: str
+    thread_id: str
+    worktree: str
+    routing_name: str
+    expected_presentation_source: Optional[str]
+    expected_title: Optional[str]
+    expected_state_change_seq: Optional[int]
+    expected_presentation_digest: Optional[str]
+    target_task_label: str
+    owner_authorized: bool
+    at: str
+
+
 class AssignmentStorage(Protocol):
     def prepare_assignment(self, command: PrepareAssignmentCommand) -> dict[str, Any]: ...
     def mark_assignment_launching(
@@ -88,6 +109,17 @@ class AssignmentStorage(Protocol):
         expected_version: int,
         display_receipt: dict[str, Any],
         event_id: str,
+        at: str,
+    ) -> dict[str, Any]: ...
+
+    def begin_legacy_display_reconciliation(
+        self, command: LegacyDisplayReconciliationCommand
+    ) -> dict[str, Any]: ...
+
+    def finalize_legacy_display_reconciliation(
+        self,
+        command: LegacyDisplayReconciliationCommand,
+        receipt: dict[str, Any],
         at: str,
     ) -> dict[str, Any]: ...
 

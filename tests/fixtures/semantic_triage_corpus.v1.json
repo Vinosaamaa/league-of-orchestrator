@@ -1,0 +1,233 @@
+{
+  "schema": "league.semantic-triage-corpus.v1",
+  "categories": [
+    {
+      "name": "direct_question",
+      "gold": {
+        "disposition": "new_request",
+        "plan": {
+          "work_kind": "question",
+          "requested_mode": "direct",
+          "signals": {
+            "pre_bounded": true,
+            "read_only": true,
+            "answer_or_routing_only": true,
+            "expected_minutes": 2,
+            "expected_task_action_calls": 1,
+            "creates_artifact": false,
+            "mutates_state": false,
+            "project_implementation": false,
+            "runs_tests": false,
+            "runs_benchmark": false
+          }
+        }
+      },
+      "prompts": [
+        "What does SQLite write-ahead logging mean in plain language?",
+        "Explain the difference between a process and a thread in two paragraphs.",
+        "What is an idempotency key and why does an API use one?",
+        "Explain optimistic concurrency to a new backend engineer.",
+        "What does p95 latency tell an operator?",
+        "Why should a transaction stay short while a model is reasoning?",
+        "What is the purpose of a foreign-key constraint?",
+        "Explain the difference between JSON and JSONL.",
+        "What does fail closed mean for an orchestration command?",
+        "Why is a bounded busy timeout useful with SQLite?",
+        "What is a deterministic fixture digest used for?",
+        "Explain cold-start latency without using jargon.",
+        "What does an atomic state transition guarantee?",
+        "Why can repeated CLI startup dominate a small database operation?",
+        "What is the difference between durable state and an event notification?",
+        "Explain a compare-and-swap update in one example.",
+        "What is the difference between a median and a tail latency?",
+        "Why should benchmark arms use the same prompt corpus?",
+        "What is a rollback journal in SQLite?",
+        "Explain why exact prompt capture is separate from semantic triage."
+      ]
+    },
+    {
+      "name": "bounded_read_only",
+      "gold": {
+        "disposition": "new_request",
+        "plan": {
+          "work_kind": "read-only",
+          "requested_mode": "direct",
+          "signals": {
+            "pre_bounded": true,
+            "read_only": true,
+            "answer_or_routing_only": true,
+            "expected_minutes": 4,
+            "expected_task_action_calls": 2,
+            "creates_artifact": false,
+            "mutates_state": false,
+            "project_implementation": false,
+            "runs_tests": false,
+            "runs_benchmark": false
+          }
+        }
+      },
+      "prompts": [
+        "Inspect the supplied command help and list its three required flags.",
+        "Read the supplied schema and summarize its required top-level fields.",
+        "Check the supplied version string and report whether it is newer than 0.2.20.",
+        "Compare the two supplied JSON objects and name the changed keys.",
+        "Inspect the supplied test receipt and report the failed check, if any.",
+        "Read the supplied migration receipt and summarize the selected journal mode.",
+        "Check the supplied command inventory for a request-turn command.",
+        "Inspect the supplied benchmark table and identify the slowest phase.",
+        "Read the supplied status record and report its current state.",
+        "Check whether the supplied list contains duplicate identifiers.",
+        "Inspect the supplied export header and report its schema version.",
+        "Read the supplied diff summary and count the changed files.",
+        "Check the supplied integrity result and state whether it passed.",
+        "Inspect the supplied event list and report the newest timestamp.",
+        "Read the supplied routing plan and identify its requested mode.",
+        "Check the supplied fixture manifest and report the artifact count.",
+        "Inspect the supplied CLI output and identify its refusal code.",
+        "Read the supplied release receipt and report the tested revision.",
+        "Check the supplied prompt batch and count the retained prompts.",
+        "Inspect the supplied policy object and summarize its timeout bound."
+      ]
+    },
+    {
+      "name": "repository_change",
+      "gold": {
+        "disposition": "new_request",
+        "plan": {
+          "work_kind": "repository-write",
+          "requested_mode": "champion",
+          "signals": {
+            "pre_bounded": false,
+            "read_only": false,
+            "answer_or_routing_only": false,
+            "expected_minutes": 20,
+            "expected_task_action_calls": 4,
+            "creates_artifact": true,
+            "mutates_state": true,
+            "project_implementation": true,
+            "runs_tests": false,
+            "runs_benchmark": false
+          }
+        }
+      },
+      "prompts": [
+        "Update the repository README with a new operator command example.",
+        "Implement a new CLI subcommand and add its focused regression test.",
+        "Refactor the storage adapter module and preserve its public interface.",
+        "Add a versioned migration for a new indexed lookup table.",
+        "Fix the request ownership bug and update the affected documentation.",
+        "Create a new JSON schema and wire it into command validation.",
+        "Change the watcher implementation to renew its fenced lease.",
+        "Add a repository-local benchmark script and its test fixture.",
+        "Implement bounded streaming export in the storage facade.",
+        "Modify the launcher to reject an unverified terminal title.",
+        "Add expected-version handling to the task transfer command.",
+        "Implement a rollback receipt and cover the crash path.",
+        "Update the migration code to verify its backup before commit.",
+        "Add an indexed roster-history lookup to the SQLite implementation.",
+        "Change the prompt hook to preserve exact bytes and deduplicate retries.",
+        "Implement a machine-readable help schema for the new command.",
+        "Add an integrity refusal to the export command and test it.",
+        "Update the routing policy module and its decision table.",
+        "Implement a reusable fake process adapter for launcher tests.",
+        "Add a public-safe incident report to the repository."
+      ]
+    },
+    {
+      "name": "supervised_benchmark",
+      "gold": {
+        "disposition": "new_request",
+        "plan": {
+          "work_kind": "supervised-test",
+          "requested_mode": "champion",
+          "signals": {
+            "pre_bounded": false,
+            "read_only": false,
+            "answer_or_routing_only": false,
+            "expected_minutes": 15,
+            "expected_task_action_calls": 4,
+            "creates_artifact": false,
+            "mutates_state": false,
+            "project_implementation": false,
+            "runs_tests": true,
+            "runs_benchmark": true
+          }
+        }
+      },
+      "prompts": [
+        "Run a cold and warm latency benchmark and publish the measured receipt.",
+        "Execute the focused concurrency suite and diagnose any failure.",
+        "Benchmark process startup separately from SQLite commit time.",
+        "Run the crash-injection matrix and record the rollback evidence.",
+        "Measure hook wake latency across ten synthetic repetitions.",
+        "Execute the migration round-trip test and verify exact count parity.",
+        "Benchmark one, six, and twenty-five prompt turn batches.",
+        "Run the public-safety test and report any repository-byte finding.",
+        "Measure p50 and p95 for the installed command path.",
+        "Execute the two-writer concurrency test against temporary roots.",
+        "Benchmark JSON serialization separately from storage commit.",
+        "Run the focused watcher lease suite and capture the test receipt.",
+        "Measure semantic classification latency with a controlled ablation.",
+        "Execute the foreign-key refusal test and report the result.",
+        "Benchmark prompt capture without touching the live state root.",
+        "Run the installed smoke against an explicit disposable fixture.",
+        "Measure process count and end-to-end turn latency.",
+        "Execute the duplicate-import refusal test and preserve its evidence.",
+        "Benchmark the same candidate with semantic triage disabled and enabled.",
+        "Run the final affected suite and record the exact tested head."
+      ]
+    },
+    {
+      "name": "acknowledgement",
+      "gold": {"disposition": "acknowledgement", "plan": null},
+      "prompts": [
+        "Thanks, that completely answers my question.",
+        "Understood; no further action is needed.",
+        "Got it, the explanation is clear.",
+        "Acknowledged, please leave everything as it is.",
+        "That makes sense, thank you.",
+        "Confirmed; there is nothing else to do.",
+        "Perfect, I have the information I needed.",
+        "Thanks for checking; stop here.",
+        "Understood and accepted.",
+        "All clear, no changes requested.",
+        "That resolves my concern, thanks.",
+        "Confirmed, the current result is sufficient.",
+        "I understand; no follow-up work.",
+        "Thanks, this is complete for now.",
+        "Acknowledged, do not run anything else.",
+        "The answer is sufficient, thank you.",
+        "Got it; keep the current state unchanged.",
+        "Confirmed and noted.",
+        "That is all I needed.",
+        "Thanks, we can stop at this point."
+      ]
+    },
+    {
+      "name": "context_only",
+      "gold": {"disposition": "context", "plan": null},
+      "prompts": [
+        "For context only: the service uses SQLite in WAL mode.",
+        "Background information: the repository is a Python modular monolith.",
+        "For reference only, the current release number is 0.2.24.",
+        "Context: the benchmark must use synthetic temporary state.",
+        "For awareness only, the owner prefers concise receipts.",
+        "Background: semantic triage is authored by the Shotcaller model.",
+        "Context only: the normal turn keeps one League process open.",
+        "For reference, exact prompt bytes are retained separately.",
+        "Background information: installation is a separate authority gate.",
+        "For awareness, the old dirty worktree must be preserved.",
+        "Context only: arm A is diagnostic and never a production mode.",
+        "For reference, p95 is the required tail statistic.",
+        "Background: hook capture and model reasoning are different phases.",
+        "For awareness only, the live state root is out of scope for tests.",
+        "Context: the installed command resolves through a stable symlink.",
+        "For reference only, the model output is a bounded JSON batch.",
+        "Background information: foreign keys remain enabled.",
+        "For awareness, the benchmark corpus contains no private prompts.",
+        "Context only: exact source and installed byte parity is required.",
+        "For reference, the final issue remains gated by live acceptance."
+      ]
+    }
+  ]
+}

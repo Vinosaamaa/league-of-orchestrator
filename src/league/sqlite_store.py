@@ -68,6 +68,18 @@ from .sqlite_outbox_ops import delivery_target as delivery_target_operation
 from .sqlite_outbox_ops import fail_outbox as fail_outbox_operation
 from .sqlite_outbox_ops import outbox_envelope as outbox_envelope_operation
 from .sqlite_outbox_ops import pending_backlog as pending_backlog_operation
+from .sqlite_watcher_ops import release_watcher as release_watcher_operation
+from .sqlite_watcher_ops import supervisor_binding as supervisor_binding_operation
+from .sqlite_watcher_ops import watcher_registration as watcher_registration_operation
+from .sqlite_watcher_ops import apply_supervision_delivery_policy as apply_supervision_delivery_policy_operation
+from .sqlite_watcher_ops import champion_stop_decision as champion_stop_decision_operation
+from .sqlite_watcher_ops import configure_supervision_policy as configure_supervision_policy_operation
+from .sqlite_watcher_ops import pause_calm_supervision as pause_calm_supervision_operation
+from .sqlite_watcher_ops import resume_calm_supervision as resume_calm_supervision_operation
+from .sqlite_watcher_ops import record_supervision_fault as record_supervision_fault_operation
+from .sqlite_watcher_ops import runtime_monitor_candidates as runtime_monitor_candidates_operation
+from .sqlite_watcher_ops import silent_supervision_updates as silent_supervision_updates_operation
+from .sqlite_watcher_ops import supervision_policy as supervision_policy_operation
 from .sqlite_request_ops import answer_request as answer_request_operation
 from .sqlite_request_ops import claim_request as claim_request_operation
 from .sqlite_request_ops import dispatch_request as dispatch_request_operation
@@ -132,6 +144,7 @@ from .storage_outbox import OutboxDispatchIdentity
 from .storage_request import (
     AnswerRequestCommand,
     DispatchRequestCommand,
+    ReconcileDuplicateRequestCommand,
     RequestProgressCommand,
     RequestResultCommand,
 )
@@ -169,10 +182,16 @@ from .sqlite_autonomous_schema import MIGRATION_NAME as AUTONOMOUS_MIGRATION_NAM
 from .sqlite_autonomous_schema import STATEMENTS as AUTONOMOUS_MIGRATION_STATEMENTS
 from .storage_issue import BeginIssueSelectionCommand, CompleteIssueSelectionCommand
 from .storage_mode import SettleModeActionCommand
+from .sqlite_request_reconciliation_schema import (
+    MIGRATION_NAME as REQUEST_RECONCILIATION_MIGRATION_NAME,
+)
+from .sqlite_request_reconciliation_schema import (
+    STATEMENTS as REQUEST_RECONCILIATION_MIGRATION_STATEMENTS,
+)
 
 
 WAL_MINIMUM = (3, 51, 3)
-CURRENT_SCHEMA_VERSION = 18
+CURRENT_SCHEMA_VERSION = 19
 DATABASE_NAME = "league.sqlite3"
 DEFAULT_BUSY_TIMEOUT_MS = 500
 MAX_BUSY_TIMEOUT_MS = 10_000
@@ -1188,6 +1207,11 @@ MIGRATIONS = (
         rebuilds_foreign_keys=True,
     ),
     Migration(18, AUTONOMOUS_MIGRATION_NAME, AUTONOMOUS_MIGRATION_STATEMENTS),
+    Migration(
+        19,
+        REQUEST_RECONCILIATION_MIGRATION_NAME,
+        REQUEST_RECONCILIATION_MIGRATION_STATEMENTS,
+    ),
 )
 
 
@@ -1428,6 +1452,7 @@ _EXPORT_TABLES = (
     "prompt_items",
     "requests",
     "request_sources",
+    "request_reconciliations",
     "request_claims",
     "request_dispatches",
     "request_results",
@@ -1506,6 +1531,7 @@ _EXPORT_ORDER = {
     "prompt_items": "prompt_id,ordinal,prompt_item_id",
     "requests": "created_at,request_id",
     "request_sources": "request_id,prompt_item_id",
+    "request_reconciliations": "reconciled_at,duplicate_request_id",
     "request_claims": "request_id",
     "request_dispatches": "decided_at,dispatch_id",
     "request_results": "created_at,result_id",
@@ -2870,11 +2896,23 @@ class SQLiteStorage(SQLiteTransactionCore):
         decisions: list[dict[str, Any]],
         plans: tuple[Any, ...],
         at: str,
+        *,
+        expected_candidate_digest: Optional[str] = None,
+        candidate_limit: int = 12,
+        candidate_max_bytes: int = 24_576,
     ) -> dict[str, Any]:
         from .sqlite_request_ops import begin_request_turn
 
         return begin_request_turn(
-            self, owner_agent_id, expected_prompt_ids, decisions, plans, at
+            self,
+            owner_agent_id,
+            expected_prompt_ids,
+            decisions,
+            plans,
+            at,
+            expected_candidate_digest=expected_candidate_digest,
+            candidate_limit=candidate_limit,
+            candidate_max_bytes=candidate_max_bytes,
         )
 
     def commit_request_turn(
@@ -2891,6 +2929,13 @@ class SQLiteStorage(SQLiteTransactionCore):
         from .sqlite_request_ops import request_turn_boundary
 
         return request_turn_boundary(self, owner_agent_id)
+
+    def reconcile_duplicate_request(
+        self, command: ReconcileDuplicateRequestCommand
+    ) -> dict[str, Any]:
+        from .sqlite_request_ops import reconcile_duplicate_request
+
+        return reconcile_duplicate_request(self, command)
 
     def quarantine_prompt(
         self,
@@ -3049,10 +3094,26 @@ class SQLiteStorage(SQLiteTransactionCore):
         *,
         limit: int = 20,
         max_bytes: int = 1_000_000,
+        candidate_limit: int = 12,
+        candidate_max_bytes: int = 24_576,
+        candidate_after: Optional[str] = None,
+        candidate_page: bool = False,
     ) -> dict[str, Any]:
         return untriaged_intake_operation(
-            self, owner_agent_id, limit=limit, max_bytes=max_bytes
+            self,
+            owner_agent_id,
+            limit=limit,
+            max_bytes=max_bytes,
+            candidate_limit=candidate_limit,
+            candidate_max_bytes=candidate_max_bytes,
+            candidate_after=candidate_after,
+            candidate_page=candidate_page,
         )
+
+    def semantic_recovery_backlog(self, *, limit: int = 20) -> dict[str, Any]:
+        from .sqlite_request_ops import semantic_recovery_backlog
+
+        return semantic_recovery_backlog(self, limit=limit)
 
     def prepare_assignment(self, command: PrepareAssignmentCommand) -> dict[str, Any]:
         return prepare_assignment_operation(self, command)
@@ -3121,6 +3182,7 @@ class SQLiteStorage(SQLiteTransactionCore):
         outbox_id: str,
         recipient_agent_id: str,
         at: str,
+        attention_required: bool = False,
     ) -> dict[str, Any]:
         return transition_task_operation(
             self,
@@ -3137,6 +3199,7 @@ class SQLiteStorage(SQLiteTransactionCore):
             outbox_id,
             recipient_agent_id,
             at,
+            attention_required,
         )
 
     def claim_outbox(
@@ -3240,6 +3303,126 @@ class SQLiteStorage(SQLiteTransactionCore):
             fence,
             at,
             block_on_obligations=block_on_obligations,
+        )
+
+    def supervisor_binding(self, callsign: Optional[str] = None) -> dict[str, Any]:
+        return supervisor_binding_operation(self, callsign)
+
+    def watcher_registration(
+        self, actor_agent_id: str
+    ) -> Optional[dict[str, Any]]:
+        return watcher_registration_operation(self, actor_agent_id)
+
+    def watcher_readiness(
+        self, actor_agent_id: str
+    ) -> Optional[dict[str, Any]]:
+        from .sqlite_watcher_ops import watcher_readiness
+
+        return watcher_readiness(self, actor_agent_id)
+
+    def supervision_policy(self, actor_agent_id: str) -> dict[str, Any]:
+        return supervision_policy_operation(self, actor_agent_id)
+
+    def runtime_monitor_candidates(
+        self, owner_agent_id: str, *, limit: int = 50
+    ) -> dict[str, Any]:
+        return runtime_monitor_candidates_operation(self, owner_agent_id, limit=limit)
+
+    def record_supervision_fault(
+        self,
+        owner_agent_id: str,
+        fault_kind: str,
+        fault_key: str,
+        at: str,
+    ) -> dict[str, Any]:
+        return record_supervision_fault_operation(
+            self, owner_agent_id, fault_kind, fault_key, at
+        )
+
+    def configure_supervision_policy(
+        self,
+        scope_id: str,
+        actor_agent_id: str,
+        mode: str,
+        unreachable_grace_seconds: int,
+        at: str,
+    ) -> dict[str, Any]:
+        return configure_supervision_policy_operation(
+            self,
+            scope_id,
+            actor_agent_id,
+            mode,
+            unreachable_grace_seconds,
+            at,
+        )
+
+    def apply_supervision_delivery_policy(
+        self,
+        outbox_id: str,
+        event_id: str,
+        recipient_agent_id: str,
+        at: str,
+    ) -> dict[str, Any]:
+        return apply_supervision_delivery_policy_operation(
+            self, outbox_id, event_id, recipient_agent_id, at
+        )
+
+    def silent_supervision_updates(
+        self,
+        actor_agent_id: str,
+        *,
+        after_event_seq: Optional[int] = None,
+        limit: int = 20,
+        advance_cursor: bool = False,
+        at: Optional[str] = None,
+    ) -> dict[str, Any]:
+        return silent_supervision_updates_operation(
+            self,
+            actor_agent_id,
+            after_event_seq=after_event_seq,
+            limit=limit,
+            advance_cursor=advance_cursor,
+            at=at,
+        )
+
+    def pause_calm_supervision(
+        self,
+        actor_agent_id: str,
+        watcher_id: str,
+        fence: int,
+        at: str,
+    ) -> dict[str, Any]:
+        return pause_calm_supervision_operation(
+            self, actor_agent_id, watcher_id, fence, at
+        )
+
+    def resume_calm_supervision(
+        self,
+        actor_agent_id: str,
+        watcher_id: str,
+        fence: int,
+        at: str,
+    ) -> dict[str, Any]:
+        return resume_calm_supervision_operation(
+            self, actor_agent_id, watcher_id, fence, at
+        )
+
+    def champion_stop_decision(
+        self, champion_agent_id: str, terminal_generation: str, at: str
+    ) -> dict[str, Any]:
+        return champion_stop_decision_operation(
+            self, champion_agent_id, terminal_generation, at
+        )
+
+    def release_watcher(
+        self,
+        watcher_id: str,
+        actor_agent_id: str,
+        fence: int,
+        at: str,
+    ) -> dict[str, Any]:
+        return release_watcher_operation(
+            self, watcher_id, actor_agent_id, fence, at
         )
 
     def note_user_message(

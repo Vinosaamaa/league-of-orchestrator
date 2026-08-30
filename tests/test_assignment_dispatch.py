@@ -401,6 +401,10 @@ def test_task_transition_matrix_refuses_illegal_and_terminal_progression(root: P
         assert exc.code == "invalid_task_transition"
     else:
         raise AssertionError("illegal task transition was accepted")
+    runtime_seen_before = store.connection.execute(
+        "SELECT last_seen_at FROM runtime_instances WHERE runtime_instance_id=?",
+        (active["runtime_instance_id"],),
+    ).fetchone()[0]
     completed = store.transition_task(
         active["task_id"],
         active["runtime_instance_id"],
@@ -417,6 +421,11 @@ def test_task_transition_matrix_refuses_illegal_and_terminal_progression(root: P
         clock.now(),
     )
     assert completed["version"] == 4
+    runtime_seen_after = store.connection.execute(
+        "SELECT last_seen_at FROM runtime_instances WHERE runtime_instance_id=?",
+        (active["runtime_instance_id"],),
+    ).fetchone()[0]
+    assert runtime_seen_after == runtime_seen_before
     try:
         store.transition_task(
             active["task_id"],

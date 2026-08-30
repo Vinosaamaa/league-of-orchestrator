@@ -482,6 +482,9 @@ def test_in_place_bootstrap_creates_shotcaller_without_layout_or_squad_registrat
     turn.stdin.write(
         json.dumps(
             {
+                "candidate_inventory_digest": intake["result"]["candidate_inventory"][
+                    "digest"
+                ],
                 "decisions": [
                     {
                         "items": [

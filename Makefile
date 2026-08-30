@@ -25,10 +25,16 @@ REQUEST_LIFECYCLE_TESTS := \
 	tests/test_transition_delivery.py \
 	tests/test_shotcaller_stop.py \
 	tests/test_canonical_watcher.py \
+	tests/test_persistent_supervisor.py \
+	tests/test_calm_supervision.py \
+	tests/test_request_reconciliation.py \
 	tests/test_request_lifecycle_cli.py
 
 BENCHMARK_TESTS := \
-	tests/test_request_turn_benchmark.py
+	tests/test_request_turn_benchmark.py \
+	tests/test_semantic_triage_benchmark.py \
+	tests/test_semantic_triage_benchmark_integration.py \
+	tests/test_inline_triage_prompt_shapes.py
 
 RUNTIME_LIFECYCLE_TESTS := \
 	tests/test_runtime_adapters.py \

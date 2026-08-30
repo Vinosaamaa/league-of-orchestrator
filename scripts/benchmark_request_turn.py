@@ -289,6 +289,9 @@ def _sqlite_turn(
             if intake["result"]["returned_count"] != PROMPT_COUNT:
                 raise RuntimeError("one-process intake count mismatch")
             begin = {
+                "candidate_inventory_digest": intake["result"]["candidate_inventory"][
+                    "digest"
+                ],
                 "decisions": [_semantic_decision(item) for item in range(1, PROMPT_COUNT + 1)],
                 "plans": [_semantic_plan() for _ in range(PROMPT_COUNT)],
             }
@@ -297,6 +300,9 @@ def _sqlite_turn(
             begun_line = _phase_line(process, deadline)
             begun_at = time.perf_counter()
             begun = json.loads(begun_line)
+            if begun.get("ok") is not True:
+                code = begun.get("error", {}).get("code", "unknown")
+                raise RuntimeError(f"one-process begin refused: {code}")
             if begun["result"]["phase"] != "begun" or process.poll() is not None:
                 raise RuntimeError("one-process begin failed or exited early")
             commit = {

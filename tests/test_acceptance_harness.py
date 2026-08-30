@@ -17,7 +17,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 LEAGUE = ROOT / "bin/league"
-EXPECTED_MIGRATION_REPORT = "beef8543c08938e4ba10fe4337a7d4ec7cb812cdee25e3694befb7da09012189"
+EXPECTED_MIGRATION_REPORT = "d02b1f489eb5dbfc964292c2c0b052448b9277876f1bfc76937e3986c01463c5"
 EXPECTED_MIGRATION_SOURCE = "0f7d57871907fabdab99b01b39e280d6ea2d12901c4a22ea765e9bbe24241499"
 EXPECTED_MIGRATION_PARITY = "cc7041659d599b9e403862928d834253458126437144981efe5d68022e7f4cda"
 sys.path.insert(0, str(ROOT / "src"))
@@ -124,7 +124,10 @@ def assert_sentinel_and_migration_receipts(result: dict[str, object]) -> None:
     assert result["sentinels"]["unchanged"] is True
     shadow = result["migration_shadow"]
     assert shadow["dry_run"]["eligible"] is True
-    assert shadow["dry_run"]["report_digest"] == EXPECTED_MIGRATION_REPORT
+    assert shadow["dry_run"]["report_digest"] == EXPECTED_MIGRATION_REPORT, (
+        shadow["dry_run"]["report_digest"],
+        EXPECTED_MIGRATION_REPORT,
+    )
     assert shadow["dry_run"]["source_digest"] == EXPECTED_MIGRATION_SOURCE
     assert shadow["apply"]["applied"] is True
     assert shadow["exact_parity"] is True and shadow["legacy_unchanged"] is True

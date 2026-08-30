@@ -49,6 +49,14 @@ Nothing here installs files, changes hooks, or connects to live Roster state.
   source, or unrelated token. Read-only identity queries retry bounded
   transient malformed output; persistent malformed bytes still refuse before
   callsign reservation, runtime registration, or Squad state.
+- One active-turn semantic sideband with a 12-row/24 KiB same-owner candidate
+  shortlist, version-fenced duplicate/follow-up links, and external-dispatch
+  refusal when the complete candidate inventory is unavailable or changed.
+- One source-only persistent event supervisor with renewable/fenced ownership,
+  exact prompt and Champion-event wake, asynchronous orphan recovery, and a
+  service-manager template that is not installed by this repository work.
+- One explicit same-owner duplicate-request reconciliation command; Stop remains
+  omission detection and never performs semantic cleanup.
 - Opaque capability-based harness/backend bindings, typed task resources, and
   canonical SQLite-backed recoverable teardown with immutable per-action/final
   receipts, exact shared-lease release, and persistent-resource retention.
@@ -113,6 +121,7 @@ make test
 make test-storage
 make test-project-roster
 make test-request-lifecycle
+make test-turn-benchmark
 make test-runtime-lifecycle
 make test-routing-policy
 make test-skill-contracts
@@ -127,6 +136,8 @@ make test-all
 storage slice once, `make test-project-roster` runs the focused issues #9/#12
 contract, `make test-request-lifecycle` runs the grouped lifecycle
 suite, `make test-runtime-lifecycle` runs issues #7/#11/#14/#83, and
+`make test-turn-benchmark` runs the focused one-process, semantic-ablation, and
+inline prompt-shape harness contracts without contacting a model provider, and
 `make test-routing-policy` runs issue #36's deterministic owner/execution,
 Squad registration, parent-progress, and hidden-scientist contract, while
 `make test-skill-contracts` runs issue #10's synthetic provenance, privacy,
@@ -193,6 +204,38 @@ add [project catalog](schema/league-project-catalog.schema.json) and
 The grouped request-lifecycle command and transaction map is documented in
 [request lifecycle](docs/REQUEST_LIFECYCLE.md). Its implementation is inert
 until issue #23 separately proves installation and cutover.
+Issue #66's inline-triage, candidate-inventory, persistent-supervision, and
+measured source-only boundaries are in the
+[issue #66 benchmark report](docs/research/issue-66-inline-triage-supervision-benchmark.md).
+The normal Shotcaller path opens one `request turn` process; the same active
+model authors its semantic JSON. `agent-watcher service-run` is an external
+service-manager surface, never an active-turn command. The inert launchd
+template is not an install receipt.
+
+The repository-local supervisor supports `all_material` and Calm (`calm`) wake
+policies. Calm commits every transition but suppresses routine Champion
+progress. With supervision on, the Shotcaller remains in an event-driven wait
+outside model inference and attention arrives through the fenced Unix socket.
+`agent-watcher service-pause` turns Calm supervision off: the model turn ends,
+the non-model monitor, watcher lease, socket, and global hooks stay active, and
+attention uses the verified exact-once direct recipient path. `service-resume`
+restores the attached wait and returns one bounded silent-transition
+reconciliation. Real owner prompts retain priority in both variants.
+
+Normal delivery is immediate IPC, not polling. Missing runtime truth gets one
+configurable 60-second grace before CAS-safe reconciliation. A 300-second
+SQLite audit is recovery-only for lost notifications or service restart and
+never invokes a model when healthy. The service renews its silent lease every
+20 seconds, the lease expires after 60 seconds, and the inert launchd template
+uses a five-second restart throttle.
+
+Installed 0.2.28 has no always-running watchdog or OS-owned supervision timer.
+Its legacy foreground `supervise` loop keeps a 30-second runtime snapshot and
+requires two matching observations (about 60 seconds) before a stall fallback;
+its separate 300-second liveness deadline only resets silently and performs no
+health operation. Both timers disappear when that foreground command exits.
+These legacy timers are not the candidate design. The source launchd/socket
+service described here is not installed.
 The adapter, resource, cleanup, and routing contracts are documented in
 [runtime lifecycle](docs/runtime-lifecycle.md) and remain equally repository-local.
 The custom-root provenance and capability boundary is documented in

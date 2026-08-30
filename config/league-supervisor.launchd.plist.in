@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>io.league-of-orchestrator.supervisor</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>@@AGENT_WATCHER@@</string>
+    <string>--shotcaller</string>
+    <string>@@SHOTCALLER@@</string>
+    <string>service-run</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>LEAGUE_STATE_ROOT</key>
+    <string>@@STATE_ROOT@@</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>ThrottleInterval</key>
+  <integer>5</integer>
+</dict>
+</plist>

@@ -630,3 +630,73 @@ idempotent.
 The v16 target-version binding changes only the deterministic acceptance
 fixture's dry-run report digest; its source and imported-row parity digests are
 unchanged.
+
+## Semantic-triage ablation provenance
+
+Issue #66 adds a repository-local diagnostic benchmark, public synthetic
+120-prompt corpus, structured-output schema, and focused fake-model test. The
+triage-off arm is benchmark-only and does not create a second production path;
+normal League behavior continues to require model-authored semantic accounting.
+
+The installed 0.2.27 turn refuses a 25-prompt batch because its internal bound
+is 20. The source candidate deliberately raises only that existing bound to 25
+so the owner-required 1/6/25 scaling matrix can execute. It does not change the
+per-prompt 32-item bound, 20-new-request plan bound, transaction shape, storage
+schema, migration set, journal policy, hooks, watcher, installation, or live
+state. The benchmark and focused test use explicit synthetic temporary roots.
+
+## Inline-triage and persistent-supervision provenance
+
+The issue-#66 successor keeps the completed Luna xhigh ablation receipt
+immutable and changes the production design rather than selecting a faster
+synchronous classifier. The active Shotcaller authors ordered semantic items
+for its existing one-process turn. The adapter validates, exact-deduplicates,
+version-links, and commits locally; no ordinary turn starts a second model.
+
+The deliberate source differences are a 12-row/24,576-byte deterministic
+same-owner candidate shortlist, complete-snapshot fencing before external
+dispatch, deterministic off-path candidate pages, schema-19 agent-authored
+duplicate reconciliation, and one persistent event-driven supervisor runtime
+with renewable/fenced ownership. Stop remains an omission backstop and does not
+merge requests. A source launchd template declares the intended owner boundary
+but is neither rendered nor installed.
+
+The deliberate supervision follow-up adds Calm filtering plus durable
+supervising/paused policy state, one exact pause receipt, bounded resume
+reconciliation, one-shot Champion Stop protection, and fenced canonical
+runtime reconciliation. Calm with supervision on keeps an event-driven wait
+outside model inference and uses the registered Unix socket. Calm with
+supervision off ends the model turn while the non-model monitor and its lease
+remain live; routine transitions stay silent and attention uses the verified
+exact-once direct recipient path. Real owner prompts keep priority.
+
+Normal transition delivery is immediate. A missing runtime gets one
+configurable 60-second grace before CAS-safe reconciliation. A 300-second
+bounded SQLite audit is lost-notification/restart recovery only. The monitor
+renews silently every 20 seconds, ownership expires after 60 seconds, and the
+launchd template throttles restart to five seconds. The retained one-second
+`supervise` loop is diagnostic compatibility, not the production runtime.
+
+Owner-source installed 0.2.28 truth remains distinct: its foreground legacy
+loop has a 30-second runtime snapshot, two matching observations (about 60
+seconds) before a stall fallback, and a 300-second liveness deadline that only
+resets silently. It has no separate OS timer or always-running liveness process,
+and both timers vanish when the foreground loop exits. Those legacy timers are
+not the source candidate behavior. The launchd/socket source in this change
+remains uninstalled.
+
+The 3×3 prompt-size/intent-count matrix measures exact capture, JSON sideband,
+candidate linking, SQLite commit, and one-process completion on synthetic
+temporary roots. Its gold sideband proves local mechanics only; it does not
+claim active-model split quality, installed prompt capture, live supervision,
+or the #23 owner-visible E2E. No global file, hook, service, model route,
+canonical database, or live runtime is changed.
+
+Current main's issue-coupled continuation, rollover-snapshot, and scoped
+autonomous-delivery migrations remain canonical schemas 16, 17, and 18.
+Issue #66 appends agent-authored request reconciliation as schema 19; it does
+not renumber, replace, or mutate any main migration. The deterministic
+acceptance dry-run report receipt is refreshed for that schema-19 target. Its
+legacy-source digest and exact
+post-import parity digest remain unchanged; only the truthful target-version
+report digest changes.

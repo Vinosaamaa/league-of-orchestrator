@@ -132,6 +132,23 @@ def main() -> None:
     assert status_schema["properties"]["routing_name"]["pattern"] == (
         "^[a-z][a-z0-9_-]{0,31}$"
     )
+    supervisor_schema = load_json(
+        ROOT / "schema" / "league-supervisor-status.schema.json"
+    )
+    assert supervisor_schema["additionalProperties"] is False
+    assert supervisor_schema["properties"]["mode"]["enum"] == [
+        "all_material",
+        "calm",
+    ]
+    assert supervisor_schema["properties"]["runtime_state"]["enum"] == [
+        "supervising",
+        "paused",
+    ]
+    assert supervisor_schema["properties"]["wake_policy"]["enum"] == [
+        "normal",
+        "calm",
+        "calm_paused",
+    ]
 
     print("PASS: strict synthetic examples, latest-event parity, routing config, and JSON schemas")
 

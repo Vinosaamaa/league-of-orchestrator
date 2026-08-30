@@ -164,13 +164,16 @@ def seed_rollover(store: SQLiteStorage, *, champion_count: int = 3) -> dict:
         """,
         (OLD_ID, SQUAD_ID, AT1),
     )
+    champion_names = ("Annie", "Braum", "Caitlyn", "Darius", "Ezreal")
+    if champion_count > len(champion_names):
+        champion_names += ("Fizz", "Janna", "Karma")[: champion_count - 5]
     champion_catalog = tuple(
         {
             "callsign": name,
             "enabled": True,
             "capabilities": ["task.execute"],
         }
-        for name in ("Annie", "Braum", "Caitlyn", "Darius", "Ezreal")
+        for name in champion_names
     )
     store.reconcile_callsign_pool(
         "champion", 1, CHAMPION_SEED, SHUFFLE_VERSION, champion_catalog, AT1
@@ -268,12 +271,12 @@ def mark_exact_imported_legacy_partial(
         "DELETE FROM runtime_instances WHERE actor_agent_id=?", (champion_agent_id,)
     )
     store.connection.execute(
-        "INSERT INTO import_runs(run_id,report_digest,source_digest,applied_at) VALUES(?,?,?,?)",
+        "INSERT OR IGNORE INTO import_runs(run_id,report_digest,source_digest,applied_at) VALUES(?,?,?,?)",
         ("import:synthetic", "a" * 64, "b" * 64, AT1),
     )
     store.connection.execute(
         """
-        INSERT INTO imported_artifacts
+        INSERT OR IGNORE INTO imported_artifacts
           (artifact_id,kind,digest,record_count,source_order,import_run_id)
         VALUES(?, 'roster', ?, 2, 0, 'import:synthetic')
         """,
@@ -300,7 +303,7 @@ def mark_exact_imported_legacy_partial(
     )
     store.connection.execute(
         "INSERT INTO legacy_event_aliases(legacy_event_id,event_id,source_order) VALUES(?,?,0)",
-        ("legacy:synthetic:champion:0", event_id),
+        (f"legacy:synthetic:champion:{task_id.rsplit(':', 1)[-1]}", event_id),
     )
     store.connection.execute(
         "UPDATE agent_instances SET version=? WHERE agent_id=?",
@@ -571,6 +574,389 @@ class ExactSnapshotInventory:
                 }
             )
         return observations
+
+
+class FakeHerdrInventory:
+    def __init__(self, agents: list[dict]) -> None:
+        self.agents = agents
+        self.calls: list[tuple[str, ...]] = []
+
+    def run(
+        self, argv: tuple[str, ...], *, timeout_seconds: int
+    ) -> subprocess.CompletedProcess[str]:
+        self.calls.append(argv)
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            json.dumps({"result": {"agents": self.agents}}),
+            "",
+        )
+
+
+def _seed_legacy_null_route_refresh(
+    store: SQLiteStorage,
+    root: Path,
+    label: str,
+    *,
+    champion_count: int = 1,
+    imported: bool = True,
+) -> dict:
+    context = seed_rollover(store, champion_count=champion_count)
+    agents = []
+    versions = {}
+    for ordinal, champion_id in enumerate(context["champion_ids"]):
+        task_id = f"task:champion:{ordinal}"
+        if imported:
+            mark_exact_imported_legacy_partial(store, champion_id, task_id)
+        callsign = store.agent_status(champion_id)["callsign"]
+        thread_id = f"22222222-3333-4444-8555-{ordinal:012d}"
+        pane_id = f"pane:legacy-null-route:{label}:{ordinal}"
+        terminal_id = f"terminal:legacy-null-route:{label}:{ordinal}"
+        worktree = (root / f"legacy-null-route-{label}-{ordinal}").resolve()
+        worktree.mkdir()
+        store.connection.execute(
+            """
+            UPDATE agent_instances
+               SET kind='codex-thread',thread_id=?,backend='herdr',address=?,worktree=?,
+                   routing_name=NULL,display_agent=NULL
+             WHERE agent_id=?
+            """,
+            (thread_id, pane_id, str(worktree), champion_id),
+        )
+        generation = "herdr:" + hashlib.sha256(
+            f"{terminal_id}\0{thread_id}".encode("utf-8")
+        ).hexdigest()[:24]
+        if not imported:
+            store.connection.execute(
+                """
+                UPDATE runtime_instances
+                   SET harness_kind='codex-thread',backend_kind='herdr',session_ref=?,
+                       endpoint=?,runtime_generation=?,status='idle',verified=1
+                 WHERE actor_agent_id=?
+                """,
+                (thread_id, pane_id, generation, champion_id),
+            )
+        elif ordinal % 2:
+            store.connection.execute(
+                """
+                INSERT INTO runtime_instances
+                  (runtime_instance_id,actor_agent_id,harness_kind,backend_kind,session_ref,
+                   endpoint,runtime_generation,status,verified,last_seen_at,capabilities_json)
+                VALUES(?,?,'codex-thread','herdr',?,?,?,'idle',1,?,'["hook.capture"]')
+                """,
+                (
+                    f"runtime:legacy-null-route:{label}:{ordinal}",
+                    champion_id,
+                    thread_id,
+                    pane_id,
+                    generation,
+                    AT5,
+                ),
+            )
+        versions[champion_id] = store.agent_status(champion_id)["version"]
+        agents.append(
+            {
+                "agent": "codex",
+                "agent_session": {"value": thread_id},
+                "agent_status": "done" if ordinal % 2 else "working",
+                "interactive_ready": True,
+                "cwd": str(worktree),
+                "foreground_cwd": str(worktree),
+                "name": str(callsign).lower(),
+                "pane_id": pane_id,
+                "state_change_seq": ordinal + 1,
+                "terminal_id": terminal_id,
+            }
+        )
+    prepared, switched = switch_rollover(store, context)
+    return {
+        "context": context,
+        "prepared": prepared,
+        "switched": switched,
+        "agents": agents,
+        "versions": versions,
+    }
+
+
+def _legacy_null_route_inputs(seed: dict, label: str) -> dict:
+    return {
+        "operation_id": seed["prepared"]["operation_id"],
+        "refresh_id": f"refresh:legacy-null-route:{label}",
+        "squad_id": SQUAD_ID,
+        "predecessor_agent_id": OLD_ID,
+        "successor_agent_id": NEW_ID,
+        "expected_rollover_version": seed["switched"]["version"],
+        "expected_snapshot_version": seed["prepared"]["snapshot"]["version"],
+        "expected_snapshot_digest": seed["prepared"]["snapshot"]["digest"],
+        "expires_at": "2026-01-01T03:00:00Z",
+        "at": "2026-01-01T02:00:00Z",
+    }
+
+
+def test_snapshot_refresh_adopts_eight_exact_imported_null_routes(root: Path) -> None:
+    state, _ = migrated_state(root, "refresh-eight-legacy-null-routes")
+    with SQLiteStorage(state) as store:
+        seed = _seed_legacy_null_route_refresh(
+            store, root, "eight", champion_count=8
+        )
+        source_rows = {
+            row["champion_agent_id"]: dict(row)
+            for row in store.connection.execute(
+                """
+                SELECT * FROM active_champion_snapshot_rows WHERE snapshot_id=?
+                 ORDER BY champion_agent_id
+                """,
+                (seed["prepared"]["snapshot"]["snapshot_id"],),
+            )
+        }
+        seed["agents"][0]["routing_name"] = ""
+        seed["agents"][1]["routing_alias"] = None
+        runner = FakeHerdrInventory(seed["agents"])
+        service = RolloverSnapshotRefreshService(
+            store, HerdrRolloverSnapshotAdapter(runner)
+        )
+        inputs = _legacy_null_route_inputs(seed, "eight")
+
+        refreshed = service.refresh(**inputs)
+        retried = service.refresh(**inputs)
+
+        assert refreshed["idempotent"] is False
+        assert retried == {**refreshed, "idempotent": True}
+        assert len(refreshed["route_adoptions"]) == 8
+        assert runner.calls == [("herdr", "agent", "list")] * 2
+        refreshed_rows = {
+            row["champion_agent_id"]: dict(row)
+            for row in store.connection.execute(
+                """
+                SELECT * FROM active_champion_snapshot_rows WHERE snapshot_id=?
+                 ORDER BY champion_agent_id
+                """,
+                (refreshed["snapshot"]["snapshot_id"],),
+            )
+        }
+        for champion_id, expected_version in seed["versions"].items():
+            champion = store.agent_status(champion_id)
+            assert champion["routing_name"] == champion["callsign"].lower()
+            assert champion["display_agent"] == "codex"
+            assert champion["version"] == expected_version + 1
+            adoption = next(
+                item
+                for item in refreshed["route_adoptions"]
+                if item["champion_agent_id"] == champion_id
+            )
+            assert adoption["expected_agent_version"] == expected_version
+            assert adoption["agent_version"] == expected_version + 1
+            event = store.connection.execute(
+                "SELECT entity_version,event_type,detail_json FROM events WHERE event_id=?",
+                (adoption["event_id"],),
+            ).fetchone()
+            assert tuple(event)[:2] == (
+                expected_version + 1,
+                "rollover_descendant_route_adopted",
+            )
+            detail = json.loads(event["detail_json"])
+            assert detail["receipt_digest"] == adoption["receipt_digest"]
+            assert detail["receipt"]["routing_name"] == champion["callsign"].lower()
+            assert source_rows[champion_id]["binding_digest"] != refreshed_rows[
+                champion_id
+            ]["binding_digest"]
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM events WHERE event_type='rollover_descendant_route_adopted'"
+        ).fetchone()[0] == 8
+
+
+def test_snapshot_refresh_null_route_refuses_live_guess_or_overlap(root: Path) -> None:
+    cases = (
+        ("title-only", "snapshot_refresh_live_mismatch"),
+        ("mismatched-name", "snapshot_refresh_live_mismatch"),
+        ("conflicting-explicit-route", "snapshot_refresh_live_mismatch"),
+        ("route-overlap", "snapshot_refresh_live_ambiguous"),
+        ("pane-overlap", "snapshot_refresh_live_ambiguous"),
+        ("session-overlap", "snapshot_refresh_live_ambiguous"),
+    )
+    for label, expected_code in cases:
+        state, _ = migrated_state(root, f"refresh-null-route-{label}")
+        with SQLiteStorage(state) as store:
+            seed = _seed_legacy_null_route_refresh(store, root, label)
+            champion_id = seed["context"]["champion_ids"][0]
+            agent = seed["agents"][0]
+            if label == "title-only":
+                agent["terminal_title"] = agent["name"]
+                agent["name"] = None
+            elif label == "mismatched-name":
+                agent["name"] = "wrong-route"
+            elif label == "conflicting-explicit-route":
+                agent["routing_alias"] = "foreign"
+            else:
+                duplicate = dict(agent)
+                duplicate["pane_id"] = f"pane:duplicate:{label}"
+                duplicate["name"] = f"duplicate-{label}"
+                duplicate["agent_session"] = {
+                    "value": "99999999-8888-4777-8666-555555555555"
+                }
+                if label == "route-overlap":
+                    duplicate["name"] = agent["name"]
+                elif label == "pane-overlap":
+                    duplicate["pane_id"] = agent["pane_id"]
+                else:
+                    duplicate["agent_session"] = agent["agent_session"]
+                seed["agents"].append(duplicate)
+            before = store.rollover_status(seed["prepared"]["operation_id"])
+            try:
+                RolloverSnapshotRefreshService(
+                    store,
+                    HerdrRolloverSnapshotAdapter(
+                        FakeHerdrInventory(seed["agents"])
+                    ),
+                ).refresh(**_legacy_null_route_inputs(seed, label))
+            except StorageRefusal as exc:
+                assert exc.code == expected_code
+            else:
+                raise AssertionError(f"{label} null-route proof refreshed snapshot")
+            champion = store.agent_status(champion_id)
+            assert champion["routing_name"] is None
+            assert champion["version"] == seed["versions"][champion_id]
+            assert store.rollover_status(seed["prepared"]["operation_id"]) == before
+            assert store.connection.execute(
+                "SELECT COUNT(*) FROM events WHERE event_type='rollover_descendant_route_adopted'"
+            ).fetchone()[0] == 0
+
+
+def test_snapshot_refresh_null_route_refuses_modern_or_successor_owner(
+    root: Path,
+) -> None:
+    for label, imported in (("modern", False), ("successor", True)):
+        state, _ = migrated_state(root, f"refresh-null-route-{label}")
+        with SQLiteStorage(state) as store:
+            seed = _seed_legacy_null_route_refresh(
+                store, root, label, imported=imported
+            )
+            champion_id = seed["context"]["champion_ids"][0]
+            if label == "successor":
+                store.connection.execute(
+                    """
+                    UPDATE agent_instances
+                       SET shotcaller_agent_id=?,version=version+1
+                     WHERE agent_id=?
+                    """,
+                    (NEW_ID, champion_id),
+                )
+            try:
+                RolloverSnapshotRefreshService(
+                    store,
+                    HerdrRolloverSnapshotAdapter(
+                        FakeHerdrInventory(seed["agents"])
+                    ),
+                ).refresh(**_legacy_null_route_inputs(seed, label))
+            except StorageRefusal as exc:
+                assert exc.code == "snapshot_refresh_identity_changed"
+            else:
+                raise AssertionError(f"{label} null-route descendant was adopted")
+            assert store.agent_status(champion_id)["routing_name"] is None
+            assert store.connection.execute(
+                "SELECT COUNT(*) FROM events WHERE event_type='rollover_descendant_route_adopted'"
+            ).fetchone()[0] == 0
+
+
+def test_snapshot_refresh_null_route_cas_and_fault_restore_exact_state(
+    root: Path,
+) -> None:
+    for label in ("agent-cas", "runtime-cas", "callsign-cas", "fault"):
+        state, _ = migrated_state(root, f"refresh-null-route-{label}")
+        with SQLiteStorage(state) as store:
+            seed = _seed_legacy_null_route_refresh(
+                store,
+                root,
+                label,
+                champion_count=2 if label == "runtime-cas" else 1,
+            )
+            champion_id = seed["context"]["champion_ids"][
+                1 if label == "runtime-cas" else 0
+            ]
+            callsign_versions_before = {
+                row["agent_id"]: int(row["version"])
+                for row in store.connection.execute(
+                    "SELECT agent_id,version FROM callsign_assignments WHERE role='champion'"
+                )
+            }
+            runtime_generations_before = {
+                row["actor_agent_id"]: row["runtime_generation"]
+                for row in store.connection.execute(
+                    "SELECT actor_agent_id,runtime_generation FROM runtime_instances WHERE actor_agent_id LIKE 'agent:champion:%'"
+                )
+            }
+            inputs = _legacy_null_route_inputs(seed, label)
+            target = store.rollover_snapshot_refresh_target(**inputs)
+            observations = HerdrRolloverSnapshotAdapter(
+                FakeHerdrInventory(seed["agents"])
+            ).observe(target["descendants"])
+
+            def final_observer(_descendants: list[dict]) -> list[dict]:
+                if label == "agent-cas":
+                    store.connection.execute(
+                        "UPDATE agent_instances SET version=version+1 WHERE agent_id=?",
+                        (champion_id,),
+                    )
+                elif label == "runtime-cas":
+                    store.connection.execute(
+                        """
+                        UPDATE runtime_instances SET runtime_generation='herdr:changed'
+                         WHERE actor_agent_id=?
+                        """,
+                        (champion_id,),
+                    )
+                elif label == "callsign-cas":
+                    store.connection.execute(
+                        """
+                        UPDATE callsign_assignments SET version=version+1
+                         WHERE agent_id=? AND role='champion'
+                        """,
+                        (champion_id,),
+                    )
+                return observations
+
+            def fault(point: str) -> None:
+                if label == "fault" and point == "after_refresh_route_adoptions":
+                    raise InjectedCrash(point)
+
+            try:
+                store.refresh_rollover_snapshot(
+                    **inputs,
+                    canonical_digest=target["canonical_digest"],
+                    observations=observations,
+                    final_observer=final_observer,
+                    fault=fault,
+                )
+            except (StorageRefusal, InjectedCrash) as exc:
+                if label != "fault":
+                    assert isinstance(exc, StorageRefusal)
+                    assert exc.code == "snapshot_refresh_concurrent_mutation"
+                else:
+                    assert str(exc) == "after_refresh_route_adoptions"
+            else:
+                raise AssertionError(f"{label} route-adoption boundary did not refuse")
+            for restored_id in seed["context"]["champion_ids"]:
+                champion = store.agent_status(restored_id)
+                assert champion["routing_name"] is None
+                assert champion["version"] == seed["versions"][restored_id]
+            assert {
+                row["agent_id"]: int(row["version"])
+                for row in store.connection.execute(
+                    "SELECT agent_id,version FROM callsign_assignments WHERE role='champion'"
+                )
+            } == callsign_versions_before
+            assert {
+                row["actor_agent_id"]: row["runtime_generation"]
+                for row in store.connection.execute(
+                    "SELECT actor_agent_id,runtime_generation FROM runtime_instances WHERE actor_agent_id LIKE 'agent:champion:%'"
+                )
+            } == runtime_generations_before
+            assert store.rollover_status(seed["prepared"]["operation_id"])[
+                "snapshot"
+            ] == seed["prepared"]["snapshot"]
+            assert store.connection.execute(
+                "SELECT COUNT(*) FROM events WHERE event_type='rollover_descendant_route_adopted'"
+            ).fetchone()[0] == 0
 
 
 def test_snapshot_refresh_cli_requires_the_exact_switched_identity() -> None:
@@ -4188,6 +4574,10 @@ def main() -> None:
         root = Path(temporary)
         test_snapshot_refresh_cli_requires_the_exact_switched_identity()
         test_snapshot_refresh_cli_runs_two_stable_herdr_inventories(root)
+        test_snapshot_refresh_adopts_eight_exact_imported_null_routes(root)
+        test_snapshot_refresh_null_route_refuses_live_guess_or_overlap(root)
+        test_snapshot_refresh_null_route_refuses_modern_or_successor_owner(root)
+        test_snapshot_refresh_null_route_cas_and_fault_restore_exact_state(root)
         test_snapshot_refresh_adapter_requires_one_exact_live_identity(root)
         test_snapshot_refresh_refuses_a_mismatched_canonical_runtime(root)
         test_runtime_capability_superset_refreshes_and_reconciles_without_downgrade(root)

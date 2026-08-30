@@ -107,6 +107,12 @@ Nothing here installs files, changes hooks, or connects to live Roster state.
   created atomically, the assignment must retain the byte-equivalent acceptance
   receipt, and current task/callsign/runtime/capability/outbox state must pass
   the same checks. Incomplete modern receipts never fall back to this profile.
+  During that same switched refresh, an exact predecessor-owned imported row
+  whose canonical route and display identity are both null may adopt only the
+  unique live Herdr top-level name equal to its normalized callsign. League
+  records the agent/runtime/callsign/snapshot CAS receipt and builds the new
+  snapshot from the incremented canonical agent version; modern clears,
+  successor rows, title-only guesses, overlaps, and identity drift refuse.
 - Deterministic bounded activity reports with stable JSON, exact range/timezone
   and scope, immutable show/since specifications, completion gates, indexed
   pagination, and JSON-derived Markdown/portable HTML.

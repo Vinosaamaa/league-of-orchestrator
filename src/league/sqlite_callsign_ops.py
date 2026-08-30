@@ -592,8 +592,14 @@ def _recover_retired_shotcaller_in_transaction(
     if not isinstance(metadata, dict):
         raise StorageRefusal("agent_conflict", "retired Shotcaller residue is malformed")
     legacy_without_baseline = metadata == {}
+    historical_scope_only = set(metadata) == {"scope_kind", "scope_id"}
     modern_keys = {"scope_kind", "scope_id", SHOTCALLER_BASELINE_KEY}
-    if not legacy_without_baseline and set(metadata) != modern_keys:
+    modern_with_baseline = set(metadata) == modern_keys
+    if (
+        not legacy_without_baseline
+        and not historical_scope_only
+        and not modern_with_baseline
+    ):
         raise StorageRefusal("agent_conflict", "retired identity is not a bootstrap residue")
     observed_baseline = _shotcaller_baseline(recovery_baseline)
     expected_generation = "herdr:" + hashlib.sha256(
@@ -601,7 +607,7 @@ def _recover_retired_shotcaller_in_transaction(
     ).hexdigest()[:24]
     if observed_baseline["endpoint_generation"] != expected_generation:
         raise StorageRefusal("agent_conflict", "retired bootstrap belongs to another thread")
-    if legacy_without_baseline:
+    if legacy_without_baseline or historical_scope_only:
         callsign = str(agent["callsign"])
         presentation_source = observed_baseline.get("presentation_source")
         if (
@@ -642,13 +648,27 @@ def _recover_retired_shotcaller_in_transaction(
     if len(assignments) != 1:
         raise StorageRefusal("agent_conflict", "retired Shotcaller assignment history is ambiguous")
     prior = assignments[0]
+    historical_scope_exact = bool(
+        historical_scope_only
+        and recovery_thread_id == agent["agent_id"]
+        and metadata.get("scope_kind") == "squad"
+        and isinstance(metadata.get("scope_id"), str)
+        and len(str(metadata["scope_id"])) > len("squad:")
+        and str(metadata["scope_id"]).startswith("squad:")
+        and prior["scope_kind"] == metadata["scope_kind"]
+        and prior["scope_id"] == metadata["scope_id"]
+    )
+    modern_scope_exact = bool(
+        not historical_scope_only
+        and prior["scope_kind"] == "shotcaller"
+        and prior["scope_id"] == agent["agent_id"]
+    )
     if (
         prior["callsign_assignment_id"] == assignment_id
         or prior["subject_id"] != f"agent:{agent['agent_id']}"
         or prior["callsign"] != agent["callsign"]
         or prior["role"] != "shotcaller"
-        or prior["scope_kind"] != "shotcaller"
-        or prior["scope_id"] != agent["agent_id"]
+        or not (historical_scope_exact or modern_scope_exact)
         or prior["state"] != "rolled_back"
         or int(prior["version"]) != 2
         or prior["runtime_instance_id"] is not None

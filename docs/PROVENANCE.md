@@ -557,6 +557,17 @@ preserving a newer user presentation. If endpoint identity changes before that
 restoration can be proven, League retains the reservation, lease, rebound agent,
 and v2 baseline as the cleanup obligation; canonical rollback occurs only after
 an exact retry proves and completes the external cleanup.
+One still-older frozen profile contains exactly two metadata keys. It is
+eligible only when `scope_kind=squad`, `scope_id` exactly equals the sole prior
+rolled-back assignment's historical Squad scope, and the currently verified
+thread ID exactly equals the retired agent ID. Every existing version-2 agent,
+single-assignment, exact-subject, rollback-event, available-callsign, and
+no-runtime/no-Squad/no-offer/no-lease fence remains mandatory. League captures
+the clean current v2 presentation baseline in the same reservation transaction
+and normalizes durable metadata to `scope_kind=shotcaller` and
+`scope_id=<exact-agent-thread-id>` before Herdr publication. Any extra metadata
+key, changed historical scope, different thread, incomplete history, owned
+resource, or interleaved presentation refuses without publication.
 Installed Herdr can omit `metadata_source` while still exposing its complete
 provider presentation envelope. Shotcaller preflight accepts that shape only
 when `harness`, identity thread/title, callsign, sidebar, thread, logical

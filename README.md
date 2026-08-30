@@ -55,7 +55,13 @@ Nothing here installs files, changes hooks, or connects to live Roster state.
   baseline-less legacy residue is eligible only when its metadata is exactly
   empty and two exact current observations prove an unbound, callsign-free
   presentation; League atomically upgrades that row with the observed source,
-  title, token, generation, and sequence baseline before publication. Herdr
+  title, token, generation, and sequence baseline before publication. One
+  frozen older two-key profile is also recognized: `scope_kind=squad` and its
+  `scope_id` must exactly equal the sole rolled-back assignment's historical
+  Squad scope, while the verified thread must equal the retired agent ID.
+  League captures the same v2 baseline and normalizes the durable scope to
+  `shotcaller` plus that exact agent/thread ID before publication. Extra keys,
+  changed scope/history, or any owned resource refuse. Herdr
   provider-generated presentation tokens are never treated as a routing bind:
   only consistent top-level route fields bind the pane, while a source-less
   provider presentation is accepted only as one complete thread-bound envelope.

@@ -10,7 +10,12 @@ from datetime import datetime, timezone
 from typing import Any, Mapping, Sequence
 
 from .sqlite_project_ops import canonical_repository
-from .storage_mode import SettleModeActionCommand
+from .storage_mode import (
+    PROTECTED_GATE_ACTIONS,
+    BeginProtectedGateCommand,
+    SettleModeActionCommand,
+    SettleProtectedGateCommand,
+)
 from .storage_types import StorageRefusal
 
 
@@ -385,6 +390,11 @@ SUPPORTED_ACTIONS = {
     "repair",
     "cleanup",
     "issue_reopen",
+    "live_reconcile",
+    "retire",
+    "shotcaller_create",
+    "squad_register",
+    "teardown",
 }
 ACTION_GOAL_STATES = {
     "land": "landing",
@@ -397,6 +407,7 @@ ACTION_GOAL_STATES = {
     "smoke": "verifying",
     "repair": "repair_pending",
     "cleanup": "cleanup_pending",
+    "teardown": "cleanup_pending",
 }
 ACTION_ALLOWED_FROM = {
     "land": {"ready_to_land"},
@@ -410,6 +421,15 @@ ACTION_ALLOWED_FROM = {
     "repair": {"repair_pending"},
     "cleanup": {"delivered", "cleanup_pending"},
     "issue_reopen": GOAL_STATES - {"cleaned"},
+    "live_reconcile": GOAL_STATES
+    - {"awaiting_authority", "repair_pending", "cleaned"},
+    "shotcaller_create": GOAL_STATES
+    - {"awaiting_authority", "repair_pending", "cleaned"},
+    "squad_register": GOAL_STATES
+    - {"awaiting_authority", "repair_pending", "cleaned"},
+    "retire": GOAL_STATES
+    - {"awaiting_authority", "repair_pending", "cleaned"},
+    "teardown": {"delivered", "cleanup_pending"},
 }
 ALWAYS_REFUSED_RISKS = {
     "ambiguous_target",
@@ -845,7 +865,7 @@ def settle_mode_action(store: Any, command: SettleModeActionCommand) -> dict[str
             else:
                 if action["action_kind"] in {"verify", "smoke"}:
                     next_state, next_action = "delivered", "cleanup"
-                elif action["action_kind"] == "cleanup":
+                elif action["action_kind"] in {"cleanup", "teardown"}:
                     next_state, next_action = "cleaned", "none"
                 elif action["action_kind"] == "repair":
                     repair = _latest_repair(store, goal_id, ("in_progress",))
@@ -861,7 +881,13 @@ def settle_mode_action(store: Any, command: SettleModeActionCommand) -> dict[str
                     next_state, next_action = "verifying", "verify"
                 elif action["action_kind"] in {"install", "deploy"}:
                     next_state, next_action = "deploying", "transition_verifying"
-                elif action["action_kind"] == "issue_reopen":
+                elif action["action_kind"] in {
+                    "issue_reopen",
+                    "live_reconcile",
+                    "retire",
+                    "shotcaller_create",
+                    "squad_register",
+                }:
                     next_state, next_action = goal["state"], goal["next_irreversible_action"]
                 else:
                     next_state, next_action = "landing", "transition_deploying_or_verifying"
@@ -900,6 +926,229 @@ def settle_mode_action(store: Any, command: SettleModeActionCommand) -> dict[str
         raise
     except sqlite3.DatabaseError as exc:
         raise store._translate_database_error(exc, "autonomous action settlement conflicted") from exc
+
+
+def _gate_scope_digest(value: Mapping[str, Any]) -> str:
+    if not isinstance(value, dict) or len(_json(value).encode("utf-8")) > 16_384:
+        raise StorageRefusal(
+            "protected_gate_invalid", "protected gate scope is invalid or unbounded"
+        )
+    return _digest(value)
+
+
+def _protected_gate_receipt(
+    use: sqlite3.Row,
+    settlement: sqlite3.Row | None,
+) -> dict[str, Any]:
+    return {
+        "schema": "league.protected-gate-receipt.v1",
+        "action_use_id": use["action_use_id"],
+        "gate_name": use["gate_name"],
+        "action_kind": use["action_kind"],
+        "gate_scope_digest": use["gate_scope_digest"],
+        "use_receipt_digest": use["use_receipt_digest"],
+        "binding_digest": use["binding_digest"],
+        "outcome": None if settlement is None else settlement["outcome"],
+        "result_receipt_digest": (
+            None if settlement is None else settlement["result_receipt_digest"]
+        ),
+        "settlement_digest": (
+            None if settlement is None else settlement["settlement_digest"]
+        ),
+    }
+
+
+def begin_protected_gate(
+    store: Any, command: BeginProtectedGateCommand
+) -> dict[str, Any]:
+    expected_kind = PROTECTED_GATE_ACTIONS.get(command.gate_name)
+    if expected_kind is None:
+        raise StorageRefusal(
+            "protected_gate_unknown", "command is not an autonomous protected gate"
+        )
+    action = _normalize_action(command.action)
+    if action["action_kind"] != expected_kind:
+        raise StorageRefusal(
+            "protected_gate_action_mismatch",
+            "protected gate action category does not match the command",
+        )
+    scope_digest = _gate_scope_digest(command.gate_scope)
+    binding_value = {
+        "action_use_id": action["action_use_id"],
+        "gate_name": command.gate_name,
+        "action_kind": expected_kind,
+        "gate_scope_digest": scope_digest,
+        "use_receipt_digest": action["use_receipt_digest"],
+    }
+    binding_digest = _digest(binding_value)
+    try:
+        with store._transaction():
+            existing = store.connection.execute(
+                "SELECT * FROM protected_gate_uses WHERE action_use_id=?",
+                (action["action_use_id"],),
+            ).fetchone()
+            used = use_mode_action(
+                store,
+                command.action,
+                command.expected_goal_version,
+                command.at,
+            )
+            if existing is None:
+                if used["idempotent"]:
+                    raise StorageRefusal(
+                        "protected_gate_unbound_action",
+                        "an existing autonomous action cannot be attached to a gate later",
+                    )
+                store.connection.execute(
+                    """
+                    INSERT INTO protected_gate_uses
+                      (action_use_id,gate_name,action_kind,gate_scope_digest,
+                       use_receipt_digest,binding_digest,started_at)
+                    VALUES(?,?,?,?,?,?,?)
+                    """,
+                    (
+                        action["action_use_id"],
+                        command.gate_name,
+                        expected_kind,
+                        scope_digest,
+                        action["use_receipt_digest"],
+                        binding_digest,
+                        command.at,
+                    ),
+                )
+            else:
+                exact = (
+                    existing["gate_name"] == command.gate_name
+                    and existing["action_kind"] == expected_kind
+                    and existing["gate_scope_digest"] == scope_digest
+                    and existing["use_receipt_digest"] == action["use_receipt_digest"]
+                    and existing["binding_digest"] == binding_digest
+                )
+                if not exact:
+                    raise StorageRefusal(
+                        "protected_gate_conflict",
+                        "protected gate retry changed its exact authority binding",
+                    )
+            gate_use = store.connection.execute(
+                "SELECT * FROM protected_gate_uses WHERE action_use_id=?",
+                (action["action_use_id"],),
+            ).fetchone()
+            settlement = store.connection.execute(
+                "SELECT * FROM protected_gate_settlements WHERE action_use_id=?",
+                (action["action_use_id"],),
+            ).fetchone()
+            assert gate_use is not None
+            result = dict(used)
+            result["protected_gate"] = _protected_gate_receipt(
+                gate_use, settlement
+            )
+            return result
+    except StorageRefusal:
+        raise
+    except sqlite3.DatabaseError as exc:
+        raise store._translate_database_error(
+            exc, "protected gate authority binding conflicted"
+        ) from exc
+
+
+def settle_protected_gate(
+    store: Any, command: SettleProtectedGateCommand
+) -> dict[str, Any]:
+    expected_kind = PROTECTED_GATE_ACTIONS.get(command.gate_name)
+    if expected_kind is None or not re.fullmatch(
+        r"[0-9a-f]{64}", command.gate_scope_digest
+    ):
+        raise StorageRefusal(
+            "protected_gate_invalid", "protected gate settlement identity is invalid"
+        )
+    try:
+        with store._transaction():
+            gate_use = store.connection.execute(
+                "SELECT * FROM protected_gate_uses WHERE action_use_id=?",
+                (command.action_use_id,),
+            ).fetchone()
+            if (
+                gate_use is None
+                or gate_use["gate_name"] != command.gate_name
+                or gate_use["action_kind"] != expected_kind
+                or gate_use["gate_scope_digest"] != command.gate_scope_digest
+                or gate_use["use_receipt_digest"] != command.use_receipt_digest
+            ):
+                raise StorageRefusal(
+                    "protected_gate_conflict",
+                    "protected gate settlement does not match its exact use",
+                )
+            settled = settle_mode_action(
+                store,
+                SettleModeActionCommand(
+                    action_use_id=command.action_use_id,
+                    goal_id=store.connection.execute(
+                        "SELECT goal_id FROM autonomous_action_uses WHERE action_use_id=?",
+                        (command.action_use_id,),
+                    ).fetchone()[0],
+                    expected_goal_version=command.expected_goal_version,
+                    use_receipt_digest=command.use_receipt_digest,
+                    outcome=command.outcome,
+                    result_receipt_digest=command.result_receipt_digest,
+                    failure_class=command.failure_class,
+                    at=command.at,
+                ),
+            )
+            settlement_value = {
+                "binding_digest": gate_use["binding_digest"],
+                "outcome": command.outcome,
+                "result_receipt_digest": command.result_receipt_digest,
+                "failure_class": command.failure_class,
+            }
+            settlement_digest = _digest(settlement_value)
+            existing = store.connection.execute(
+                "SELECT * FROM protected_gate_settlements WHERE action_use_id=?",
+                (command.action_use_id,),
+            ).fetchone()
+            if existing is None:
+                store.connection.execute(
+                    """
+                    INSERT INTO protected_gate_settlements
+                      (action_use_id,outcome,result_receipt_digest,failure_class,
+                       settlement_digest,settled_at)
+                    VALUES(?,?,?,?,?,?)
+                    """,
+                    (
+                        command.action_use_id,
+                        command.outcome,
+                        command.result_receipt_digest,
+                        command.failure_class,
+                        settlement_digest,
+                        command.at,
+                    ),
+                )
+            elif (
+                existing["outcome"] != command.outcome
+                or existing["result_receipt_digest"]
+                != command.result_receipt_digest
+                or existing["failure_class"] != command.failure_class
+                or existing["settlement_digest"] != settlement_digest
+            ):
+                raise StorageRefusal(
+                    "protected_gate_settlement_conflict",
+                    "protected gate was already settled differently",
+                )
+            settlement = store.connection.execute(
+                "SELECT * FROM protected_gate_settlements WHERE action_use_id=?",
+                (command.action_use_id,),
+            ).fetchone()
+            assert settlement is not None
+            result = dict(settled)
+            result["protected_gate"] = _protected_gate_receipt(
+                gate_use, settlement
+            )
+            return result
+    except StorageRefusal:
+        raise
+    except sqlite3.DatabaseError as exc:
+        raise store._translate_database_error(
+            exc, "protected gate settlement conflicted"
+        ) from exc
 
 
 TRANSITIONS = {

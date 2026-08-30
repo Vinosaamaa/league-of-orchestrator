@@ -54,6 +54,8 @@ from .storage_request import (
     TurnDispatchPlan,
 )
 from .storage_assignment import FinishHiddenAssignmentCommand
+from .storage_mode import PROTECTED_GATE_ACTIONS
+from .protected_gate import ProtectedGateExecutor
 from .request_services import AssignmentSpec
 from .shotcaller_bootstrap import (
     HerdrShotcallerBootstrapAdapter,
@@ -284,8 +286,18 @@ def _add_callsign_commands(groups: argparse._SubParsersAction) -> None:
     release.add_argument("--expected-version", type=int, required=True)
     release.add_argument("--release-receipt-digest", required=True)
     release.add_argument("--at", required=True)
+    _add_mode_gate_options(release)
     status = commands.add_parser("status", help="Read one role queue without private runtime data.")
     status.add_argument("--role", choices=("shotcaller", "champion", "hidden-worker"), required=True)
+
+
+def _add_mode_gate_options(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--mode-action",
+        type=Path,
+        help="Consume and settle one exact already-authorized autonomous action.",
+    )
+    parser.add_argument("--expected-mode-goal-version", type=int)
 
 
 def _add_shotcaller_commands(groups: argparse._SubParsersAction) -> None:
@@ -306,6 +318,7 @@ def _add_shotcaller_commands(groups: argparse._SubParsersAction) -> None:
     ):
         create.add_argument(f"--{name}", required=True)
     create.add_argument("--capability", action="append", default=[])
+    _add_mode_gate_options(create)
 
 
 def _add_rollover_commands(groups: argparse._SubParsersAction) -> None:
@@ -318,14 +331,16 @@ def _add_rollover_commands(groups: argparse._SubParsersAction) -> None:
     )
     for name in (
         "operation-id", "squad-id", "predecessor-agent-id", "successor-agent-id",
-        "callsign-assignment-id", "authority-digest", "at",
+        "callsign-assignment-id", "at",
     ):
         prepare.add_argument(f"--{name}", required=True)
     prepare.add_argument("--expected-owner-version", type=int, required=True)
     prepare.add_argument("--expected-owner-fence", type=int, required=True)
-    prepare.add_argument("--authority-kind", choices=("explicit", "automatic"), required=True)
+    prepare.add_argument("--authority-kind", choices=("explicit", "automatic"))
+    prepare.add_argument("--authority-digest")
     prepare.add_argument("--requires", action="append", default=[])
     prepare.add_argument("--plan", type=Path, required=True)
+    _add_mode_gate_options(prepare)
     bindings = commands.add_parser(
         "bindings", help="Read one immutable bounded snapshot page by opaque cursor."
     )
@@ -376,6 +391,7 @@ def _add_rollover_commands(groups: argparse._SubParsersAction) -> None:
         commit.add_argument(f"--{name}", required=True)
     commit.add_argument("--expected-owner-version", type=int, required=True)
     commit.add_argument("--expected-owner-fence", type=int, required=True)
+    _add_mode_gate_options(commit)
     reconcile_descendant = commands.add_parser(
         "reconcile-descendant",
         help="Bind one exact frozen imported Champion to the committed successor.",
@@ -404,6 +420,7 @@ def _add_rollover_commands(groups: argparse._SubParsersAction) -> None:
         default=[],
         help="Declare one exact pending descendant outbox still targeting the predecessor.",
     )
+    _add_mode_gate_options(reconcile_descendant)
     reconcile_intake = commands.add_parser(
         "reconcile-intake",
         help="Rebind one exact predecessor-owned unresolved intake plan to the committed successor.",
@@ -412,6 +429,7 @@ def _add_rollover_commands(groups: argparse._SubParsersAction) -> None:
         reconcile_intake.add_argument(f"--{name}", required=True)
     reconcile_intake.add_argument("--expected-rollover-version", type=int, required=True)
     reconcile_intake.add_argument("--plan", type=Path, required=True)
+    _add_mode_gate_options(reconcile_intake)
     intake_plan = commands.add_parser(
         "intake-plan",
         help="Read the next exact bounded predecessor-intake reconciliation page.",
@@ -426,6 +444,7 @@ def _add_rollover_commands(groups: argparse._SubParsersAction) -> None:
         command.add_argument("--expected-version", type=int, required=True)
         command.add_argument("--cleanup-receipt", type=Path, required=True)
         command.add_argument("--at", required=True)
+    _add_mode_gate_options(drain)
     status = commands.add_parser("status", help="Read durable rollover state and public digests.")
     status.add_argument("--operation-id", required=True)
 
@@ -623,6 +642,7 @@ def _add_squad_commands(groups: argparse._SubParsersAction) -> None:
         register.add_argument(f"--{name}", required=True)
     register.add_argument("--project-id", action="append", default=[])
     register.add_argument("--capability", action="append", default=[])
+    _add_mode_gate_options(register)
     accept = commands.add_parser(
         "accept", help="Accept or reject from the exact offered live Shotcaller runtime."
     )
@@ -636,6 +656,7 @@ def _add_squad_commands(groups: argparse._SubParsersAction) -> None:
     ):
         accept.add_argument(f"--{name}", required=True)
     accept.add_argument("--decision", choices=("accept", "reject"), required=True)
+    _add_mode_gate_options(accept)
     status = commands.add_parser("status", help="Inspect one registration or active stable Squad.")
     selector = status.add_mutually_exclusive_group(required=True)
     selector.add_argument("--registration-id")
@@ -781,6 +802,7 @@ def _add_cleanup_commands(groups: argparse._SubParsersAction) -> None:
     execute.add_argument("--executor-id", required=True)
     execute.add_argument("--leased-until", required=True)
     execute.add_argument("--at", required=True)
+    _add_mode_gate_options(execute)
     reconcile = commands.add_parser(
         "reconcile",
         help="Plan and automatically execute one exact disposable-canary cleanup.",
@@ -796,6 +818,7 @@ def _add_cleanup_commands(groups: argparse._SubParsersAction) -> None:
         action="store_true",
         help="Disposable-canary-only crash injection after the archive external effect.",
     )
+    _add_mode_gate_options(reconcile)
 
 
 def _add_continuation_commands(groups: argparse._SubParsersAction) -> None:
@@ -1140,6 +1163,7 @@ def _add_assignment_commands(groups: argparse._SubParsersAction) -> None:
     )
     reconcile_runtime.add_argument("--assignment-id", required=True)
     reconcile_runtime.add_argument("--at", required=True)
+    _add_mode_gate_options(reconcile_runtime)
     reconcile_display = commands.add_parser(
         "reconcile-legacy-display",
         help="Owner-authorized CAS-safe repair of one exact pre-fix active Champion display.",
@@ -1160,7 +1184,8 @@ def _add_assignment_commands(groups: argparse._SubParsersAction) -> None:
         reconcile_display.add_argument(f"--{name}", required=True)
     reconcile_display.add_argument("--expected-version", type=int, required=True)
     reconcile_display.add_argument("--expected-presentation-json", required=True)
-    reconcile_display.add_argument("--owner-authorized", action="store_true", required=True)
+    reconcile_display.add_argument("--owner-authorized", action="store_true")
+    _add_mode_gate_options(reconcile_display)
     block = commands.add_parser("block", help="Record a blocked or cleanup-pending failed launch.")
     block.add_argument("--assignment-id", required=True)
     block.add_argument("--expected-version", type=int, required=True)
@@ -1589,6 +1614,11 @@ def _shotcaller_create(store: Storage, args: argparse.Namespace) -> CommandResul
 
 
 def _rollover_prepare(store: Storage, args: argparse.Namespace) -> CommandResult:
+    if args.authority_kind is None or args.authority_digest is None:
+        raise StorageRefusal(
+            "rollover_authority_required",
+            "rollover preparation requires explicit authority or one exact mode action",
+        )
     return store.prepare_rollover(
         args.operation_id,
         args.squad_id,
@@ -2957,7 +2987,7 @@ def _assign_reconcile_legacy_display(
         expected_title=expected_title,
         expected_state_change_seq=expected_sequence,
         target_task_label=args.target_task_label,
-        owner_authorized=args.owner_authorized,
+        owner_authorized=args.owner_authorized or args.mode_action is not None,
     )
     return LegacyDisplayReconciliationService(
         store, HerdrLegacyDisplayAdapter(), _ProvidedClock(args.at)
@@ -3314,6 +3344,7 @@ SCHEMA_INVENTORY = (
     "league-autonomous-action.schema.json",
     "league-mode-status.schema.json",
     "league-mode-action-receipt.schema.json",
+    "league-protected-gate-receipt.schema.json",
     "league-repository-issue.schema.json",
     "league-issue-selection-receipt.schema.json",
 )
@@ -3358,6 +3389,69 @@ def _help_inventory() -> dict[str, Any]:
         "assignment_states": ["pending", "launching", "active", "blocked", "cleanup_pending"],
         "lease_kinds": ["request_claim", "outbox_dispatch", "watcher_registration"],
     }
+
+
+_PROTECTED_GATE_SCOPE_OMISSIONS = {
+    "action",
+    "at",
+    "authority_digest",
+    "authority_kind",
+    "busy_timeout_ms",
+    "expected_mode_goal_version",
+    "group",
+    "mode_action",
+    "no_wal",
+    "owner_authorized",
+    "state_root",
+}
+
+
+def _protected_gate_scope(command: str, args: argparse.Namespace) -> dict[str, Any]:
+    arguments: dict[str, Any] = {}
+    for name, value in sorted(vars(args).items()):
+        if name in _PROTECTED_GATE_SCOPE_OMISSIONS:
+            continue
+        if isinstance(value, Path):
+            try:
+                with value.open("rb") as stream:
+                    payload = stream.read(MAX_JSON_INPUT_BYTES + 1)
+            except OSError as exc:
+                raise StorageRefusal(
+                    "input_invalid", "protected gate input could not be read"
+                ) from exc
+            if len(payload) > MAX_JSON_INPUT_BYTES:
+                raise StorageRefusal(
+                    "input_too_large",
+                    f"protected gate input exceeds the {MAX_JSON_INPUT_BYTES}-byte limit",
+                )
+            arguments[name] = {
+                "content_sha256": hashlib.sha256(payload).hexdigest(),
+                "size_bytes": len(payload),
+            }
+        elif isinstance(value, tuple):
+            arguments[name] = list(value)
+        else:
+            arguments[name] = value
+    return {"command": command, "arguments": arguments}
+
+
+def _run_protected_gate(
+    handler: Callable[[Storage, argparse.Namespace], CommandResult],
+    store: Storage,
+    args: argparse.Namespace,
+    command: str,
+    begun: dict[str, Any],
+) -> Any:
+    if command == "rollover.prepare":
+        args.authority_kind = "automatic"
+        args.authority_digest = begun["use_receipt_digest"]
+    result, raw = handler(store, args)
+    if raw is not None:
+        raise StorageRefusal(
+            "protected_gate_output_refused",
+            "protected gates require one structured canonical result",
+        )
+    return result
 
 
 def _run(args: argparse.Namespace) -> CommandResult:
@@ -3455,6 +3549,51 @@ def _run(args: argparse.Namespace) -> CommandResult:
     if handler is None:
         raise StorageRefusal("unsupported_command", "command is unsupported")
     with _open(args) as store:
+        mode_action_path = getattr(args, "mode_action", None)
+        expected_mode_goal_version = getattr(
+            args, "expected_mode_goal_version", None
+        )
+        if (mode_action_path is None) != (expected_mode_goal_version is None):
+            raise StorageRefusal(
+                "protected_gate_authority_incomplete",
+                "mode action and expected mode goal version must be supplied together",
+            )
+        if mode_action_path is not None:
+            if command not in PROTECTED_GATE_ACTIONS:
+                raise StorageRefusal(
+                    "protected_gate_unknown",
+                    "command is not an autonomous protected gate",
+                )
+            if command == "rollover.prepare" and (
+                args.authority_kind is not None or args.authority_digest is not None
+            ):
+                raise StorageRefusal(
+                    "protected_gate_authority_conflict",
+                    "rollover preparation cannot combine manual and mode authority",
+                )
+            if (
+                command == "assign.reconcile-legacy-display"
+                and args.owner_authorized
+            ):
+                raise StorageRefusal(
+                    "protected_gate_authority_conflict",
+                    "legacy display reconciliation cannot combine manual and mode authority",
+                )
+            action = _read_json_object(mode_action_path)
+            gate_scope = _protected_gate_scope(command, args)
+            return (
+                ProtectedGateExecutor(store).execute(
+                    gate_name=command,
+                    gate_scope=gate_scope,
+                    action=action,
+                    expected_goal_version=expected_mode_goal_version,
+                    at=args.at,
+                    operation=lambda begun: _run_protected_gate(
+                        handler, store, args, command, begun
+                    ),
+                ),
+                None,
+            )
         return handler(store, args)
 
 

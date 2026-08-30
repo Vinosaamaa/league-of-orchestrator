@@ -27,7 +27,7 @@
       },
       "additionalProperties": false
     },
-    "allowed_actions": {"type": "array", "minItems": 1, "maxItems": 128, "items": {"enum": ["land", "merge", "release", "publish", "install", "deploy", "verify", "smoke", "repair", "cleanup", "issue_reopen"]}, "uniqueItems": true},
+    "allowed_actions": {"type": "array", "minItems": 1, "maxItems": 128, "items": {"enum": ["land", "merge", "release", "publish", "install", "deploy", "verify", "smoke", "repair", "cleanup", "issue_reopen", "live_reconcile", "retire", "shotcaller_create", "squad_register", "teardown"]}, "uniqueItems": true},
     "exclusions": {"type": "array", "maxItems": 128, "items": {"type": "string", "minLength": 1, "maxLength": 256}, "uniqueItems": true},
     "sensitive_inclusions": {"type": "array", "maxItems": 128, "items": {"type": "string", "minLength": 1, "maxLength": 256}, "uniqueItems": true},
     "resource_boundary": {"$ref": "#/$defs/resourceObject"},

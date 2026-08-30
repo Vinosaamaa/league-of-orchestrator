@@ -147,6 +147,11 @@ $HOME/.local/bin/league --state-root "$HOME/.local/state/league" request turn \
   platform safety, provider restrictions, or the universal contract.
 - Champions never merge or deploy. The Shotcaller owns every authorized
   external-action receipt and bounded repair loop.
+- An already accepted grant may satisfy a later protected gate only through an
+  exact `--mode-action` and expected goal version. The gate must bind and settle
+  its command scope receipt; do not ask again for an in-scope category, and do
+  not infer adjacent categories such as reconciliation, retirement, Shotcaller
+  creation, Squad registration, deploy, or teardown when they are absent.
 - If `league help inventory` does not expose stable `mode.*` commands, the mode
   is unavailable and remains manual; never infer authority from prose.
 

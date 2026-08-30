@@ -187,17 +187,27 @@ from .sqlite_rollover_snapshot_schema import (
 from .sqlite_autonomous_schema import MIGRATION_NAME as AUTONOMOUS_MIGRATION_NAME
 from .sqlite_autonomous_schema import STATEMENTS as AUTONOMOUS_MIGRATION_STATEMENTS
 from .storage_issue import BeginIssueSelectionCommand, CompleteIssueSelectionCommand
-from .storage_mode import SettleModeActionCommand
+from .storage_mode import (
+    BeginProtectedGateCommand,
+    SettleModeActionCommand,
+    SettleProtectedGateCommand,
+)
 from .sqlite_request_reconciliation_schema import (
     MIGRATION_NAME as REQUEST_RECONCILIATION_MIGRATION_NAME,
 )
 from .sqlite_request_reconciliation_schema import (
     STATEMENTS as REQUEST_RECONCILIATION_MIGRATION_STATEMENTS,
 )
+from .sqlite_protected_gate_schema import (
+    MIGRATION_NAME as PROTECTED_GATE_MIGRATION_NAME,
+)
+from .sqlite_protected_gate_schema import (
+    STATEMENTS as PROTECTED_GATE_MIGRATION_STATEMENTS,
+)
 
 
 WAL_MINIMUM = (3, 51, 3)
-CURRENT_SCHEMA_VERSION = 19
+CURRENT_SCHEMA_VERSION = 20
 DATABASE_NAME = "league.sqlite3"
 DEFAULT_BUSY_TIMEOUT_MS = 500
 MAX_BUSY_TIMEOUT_MS = 10_000
@@ -1218,6 +1228,11 @@ MIGRATIONS = (
         REQUEST_RECONCILIATION_MIGRATION_NAME,
         REQUEST_RECONCILIATION_MIGRATION_STATEMENTS,
     ),
+    Migration(
+        20,
+        PROTECTED_GATE_MIGRATION_NAME,
+        PROTECTED_GATE_MIGRATION_STATEMENTS,
+    ),
 )
 
 
@@ -1391,6 +1406,14 @@ _IMPORT_COLUMNS: dict[str, tuple[str, ...]] = {
         "duration_seconds", "state", "use_receipt_digest", "result_receipt_digest",
         "failure_class", "started_at", "settled_at",
     ),
+    "protected_gate_uses": (
+        "action_use_id", "gate_name", "action_kind", "gate_scope_digest",
+        "use_receipt_digest", "binding_digest", "started_at",
+    ),
+    "protected_gate_settlements": (
+        "action_use_id", "outcome", "result_receipt_digest", "failure_class",
+        "settlement_digest", "settled_at",
+    ),
     "autonomous_repair_obligations": (
         "repair_id", "goal_id", "failed_action_use_id", "state", "attempts_used",
         "max_attempts", "failure_class", "version", "created_at", "updated_at",
@@ -1494,6 +1517,8 @@ _EXPORT_TABLES = (
     "delivery_goals",
     "authorization_revocations",
     "autonomous_action_uses",
+    "protected_gate_uses",
+    "protected_gate_settlements",
     "autonomous_repair_obligations",
     "repository_issue_selection_leases",
     "repository_issue_selection_receipts",
@@ -1573,6 +1598,8 @@ _EXPORT_ORDER = {
     "delivery_goals": "goal_id",
     "authorization_revocations": "revoked_at,grant_id",
     "autonomous_action_uses": "started_at,action_use_id",
+    "protected_gate_uses": "started_at,action_use_id",
+    "protected_gate_settlements": "settled_at,action_use_id",
     "autonomous_repair_obligations": "created_at,repair_id",
     "repository_issue_selection_leases": "repository_key,normalized_title,selection_key",
     "repository_issue_selection_receipts": "created_at,selection_receipt_id",
@@ -2128,6 +2155,16 @@ class SQLiteStorage(SQLiteTransactionCore):
 
     def settle_mode_action(self, command: SettleModeActionCommand) -> dict[str, Any]:
         return sqlite_mode_ops.settle_mode_action(self, command)
+
+    def begin_protected_gate(
+        self, command: BeginProtectedGateCommand
+    ) -> dict[str, Any]:
+        return sqlite_mode_ops.begin_protected_gate(self, command)
+
+    def settle_protected_gate(
+        self, command: SettleProtectedGateCommand
+    ) -> dict[str, Any]:
+        return sqlite_mode_ops.settle_protected_gate(self, command)
 
     def transition_mode_goal(
         self, goal_id: str, expected_goal_version: int, state: str, at: str

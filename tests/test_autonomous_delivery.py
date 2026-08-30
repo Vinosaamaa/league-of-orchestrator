@@ -14,10 +14,12 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / "src"), str(ROOT / "tests")]
 
-from request_lifecycle_fixture import create_context  # noqa: E402
-from request_lifecycle_fixture import LUX_ID  # noqa: E402
+import league.cli as league_cli  # noqa: E402
+from league.protected_gate import ProtectedGateExecutor  # noqa: E402
 from league.sqlite_store import DATABASE_NAME, SQLiteStorage  # noqa: E402
 from league.storage import StorageRefusal  # noqa: E402
+from request_lifecycle_fixture import create_context  # noqa: E402
+from request_lifecycle_fixture import LUX_ID  # noqa: E402
 from storage_fixture import REPOSITORY, SHOTCALLER_ID, write_json  # noqa: E402
 from storage_test_support import invoke_cli  # noqa: E402
 
@@ -49,6 +51,10 @@ def _grant(path: Path) -> Path:
                 "repair",
                 "cleanup",
                 "issue_reopen",
+                "live_reconcile",
+                "retire",
+                "shotcaller_create",
+                "squad_register",
             ],
             "exclusions": ["production_data_mutation"],
             "sensitive_inclusions": [],
@@ -731,7 +737,7 @@ def test_mode_records_survive_verified_backup_and_bounded_export(root: Path) -> 
     authorized = _authorize(state, root)
     with SQLiteStorage(state) as source:
         backup = source.backup("backups/mode.sqlite3")
-        assert backup["database_schema_version"] == 19
+        assert backup["database_schema_version"] == 20
         inspection = json.loads(
             source.export_bytes(
                 format_name="json", purpose="inspection", max_records=10_000
@@ -755,6 +761,216 @@ def test_mode_records_survive_verified_backup_and_bounded_export(root: Path) -> 
         assert status["grant"]["canonical_digest"] == authorized["grant"]["canonical_digest"]
 
 
+def test_one_grant_propagates_across_protected_gates_without_reprompt(
+    root: Path,
+) -> None:
+    state, store, _ = create_context(root, "protected-gate-propagation")
+    store.close()
+    _authorize(state, root)
+    callbacks: list[str] = []
+    with SQLiteStorage(state) as active:
+        executor = ProtectedGateExecutor(active)
+        goal_version = 1
+        cases = (
+            ("shotcaller.create", "shotcaller_create"),
+            ("squad.register", "squad_register"),
+            ("assign.reconcile-legacy-display", "live_reconcile"),
+            ("rollover.drain", "retire"),
+        )
+        for index, (gate_name, action_kind) in enumerate(cases, start=1):
+            action = json.loads(
+                _action(
+                    root / f"protected-{index}.json",
+                    suffix=f"protected-{index}",
+                    action_kind=action_kind,
+                    cost_microunits=0,
+                    changed_files=0,
+                    duration_seconds=1,
+                ).read_text(encoding="utf-8")
+            )
+            receipt = executor.execute(
+                gate_name=gate_name,
+                gate_scope={"synthetic_target": f"target:{index}"},
+                action=action,
+                expected_goal_version=goal_version,
+                at=AT,
+                operation=lambda _, name=gate_name: callbacks.append(name)
+                or {"gate": name, "result": "ok"},
+            )
+            assert receipt["mode_action"]["state"] == "succeeded"
+            assert receipt["mode_action"]["goal_state"] == "implementing"
+            assert receipt["protected_gate"]["gate_name"] == gate_name
+            assert receipt["protected_gate"]["outcome"] == "succeeded"
+            goal_version = receipt["mode_action"]["goal_version"]
+
+        adjacent = json.loads(
+            _action(
+                root / "protected-adjacent.json",
+                suffix="protected-adjacent",
+                action_kind="teardown",
+                cost_microunits=0,
+                changed_files=0,
+                duration_seconds=1,
+            ).read_text(encoding="utf-8")
+        )
+        try:
+            executor.execute(
+                gate_name="cleanup.execute",
+                gate_scope={"synthetic_target": "target:adjacent"},
+                action=adjacent,
+                expected_goal_version=goal_version,
+                at=AT,
+                operation=lambda _: callbacks.append("out-of-scope"),
+            )
+        except StorageRefusal as exc:
+            assert exc.code == "action_not_allowed"
+        else:
+            raise AssertionError("an adjacent ungranted protected gate executed")
+
+        assert callbacks == [name for name, _ in cases]
+        assert active.connection.execute(
+            "SELECT COUNT(*) FROM authorization_grants"
+        ).fetchone()[0] == 1
+        assert active.connection.execute(
+            "SELECT COUNT(*) FROM protected_gate_uses"
+        ).fetchone()[0] == 4
+        assert active.connection.execute(
+            "SELECT COUNT(*) FROM protected_gate_settlements"
+        ).fetchone()[0] == 4
+        assert active.connection.execute(
+            "SELECT COUNT(*) FROM autonomous_action_uses"
+        ).fetchone()[0] == 4
+        rollback = json.loads(
+            active.export_bytes(
+                format_name="json", purpose="rollback", max_records=10_000
+            )
+        )
+        assert len(rollback["tables"]["protected_gate_uses"]) == 4
+        assert len(rollback["tables"]["protected_gate_settlements"]) == 4
+        backup = active.backup("backups/protected-gates.sqlite3")
+        assert backup["database_schema_version"] == 20
+    recovered = root / "protected-gate-recovered"
+    recovered.mkdir()
+    shutil.copy2(
+        state / "backups/protected-gates.sqlite3", recovered / DATABASE_NAME
+    )
+    with SQLiteStorage(recovered) as restored:
+        assert restored.connection.execute(
+            "SELECT COUNT(*) FROM protected_gate_uses"
+        ).fetchone()[0] == 4
+        assert restored.connection.execute(
+            "SELECT COUNT(*) FROM protected_gate_settlements"
+        ).fetchone()[0] == 4
+
+
+def test_protected_gate_two_writer_cas_runs_one_operation(root: Path) -> None:
+    state, store, _ = create_context(root, "protected-gate-cas")
+    store.close()
+    _authorize(state, root)
+    barrier = threading.Barrier(2)
+    callbacks: list[str] = []
+    outcomes: list[str] = []
+
+    def writer(suffix: str) -> None:
+        action = json.loads(
+            _action(
+                root / f"protected-cas-{suffix}.json",
+                suffix=f"protected-cas-{suffix}",
+                action_kind="live_reconcile",
+                cost_microunits=0,
+                changed_files=0,
+                duration_seconds=1,
+            ).read_text(encoding="utf-8")
+        )
+        with SQLiteStorage(state, busy_timeout_ms=2000) as candidate:
+            barrier.wait()
+            try:
+                ProtectedGateExecutor(candidate).execute(
+                    gate_name="assign.reconcile-runtime",
+                    gate_scope={"assignment_id": f"assignment:{suffix}"},
+                    action=action,
+                    expected_goal_version=1,
+                    at=AT,
+                    operation=lambda _: callbacks.append(suffix)
+                    or {"assignment_id": f"assignment:{suffix}"},
+                )
+                outcomes.append("committed")
+            except StorageRefusal as exc:
+                outcomes.append(exc.code)
+
+    threads = [threading.Thread(target=writer, args=(suffix,)) for suffix in ("a", "b")]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert sorted(outcomes) == ["committed", "goal_version_conflict"]
+    assert len(callbacks) == 1
+    with SQLiteStorage(state) as checked:
+        assert checked.connection.execute(
+            "SELECT COUNT(*) FROM protected_gate_uses"
+        ).fetchone()[0] == 1
+        assert checked.connection.execute(
+            "SELECT COUNT(*) FROM protected_gate_settlements"
+        ).fetchone()[0] == 1
+
+
+def test_cli_protected_gate_consumes_and_settles_mode_authority(root: Path) -> None:
+    state, store, _ = create_context(root, "protected-gate-cli")
+    store.close()
+    _authorize(state, root)
+    action_path = _action(
+        root / "protected-cli.json",
+        suffix="protected-cli",
+        action_kind="live_reconcile",
+        cost_microunits=0,
+        changed_files=0,
+        duration_seconds=1,
+    )
+    calls: list[str] = []
+    original = league_cli.HANDLERS["assign.reconcile-runtime"]
+
+    def synthetic_handler(_, args):
+        calls.append(args.assignment_id)
+        return {"assignment_id": args.assignment_id, "state": "reconciled"}, None
+
+    league_cli.HANDLERS["assign.reconcile-runtime"] = synthetic_handler
+    try:
+        incomplete = invoke_cli(
+            state,
+            "assign",
+            "reconcile-runtime",
+            "--assignment-id",
+            "assignment:synthetic-cli",
+            "--at",
+            AT,
+            "--mode-action",
+            str(action_path),
+            expected=2,
+        )
+        assert incomplete["error"]["code"] == "protected_gate_authority_incomplete"
+        assert calls == []
+        executed = invoke_cli(
+            state,
+            "assign",
+            "reconcile-runtime",
+            "--assignment-id",
+            "assignment:synthetic-cli",
+            "--at",
+            AT,
+            "--mode-action",
+            str(action_path),
+            "--expected-mode-goal-version",
+            "1",
+        )["result"]
+    finally:
+        league_cli.HANDLERS["assign.reconcile-runtime"] = original
+    assert calls == ["assignment:synthetic-cli"]
+    assert executed["operation"]["state"] == "reconciled"
+    assert executed["mode_action"]["state"] == "succeeded"
+    assert executed["protected_gate"]["gate_name"] == "assign.reconcile-runtime"
+    assert executed["protected_gate"]["outcome"] == "succeeded"
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory() as raw:
         test_manual_default_and_exact_grant_authorization(Path(raw))
@@ -764,6 +980,12 @@ def main() -> None:
         test_scope_limits_revocation_expiry_and_two_writer_cas(Path(raw))
     with tempfile.TemporaryDirectory() as raw:
         test_every_numeric_limit_and_immutable_revision(Path(raw))
+    with tempfile.TemporaryDirectory() as raw:
+        test_one_grant_propagates_across_protected_gates_without_reprompt(Path(raw))
+    with tempfile.TemporaryDirectory() as raw:
+        test_protected_gate_two_writer_cas_runs_one_operation(Path(raw))
+    with tempfile.TemporaryDirectory() as raw:
+        test_cli_protected_gate_consumes_and_settles_mode_authority(Path(raw))
     with tempfile.TemporaryDirectory() as raw:
         test_mode_records_survive_verified_backup_and_bounded_export(Path(raw))
     print("PASS: autonomous delivery authorization and action lifecycle")

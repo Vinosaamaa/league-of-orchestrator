@@ -138,7 +138,8 @@ Nothing here installs files, changes hooks, or connects to live Roster state.
 - One immutable scoped `autonomous_delivery` grant lifecycle (owner alias:
   **YOLO mode**) with exact goal/action receipts, expiry, revocation, configured
   usage limits, bounded repair, backup/export coverage, and Shotcaller-only
-  external-action ownership.
+  external-action ownership. Exact protected command gates can consume and
+  settle that accepted authority without asking the owner again.
 - Issue-first visible delegation with duplicate preflight across open and
   closed GitHub issues, durable reuse/reopen/create selection receipts, and an
   exact binding before assignment or tab mutation; durable work kinds cannot
@@ -320,7 +321,17 @@ grant document, and the Shotcaller checks status before each irreversible step:
 Grant and action input schemas are
 [authorization](schema/league-autonomous-grant.schema.json) and
 [action use](schema/league-autonomous-action.schema.json); status, action, and
-issue-first receipts have separate public schemas. An autonomous grant never
+protected-gate receipts have separate public schemas. A protected command such
+as `assign reconcile-runtime` accepts `--mode-action` with
+`--expected-mode-goal-version`; League binds the exact command scope to that
+action, runs the command, and durably settles both receipts. The grant must
+explicitly include the command's category (`live_reconcile`, `retire`,
+`shotcaller_create`, `squad_register`, or `teardown`). Manual authority remains
+available, but a caller cannot combine it with mode authority for the same
+gate. Stale, revoked, expired, sensitive, excluded, out-of-scope, over-limit,
+or safety-bypass actions still refuse before the protected operation.
+
+An autonomous grant never
 makes repository implementation direct: `request dispatch` still requires a
 visible Champion, and `assign run` verifies the issue against GitHub before any
 canonical assignment or terminal mutation.

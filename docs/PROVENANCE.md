@@ -634,6 +634,25 @@ merge, release, installation, deployment, production action, or teardown.
 The rules live in the League supplement; the toolkit-owned universal guide and
 the supplement's existing 16 KiB fail-closed staging bound remain unchanged.
 
+The issue-#81 continuation adds original League-only migration v20 and one
+protected-gate executor. It deliberately carries an already accepted exact
+grant through later assignment reconciliation, Shotcaller creation, Squad
+registration, rollover, retirement, and teardown gates. Each protected use is
+immutably bound to its command category and canonical scope digest before the
+effect, and each effect outcome settles a separate receipt. It does not infer
+authority from mode state, combine manual and autonomous authority, bypass an
+existing platform or provider refusal, or broaden any grant category.
+
+Migration v20 is named
+`autonomous-protected-gate-authority-propagation`, checksum
+`f5a80c7a8b312063c35d6a3504c893ac0a45d96952ac6e288e6f251188efe708`.
+Existing migrations remain byte-for-byte unchanged. Focused temporary-root
+tests cover one grant across multiple protected actions, an adjacent ungranted
+refusal before operation, exact CLI propagation, two-writer CAS, immutable
+receipt migration rollback, backup/export/import, and schema validation. This
+source slice performs no installation, live grant mutation, reconciliation,
+Squad creation, deployment, teardown, or merge.
+
 ## Issue-coupled cleanup and exact-thread continuation provenance
 
 Issue #83 implements the continuation portion of the accepted issue-#15 policy
@@ -750,11 +769,11 @@ claim active-model split quality, installed prompt capture, live supervision,
 or the #23 owner-visible E2E. No global file, hook, service, model route,
 canonical database, or live runtime is changed.
 
-Current main's issue-coupled continuation, rollover-snapshot, and scoped
-autonomous-delivery migrations remain canonical schemas 16, 17, and 18.
-Issue #66 appends agent-authored request reconciliation as schema 19; it does
-not renumber, replace, or mutate any main migration. The deterministic
-acceptance dry-run report receipt is refreshed for that schema-19 target. Its
+Current main's issue-coupled continuation, rollover-snapshot, scoped
+autonomous-delivery, and request-reconciliation migrations remain canonical
+schemas 16 through 19. Issue #81 appends protected-gate authority propagation
+as schema 20; it does not renumber, replace, or mutate any earlier migration.
+The deterministic acceptance dry-run report follows the current schema target. Its
 legacy-source digest and exact
 post-import parity digest remain unchanged; only the truthful target-version
 report digest changes.

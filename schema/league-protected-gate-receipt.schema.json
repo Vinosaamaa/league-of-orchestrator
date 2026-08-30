@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Vinosaamaa/league-of-orchestrator/schema/league-protected-gate-receipt.schema.json",
+  "title": "Exact protected-gate authority propagation receipt",
+  "type": "object",
+  "required": ["schema", "action_use_id", "gate_name", "action_kind", "gate_scope_digest", "use_receipt_digest", "binding_digest", "outcome", "result_receipt_digest", "settlement_digest"],
+  "properties": {
+    "schema": {"const": "league.protected-gate-receipt.v1"},
+    "action_use_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "gate_name": {"type": "string", "minLength": 1, "maxLength": 256},
+    "action_kind": {"enum": ["live_reconcile", "retire", "shotcaller_create", "squad_register", "teardown"]},
+    "gate_scope_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "use_receipt_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "binding_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "outcome": {"type": ["string", "null"], "enum": ["succeeded", "failed", null]},
+    "result_receipt_digest": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+    "settlement_digest": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"}
+  },
+  "additionalProperties": false
+}

@@ -14,7 +14,12 @@ from .storage_continuation import ContinuationStorage
 from .storage_delivery import DeliveryStorage
 from .storage_lifecycle import LifecycleStorage
 from .storage_issue import IssueStorage
-from .storage_mode import ModeStorage, SettleModeActionCommand
+from .storage_mode import (
+    BeginProtectedGateCommand,
+    ModeStorage,
+    SettleModeActionCommand,
+    SettleProtectedGateCommand,
+)
 from .storage_outbox import OutboxDispatchIdentity, OutboxStorage
 from .storage_project import ProjectStorage
 from .storage_reporting import ReportingStorage
@@ -81,6 +86,8 @@ __all__ = [
     "RequestResultCommand",
     "RuntimeRegistrationCommand",
     "SettleModeActionCommand",
+    "BeginProtectedGateCommand",
+    "SettleProtectedGateCommand",
     "Storage",
     "StorageRefusal",
 ]

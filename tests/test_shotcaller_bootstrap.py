@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -45,12 +46,18 @@ class RecordingHerdr:
     ) -> None:
         self.worktree = str(worktree.resolve())
         self.thread_id = thread_id
+        self.terminal_id = "terminal:1"
+        self.agent_status = "working"
         self.publish_mismatch = publish_mismatch
         self.delayed_auto_title_reads = delayed_auto_title_reads
         self.name: str | None = None
-        self.tokens: dict[str, str] = {}
+        self.routing_name_field: object | None = None
+        self.routing_alias_field: object | None = None
+        self.tokens: dict[str, str] | None = {}
         self.title = ""
         self.metadata_source = "herdr:codex"
+        self.expose_metadata_source = True
+        self.provider_managed_presentation = False
         self.source_sequences: dict[str, int] = {}
         self.pending_auto_title_reads: int | None = None
         self.auto_title_scheduled = False
@@ -62,17 +69,16 @@ class RecordingHerdr:
     def _agent(self) -> dict[str, object]:
         value: dict[str, object] = {
             "agent": "codex",
-            "agent_status": "working",
+            "agent_status": self.agent_status,
             "agent_session": {"source": "herdr:codex", "value": self.thread_id},
             "cwd": self.worktree,
             "foreground_cwd": self.worktree,
-            "metadata_source": self.metadata_source,
             "pane_id": "w1:p1",
             "state_change_seq": self.state_change_seq,
             "tab_id": "w1:t1",
-            "terminal_id": "terminal:1",
+            "terminal_id": self.terminal_id,
             "workspace_id": "w1",
-            "tokens": dict(self.tokens),
+            "tokens": dict(self.tokens) if isinstance(self.tokens, dict) else self.tokens,
             "terminal_title": (
                 self.title
                 if self.terminal_title_override is None
@@ -84,8 +90,14 @@ class RecordingHerdr:
                 else self.terminal_title_stripped_override
             ),
         }
+        if self.expose_metadata_source:
+            value["metadata_source"] = self.metadata_source
         if self.name is not None:
             value["name"] = self.name
+        if self.routing_name_field is not None:
+            value["routing_name"] = self.routing_name_field
+        if self.routing_alias_field is not None:
+            value["routing_alias"] = self.routing_alias_field
         return value
 
     def _advance_auto_title(self) -> None:
@@ -114,27 +126,47 @@ class RecordingHerdr:
         elif command[:3] == ("herdr", "agent", "rename"):
             self.name = None if command[-1] == "--clear" else command[-1]
             self.state_change_seq += 1
+            if self.provider_managed_presentation and self.name is not None:
+                callsign = self.name[0].upper() + self.name[1:]
+                self.tokens = {
+                    "callsign": callsign,
+                    "harness": "codex",
+                    "identity_thread_id": self.thread_id,
+                    "identity_title": f"Codex | {callsign}",
+                    "orchestrator_identity": f"codex · {self.name}",
+                    "routing_alias": self.name,
+                    "sidebar_name": callsign,
+                    "thread_title": callsign,
+                }
+                self.title = f"{callsign} | codex"
             result = {"agent": self._agent()}
         elif command[:3] == ("herdr", "pane", "report-metadata"):
             source = command[command.index("--source") + 1]
-            sequence = int(command[command.index("--seq") + 1])
-            if sequence <= self.source_sequences.get(source, 0):
-                return subprocess.CompletedProcess(
-                    command, 1, "", "metadata sequence conflict"
-                )
+            sequence = (
+                int(command[command.index("--seq") + 1])
+                if "--seq" in command
+                else None
+            )
+            if sequence is not None and sequence <= self.source_sequences.get(source, 0):
+                return subprocess.CompletedProcess(command, 0, "", "")
             if "--applies-to-source" in command:
                 applies_to = command[command.index("--applies-to-source") + 1]
                 if applies_to != "herdr:codex":
                     return subprocess.CompletedProcess(
                         command, 1, "", "metadata source mismatch"
                     )
-            self.source_sequences[source] = sequence
+            if sequence is not None:
+                self.source_sequences[source] = sequence
             self.state_change_seq += 1
             if "--title" in command:
                 self.metadata_source = source
                 title = command[command.index("--title") + 1]
                 if not self.publish_mismatch or not title:
-                    self.title = title
+                    self.title = (
+                        f"{title} | codex"
+                        if self.provider_managed_presentation and title
+                        else title
+                    )
             positions = [index for index, value in enumerate(command) if value == "--token"]
             for position in positions:
                 key, value = command[position + 1].split("=", 1)
@@ -246,6 +278,55 @@ class UserTitleAfterPublishHerdr(RecordingHerdr):
         self.title = "User selected title"
 
 
+class ProviderPresentationAfterPublishHerdr(RecordingHerdr):
+    """The provider replaces its complete prompt presentation after publication."""
+
+    def _advance_auto_title(self) -> None:
+        if self.pending_auto_title_reads is None:
+            return
+        self.pending_auto_title_reads -= 1
+        if self.pending_auto_title_reads > 0:
+            return
+        self.pending_auto_title_reads = None
+        title = "Review another request"
+        self.metadata_source = "herdr:codex"
+        self.state_change_seq += 1
+        self.title = f"{title} | codex"
+        self.tokens.update(
+            {
+                "callsign": title,
+                "harness": "codex",
+                "identity_thread_id": self.thread_id,
+                "identity_title": f"Codex | {title}",
+                "sidebar_name": title,
+                "thread_title": title,
+                "user_badge": "preserve",
+            }
+        )
+
+
+class CrashAfterRenameHerdr(RecordingHerdr):
+    """The process dies after Herdr commits the routing rename."""
+
+    def __init__(self, worktree: Path, **kwargs) -> None:
+        super().__init__(worktree, **kwargs)
+        self.crash_after_rename = False
+
+    def run(
+        self, arguments, *, timeout_seconds: int = 30
+    ) -> subprocess.CompletedProcess[str]:
+        command = tuple(arguments)
+        result = super().run(arguments, timeout_seconds=timeout_seconds)
+        if (
+            self.crash_after_rename
+            and command[:3] == ("herdr", "agent", "rename")
+            and command[-1] != "--clear"
+        ):
+            self.crash_after_rename = False
+            raise InjectedBootstrapCrash("after_shotcaller_routing_rename")
+        return result
+
+
 class TransientMalformedCurrentHerdr(RecordingHerdr):
     """The exact in-place pane briefly returns non-JSON before a valid read."""
 
@@ -268,6 +349,10 @@ class TransientMalformedCurrentHerdr(RecordingHerdr):
 
 
 class InjectedBootstrapFault(RuntimeError):
+    pass
+
+
+class InjectedBootstrapCrash(BaseException):
     pass
 
 
@@ -308,6 +393,14 @@ def _spec() -> ShotcallerBootstrapSpec:
     )
 
 
+def _shotcaller_title_ownership(spec: ShotcallerBootstrapSpec) -> dict[str, str]:
+    owner = hashlib.sha256(spec.assignment_id.encode()).hexdigest()[:16]
+    return {
+        "shotcaller_title_owner": owner,
+        "shotcaller_title_source": f"league-shotcaller-{owner}",
+    }
+
+
 def _options(worktree: Path) -> ShotcallerBootstrapOptions:
     return ShotcallerBootstrapOptions(
         workspace_id="w1",
@@ -315,6 +408,109 @@ def _options(worktree: Path) -> ShotcallerBootstrapOptions:
         pane_id="w1:p1",
         worktree=str(worktree.resolve()),
     )
+
+
+def _service(
+    store: SQLiteStorage,
+    clock: FakeClock,
+    worktree: Path,
+    runner: RecordingHerdr,
+) -> ShotcallerBootstrapService:
+    return ShotcallerBootstrapService(
+        store,
+        HerdrShotcallerBootstrapAdapter(
+            _options(worktree),
+            runner,
+            environment={
+                "HERDR_ENV": "1",
+                "HERDR_WORKSPACE_ID": "w1",
+                "HERDR_TAB_ID": "w1:t1",
+                "HERDR_PANE_ID": "w1:p1",
+            },
+        ),
+        clock,
+    )
+
+
+def _create_clean_bootstrap_residue(
+    store: SQLiteStorage,
+    service: ShotcallerBootstrapService,
+    runner: RecordingHerdr,
+) -> tuple[ShotcallerBootstrapSpec, dict[str, object]]:
+    original = _spec()
+    try:
+        service.bootstrap(original)
+    except StorageRefusal as exc:
+        assert exc.code == "shotcaller_metadata_unverified"
+    else:
+        raise AssertionError("failed bootstrap did not create the retired residue")
+    assignment = store.callsign_assignment_status(original.assignment_id)
+    assert assignment is not None
+    assert assignment["state"] == "rolled_back"
+    assert assignment["version"] == 2
+    runner.publish_mismatch = False
+    return original, assignment
+
+
+def _make_legacy_bootstrap_residue(
+    store: SQLiteStorage,
+    service: ShotcallerBootstrapService,
+    runner: RecordingHerdr,
+) -> tuple[ShotcallerBootstrapSpec, dict[str, object]]:
+    original, assignment = _create_clean_bootstrap_residue(store, service, runner)
+    store.connection.execute(
+        "UPDATE agent_instances SET metadata_json='{}' WHERE agent_id=?",
+        (original.agent_id,),
+    )
+    runner.metadata_source = "herdr:codex"
+    runner.title = "Interview Prep"
+    runner.tokens = {"user_theme": "focused"}
+    runner.state_change_seq += 1
+    return original, assignment
+
+
+def _make_historical_squad_bootstrap_residue(
+    store: SQLiteStorage,
+    service: ShotcallerBootstrapService,
+    runner: RecordingHerdr,
+) -> tuple[ShotcallerBootstrapSpec, dict[str, object]]:
+    original = ShotcallerBootstrapSpec(
+        assignment_id="callsign-assignment:bootstrap:ashe:historical-origin",
+        agent_id=THREAD_ID,
+        runtime_instance_id="runtime:shotcaller:ashe:historical",
+        thread_id=THREAD_ID,
+        capabilities=("request.triage", "rollover.accept"),
+    )
+    try:
+        service.bootstrap(original)
+    except StorageRefusal as exc:
+        assert exc.code == "shotcaller_metadata_unverified"
+    else:
+        raise AssertionError("failed bootstrap did not create the historical residue")
+    runner.publish_mismatch = False
+    historical_scope = {"scope_kind": "squad", "scope_id": "squad:InterviewPrep"}
+    store.connection.execute(
+        "UPDATE agent_instances SET metadata_json=? WHERE agent_id=?",
+        (json.dumps(historical_scope, sort_keys=True), original.agent_id),
+    )
+    store.connection.execute(
+        "UPDATE callsign_assignments SET scope_kind=?,scope_id=? "
+        "WHERE callsign_assignment_id=?",
+        (
+            historical_scope["scope_kind"],
+            historical_scope["scope_id"],
+            original.assignment_id,
+        ),
+    )
+    assignment = store.callsign_assignment_status(original.assignment_id)
+    assert assignment is not None
+    assert assignment["state"] == "rolled_back"
+    assert assignment["version"] == 2
+    runner.metadata_source = "herdr:codex"
+    runner.title = "Interview Prep"
+    runner.tokens = {"user_theme": "focused"}
+    runner.state_change_seq += 1
+    return original, assignment
 
 
 def test_in_place_bootstrap_creates_shotcaller_without_layout_or_squad_registration(
@@ -482,6 +678,9 @@ def test_in_place_bootstrap_creates_shotcaller_without_layout_or_squad_registrat
     turn.stdin.write(
         json.dumps(
             {
+                "candidate_inventory_digest": intake["result"]["candidate_inventory"][
+                    "digest"
+                ],
                 "decisions": [
                     {
                         "items": [
@@ -663,7 +862,7 @@ def test_in_place_bootstrap_refuses_persistently_malformed_identity_without_muta
         ).fetchone()[0] == 0
 
 
-def test_bootstrap_reasserts_owned_title_after_auto_title_settles(root: Path) -> None:
+def test_bootstrap_refuses_later_provider_title_without_overwriting_it(root: Path) -> None:
     state, _ = migrated_state(root, "shotcaller-auto-title-settling")
     worktree = root / "shotcaller-auto-title-settling" / "worktree"
     worktree.mkdir()
@@ -686,14 +885,19 @@ def test_bootstrap_reasserts_owned_title_after_auto_title_settles(root: Path) ->
             clock,
         )
 
-        created = service.bootstrap(_spec())
+        try:
+            service.bootstrap(_spec())
+        except StorageRefusal as exc:
+            assert exc.code == "shotcaller_metadata_unverified"
+        else:
+            raise AssertionError("later provider title was overwritten")
 
-        assert created["state"] == "active"
-        assert runner.name == "ashe"
-        assert runner.metadata_source.startswith("league-shotcaller-")
-        assert runner.title == "Ashe"
-        assert runner.tokens["sidebar_name"] == "Ashe"
-        assert runner.tokens["thread_title"] == "Ashe"
+        assignment = store.callsign_assignment_status(_spec().assignment_id)
+        assert assignment is not None and assignment["state"] == "rolled_back"
+        assert runner.name is None
+        assert runner.metadata_source == "herdr:codex"
+        assert runner.title == "Create the Shotcaller for this pane | codex"
+        assert runner.tokens == {}
         metadata_calls = [
             call
             for call in runner.calls
@@ -709,8 +913,70 @@ def test_bootstrap_reasserts_owned_title_after_auto_title_settles(root: Path) ->
                 ("herdr", "agent", "start"),
                 ("herdr", "agent", "prompt"),
             }
-            for call in runner.calls
-        )
+        for call in runner.calls
+    )
+
+
+def test_bootstrap_preserves_complete_later_provider_presentation_on_rollback(
+    root: Path,
+) -> None:
+    state, _ = migrated_state(root, "shotcaller-provider-presentation-race")
+    worktree = root / "shotcaller-provider-presentation-race" / "worktree"
+    worktree.mkdir()
+    clock = FakeClock()
+    runner = ProviderPresentationAfterPublishHerdr(
+        worktree, delayed_auto_title_reads=2
+    )
+    with SQLiteStorage(state) as store:
+        _seed_available_ashe(store, clock)
+        service = _service(store, clock, worktree, runner)
+
+        try:
+            service.bootstrap(_spec())
+        except StorageRefusal as exc:
+            assert exc.code == "shotcaller_metadata_unverified"
+        else:
+            raise AssertionError("later provider presentation was overwritten")
+
+        assignment = store.callsign_assignment_status(_spec().assignment_id)
+        assert assignment is not None and assignment["state"] == "rolled_back"
+        assert tuple(
+            store.connection.execute(
+                "SELECT state,reservation_assignment_id FROM callsign_queue "
+                "WHERE callsign='Ashe'"
+            ).fetchone()
+        ) == ("available", None)
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM runtime_instances WHERE actor_agent_id=?", (AGENT_ID,)
+        ).fetchone()[0] == 0
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM squads WHERE shotcaller_agent_id=?", (AGENT_ID,)
+        ).fetchone()[0] == 0
+
+    title = "Review another request"
+    assert runner.name is None
+    assert runner.metadata_source == "herdr:codex"
+    assert runner.title == f"{title} | codex"
+    assert runner.tokens == {
+        "callsign": title,
+        "harness": "codex",
+        "identity_thread_id": THREAD_ID,
+        "identity_title": f"Codex | {title}",
+        "sidebar_name": title,
+        "thread_title": title,
+        "user_badge": "preserve",
+    }
+    assert not any(
+        call[:3]
+        in {
+            ("herdr", "agent", "prompt"),
+            ("herdr", "tab", "create"),
+            ("herdr", "pane", "split"),
+            ("herdr", "workspace", "create"),
+            ("herdr", "agent", "start"),
+        }
+        for call in runner.calls
+    )
 
 
 def test_bootstrap_identity_mismatch_makes_no_canonical_mutation(root: Path) -> None:
@@ -830,7 +1096,7 @@ def test_preexisting_reserved_bootstrap_rejects_residual_metadata_without_baseli
     )
 
 
-def test_completed_bootstrap_retry_restores_owned_title_without_prompt(root: Path) -> None:
+def test_completed_bootstrap_retry_refuses_later_provider_title_without_prompt(root: Path) -> None:
     state, _ = migrated_state(root, "shotcaller-completed-retry")
     worktree = root / "shotcaller-completed-retry" / "worktree"
     worktree.mkdir()
@@ -888,20 +1154,17 @@ def test_completed_bootstrap_retry_restores_owned_title_without_prompt(root: Pat
         runner.title = "Create the Shotcaller for this pane | codex"
         calls_before_retry = len(runner.calls)
 
-        retry = service.bootstrap(_spec())
-
-        assert retry == {**created, "idempotent": True}
+        try:
+            service.bootstrap(_spec())
+        except StorageRefusal as exc:
+            assert exc.code == "shotcaller_metadata_unverified"
+        else:
+            raise AssertionError("completed retry overwrote a later provider title")
         retry_calls = runner.calls[calls_before_retry:]
-        assert len(
-            [
-                call
-                for call in retry_calls
-                if call[:3] == ("herdr", "pane", "report-metadata")
-            ]
-        ) == 1
         assert not any(
             call[:3]
             in {
+                ("herdr", "pane", "report-metadata"),
                 ("herdr", "agent", "rename"),
                 ("herdr", "agent", "prompt"),
                 ("herdr", "tab", "create"),
@@ -910,8 +1173,8 @@ def test_completed_bootstrap_retry_restores_owned_title_without_prompt(root: Pat
             }
             for call in retry_calls
         )
-        assert runner.metadata_source.startswith("league-shotcaller-")
-        assert runner.title == "Ashe"
+        assert runner.metadata_source == "herdr:codex"
+        assert runner.title == "Create the Shotcaller for this pane | codex"
         assert store.shotcaller_bootstrap_status(_spec().assignment_id) == {
             **created,
             "idempotent": True,
@@ -1042,6 +1305,2100 @@ def test_bootstrap_metadata_and_atomic_finalization_failures_restore_exact_state
         )
 
 
+def test_clean_rolled_back_bootstrap_residue_rebinds_same_thread_in_place(
+    root: Path,
+) -> None:
+    state, _ = migrated_state(root, "shotcaller-clean-residue-retry")
+    worktree = root / "shotcaller-clean-residue-retry" / "worktree"
+    worktree.mkdir()
+    clock = FakeClock()
+    runner = RecordingHerdr(worktree, publish_mismatch=True)
+    with SQLiteStorage(state) as store:
+        _seed_available_ashe(store, clock)
+        service = _service(store, clock, worktree, runner)
+        original, original_assignment = _create_clean_bootstrap_residue(
+            store, service, runner
+        )
+        retry = ShotcallerBootstrapSpec(
+            assignment_id="callsign-assignment:bootstrap:ashe:retry",
+            agent_id=original.agent_id,
+            runtime_instance_id=original.runtime_instance_id,
+            thread_id=original.thread_id,
+            capabilities=original.capabilities,
+        )
+        calls_before_retry = len(runner.calls)
+
+        created = service.bootstrap(retry)
+
+        assert created["state"] == "active"
+        assert created["callsign"] == original_assignment["callsign"]
+        assert store.callsign_assignment_status(original.assignment_id) == original_assignment
+        assert store.callsign_assignment_status(retry.assignment_id)["state"] == "active"
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM squads WHERE shotcaller_agent_id=?", (AGENT_ID,)
+        ).fetchone()[0] == 0
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM squad_registration_offers WHERE shotcaller_agent_id=?",
+            (AGENT_ID,),
+        ).fetchone()[0] == 0
+        created_event = store.connection.execute(
+            "SELECT entity_version,detail_json FROM events WHERE event_id=?",
+            (f"shotcaller:{retry.assignment_id}:created",),
+        ).fetchone()
+        assert created_event is not None
+        assert created_event["entity_version"] == 4
+        assert json.loads(created_event["detail_json"])["placement"] == "existing-current-pane"
+
+    retry_calls = runner.calls[calls_before_retry:]
+    assert runner.name == "ashe"
+    assert not any(
+        call[:3]
+        in {
+            ("herdr", "tab", "create"),
+            ("herdr", "pane", "split"),
+            ("herdr", "workspace", "create"),
+            ("herdr", "agent", "start"),
+            ("herdr", "agent", "prompt"),
+        }
+        for call in retry_calls
+    )
+
+
+def test_legacy_rolled_back_bootstrap_residue_captures_clean_live_baseline(
+    root: Path,
+) -> None:
+    state, _ = migrated_state(root, "shotcaller-legacy-residue-retry")
+    worktree = root / "shotcaller-legacy-residue-retry" / "worktree"
+    worktree.mkdir()
+    clock = FakeClock()
+    runner = RecordingHerdr(worktree, publish_mismatch=True)
+    with SQLiteStorage(state) as store:
+        _seed_available_ashe(store, clock)
+        service = _service(store, clock, worktree, runner)
+        original, original_assignment = _make_legacy_bootstrap_residue(
+            store, service, runner
+        )
+        retry = ShotcallerBootstrapSpec(
+            assignment_id="callsign-assignment:bootstrap:ashe:legacy-retry",
+            agent_id=original.agent_id,
+            runtime_instance_id=original.runtime_instance_id,
+            thread_id=original.thread_id,
+            capabilities=original.capabilities,
+        )
+        expected_baseline = {
+            "schema": "league.shotcaller-bootstrap-baseline.v2",
+            "terminal_id": "terminal:1",
+            "endpoint_generation": "herdr:"
+            + hashlib.sha256(
+                f"terminal:1\0{original.thread_id}".encode("utf-8")
+            ).hexdigest()[:24],
+            "state_change_seq": runner.state_change_seq,
+            "routing_name": None,
+            "sidebar_name": "",
+            "thread_title": "",
+            "title": "Interview Prep",
+            "presentation_source": "herdr:codex",
+        }
+        calls_before_retry = len(runner.calls)
+
+        created = service.bootstrap(retry)
+
+        assert created["state"] == "active"
+        assert created["callsign"] == original_assignment["callsign"]
+        assert store.callsign_assignment_status(original.assignment_id) == original_assignment
+        assert store.shotcaller_bootstrap_baseline(retry.assignment_id) == expected_baseline
+        metadata = json.loads(
+            store.connection.execute(
+                "SELECT metadata_json FROM agent_instances WHERE agent_id=?",
+                (original.agent_id,),
+            ).fetchone()[0]
+        )
+        publication = store.shotcaller_bootstrap_publication(retry.assignment_id)
+        assert publication is not None
+        assert publication["schema"] == "league.shotcaller-bootstrap-publication.v1"
+        assert publication["baseline_digest"] == hashlib.sha256(
+            json.dumps(expected_baseline, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        assert metadata == {
+            "scope_kind": "shotcaller",
+            "scope_id": original.agent_id,
+            "shotcaller_bootstrap_baseline": expected_baseline,
+            "shotcaller_bootstrap_publication": publication,
+        }
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM squads WHERE shotcaller_agent_id=?", (AGENT_ID,)
+        ).fetchone()[0] == 0
+
+    retry_calls = runner.calls[calls_before_retry:]
+    assert runner.name == "ashe"
+    assert runner.title == "Ashe"
+    assert runner.tokens == {
+        "user_theme": "focused",
+        "sidebar_name": "Ashe",
+        "thread_title": "Ashe",
+        **_shotcaller_title_ownership(retry),
+    }
+    assert not any(
+        call[:3]
+        in {
+            ("herdr", "tab", "create"),
+            ("herdr", "pane", "split"),
+            ("herdr", "workspace", "create"),
+            ("herdr", "agent", "start"),
+            ("herdr", "agent", "prompt"),
+        }
+        for call in retry_calls
+    )
+
+
+def test_legacy_residue_accepts_installed_provider_presentation_without_route(
+    root: Path,
+) -> None:
+    state, _ = migrated_state(root, "shotcaller-installed-provider-presentation")
+    worktree = root / "shotcaller-installed-provider-presentation" / "worktree"
+    worktree.mkdir()
+    clock = FakeClock()
+    runner = RecordingHerdr(worktree, publish_mismatch=True)
+    with SQLiteStorage(state) as store:
+        _seed_available_ashe(store, clock)
+        service = _service(store, clock, worktree, runner)
+        original, original_assignment = _make_legacy_bootstrap_residue(
+            store, service, runner
+        )
+        retry = ShotcallerBootstrapSpec(
+            assignment_id="callsign-assignment:bootstrap:ashe:installed-provider",
+            agent_id=original.agent_id,
+            runtime_instance_id=original.runtime_instance_id,
+            thread_id=original.thread_id,
+            capabilities=original.capabilities,
+        )
+        prompt_title = "Execute shotcaller command"
+        runner.expose_metadata_source = False
+        runner.agent_status = "done"
+        runner.title = f"{prompt_title} | codex"
+        runner.tokens = {
+            "callsign": prompt_title,
+            "harness": "codex",
+            "identity_thread_id": original.thread_id,
+            "identity_title": f"Codex | {prompt_title}",
+            "sidebar_name": prompt_title,
+            "thread_title": prompt_title,
+        }
+        runner.state_change_seq += 1
+        calls_before_retry = len(runner.calls)
+
+        created = service.bootstrap(retry)
+
+        assert created["state"] == "active"
+        assert created["callsign"] == original_assignment["callsign"]
+        baseline = store.shotcaller_bootstrap_baseline(retry.assignment_id)
+        assert baseline is not None
+        assert baseline["presentation_source"] == "herdr:codex"
+        assert baseline["routing_name"] is None
+        assert baseline["sidebar_name"] == prompt_title
+        assert baseline["thread_title"] == prompt_title
+        assert baseline["title"] == prompt_title
+        assert store.callsign_assignment_status(original.assignment_id) == original_assignment
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM squads WHERE shotcaller_agent_id=?", (AGENT_ID,)
+        ).fetchone()[0] == 0
+
+        published_calls = runner.calls[calls_before_retry:]
+        assert runner.name == "ashe"
+        assert runner.title == "Ashe"
+        assert runner.tokens == {
+            "callsign": prompt_title,
+            "harness": "codex",
+            "identity_thread_id": original.thread_id,
+            "identity_title": f"Codex | {prompt_title}",
+            "sidebar_name": "Ashe",
+            "thread_title": "Ashe",
+            **_shotcaller_title_ownership(retry),
+        }
+        assert any(
+            call[:3] == ("herdr", "agent", "rename") for call in published_calls
+        )
+        assert not any(
+            call[:3]
+            in {
+                ("herdr", "tab", "create"),
+                ("herdr", "pane", "split"),
+                ("herdr", "workspace", "create"),
+                ("herdr", "agent", "start"),
+                ("herdr", "agent", "prompt"),
+            }
+            for call in published_calls
+        )
+
+        calls_before_exact_retry = len(runner.calls)
+        exact_retry = _service(store, clock, worktree, runner).bootstrap(retry)
+        assert exact_retry == {**created, "idempotent": True}
+        assert not any(
+            call[:3]
+            in {
+                ("herdr", "agent", "rename"),
+                ("herdr", "pane", "report-metadata"),
+                ("herdr", "agent", "prompt"),
+                ("herdr", "tab", "create"),
+                ("herdr", "pane", "split"),
+                ("herdr", "workspace", "create"),
+                ("herdr", "agent", "start"),
+            }
+            for call in runner.calls[calls_before_exact_retry:]
+        )
+
+
+def test_historical_squad_residue_captures_baseline_before_publication_and_retries(
+    root: Path,
+) -> None:
+    state, _ = migrated_state(root, "shotcaller-historical-squad-residue")
+    worktree = root / "shotcaller-historical-squad-residue" / "worktree"
+    worktree.mkdir()
+    clock = FakeClock()
+    runner = RecordingHerdr(worktree, publish_mismatch=True)
+    with SQLiteStorage(state) as store:
+        _seed_available_ashe(store, clock)
+        service = _service(store, clock, worktree, runner)
+        original, original_assignment = _make_historical_squad_bootstrap_residue(
+            store, service, runner
+        )
+        retry = ShotcallerBootstrapSpec(
+            assignment_id="callsign-assignment:bootstrap:ashe:historical-squad",
+            agent_id=original.agent_id,
+            runtime_instance_id=original.runtime_instance_id,
+            thread_id=original.thread_id,
+            capabilities=original.capabilities,
+        )
+        prompt_title = "Execute shotcaller command"
+        runner.expose_metadata_source = False
+        runner.agent_status = "done"
+        runner.title = f"{prompt_title} | codex"
+        runner.tokens = {
+            "callsign": prompt_title,
+            "harness": "codex",
+            "identity_thread_id": original.thread_id,
+            "identity_title": f"Codex | {prompt_title}",
+            "sidebar_name": prompt_title,
+            "thread_title": prompt_title,
+        }
+        runner.state_change_seq += 1
+        expected_baseline = {
+            "schema": "league.shotcaller-bootstrap-baseline.v2",
+            "terminal_id": "terminal:1",
+            "endpoint_generation": "herdr:"
+            + hashlib.sha256(
+                f"terminal:1\0{original.thread_id}".encode("utf-8")
+            ).hexdigest()[:24],
+            "state_change_seq": runner.state_change_seq,
+            "routing_name": None,
+            "sidebar_name": prompt_title,
+            "thread_title": prompt_title,
+            "title": prompt_title,
+            "presentation_source": "herdr:codex",
+        }
+        calls_before_crash = len(runner.calls)
+
+        def crash_before_publication(point: str) -> None:
+            if point == "after_shotcaller_recovery_reserved":
+                raise InjectedBootstrapCrash(point)
+
+        try:
+            service.bootstrap(retry, fault=crash_before_publication)
+        except InjectedBootstrapCrash:
+            pass
+        else:
+            raise AssertionError("historical recovery did not reach the durable baseline fence")
+
+        reserved = store.callsign_assignment_status(retry.assignment_id)
+        assert reserved is not None and reserved["state"] == "reserved"
+        assert store.callsign_assignment_status(original.assignment_id) == original_assignment
+        assert store.shotcaller_bootstrap_baseline(retry.assignment_id) == expected_baseline
+        metadata = json.loads(
+            store.connection.execute(
+                "SELECT metadata_json FROM agent_instances WHERE agent_id=?",
+                (original.agent_id,),
+            ).fetchone()[0]
+        )
+        assert store.shotcaller_bootstrap_publication(retry.assignment_id) is None
+        assert metadata == {
+            "scope_kind": "shotcaller",
+            "scope_id": original.agent_id,
+            "shotcaller_bootstrap_baseline": expected_baseline,
+        }
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM callsign_leases WHERE callsign='Ashe' AND agent_id=?",
+            (original.agent_id,),
+        ).fetchone()[0] == 1
+        assert not any(
+            call[:3]
+            in {
+                ("herdr", "agent", "rename"),
+                ("herdr", "pane", "report-metadata"),
+                ("herdr", "agent", "prompt"),
+                ("herdr", "tab", "create"),
+                ("herdr", "pane", "split"),
+                ("herdr", "workspace", "create"),
+                ("herdr", "agent", "start"),
+            }
+            for call in runner.calls[calls_before_crash:]
+        )
+
+        runner.publish_mismatch = False
+        calls_before_retry = len(runner.calls)
+        created = _service(store, clock, worktree, runner).bootstrap(retry)
+        assert created["state"] == "active"
+        assert created["callsign"] == original_assignment["callsign"]
+        assert runner.name == "ashe"
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM squads WHERE shotcaller_agent_id=?", (original.agent_id,)
+        ).fetchone()[0] == 0
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM squad_registration_offers WHERE shotcaller_agent_id=?",
+            (original.agent_id,),
+        ).fetchone()[0] == 0
+        retry_calls = runner.calls[calls_before_retry:]
+        assert sum(
+            call[:3] == ("herdr", "agent", "rename") for call in retry_calls
+        ) == 1
+
+        calls_before_exact_retry = len(runner.calls)
+        exact_retry = _service(store, clock, worktree, runner).bootstrap(retry)
+        assert exact_retry == {**created, "idempotent": True}
+        assert not any(
+            call[:3]
+            in {
+                ("herdr", "agent", "rename"),
+                ("herdr", "pane", "report-metadata"),
+                ("herdr", "agent", "prompt"),
+                ("herdr", "tab", "create"),
+                ("herdr", "pane", "split"),
+                ("herdr", "workspace", "create"),
+                ("herdr", "agent", "start"),
+            }
+            for call in runner.calls[calls_before_exact_retry:]
+        )
+
+
+def test_historical_squad_residue_refuses_tampered_history_or_owned_resources(
+    root: Path,
+) -> None:
+    cases = (
+        "sidebar-residue",
+        "league-source",
+        "metadata-extra-key",
+        "metadata-scope-tamper",
+        "prior-scope-tamper",
+        "foreign-subject",
+        "different-thread",
+        "ambiguous-history",
+        "malformed-rollback-history",
+        "runtime-bearing",
+        "squad-bearing",
+        "offer-bearing",
+        "lease-bearing",
+        "active-assignment",
+        "active-callsign",
+    )
+    for case in cases:
+        state, _ = migrated_state(root, f"shotcaller-historical-refusal-{case}")
+        worktree = root / f"shotcaller-historical-refusal-{case}" / "worktree"
+        worktree.mkdir()
+        clock = FakeClock()
+        runner = RecordingHerdr(worktree, publish_mismatch=True)
+        with SQLiteStorage(state) as store:
+            _seed_available_ashe(store, clock)
+            service = _service(store, clock, worktree, runner)
+            original, _ = _make_historical_squad_bootstrap_residue(
+                store, service, runner
+            )
+            thread_id = original.thread_id
+            if case == "sidebar-residue":
+                runner.tokens["sidebar_name"] = "Ashe"
+            elif case == "league-source":
+                runner.metadata_source = "league-shotcaller-historical"
+            elif case == "metadata-extra-key":
+                store.connection.execute(
+                    "UPDATE agent_instances SET metadata_json=? WHERE agent_id=?",
+                    (
+                        json.dumps(
+                            {
+                                "scope_kind": "squad",
+                                "scope_id": "squad:InterviewPrep",
+                                "unexpected": True,
+                            },
+                            sort_keys=True,
+                        ),
+                        original.agent_id,
+                    ),
+                )
+            elif case == "metadata-scope-tamper":
+                store.connection.execute(
+                    "UPDATE agent_instances SET metadata_json=? WHERE agent_id=?",
+                    (
+                        json.dumps(
+                            {"scope_kind": "squad", "scope_id": "squad:Other"},
+                            sort_keys=True,
+                        ),
+                        original.agent_id,
+                    ),
+                )
+            elif case == "prior-scope-tamper":
+                store.connection.execute(
+                    "UPDATE callsign_assignments SET scope_id='squad:Other' "
+                    "WHERE callsign_assignment_id=?",
+                    (original.assignment_id,),
+                )
+            elif case == "foreign-subject":
+                store.connection.execute(
+                    "UPDATE callsign_assignments SET subject_id='agent:foreign' "
+                    "WHERE callsign_assignment_id=?",
+                    (original.assignment_id,),
+                )
+            elif case == "different-thread":
+                thread_id = "77777777-7777-4777-8777-777777777777"
+                runner.thread_id = thread_id
+            elif case == "ambiguous-history":
+                store.connection.execute(
+                    """
+                    INSERT INTO callsign_assignments
+                      (callsign_assignment_id,callsign,subject_id,agent_id,
+                       runtime_instance_id,role,scope_kind,scope_id,state,
+                       reservation_position,queue_version,requirements_json,
+                       acceptance_digest,release_receipt_digest,failure_receipt_digest,
+                       version,reserved_at,activated_at,released_at)
+                    VALUES('callsign-assignment:historical:ambiguous','Ashe',?,?,NULL,
+                           'shotcaller','squad','squad:InterviewPrep','rolled_back',0,1,
+                           '[]',NULL,NULL,'failure:historical:ambiguous',2,?,NULL,?)
+                    """,
+                    (
+                        "agent:historical:ambiguous",
+                        original.agent_id,
+                        clock.now(),
+                        clock.now(),
+                    ),
+                )
+            elif case == "malformed-rollback-history":
+                store.connection.execute(
+                    "UPDATE events SET detail_json='{}' WHERE event_id=?",
+                    (f"callsign:{original.assignment_id}:rolled-back",),
+                )
+            elif case == "runtime-bearing":
+                store.connection.execute(
+                    """
+                    INSERT INTO runtime_instances
+                      (runtime_instance_id,actor_agent_id,harness_kind,backend_kind,
+                       session_ref,endpoint,runtime_generation,status,verified,last_seen_at,
+                       capabilities_json)
+                    VALUES('runtime:historical-residue',?,'codex-thread','herdr',?,
+                           'pane:residue','generation:residue','closed',1,?,'[]')
+                    """,
+                    (original.agent_id, original.thread_id, clock.now()),
+                )
+            elif case == "squad-bearing":
+                store.connection.execute(
+                    "INSERT INTO squads(squad_id,shotcaller_agent_id,state,version,updated_at) "
+                    "VALUES('squad:historical-residue',?,'retired',1,?)",
+                    (original.agent_id, clock.now()),
+                )
+            elif case == "offer-bearing":
+                requester = "agent:historical-offer-requester"
+                store.connection.execute(
+                    """
+                    INSERT INTO agent_instances
+                      (agent_id,callsign,role,shotcaller_agent_id,task_id,kind,address,
+                       thread_id,backend,routing_name,display_agent,repository,issue,branch,
+                       worktree,status,version,updated_at,update_text,blocker,next_action,
+                       metadata_json,retired_at)
+                    VALUES(?,'Ashe','hidden-worker',NULL,NULL,'unbound',NULL,NULL,NULL,NULL,
+                           NULL,NULL,NULL,NULL,NULL,'active',1,?,'offer fixture',NULL,
+                           'none','{}',?)
+                    """,
+                    (requester, clock.now(), clock.now()),
+                )
+                store.connection.execute(
+                    """
+                    INSERT INTO runtime_instances
+                      (runtime_instance_id,actor_agent_id,harness_kind,backend_kind,
+                       session_ref,endpoint,runtime_generation,status,verified,last_seen_at,
+                       capabilities_json)
+                    VALUES('runtime:historical-offer',?,'codex-thread','herdr',
+                           'thread:historical-offer','pane:historical-offer',
+                           'generation:historical-offer','closed',1,?,'[]')
+                    """,
+                    (requester, clock.now()),
+                )
+                store.connection.execute(
+                    "INSERT INTO events(event_id,agent_id,task_id,entity_version,event_type,"
+                    "status,update_text,occurred_at,detail_json) "
+                    "VALUES('event:historical-offer',?,NULL,1,'squad_registration_offered',"
+                    "'pending','offer fixture',?,'{}')",
+                    (requester, clock.now()),
+                )
+                store.connection.execute(
+                    "INSERT INTO delivery_outbox(outbox_id,event_id,recipient_agent_id,state,"
+                    "available_at) VALUES('outbox:historical-offer',"
+                    "'event:historical-offer',?,'pending',?)",
+                    (requester, clock.now()),
+                )
+                store.connection.execute(
+                    """
+                    INSERT INTO squad_registration_offers
+                      (registration_id,squad_id,requester_agent_id,shotcaller_agent_id,
+                       runtime_instance_id,project_ids_json,capabilities_json,state,expires_at,
+                       offer_event_id,offer_outbox_id,response_event_id,response_outbox_id,
+                       registered_at,responded_at)
+                    VALUES('registration:historical-residue','squad:historical-offered',?,?,
+                           'runtime:historical-offer','[]','[]','rejected',?,
+                           'event:historical-offer','outbox:historical-offer',NULL,NULL,?,?)
+                    """,
+                    (
+                        requester,
+                        original.agent_id,
+                        clock.now(),
+                        clock.now(),
+                        clock.now(),
+                    ),
+                )
+            elif case == "lease-bearing":
+                store.connection.execute(
+                    "INSERT INTO callsign_leases(callsign,agent_id,launch_attempt_id,reserved_at) "
+                    "VALUES('Ashe',?,NULL,?)",
+                    (original.agent_id, clock.now()),
+                )
+            elif case == "active-assignment":
+                store.connection.execute(
+                    "UPDATE callsign_assignments SET state='active',activated_at=? "
+                    "WHERE callsign_assignment_id=?",
+                    (clock.now(), original.assignment_id),
+                )
+            elif case == "active-callsign":
+                store.connection.execute(
+                    "UPDATE callsign_queue SET state='active',queue_position=NULL "
+                    "WHERE callsign='Ashe'"
+                )
+            retry = ShotcallerBootstrapSpec(
+                assignment_id=f"callsign-assignment:bootstrap:ashe:historical:{case}",
+                agent_id=original.agent_id,
+                runtime_instance_id=original.runtime_instance_id,
+                thread_id=thread_id,
+                capabilities=original.capabilities,
+            )
+            agent_before = tuple(
+                store.connection.execute(
+                    "SELECT version,retired_at,metadata_json FROM agent_instances "
+                    "WHERE agent_id=?",
+                    (original.agent_id,),
+                ).fetchone()
+            )
+            queue_before = tuple(
+                store.connection.execute(
+                    "SELECT state,reservation_assignment_id,version FROM callsign_queue "
+                    "WHERE callsign='Ashe'"
+                ).fetchone()
+            )
+            history_before = tuple(
+                tuple(row)
+                for row in store.connection.execute(
+                    "SELECT * FROM callsign_assignments WHERE agent_id=? "
+                    "ORDER BY reserved_at,callsign_assignment_id",
+                    (original.agent_id,),
+                )
+            )
+            calls_before_retry = len(runner.calls)
+
+            try:
+                service.bootstrap(retry)
+            except StorageRefusal as exc:
+                assert exc.code == "agent_conflict"
+            else:
+                raise AssertionError(f"unsafe historical residue {case} was rebound")
+
+            assert store.callsign_assignment_status(retry.assignment_id) is None
+            assert tuple(
+                store.connection.execute(
+                    "SELECT version,retired_at,metadata_json FROM agent_instances "
+                    "WHERE agent_id=?",
+                    (original.agent_id,),
+                ).fetchone()
+            ) == agent_before
+            assert tuple(
+                store.connection.execute(
+                    "SELECT state,reservation_assignment_id,version FROM callsign_queue "
+                    "WHERE callsign='Ashe'"
+                ).fetchone()
+            ) == queue_before
+            assert tuple(
+                tuple(row)
+                for row in store.connection.execute(
+                    "SELECT * FROM callsign_assignments WHERE agent_id=? "
+                    "ORDER BY reserved_at,callsign_assignment_id",
+                    (original.agent_id,),
+                )
+            ) == history_before
+        retry_calls = runner.calls[calls_before_retry:]
+        assert not any(
+            call[:3]
+            in {
+                ("herdr", "agent", "rename"),
+                ("herdr", "pane", "report-metadata"),
+                ("herdr", "agent", "prompt"),
+                ("herdr", "tab", "create"),
+                ("herdr", "pane", "split"),
+                ("herdr", "workspace", "create"),
+                ("herdr", "agent", "start"),
+            }
+            for call in retry_calls
+        )
+
+
+def test_historical_squad_residue_finalization_failure_restores_v2_baseline(
+    root: Path,
+) -> None:
+    state, _ = migrated_state(root, "shotcaller-historical-finalization-rollback")
+    worktree = root / "shotcaller-historical-finalization-rollback" / "worktree"
+    worktree.mkdir()
+    clock = FakeClock()
+    runner = RecordingHerdr(worktree, publish_mismatch=True)
+    with SQLiteStorage(state) as store:
+        _seed_available_ashe(store, clock)
+        service = _service(store, clock, worktree, runner)
+        original, original_assignment = _make_historical_squad_bootstrap_residue(
+            store, service, runner
+        )
+        retry = ShotcallerBootstrapSpec(
+            assignment_id="callsign-assignment:bootstrap:ashe:historical-rollback",
+            agent_id=original.agent_id,
+            runtime_instance_id=original.runtime_instance_id,
+            thread_id=original.thread_id,
+            capabilities=original.capabilities,
+        )
+
+        def fail_finalization(point: str) -> None:
+            if point == "after_shotcaller_activation":
+                raise InjectedBootstrapFault(point)
+
+        try:
+            service.bootstrap(retry, fault=fail_finalization)
+        except InjectedBootstrapFault:
+            pass
+        else:
+            raise AssertionError("historical recovery finalization fault escaped")
+
+        assert store.callsign_assignment_status(original.assignment_id) == original_assignment
+        attempted = store.callsign_assignment_status(retry.assignment_id)
+        assert attempted is not None and attempted["state"] == "rolled_back"
+        baseline = store.shotcaller_bootstrap_baseline(retry.assignment_id)
+        assert baseline is not None
+        assert baseline["schema"] == "league.shotcaller-bootstrap-baseline.v2"
+        assert baseline["title"] == "Interview Prep"
+        assert baseline["presentation_source"] == "herdr:codex"
+        metadata = json.loads(
+            store.connection.execute(
+                "SELECT metadata_json FROM agent_instances WHERE agent_id=?",
+                (original.agent_id,),
+            ).fetchone()[0]
+        )
+        publication = store.shotcaller_bootstrap_publication(retry.assignment_id)
+        assert publication is not None
+        assert metadata == {
+            "scope_kind": "shotcaller",
+            "scope_id": original.agent_id,
+            "shotcaller_bootstrap_baseline": baseline,
+            "shotcaller_bootstrap_publication": publication,
+        }
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM runtime_instances WHERE actor_agent_id=?",
+            (original.agent_id,),
+        ).fetchone()[0] == 0
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM squads WHERE shotcaller_agent_id=?",
+            (original.agent_id,),
+        ).fetchone()[0] == 0
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM squad_registration_offers WHERE shotcaller_agent_id=?",
+            (original.agent_id,),
+        ).fetchone()[0] == 0
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM callsign_leases WHERE callsign='Ashe' OR agent_id=?",
+            (original.agent_id,),
+        ).fetchone()[0] == 0
+
+    assert runner.name is None
+    assert runner.metadata_source == "league-shotcaller-rollback"
+    assert runner.title == "Interview Prep"
+    assert runner.tokens == {"user_theme": "focused"}
+    assert not any(
+        call[:3]
+        in {
+            ("herdr", "tab", "create"),
+            ("herdr", "pane", "split"),
+            ("herdr", "workspace", "create"),
+            ("herdr", "agent", "start"),
+            ("herdr", "agent", "prompt"),
+        }
+        for call in runner.calls
+    )
+
+
+def test_installed_provider_presentation_refuses_real_or_ambiguous_route(
+    root: Path,
+) -> None:
+    for case in (
+        "name",
+        "routing-name",
+        "routing-alias",
+        "conflicting-route",
+        "partial-source",
+    ):
+        state, _ = migrated_state(root, f"shotcaller-installed-route-{case}")
+        worktree = root / f"shotcaller-installed-route-{case}" / "worktree"
+        worktree.mkdir()
+        clock = FakeClock()
+        runner = RecordingHerdr(worktree)
+        prompt_title = "Execute shotcaller command"
+        runner.expose_metadata_source = False
+        runner.provider_managed_presentation = True
+        runner.agent_status = "done"
+        runner.title = f"{prompt_title} | codex"
+        runner.tokens = {
+            "callsign": prompt_title,
+            "harness": "codex",
+            "identity_thread_id": THREAD_ID,
+            "identity_title": f"Codex | {prompt_title}",
+            "sidebar_name": prompt_title,
+            "thread_title": prompt_title,
+        }
+        if case == "name":
+            runner.name = "foreign"
+        elif case == "routing-name":
+            runner.routing_name_field = "foreign"
+        elif case == "routing-alias":
+            runner.routing_alias_field = "foreign"
+        elif case == "conflicting-route":
+            runner.name = "ashe"
+            runner.routing_alias_field = "foreign"
+        else:
+            runner.expose_metadata_source = True
+            runner.metadata_source = None  # type: ignore[assignment]
+
+        with SQLiteStorage(state) as store:
+            _seed_available_ashe(store, clock)
+            before = store.callsign_status("shotcaller")
+            service = _service(store, clock, worktree, runner)
+
+            try:
+                service.bootstrap(_spec())
+            except StorageRefusal as exc:
+                assert exc.code == "shotcaller_identity_unverified"
+            else:
+                raise AssertionError(f"installed ambiguous route {case} was accepted")
+
+            assert store.callsign_status("shotcaller") == before
+            assert store.callsign_assignment_status(_spec().assignment_id) is None
+            assert store.connection.execute(
+                "SELECT COUNT(*) FROM agent_instances WHERE agent_id=?", (AGENT_ID,)
+            ).fetchone()[0] == 0
+        assert not any(
+            call[:3]
+            in {
+                ("herdr", "agent", "rename"),
+                ("herdr", "pane", "report-metadata"),
+                ("herdr", "agent", "prompt"),
+                ("herdr", "tab", "create"),
+                ("herdr", "pane", "split"),
+                ("herdr", "workspace", "create"),
+                ("herdr", "agent", "start"),
+            }
+            for call in runner.calls
+        )
+
+
+def test_legacy_residue_refuses_dirty_or_ambiguous_state_before_publication(
+    root: Path,
+) -> None:
+    cases = (
+        "sidebar-residue",
+        "thread-residue",
+        "title-residue",
+        "league-source",
+        "unproven-tokens",
+        "foreign-subject",
+        "partial-agent-metadata",
+        "ambiguous-history",
+    )
+    for case in cases:
+        state, _ = migrated_state(root, f"shotcaller-legacy-refusal-{case}")
+        worktree = root / f"shotcaller-legacy-refusal-{case}" / "worktree"
+        worktree.mkdir()
+        clock = FakeClock()
+        runner = RecordingHerdr(worktree, publish_mismatch=True)
+        with SQLiteStorage(state) as store:
+            _seed_available_ashe(store, clock)
+            service = _service(store, clock, worktree, runner)
+            original, original_assignment = _make_legacy_bootstrap_residue(
+                store, service, runner
+            )
+            if case == "sidebar-residue":
+                runner.tokens["sidebar_name"] = "Ashe"
+            elif case == "thread-residue":
+                runner.tokens["thread_title"] = "Ashe"
+            elif case == "title-residue":
+                runner.title = "Ashe"
+            elif case == "league-source":
+                runner.metadata_source = "league-shotcaller-legacy"
+            elif case == "unproven-tokens":
+                runner.tokens = None
+            elif case == "foreign-subject":
+                store.connection.execute(
+                    "UPDATE callsign_assignments SET subject_id='agent:foreign' "
+                    "WHERE callsign_assignment_id=?",
+                    (original.assignment_id,),
+                )
+            elif case == "partial-agent-metadata":
+                store.connection.execute(
+                    "UPDATE agent_instances SET metadata_json=? WHERE agent_id=?",
+                    (json.dumps({"scope_kind": "shotcaller"}), AGENT_ID),
+                )
+            elif case == "ambiguous-history":
+                store.connection.execute(
+                    """
+                    INSERT INTO callsign_assignments
+                      (callsign_assignment_id,callsign,subject_id,agent_id,
+                       runtime_instance_id,role,scope_kind,scope_id,state,
+                       reservation_position,queue_version,requirements_json,
+                       acceptance_digest,release_receipt_digest,failure_receipt_digest,
+                       version,reserved_at,activated_at,released_at)
+                    VALUES('callsign-assignment:legacy:ambiguous','Ashe',?, ?,NULL,
+                           'shotcaller','shotcaller',?,'rolled_back',0,1,'[]',NULL,NULL,
+                           'failure:legacy:ambiguous',2,?,NULL,?)
+                    """,
+                    (
+                        "agent:legacy:ambiguous",
+                        AGENT_ID,
+                        AGENT_ID,
+                        clock.now(),
+                        clock.now(),
+                    ),
+                )
+            retry = ShotcallerBootstrapSpec(
+                assignment_id=f"callsign-assignment:bootstrap:ashe:legacy:{case}",
+                agent_id=original.agent_id,
+                runtime_instance_id=original.runtime_instance_id,
+                thread_id=original.thread_id,
+                capabilities=original.capabilities,
+            )
+            agent_before = tuple(
+                store.connection.execute(
+                    "SELECT version,retired_at,metadata_json FROM agent_instances "
+                    "WHERE agent_id=?",
+                    (AGENT_ID,),
+                ).fetchone()
+            )
+            queue_before = tuple(
+                store.connection.execute(
+                    "SELECT state,reservation_assignment_id,version FROM callsign_queue "
+                    "WHERE callsign='Ashe'"
+                ).fetchone()
+            )
+            calls_before_retry = len(runner.calls)
+
+            try:
+                service.bootstrap(retry)
+            except StorageRefusal as exc:
+                expected = (
+                    "shotcaller_identity_unverified"
+                    if case == "unproven-tokens"
+                    else "agent_conflict"
+                )
+                assert exc.code == expected
+            else:
+                raise AssertionError(f"unsafe legacy residue {case} was rebound")
+
+            assert store.callsign_assignment_status(original.assignment_id) == original_assignment
+            assert store.callsign_assignment_status(retry.assignment_id) is None
+            assert tuple(
+                store.connection.execute(
+                    "SELECT version,retired_at,metadata_json FROM agent_instances "
+                    "WHERE agent_id=?",
+                    (AGENT_ID,),
+                ).fetchone()
+            ) == agent_before
+            assert tuple(
+                store.connection.execute(
+                    "SELECT state,reservation_assignment_id,version FROM callsign_queue "
+                    "WHERE callsign='Ashe'"
+                ).fetchone()
+            ) == queue_before
+        retry_calls = runner.calls[calls_before_retry:]
+        assert not any(
+            call[:3]
+            in {
+                ("herdr", "agent", "rename"),
+                ("herdr", "pane", "report-metadata"),
+                ("herdr", "agent", "prompt"),
+                ("herdr", "tab", "create"),
+                ("herdr", "pane", "split"),
+                ("herdr", "workspace", "create"),
+                ("herdr", "agent", "start"),
+            }
+            for call in retry_calls
+        )
+
+
+def test_legacy_residue_refuses_newer_presentation_write_before_publication(
+    root: Path,
+) -> None:
+    state, _ = migrated_state(root, "shotcaller-legacy-presentation-race")
+    worktree = root / "shotcaller-legacy-presentation-race" / "worktree"
+    worktree.mkdir()
+    clock = FakeClock()
+    runner = RecordingHerdr(worktree, publish_mismatch=True)
+    with SQLiteStorage(state) as store:
+        _seed_available_ashe(store, clock)
+        service = _service(store, clock, worktree, runner)
+        original, original_assignment = _make_legacy_bootstrap_residue(
+            store, service, runner
+        )
+        retry = ShotcallerBootstrapSpec(
+            assignment_id="callsign-assignment:bootstrap:ashe:legacy-race",
+            agent_id=original.agent_id,
+            runtime_instance_id=original.runtime_instance_id,
+            thread_id=original.thread_id,
+            capabilities=original.capabilities,
+        )
+        allocate = store.allocate_callsign
+
+        def interleaved_allocate(*args, **kwargs):
+            runner.metadata_source = "user-selected"
+            runner.title = "User selected title"
+            runner.tokens = {"user_theme": "newer"}
+            runner.state_change_seq += 1
+            return allocate(*args, **kwargs)
+
+        store.allocate_callsign = interleaved_allocate  # type: ignore[method-assign]
+        calls_before_retry = len(runner.calls)
+
+        try:
+            service.bootstrap(retry)
+        except StorageRefusal as exc:
+            assert exc.code == "shotcaller_metadata_unverified"
+        else:
+            raise AssertionError("legacy recovery overwrote a newer presentation write")
+
+        assert store.callsign_assignment_status(original.assignment_id) == original_assignment
+        attempted = store.callsign_assignment_status(retry.assignment_id)
+        assert attempted is not None and attempted["state"] == "rolled_back"
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM runtime_instances WHERE actor_agent_id=?", (AGENT_ID,)
+        ).fetchone()[0] == 0
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM squads WHERE shotcaller_agent_id=?", (AGENT_ID,)
+        ).fetchone()[0] == 0
+
+    retry_calls = runner.calls[calls_before_retry:]
+    assert runner.name is None
+    assert runner.metadata_source == "user-selected"
+    assert runner.title == "User selected title"
+    assert runner.tokens == {"user_theme": "newer"}
+    assert not any(
+        call[:3]
+        in {
+            ("herdr", "agent", "rename"),
+            ("herdr", "pane", "report-metadata"),
+            ("herdr", "agent", "prompt"),
+            ("herdr", "tab", "create"),
+            ("herdr", "pane", "split"),
+            ("herdr", "workspace", "create"),
+            ("herdr", "agent", "start"),
+        }
+        for call in retry_calls
+    )
+
+
+def test_legacy_residue_refuses_thread_or_generation_race_before_publication(
+    root: Path,
+) -> None:
+    for case in ("thread", "generation"):
+        state, _ = migrated_state(root, f"shotcaller-legacy-{case}-race")
+        worktree = root / f"shotcaller-legacy-{case}-race" / "worktree"
+        worktree.mkdir()
+        clock = FakeClock()
+        runner = RecordingHerdr(worktree, publish_mismatch=True)
+        with SQLiteStorage(state) as store:
+            _seed_available_ashe(store, clock)
+            service = _service(store, clock, worktree, runner)
+            original, original_assignment = _make_legacy_bootstrap_residue(
+                store, service, runner
+            )
+            retry = ShotcallerBootstrapSpec(
+                assignment_id=f"callsign-assignment:bootstrap:ashe:legacy-{case}-race",
+                agent_id=original.agent_id,
+                runtime_instance_id=original.runtime_instance_id,
+                thread_id=original.thread_id,
+                capabilities=original.capabilities,
+            )
+            allocate = store.allocate_callsign
+
+            def interleaved_allocate(*args, **kwargs):
+                if case == "thread":
+                    runner.thread_id = "77777777-7777-4777-8777-777777777777"
+                else:
+                    runner.terminal_id = "terminal:foreign"
+                runner.state_change_seq += 1
+                return allocate(*args, **kwargs)
+
+            store.allocate_callsign = interleaved_allocate  # type: ignore[method-assign]
+            calls_before_retry = len(runner.calls)
+
+            try:
+                service.bootstrap(retry)
+            except StorageRefusal as exc:
+                assert exc.code == "shotcaller_metadata_unverified"
+            else:
+                raise AssertionError(f"legacy recovery accepted a {case} race")
+
+            assert store.callsign_assignment_status(original.assignment_id) == original_assignment
+            attempted = store.callsign_assignment_status(retry.assignment_id)
+            assert attempted is not None and attempted["state"] == "rolled_back"
+            assert store.connection.execute(
+                "SELECT COUNT(*) FROM runtime_instances WHERE actor_agent_id=?", (AGENT_ID,)
+            ).fetchone()[0] == 0
+            assert store.connection.execute(
+                "SELECT COUNT(*) FROM squads WHERE shotcaller_agent_id=?", (AGENT_ID,)
+            ).fetchone()[0] == 0
+
+        retry_calls = runner.calls[calls_before_retry:]
+        assert runner.name is None
+        assert not any(
+            call[:3]
+            in {
+                ("herdr", "agent", "rename"),
+                ("herdr", "pane", "report-metadata"),
+                ("herdr", "agent", "prompt"),
+                ("herdr", "tab", "create"),
+                ("herdr", "pane", "split"),
+                ("herdr", "workspace", "create"),
+                ("herdr", "agent", "start"),
+            }
+            for call in retry_calls
+        )
+
+
+def test_legacy_residue_crash_after_baseline_retries_exactly_once(
+    root: Path,
+) -> None:
+    state, _ = migrated_state(root, "shotcaller-legacy-crash-retry")
+    worktree = root / "shotcaller-legacy-crash-retry" / "worktree"
+    worktree.mkdir()
+    clock = FakeClock()
+    runner = RecordingHerdr(worktree, publish_mismatch=True)
+    with SQLiteStorage(state) as store:
+        _seed_available_ashe(store, clock)
+        service = _service(store, clock, worktree, runner)
+        original, original_assignment = _make_legacy_bootstrap_residue(
+            store, service, runner
+        )
+        retry = ShotcallerBootstrapSpec(
+            assignment_id="callsign-assignment:bootstrap:ashe:legacy-crash",
+            agent_id=original.agent_id,
+            runtime_instance_id=original.runtime_instance_id,
+            thread_id=original.thread_id,
+            capabilities=original.capabilities,
+        )
+        calls_before_crash = len(runner.calls)
+
+        def crash(point: str) -> None:
+            if point == "after_shotcaller_recovery_reserved":
+                raise InjectedBootstrapCrash(point)
+
+        try:
+            service.bootstrap(retry, fault=crash)
+        except InjectedBootstrapCrash:
+            pass
+        else:
+            raise AssertionError("legacy recovery did not stop at the crash boundary")
+
+        reserved = store.callsign_assignment_status(retry.assignment_id)
+        assert reserved is not None and reserved["state"] == "reserved"
+        baseline = store.shotcaller_bootstrap_baseline(retry.assignment_id)
+        assert baseline is not None
+        assert baseline["schema"] == "league.shotcaller-bootstrap-baseline.v2"
+        assert baseline["title"] == "Interview Prep"
+        assert baseline["presentation_source"] == "herdr:codex"
+        assert store.callsign_assignment_status(original.assignment_id) == original_assignment
+        crash_calls = runner.calls[calls_before_crash:]
+        assert not any(
+            call[:3]
+            in {
+                ("herdr", "agent", "rename"),
+                ("herdr", "pane", "report-metadata"),
+                ("herdr", "agent", "prompt"),
+            }
+            for call in crash_calls
+        )
+
+        created = service.bootstrap(retry)
+        calls_before_exact_retry = len(runner.calls)
+        retried = service.bootstrap(retry)
+
+        assert created["state"] == "active"
+        assert retried == {**created, "idempotent": True}
+        assert store.shotcaller_bootstrap_status(retry.assignment_id) == retried
+        assert store.callsign_assignment_status(original.assignment_id) == original_assignment
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM callsign_assignments WHERE agent_id=?", (AGENT_ID,)
+        ).fetchone()[0] == 2
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM events WHERE event_id=?",
+            (f"callsign:{retry.assignment_id}:reserved",),
+        ).fetchone()[0] == 1
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM squads WHERE shotcaller_agent_id=?", (AGENT_ID,)
+        ).fetchone()[0] == 0
+
+    exact_retry_calls = runner.calls[calls_before_exact_retry:]
+    assert not any(
+        call[:3]
+        in {
+            ("herdr", "agent", "rename"),
+            ("herdr", "pane", "report-metadata"),
+            ("herdr", "agent", "prompt"),
+            ("herdr", "tab", "create"),
+            ("herdr", "pane", "split"),
+            ("herdr", "workspace", "create"),
+            ("herdr", "agent", "start"),
+        }
+        for call in exact_retry_calls
+    )
+
+
+def test_legacy_residue_crash_after_routing_rename_resumes_owned_publication(
+    root: Path,
+) -> None:
+    state, _ = migrated_state(root, "shotcaller-legacy-route-crash-retry")
+    worktree = root / "shotcaller-legacy-route-crash-retry" / "worktree"
+    worktree.mkdir()
+    clock = FakeClock()
+    runner = CrashAfterRenameHerdr(worktree, publish_mismatch=True)
+    with SQLiteStorage(state) as store:
+        _seed_available_ashe(store, clock)
+        service = _service(store, clock, worktree, runner)
+        original, original_assignment = _make_legacy_bootstrap_residue(
+            store, service, runner
+        )
+        retry = ShotcallerBootstrapSpec(
+            assignment_id="callsign-assignment:bootstrap:ashe:legacy-route-crash",
+            agent_id=original.agent_id,
+            runtime_instance_id=original.runtime_instance_id,
+            thread_id=original.thread_id,
+            capabilities=original.capabilities,
+        )
+        runner.crash_after_rename = True
+        calls_before_crash = len(runner.calls)
+
+        try:
+            service.bootstrap(retry)
+        except InjectedBootstrapCrash:
+            pass
+        else:
+            raise AssertionError("legacy recovery did not crash after routing rename")
+
+        reserved = store.callsign_assignment_status(retry.assignment_id)
+        assert reserved is not None and reserved["state"] == "reserved"
+        assert store.shotcaller_bootstrap_baseline(retry.assignment_id) is not None
+        assert runner.name == "ashe"
+        assert runner.metadata_source == "herdr:codex"
+        assert runner.title == "Interview Prep"
+        assert runner.tokens == {"user_theme": "focused"}
+        crash_calls = runner.calls[calls_before_crash:]
+        assert sum(
+            call[:3] == ("herdr", "agent", "rename") and call[-1] != "--clear"
+            for call in crash_calls
+        ) == 1
+        assert not any(
+            call[:3] == ("herdr", "pane", "report-metadata")
+            for call in crash_calls
+        )
+
+        calls_before_resume = len(runner.calls)
+        created = service.bootstrap(retry)
+        resume_calls = runner.calls[calls_before_resume:]
+        calls_before_exact_retry = len(runner.calls)
+        retried = service.bootstrap(retry)
+
+        assert created["state"] == "active"
+        assert retried == {**created, "idempotent": True}
+        assert store.shotcaller_bootstrap_status(retry.assignment_id) == retried
+        assert store.callsign_assignment_status(original.assignment_id) == original_assignment
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM runtime_instances WHERE actor_agent_id=?", (AGENT_ID,)
+        ).fetchone()[0] == 1
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM squads WHERE shotcaller_agent_id=?", (AGENT_ID,)
+        ).fetchone()[0] == 0
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM squad_registration_offers WHERE shotcaller_agent_id=?",
+            (AGENT_ID,),
+        ).fetchone()[0] == 0
+
+    assert runner.name == "ashe"
+    assert runner.title == "Ashe"
+    assert runner.tokens == {
+        "user_theme": "focused",
+        "sidebar_name": "Ashe",
+        "thread_title": "Ashe",
+        **_shotcaller_title_ownership(retry),
+    }
+    assert not any(
+        call[:3] == ("herdr", "agent", "rename") for call in resume_calls
+    )
+    assert sum(
+        call[:3] == ("herdr", "pane", "report-metadata") for call in resume_calls
+    ) == 1
+    assert not any(
+        call[:3]
+        in {
+            ("herdr", "agent", "rename"),
+            ("herdr", "pane", "report-metadata"),
+            ("herdr", "agent", "prompt"),
+            ("herdr", "tab", "create"),
+            ("herdr", "pane", "split"),
+            ("herdr", "workspace", "create"),
+            ("herdr", "agent", "start"),
+        }
+        for call in runner.calls[calls_before_exact_retry:]
+    )
+
+
+def test_historical_route_only_retry_accepts_unrelated_global_sequence_advance(
+    root: Path,
+) -> None:
+    state, _ = migrated_state(root, "shotcaller-historical-route-sequence-retry")
+    worktree = root / "shotcaller-historical-route-sequence-retry" / "worktree"
+    worktree.mkdir()
+    clock = FakeClock()
+    runner = CrashAfterRenameHerdr(worktree, publish_mismatch=True)
+    with SQLiteStorage(state) as store:
+        _seed_available_ashe(store, clock)
+        service = _service(store, clock, worktree, runner)
+        original, original_assignment = _make_historical_squad_bootstrap_residue(
+            store, service, runner
+        )
+        retry = ShotcallerBootstrapSpec(
+            assignment_id="callsign-assignment:bootstrap:ashe:historical-route-sequence",
+            agent_id=original.agent_id,
+            runtime_instance_id=original.runtime_instance_id,
+            thread_id=original.thread_id,
+            capabilities=original.capabilities,
+        )
+        prompt_title = "Execute shotcaller command"
+        runner.expose_metadata_source = False
+        runner.agent_status = "done"
+        runner.title = f"{prompt_title} | codex"
+        runner.tokens = {
+            "callsign": prompt_title,
+            "harness": "codex",
+            "identity_thread_id": original.thread_id,
+            "identity_title": f"Codex | {prompt_title}",
+            "sidebar_name": prompt_title,
+            "thread_title": prompt_title,
+        }
+        runner.state_change_seq += 1
+        runner.crash_after_rename = True
+
+        try:
+            service.bootstrap(retry)
+        except InjectedBootstrapCrash:
+            pass
+        else:
+            raise AssertionError("historical recovery did not crash after route publication")
+
+        reserved = store.callsign_assignment_status(retry.assignment_id)
+        assert reserved is not None and reserved["state"] == "reserved"
+        assert store.callsign_assignment_status(original.assignment_id) == original_assignment
+        assert runner.name == "ashe"
+        assert runner.title == f"{prompt_title} | codex"
+        assert runner.tokens["sidebar_name"] == prompt_title
+        assert runner.tokens["thread_title"] == prompt_title
+        publication = store.shotcaller_bootstrap_publication(retry.assignment_id)
+        assert publication is not None
+        assert publication == {
+            "schema": "league.shotcaller-bootstrap-publication.v1",
+            "assignment_id": retry.assignment_id,
+            "agent_id": retry.agent_id,
+            "callsign": "Ashe",
+            "routing_name": "ashe",
+            "terminal_id": "terminal:1",
+            "endpoint_generation": "herdr:"
+            + hashlib.sha256(
+                f"terminal:1\0{retry.thread_id}".encode("utf-8")
+            ).hexdigest()[:24],
+            "session_identity": retry.thread_id,
+            "worktree": str(worktree.resolve()),
+            "presentation_source": "herdr:codex",
+            "title": prompt_title,
+            "sidebar_name": prompt_title,
+            "thread_title": prompt_title,
+            "baseline_digest": hashlib.sha256(
+                json.dumps(
+                    store.shotcaller_bootstrap_baseline(retry.assignment_id),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode()
+            ).hexdigest(),
+            "observed_state_change_seq": runner.state_change_seq - 1,
+        }
+        runner.state_change_seq += 3
+        calls_before_retry = len(runner.calls)
+
+        created = _service(store, clock, worktree, runner).bootstrap(retry)
+        calls_before_exact_retry = len(runner.calls)
+        retried = _service(store, clock, worktree, runner).bootstrap(retry)
+
+        assert created["state"] == "active"
+        assert retried == {**created, "idempotent": True}
+        assert store.shotcaller_bootstrap_status(retry.assignment_id) == retried
+        assert store.shotcaller_bootstrap_publication(retry.assignment_id) == publication
+        assert store.callsign_assignment_status(original.assignment_id) == original_assignment
+        assert runner.name == "ashe"
+        assert runner.title == "Ashe"
+        assert runner.tokens["sidebar_name"] == "Ashe"
+        assert runner.tokens["thread_title"] == "Ashe"
+        retry_calls = runner.calls[calls_before_retry:]
+        assert not any(
+            call[:3] == ("herdr", "agent", "rename") for call in retry_calls
+        )
+        assert sum(
+            call[:3] == ("herdr", "pane", "report-metadata")
+            for call in retry_calls
+        ) == 1
+        report = next(
+            call
+            for call in retry_calls
+            if call[:3] == ("herdr", "pane", "report-metadata")
+        )
+        assert "--seq" not in report
+        assert report[report.index("--applies-to-source") + 1] == "herdr:codex"
+        assert not any(
+            call[:3]
+            in {
+                ("herdr", "agent", "prompt"),
+                ("herdr", "tab", "create"),
+                ("herdr", "pane", "split"),
+                ("herdr", "workspace", "create"),
+                ("herdr", "agent", "start"),
+            }
+            for call in retry_calls
+        )
+        assert not any(
+            call[:3]
+            in {
+                ("herdr", "agent", "rename"),
+                ("herdr", "pane", "report-metadata"),
+                ("herdr", "agent", "prompt"),
+                ("herdr", "tab", "create"),
+                ("herdr", "pane", "split"),
+                ("herdr", "workspace", "create"),
+                ("herdr", "agent", "start"),
+            }
+            for call in runner.calls[calls_before_exact_retry:]
+        )
+
+
+def test_legacy_route_crash_with_newer_user_write_restores_before_rollback(
+    root: Path,
+) -> None:
+    state, _ = migrated_state(root, "shotcaller-legacy-route-crash-user-write")
+    worktree = root / "shotcaller-legacy-route-crash-user-write" / "worktree"
+    worktree.mkdir()
+    clock = FakeClock()
+    runner = CrashAfterRenameHerdr(worktree, publish_mismatch=True)
+    with SQLiteStorage(state) as store:
+        _seed_available_ashe(store, clock)
+        service = _service(store, clock, worktree, runner)
+        original, original_assignment = _make_legacy_bootstrap_residue(
+            store, service, runner
+        )
+        retry = ShotcallerBootstrapSpec(
+            assignment_id="callsign-assignment:bootstrap:ashe:legacy-route-user-write",
+            agent_id=original.agent_id,
+            runtime_instance_id=original.runtime_instance_id,
+            thread_id=original.thread_id,
+            capabilities=original.capabilities,
+        )
+        runner.crash_after_rename = True
+        try:
+            service.bootstrap(retry)
+        except InjectedBootstrapCrash:
+            pass
+        else:
+            raise AssertionError("legacy recovery did not crash after routing rename")
+
+        runner.metadata_source = "user-selected"
+        runner.title = "User selected title"
+        runner.tokens = {"user_theme": "newer"}
+        runner.state_change_seq += 1
+        calls_before_retry = len(runner.calls)
+
+        try:
+            service.bootstrap(retry)
+        except StorageRefusal as exc:
+            assert exc.code == "shotcaller_metadata_unverified"
+        else:
+            raise AssertionError("route-only recovery overwrote a newer user presentation")
+
+        assert store.callsign_assignment_status(original.assignment_id) == original_assignment
+        attempted = store.callsign_assignment_status(retry.assignment_id)
+        assert attempted is not None and attempted["state"] == "rolled_back"
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM runtime_instances WHERE actor_agent_id=?", (AGENT_ID,)
+        ).fetchone()[0] == 0
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM squads WHERE shotcaller_agent_id=?", (AGENT_ID,)
+        ).fetchone()[0] == 0
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM squad_registration_offers WHERE shotcaller_agent_id=?",
+            (AGENT_ID,),
+        ).fetchone()[0] == 0
+
+    retry_calls = runner.calls[calls_before_retry:]
+    assert runner.name is None
+    assert runner.metadata_source == "user-selected"
+    assert runner.title == "User selected title"
+    assert runner.tokens == {"user_theme": "newer"}
+    assert any(
+        call[:3] == ("herdr", "agent", "rename") and call[-1] == "--clear"
+        for call in retry_calls
+    )
+    rollback_reports = [
+        call
+        for call in retry_calls
+        if call[:3] == ("herdr", "pane", "report-metadata")
+    ]
+    assert len(rollback_reports) == 1
+    assert "--title" not in rollback_reports[0]
+    assert not any(
+        call[:3]
+        in {
+            ("herdr", "agent", "prompt"),
+            ("herdr", "tab", "create"),
+            ("herdr", "pane", "split"),
+            ("herdr", "workspace", "create"),
+            ("herdr", "agent", "start"),
+        }
+        for call in retry_calls
+    )
+
+
+def test_legacy_route_crash_identity_race_preserves_reservation_until_cleanup(
+    root: Path,
+) -> None:
+    for case in ("thread", "generation"):
+        state, _ = migrated_state(root, f"shotcaller-legacy-route-{case}-cleanup")
+        worktree = root / f"shotcaller-legacy-route-{case}-cleanup" / "worktree"
+        worktree.mkdir()
+        clock = FakeClock()
+        runner = CrashAfterRenameHerdr(worktree, publish_mismatch=True)
+        with SQLiteStorage(state) as store:
+            _seed_available_ashe(store, clock)
+            service = _service(store, clock, worktree, runner)
+            original, original_assignment = _make_legacy_bootstrap_residue(
+                store, service, runner
+            )
+            retry = ShotcallerBootstrapSpec(
+                assignment_id=f"callsign-assignment:bootstrap:ashe:route-{case}-cleanup",
+                agent_id=original.agent_id,
+                runtime_instance_id=original.runtime_instance_id,
+                thread_id=original.thread_id,
+                capabilities=original.capabilities,
+            )
+            runner.crash_after_rename = True
+            try:
+                service.bootstrap(retry)
+            except InjectedBootstrapCrash:
+                pass
+            else:
+                raise AssertionError("legacy recovery did not crash after routing rename")
+
+            allocate = store.allocate_callsign
+
+            def interleaved_allocate(*args, **kwargs):
+                if case == "thread":
+                    runner.thread_id = "77777777-7777-4777-8777-777777777777"
+                else:
+                    runner.terminal_id = "terminal:foreign"
+                runner.metadata_source = "user-selected"
+                runner.title = "User selected title"
+                runner.tokens = {"user_theme": "newer"}
+                runner.state_change_seq += 1
+                return allocate(*args, **kwargs)
+
+            store.allocate_callsign = interleaved_allocate  # type: ignore[method-assign]
+            calls_before_failed_cleanup = len(runner.calls)
+            try:
+                service.bootstrap(retry)
+            except StorageRefusal as exc:
+                assert exc.code == "shotcaller_creation_cleanup_unproven"
+            else:
+                raise AssertionError(f"{case} race did not preserve cleanup obligation")
+
+            reserved = store.callsign_assignment_status(retry.assignment_id)
+            assert reserved is not None and reserved["state"] == "reserved"
+            assert store.callsign_assignment_status(original.assignment_id) == original_assignment
+            assert tuple(
+                store.connection.execute(
+                    "SELECT state,reservation_assignment_id FROM callsign_queue "
+                    "WHERE callsign='Ashe'"
+                ).fetchone()
+            ) == ("reserved", retry.assignment_id)
+            assert store.connection.execute(
+                "SELECT COUNT(*) FROM callsign_leases WHERE callsign='Ashe' AND agent_id=?",
+                (AGENT_ID,),
+            ).fetchone()[0] == 1
+            agent = store.connection.execute(
+                "SELECT version,retired_at,metadata_json FROM agent_instances WHERE agent_id=?",
+                (AGENT_ID,),
+            ).fetchone()
+            assert agent["version"] == 3 and agent["retired_at"] is None
+            assert (
+                json.loads(agent["metadata_json"])["shotcaller_bootstrap_baseline"]["schema"]
+                == "league.shotcaller-bootstrap-baseline.v2"
+            )
+            assert store.connection.execute(
+                "SELECT COUNT(*) FROM runtime_instances WHERE actor_agent_id=?", (AGENT_ID,)
+            ).fetchone()[0] == 0
+            assert store.connection.execute(
+                "SELECT COUNT(*) FROM squads WHERE shotcaller_agent_id=?", (AGENT_ID,)
+            ).fetchone()[0] == 0
+            assert store.connection.execute(
+                "SELECT COUNT(*) FROM squad_registration_offers WHERE shotcaller_agent_id=?",
+                (AGENT_ID,),
+            ).fetchone()[0] == 0
+
+            failed_cleanup_calls = runner.calls[calls_before_failed_cleanup:]
+            assert runner.name == "ashe"
+            assert not any(
+                call[:3]
+                in {
+                    ("herdr", "agent", "rename"),
+                    ("herdr", "pane", "report-metadata"),
+                    ("herdr", "agent", "prompt"),
+                    ("herdr", "tab", "create"),
+                    ("herdr", "pane", "split"),
+                    ("herdr", "workspace", "create"),
+                    ("herdr", "agent", "start"),
+                }
+                for call in failed_cleanup_calls
+            )
+
+            store.allocate_callsign = allocate  # type: ignore[method-assign]
+            runner.thread_id = original.thread_id
+            runner.terminal_id = "terminal:1"
+            calls_before_completed_cleanup = len(runner.calls)
+            try:
+                service.bootstrap(retry)
+            except StorageRefusal as exc:
+                assert exc.code == "shotcaller_metadata_unverified"
+            else:
+                raise AssertionError(f"{case} cleanup retry unexpectedly activated")
+
+            rolled_back = store.callsign_assignment_status(retry.assignment_id)
+            assert rolled_back is not None and rolled_back["state"] == "rolled_back"
+            assert tuple(
+                store.connection.execute(
+                    "SELECT state,reservation_assignment_id FROM callsign_queue "
+                    "WHERE callsign='Ashe'"
+                ).fetchone()
+            ) == ("available", None)
+            assert store.connection.execute(
+                "SELECT COUNT(*) FROM callsign_leases WHERE callsign='Ashe' AND agent_id=?",
+                (AGENT_ID,),
+            ).fetchone()[0] == 0
+
+        completed_cleanup_calls = runner.calls[calls_before_completed_cleanup:]
+        assert runner.name is None
+        assert runner.metadata_source == "user-selected"
+        assert runner.title == "User selected title"
+        assert runner.tokens == {"user_theme": "newer"}
+        assert any(
+            call[:3] == ("herdr", "agent", "rename") and call[-1] == "--clear"
+            for call in completed_cleanup_calls
+        )
+        reports = [
+            call
+            for call in completed_cleanup_calls
+            if call[:3] == ("herdr", "pane", "report-metadata")
+        ]
+        assert len(reports) == 1 and "--title" not in reports[0]
+        assert not any(
+            call[:3]
+            in {
+                ("herdr", "agent", "prompt"),
+                ("herdr", "tab", "create"),
+                ("herdr", "pane", "split"),
+                ("herdr", "workspace", "create"),
+                ("herdr", "agent", "start"),
+            }
+            for call in completed_cleanup_calls
+        )
+
+
+def test_legacy_residue_finalization_failure_restores_captured_presentation(
+    root: Path,
+) -> None:
+    state, _ = migrated_state(root, "shotcaller-legacy-finalization-rollback")
+    worktree = root / "shotcaller-legacy-finalization-rollback" / "worktree"
+    worktree.mkdir()
+    clock = FakeClock()
+    runner = RecordingHerdr(worktree, publish_mismatch=True)
+    with SQLiteStorage(state) as store:
+        _seed_available_ashe(store, clock)
+        service = _service(store, clock, worktree, runner)
+        original, original_assignment = _make_legacy_bootstrap_residue(
+            store, service, runner
+        )
+        retry = ShotcallerBootstrapSpec(
+            assignment_id="callsign-assignment:bootstrap:ashe:legacy-rollback",
+            agent_id=original.agent_id,
+            runtime_instance_id=original.runtime_instance_id,
+            thread_id=original.thread_id,
+            capabilities=original.capabilities,
+        )
+
+        def fail_finalization(point: str) -> None:
+            if point == "after_shotcaller_activation":
+                raise InjectedBootstrapFault(point)
+
+        try:
+            service.bootstrap(retry, fault=fail_finalization)
+        except InjectedBootstrapFault:
+            pass
+        else:
+            raise AssertionError("legacy recovery finalization fault escaped")
+
+        assert store.callsign_assignment_status(original.assignment_id) == original_assignment
+        attempted = store.callsign_assignment_status(retry.assignment_id)
+        assert attempted is not None and attempted["state"] == "rolled_back"
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM runtime_instances WHERE actor_agent_id=?", (AGENT_ID,)
+        ).fetchone()[0] == 0
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM squads WHERE shotcaller_agent_id=?", (AGENT_ID,)
+        ).fetchone()[0] == 0
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM squad_registration_offers WHERE shotcaller_agent_id=?",
+            (AGENT_ID,),
+        ).fetchone()[0] == 0
+
+    assert runner.name is None
+    assert runner.title == "Interview Prep"
+    assert runner.tokens == {"user_theme": "focused"}
+    assert not any(
+        call[:3]
+        in {
+            ("herdr", "tab", "create"),
+            ("herdr", "pane", "split"),
+            ("herdr", "workspace", "create"),
+            ("herdr", "agent", "start"),
+            ("herdr", "agent", "prompt"),
+        }
+        for call in runner.calls
+    )
+
+
+def test_recovered_bootstrap_exact_retry_is_receipt_identical_and_read_only(
+    root: Path,
+) -> None:
+    state, _ = migrated_state(root, "shotcaller-recovered-exact-retry")
+    worktree = root / "shotcaller-recovered-exact-retry" / "worktree"
+    worktree.mkdir()
+    clock = FakeClock()
+    runner = RecordingHerdr(worktree, publish_mismatch=True)
+    with SQLiteStorage(state) as store:
+        _seed_available_ashe(store, clock)
+        service = _service(store, clock, worktree, runner)
+        original, _ = _create_clean_bootstrap_residue(store, service, runner)
+        spec = ShotcallerBootstrapSpec(
+            assignment_id="callsign-assignment:bootstrap:ashe:recovered",
+            agent_id=original.agent_id,
+            runtime_instance_id=original.runtime_instance_id,
+            thread_id=original.thread_id,
+            capabilities=original.capabilities,
+        )
+        created = service.bootstrap(spec)
+        calls_before_retry = len(runner.calls)
+
+        retried = service.bootstrap(spec)
+
+        assert retried == {**created, "idempotent": True}
+        assert store.shotcaller_bootstrap_status(spec.assignment_id) == retried
+    retry_calls = runner.calls[calls_before_retry:]
+    assert not any(
+        call[:3]
+        in {
+            ("herdr", "agent", "rename"),
+            ("herdr", "pane", "report-metadata"),
+            ("herdr", "agent", "prompt"),
+            ("herdr", "tab", "create"),
+            ("herdr", "pane", "split"),
+            ("herdr", "workspace", "create"),
+            ("herdr", "agent", "start"),
+        }
+        for call in retry_calls
+    )
+
+
+def test_recovered_bootstrap_finalization_fault_rolls_back_without_losing_history(
+    root: Path,
+) -> None:
+    state, _ = migrated_state(root, "shotcaller-recovered-rollback")
+    worktree = root / "shotcaller-recovered-rollback" / "worktree"
+    worktree.mkdir()
+    clock = FakeClock()
+    runner = RecordingHerdr(worktree, publish_mismatch=True)
+    with SQLiteStorage(state) as store:
+        _seed_available_ashe(store, clock)
+        service = _service(store, clock, worktree, runner)
+        original, original_assignment = _create_clean_bootstrap_residue(
+            store, service, runner
+        )
+        retry = ShotcallerBootstrapSpec(
+            assignment_id="callsign-assignment:bootstrap:ashe:rollback-retry",
+            agent_id=original.agent_id,
+            runtime_instance_id=original.runtime_instance_id,
+            thread_id=original.thread_id,
+            capabilities=original.capabilities,
+        )
+
+        def fail_finalization(point: str) -> None:
+            if point == "after_shotcaller_activation":
+                raise InjectedBootstrapFault(point)
+
+        try:
+            service.bootstrap(retry, fault=fail_finalization)
+        except InjectedBootstrapFault:
+            pass
+        else:
+            raise AssertionError("recovered bootstrap finalization fault escaped")
+
+        assert store.callsign_assignment_status(original.assignment_id) == original_assignment
+        recovered = store.callsign_assignment_status(retry.assignment_id)
+        assert recovered is not None and recovered["state"] == "rolled_back"
+        assert store.connection.execute(
+            "SELECT state FROM callsign_queue WHERE callsign=?",
+            (original_assignment["callsign"],),
+        ).fetchone()[0] == "available"
+        agent = store.connection.execute(
+            "SELECT kind,retired_at,version FROM agent_instances WHERE agent_id=?",
+            (AGENT_ID,),
+        ).fetchone()
+        assert agent["kind"] == "unbound"
+        assert agent["retired_at"] is not None
+        assert agent["version"] == 4
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM runtime_instances WHERE actor_agent_id=?", (AGENT_ID,)
+        ).fetchone()[0] == 0
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM squads WHERE shotcaller_agent_id=?", (AGENT_ID,)
+        ).fetchone()[0] == 0
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM squad_registration_offers WHERE shotcaller_agent_id=?",
+            (AGENT_ID,),
+        ).fetchone()[0] == 0
+    assert runner.name is None
+    assert not any(
+        call[:3]
+        in {
+            ("herdr", "tab", "create"),
+            ("herdr", "pane", "split"),
+            ("herdr", "workspace", "create"),
+            ("herdr", "agent", "start"),
+            ("herdr", "agent", "prompt"),
+        }
+        for call in runner.calls
+    )
+
+
+def test_retired_shotcaller_recovery_refuses_unsafe_residue_shapes_without_mutation(
+    root: Path,
+) -> None:
+    cases = (
+        "different-thread",
+        "runtime-bearing",
+        "squad-bearing",
+        "offer-bearing",
+        "active-assignment",
+        "active-callsign",
+        "ambiguous-history",
+        "malformed-rollback-history",
+        "foreign-subject",
+        "non-bootstrap-retired-agent",
+    )
+    for case in cases:
+        state, _ = migrated_state(root, f"shotcaller-residue-refusal-{case}")
+        worktree = root / f"shotcaller-residue-refusal-{case}" / "worktree"
+        worktree.mkdir()
+        clock = FakeClock()
+        runner = RecordingHerdr(worktree, publish_mismatch=True)
+        with SQLiteStorage(state) as store:
+            _seed_available_ashe(store, clock)
+            service = _service(store, clock, worktree, runner)
+            original, _ = _create_clean_bootstrap_residue(store, service, runner)
+            thread_id = original.thread_id
+            if case == "different-thread":
+                thread_id = "77777777-7777-4777-8777-777777777777"
+                runner.thread_id = thread_id
+            elif case == "runtime-bearing":
+                store.connection.execute(
+                    """
+                    INSERT INTO runtime_instances
+                      (runtime_instance_id,actor_agent_id,harness_kind,backend_kind,
+                       session_ref,endpoint,runtime_generation,status,verified,last_seen_at,
+                       capabilities_json)
+                    VALUES('runtime:residue',?,'codex-thread','herdr',?,
+                           'pane:residue','generation:residue','closed',1,?,'[]')
+                    """,
+                    (AGENT_ID, original.thread_id, clock.now()),
+                )
+            elif case == "squad-bearing":
+                store.connection.execute(
+                    "INSERT INTO squads(squad_id,shotcaller_agent_id,state,version,updated_at) "
+                    "VALUES('squad:residue',?,'retired',1,?)",
+                    (AGENT_ID, clock.now()),
+                )
+            elif case == "offer-bearing":
+                requester = "agent:offer-requester"
+                store.connection.execute(
+                    """
+                    INSERT INTO agent_instances
+                      (agent_id,callsign,role,shotcaller_agent_id,task_id,kind,address,
+                       thread_id,backend,routing_name,display_agent,repository,issue,branch,
+                       worktree,status,version,updated_at,update_text,blocker,next_action,
+                       metadata_json,retired_at)
+                    VALUES(?,'Ashe','hidden-worker',NULL,NULL,'unbound',NULL,NULL,NULL,NULL,
+                           NULL,NULL,NULL,NULL,NULL,'active',1,?,'offer fixture',NULL,
+                           'none','{}',?)
+                    """,
+                    (requester, clock.now(), clock.now()),
+                )
+                store.connection.execute(
+                    """
+                    INSERT INTO runtime_instances
+                      (runtime_instance_id,actor_agent_id,harness_kind,backend_kind,
+                       session_ref,endpoint,runtime_generation,status,verified,last_seen_at,
+                       capabilities_json)
+                    VALUES('runtime:offer',?,'codex-thread','herdr','thread:offer',
+                           'pane:offer','generation:offer','closed',1,?,'[]')
+                    """,
+                    (requester, clock.now()),
+                )
+                store.connection.execute(
+                    "INSERT INTO events(event_id,agent_id,task_id,entity_version,event_type,"
+                    "status,update_text,occurred_at,detail_json) "
+                    "VALUES('event:offer',?,NULL,1,'squad_registration_offered','pending',"
+                    "'offer fixture',?,'{}')",
+                    (requester, clock.now()),
+                )
+                store.connection.execute(
+                    "INSERT INTO delivery_outbox(outbox_id,event_id,recipient_agent_id,state,"
+                    "available_at) VALUES('outbox:offer','event:offer',?,'pending',?)",
+                    (requester, clock.now()),
+                )
+                store.connection.execute(
+                    """
+                    INSERT INTO squad_registration_offers
+                      (registration_id,squad_id,requester_agent_id,shotcaller_agent_id,
+                       runtime_instance_id,project_ids_json,capabilities_json,state,expires_at,
+                       offer_event_id,offer_outbox_id,response_event_id,response_outbox_id,
+                       registered_at,responded_at)
+                    VALUES('registration:residue','squad:offered',?,?,'runtime:offer','[]','[]',
+                           'rejected',?,'event:offer','outbox:offer',NULL,NULL,?,?)
+                    """,
+                    (requester, AGENT_ID, clock.now(), clock.now(), clock.now()),
+                )
+            elif case == "active-assignment":
+                store.connection.execute(
+                    "UPDATE callsign_assignments SET state='active',activated_at=? "
+                    "WHERE callsign_assignment_id=?",
+                    (clock.now(), original.assignment_id),
+                )
+            elif case == "active-callsign":
+                store.connection.execute(
+                    "UPDATE callsign_queue SET state='active',queue_position=NULL "
+                    "WHERE callsign='Ashe'"
+                )
+            elif case == "ambiguous-history":
+                store.connection.execute(
+                    """
+                    INSERT INTO callsign_assignments
+                      (callsign_assignment_id,callsign,subject_id,agent_id,runtime_instance_id,
+                       role,scope_kind,scope_id,state,reservation_position,queue_version,
+                       requirements_json,acceptance_digest,release_receipt_digest,
+                       failure_receipt_digest,version,reserved_at,activated_at,released_at)
+                    VALUES('callsign-assignment:ambiguous','Ashe','agent:ambiguous',?,NULL,
+                           'shotcaller','shotcaller',?,'rolled_back',0,1,'[]',NULL,NULL,
+                           'failure:ambiguous',2,?,NULL,?)
+                    """,
+                    (AGENT_ID, AGENT_ID, clock.now(), clock.now()),
+                )
+            elif case == "malformed-rollback-history":
+                store.connection.execute(
+                    "UPDATE events SET detail_json='{}' WHERE event_id=?",
+                    (f"callsign:{original.assignment_id}:rolled-back",),
+                )
+            elif case == "foreign-subject":
+                store.connection.execute(
+                    "UPDATE callsign_assignments SET subject_id='agent:foreign' "
+                    "WHERE callsign_assignment_id=?",
+                    (original.assignment_id,),
+                )
+            elif case == "non-bootstrap-retired-agent":
+                store.connection.execute(
+                    "UPDATE agent_instances SET metadata_json=? WHERE agent_id=?",
+                    (json.dumps({"scope_kind": "shotcaller", "scope_id": AGENT_ID}), AGENT_ID),
+                )
+            retry = ShotcallerBootstrapSpec(
+                assignment_id=f"callsign-assignment:bootstrap:ashe:refuse:{case}",
+                agent_id=original.agent_id,
+                runtime_instance_id=original.runtime_instance_id,
+                thread_id=thread_id,
+                capabilities=original.capabilities,
+            )
+            agent_before = tuple(
+                store.connection.execute(
+                    "SELECT version,retired_at,metadata_json FROM agent_instances WHERE agent_id=?",
+                    (AGENT_ID,),
+                ).fetchone()
+            )
+            queue_before = tuple(
+                store.connection.execute(
+                    "SELECT state,reservation_assignment_id,version FROM callsign_queue "
+                    "WHERE callsign='Ashe'"
+                ).fetchone()
+            )
+            history_before = tuple(
+                store.connection.execute(
+                    "SELECT * FROM callsign_assignments WHERE callsign_assignment_id=?",
+                    (original.assignment_id,),
+                ).fetchone()
+            )
+            calls_before_retry = len(runner.calls)
+
+            try:
+                service.bootstrap(retry)
+            except StorageRefusal as exc:
+                assert exc.code == "agent_conflict"
+            else:
+                raise AssertionError(f"unsafe residue {case} was rebound")
+
+            assert store.callsign_assignment_status(retry.assignment_id) is None
+            assert tuple(
+                store.connection.execute(
+                    "SELECT version,retired_at,metadata_json FROM agent_instances WHERE agent_id=?",
+                    (AGENT_ID,),
+                ).fetchone()
+            ) == agent_before
+            assert tuple(
+                store.connection.execute(
+                    "SELECT state,reservation_assignment_id,version FROM callsign_queue "
+                    "WHERE callsign='Ashe'"
+                ).fetchone()
+            ) == queue_before
+            assert tuple(
+                store.connection.execute(
+                    "SELECT * FROM callsign_assignments WHERE callsign_assignment_id=?",
+                    (original.assignment_id,),
+                ).fetchone()
+            ) == history_before
+        retry_calls = runner.calls[calls_before_retry:]
+        assert not any(
+            call[:3]
+            in {
+                ("herdr", "agent", "rename"),
+                ("herdr", "pane", "report-metadata"),
+                ("herdr", "agent", "prompt"),
+                ("herdr", "tab", "create"),
+                ("herdr", "pane", "split"),
+                ("herdr", "workspace", "create"),
+                ("herdr", "agent", "start"),
+            }
+            for call in retry_calls
+        )
+
+
+def test_retired_shotcaller_recovery_refuses_interleaved_agent_write(
+    root: Path,
+) -> None:
+    state, _ = migrated_state(root, "shotcaller-residue-race")
+    worktree = root / "shotcaller-residue-race" / "worktree"
+    worktree.mkdir()
+    clock = FakeClock()
+    runner = RecordingHerdr(worktree, publish_mismatch=True)
+    with SQLiteStorage(state) as store:
+        _seed_available_ashe(store, clock)
+        service = _service(store, clock, worktree, runner)
+        original, _ = _create_clean_bootstrap_residue(store, service, runner)
+        retry = ShotcallerBootstrapSpec(
+            assignment_id="callsign-assignment:bootstrap:ashe:race",
+            agent_id=original.agent_id,
+            runtime_instance_id=original.runtime_instance_id,
+            thread_id=original.thread_id,
+            capabilities=original.capabilities,
+        )
+        queue_before = tuple(
+            store.connection.execute(
+                "SELECT state,reservation_assignment_id,version FROM callsign_queue "
+                "WHERE callsign='Ashe'"
+            ).fetchone()
+        )
+        allocate = store.allocate_callsign
+
+        def interleaved_allocate(*args, **kwargs):
+            store.connection.execute(
+                "UPDATE agent_instances SET version=version+1,update_text='newer owner write' "
+                "WHERE agent_id=?",
+                (AGENT_ID,),
+            )
+            return allocate(*args, **kwargs)
+
+        store.allocate_callsign = interleaved_allocate  # type: ignore[method-assign]
+        calls_before_retry = len(runner.calls)
+
+        try:
+            service.bootstrap(retry)
+        except StorageRefusal as exc:
+            assert exc.code == "agent_conflict"
+        else:
+            raise AssertionError("interleaved retired-agent write was overwritten")
+
+        assert store.callsign_assignment_status(retry.assignment_id) is None
+        agent = store.connection.execute(
+            "SELECT version,retired_at,update_text FROM agent_instances WHERE agent_id=?",
+            (AGENT_ID,),
+        ).fetchone()
+        assert tuple(agent) == (3, clock.now(), "newer owner write")
+        assert tuple(
+            store.connection.execute(
+                "SELECT state,reservation_assignment_id,version FROM callsign_queue "
+                "WHERE callsign='Ashe'"
+            ).fetchone()
+        ) == queue_before
+    retry_calls = runner.calls[calls_before_retry:]
+    assert not any(
+        call[:3]
+        in {
+            ("herdr", "agent", "rename"),
+            ("herdr", "pane", "report-metadata"),
+            ("herdr", "agent", "prompt"),
+            ("herdr", "tab", "create"),
+            ("herdr", "pane", "split"),
+            ("herdr", "workspace", "create"),
+            ("herdr", "agent", "start"),
+        }
+        for call in retry_calls
+    )
+
+
 def test_bootstrap_rolls_back_when_owned_auto_title_never_settles(root: Path) -> None:
     state, _ = migrated_state(root, "shotcaller-auto-title-rollback")
     worktree = root / "shotcaller-auto-title-rollback" / "worktree"
@@ -1083,7 +3440,10 @@ def test_bootstrap_rolls_back_when_owned_auto_title_never_settles(root: Path) ->
         assert store.connection.execute(
             "SELECT COUNT(*) FROM squads WHERE shotcaller_agent_id=?", (AGENT_ID,)
         ).fetchone()[0] == 0
-    assert runner.name is None and runner.tokens == {} and runner.title == ""
+    assert runner.name is None
+    assert runner.tokens == {}
+    assert runner.metadata_source == "herdr:codex"
+    assert runner.title == "Create the Shotcaller for this pane | codex"
     assert not any(
         call[:3]
         in {
@@ -1156,7 +3516,12 @@ def test_bootstrap_rolls_back_without_overwriting_newer_user_title(root: Path) -
         for index, value in enumerate(rollback_metadata)
         if value == "--token"
     }
-    assert rollback_tokens == {"sidebar_name=", "thread_title="}
+    assert rollback_tokens == {
+        "sidebar_name=",
+        "thread_title=",
+        "shotcaller_title_owner=",
+        "shotcaller_title_source=",
+    }
     assert not any(
         call[:3]
         in {
@@ -1239,7 +3604,11 @@ def test_publish_crash_then_retry_fault_restores_original_unbound_metadata(
     assert crashed.returncode == 86
     published = PersistentRecordingHerdr(worktree, herdr_state)
     assert published.name == "ashe"
-    assert published.tokens == {"sidebar_name": "Ashe", "thread_title": "Ashe"}
+    assert published.tokens == {
+        "sidebar_name": "Ashe",
+        "thread_title": "Ashe",
+        **_shotcaller_title_ownership(_spec()),
+    }
     assert published.title == "Ashe"
     with SQLiteStorage(state) as store:
         assignment = store.callsign_assignment_status(_spec().assignment_id)
@@ -1279,13 +3648,34 @@ def main() -> None:
         test_in_place_bootstrap_creates_shotcaller_without_layout_or_squad_registration(root)
         test_in_place_bootstrap_retries_transient_malformed_identity_read_without_layout(root)
         test_in_place_bootstrap_refuses_persistently_malformed_identity_without_mutation(root)
-        test_bootstrap_reasserts_owned_title_after_auto_title_settles(root)
+        test_bootstrap_refuses_later_provider_title_without_overwriting_it(root)
+        test_bootstrap_preserves_complete_later_provider_presentation_on_rollback(root)
         test_bootstrap_identity_mismatch_makes_no_canonical_mutation(root)
         test_preexisting_reserved_bootstrap_requires_durable_baseline_when_alias_empty(root)
         test_preexisting_reserved_bootstrap_rejects_residual_metadata_without_baseline(root)
-        test_completed_bootstrap_retry_restores_owned_title_without_prompt(root)
+        test_completed_bootstrap_retry_refuses_later_provider_title_without_prompt(root)
         test_completed_bootstrap_retry_refuses_newer_user_title_with_stale_tokens(root)
         test_bootstrap_metadata_and_atomic_finalization_failures_restore_exact_state(root)
+        test_clean_rolled_back_bootstrap_residue_rebinds_same_thread_in_place(root)
+        test_legacy_rolled_back_bootstrap_residue_captures_clean_live_baseline(root)
+        test_legacy_residue_accepts_installed_provider_presentation_without_route(root)
+        test_historical_squad_residue_captures_baseline_before_publication_and_retries(root)
+        test_historical_squad_residue_refuses_tampered_history_or_owned_resources(root)
+        test_historical_squad_residue_finalization_failure_restores_v2_baseline(root)
+        test_installed_provider_presentation_refuses_real_or_ambiguous_route(root)
+        test_legacy_residue_refuses_dirty_or_ambiguous_state_before_publication(root)
+        test_legacy_residue_refuses_newer_presentation_write_before_publication(root)
+        test_legacy_residue_refuses_thread_or_generation_race_before_publication(root)
+        test_legacy_residue_crash_after_baseline_retries_exactly_once(root)
+        test_legacy_residue_crash_after_routing_rename_resumes_owned_publication(root)
+        test_historical_route_only_retry_accepts_unrelated_global_sequence_advance(root)
+        test_legacy_route_crash_with_newer_user_write_restores_before_rollback(root)
+        test_legacy_route_crash_identity_race_preserves_reservation_until_cleanup(root)
+        test_legacy_residue_finalization_failure_restores_captured_presentation(root)
+        test_recovered_bootstrap_exact_retry_is_receipt_identical_and_read_only(root)
+        test_recovered_bootstrap_finalization_fault_rolls_back_without_losing_history(root)
+        test_retired_shotcaller_recovery_refuses_unsafe_residue_shapes_without_mutation(root)
+        test_retired_shotcaller_recovery_refuses_interleaved_agent_write(root)
         test_bootstrap_rolls_back_when_owned_auto_title_never_settles(root)
         test_bootstrap_rolls_back_without_overwriting_newer_user_title(root)
         test_publish_crash_then_retry_fault_restores_original_unbound_metadata(root)

@@ -349,6 +349,41 @@ def test_concurrent_source_transitions_commit_once(root: Path) -> None:
          WHERE e.aggregate_kind='task' AND e.aggregate_id='task:concurrent'
         """
     ).fetchone()[0] == 1
+    committed = first.connection.execute(
+        "SELECT transition_key,event_id FROM task_transitions WHERE task_id='task:concurrent'"
+    ).fetchone()
+
+    def retry_committed_transition() -> str:
+        try:
+            first.transition_task(
+                active["task_id"],
+                active["runtime_instance_id"],
+                4,
+                "completed",
+                "Malformed retry history",
+                "No action",
+                None,
+                "transition:retry-malformed",
+                committed["transition_key"],
+                "event:retry-malformed",
+                "outbox:retry-malformed",
+                SHOTCALLER_ID,
+                clock.now(),
+            )
+        except StorageRefusal as exc:
+            return exc.code
+        raise AssertionError("malformed stored transition history escaped its refusal")
+
+    first.connection.execute(
+        "UPDATE events SET detail_json='not-json' WHERE event_id=?",
+        (committed["event_id"],),
+    )
+    assert retry_committed_transition() == "transition_history_malformed"
+    first.connection.execute(
+        "UPDATE events SET detail_json=? WHERE event_id=?",
+        ('{"attention_required":"false"}', committed["event_id"]),
+    )
+    assert retry_committed_transition() == "transition_history_malformed"
     try:
         first.transition_task(
             active["task_id"],

@@ -3,19 +3,31 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import ExitStack, contextmanager
 import fcntl
 import hashlib
 import json
 import os
+import secrets
 import sys
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from .sqlite_store import DEFAULT_BUSY_TIMEOUT_MS, SQLiteStorage
 from .sqlite_watcher_ops import _obligation_counts, stop_feedback_reason
 from .storage import RuntimeRegistrationCommand, StorageRefusal
+from .persistent_supervisor import (
+    PersistentSupervisor,
+    notify_user_message,
+    pause_supervisor,
+    resume_supervisor,
+    send_supervisor_message,
+    SupervisorUnavailable,
+    stop_supervisor,
+    supervisor_status,
+)
 
 
 STOP_BUSY_TIMEOUT_MS = 250
@@ -36,6 +48,11 @@ def _payload() -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+BROKERED_HOOK_COMMANDS = frozenset(
+    {"codex-stop-hook", "codex-user-prompt-hook", "cursor-before-submit-hook"}
+)
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="agent-watcher")
     parser.add_argument("--shotcaller")
@@ -49,6 +66,15 @@ def _parser() -> argparse.ArgumentParser:
     commands.add_parser("cursor-stop-hook")
     commands.add_parser("cursor-before-submit-hook")
     commands.add_parser("status")
+    service_run = commands.add_parser("service-run")
+    service_run.add_argument("--lease-seconds", type=float, default=60)
+    service_run.add_argument("--renew-seconds", type=float, default=20)
+    service_resume = commands.add_parser("service-resume")
+    service_resume.add_argument("--lease-seconds", type=float, default=60)
+    service_resume.add_argument("--renew-seconds", type=float, default=20)
+    commands.add_parser("service-status")
+    commands.add_parser("service-stop")
+    commands.add_parser("service-pause")
     supervise = commands.add_parser("supervise")
     supervise.add_argument("--poll-seconds", type=float, default=1.0)
     deliver = commands.add_parser("deliver")
@@ -171,10 +197,27 @@ def _busy_stop_result(
     }
 
 
-def _codex_stop_reason(callsign: str, wait_generation: int) -> str:
+def _champion_stop_output(command: str, result: dict[str, Any]) -> dict[str, Any]:
+    if result["decision"] != "block":
+        return {}
+    reason = (
+        f"League requires {result['callsign']} to record a fresh durable transition "
+        f"for active task {result['task_id']} before this Champion turn ends: "
+        f"{result['task_summary']}"
+    )
+    return (
+        {"decision": "block", "reason": reason}
+        if command == "codex-stop-hook"
+        else {"followup_message": reason}
+    )
+
+
+def _codex_stop_reason(
+    callsign: str, wait_generation: int, summaries: tuple[str, ...] = ()
+) -> str:
     """Render only the resolved callsign; Codex turn identity stays internal."""
 
-    return stop_feedback_reason(callsign, wait_generation)
+    return stop_feedback_reason(callsign, wait_generation, summaries)
 
 
 def _hook_busy_timeout(command: str) -> int:
@@ -196,6 +239,27 @@ def _prompt_identity(
     return f"prompt:hook:{digest}", f"hook:{digest}"
 
 
+def _codex_prompt_invocation_id() -> str:
+    """Mint one opaque identity for one provider hook invocation.
+
+    Codex deliberately reuses ``turn_id`` for queued steers in the same active
+    turn.  The invocation identity is therefore created once in the hook
+    process and carried unchanged through broker retry or direct fallback.
+    """
+
+    return f"codex-user-prompt:{secrets.token_hex(16)}"
+
+
+def _valid_codex_prompt_invocation_id(value: Any) -> bool:
+    prefix = "codex-user-prompt:"
+    return (
+        isinstance(value, str)
+        and len(value) == len(prefix) + 32
+        and value.startswith(prefix)
+        and all(character in "0123456789abcdef" for character in value[len(prefix):])
+    )
+
+
 def _capture_prompt(
     store: SQLiteStorage,
     scope: str | None,
@@ -204,14 +268,24 @@ def _capture_prompt(
     payload: dict[str, Any],
     *,
     adapter_kind: str,
+    capture_event_id: str | None = None,
 ) -> dict[str, Any]:
     if adapter_kind == "codex":
         event_name = "UserPromptSubmit"
         session_ref = payload.get("session_id")
-        raw_source_event_key = payload.get("turn_id")
+        provider_turn_id = payload.get("turn_id")
+        raw_source_event_key = (
+            f"{provider_turn_id}\0{capture_event_id}"
+            if isinstance(provider_turn_id, str)
+            and provider_turn_id
+            and isinstance(capture_event_id, str)
+            and capture_event_id
+            else None
+        )
     else:
         event_name = "beforeSubmitPrompt"
         session_ref = payload.get("conversation_id")
+        provider_turn_id = payload.get("generation_id")
         raw_source_event_key = payload.get("generation_id")
     body = payload.get("prompt")
     if (
@@ -238,7 +312,7 @@ def _capture_prompt(
         and store.consume_stop_feedback(
             scope,
             actor_id,
-            _codex_turn_generation(session_ref, raw_source_event_key),
+            _codex_turn_generation(session_ref, provider_turn_id),
             body,
         )
     ):
@@ -247,7 +321,9 @@ def _capture_prompt(
             "prompt_id": None,
             "idempotent": False,
         }
-    now = datetime.now().astimezone().isoformat(timespec="seconds")
+    # Preserve provider invocation order for multiple steers accepted inside
+    # one Codex turn; second precision collapses ordinary queued submissions.
+    now = datetime.now().astimezone().isoformat(timespec="microseconds")
     if actor_id is None:
         return store.quarantine_prompt(
             prompt_id, adapter_kind, session_ref, source_event_key, body, now
@@ -408,6 +484,221 @@ def _capture_prompt(
             prompt_id, adapter_kind, session_ref, source_event_key, body, now,
             wake_actor_id=actor_id, wake_scope_id=scope,
         )
+
+
+def _priority_eligible_capture(
+    actor_id: str | None,
+    actor_role: str | None,
+    captured: dict[str, Any],
+) -> bool:
+    """Trust only the atomic storage receipt for user-priority delivery."""
+
+    return bool(
+        actor_role == "shotcaller"
+        and actor_id is not None
+        and isinstance(captured.get("prompt_id"), str)
+        and captured.get("wake_committed") is True
+    )
+
+
+def _notify_direct_user_priority(
+    store: SQLiteStorage,
+    actor_id: str | None,
+    actor_role: str | None,
+    captured: dict[str, Any],
+) -> bool:
+    if not _priority_eligible_capture(actor_id, actor_role, captured):
+        return False
+    assert actor_id is not None
+    return notify_user_message(store, actor_id, str(captured["prompt_id"]))
+
+
+def handle_brokered_hook(
+    store: SQLiteStorage, hook: dict[str, Any]
+) -> dict[str, Any]:
+    """Execute one validated hook inside the persistent canonical-state owner."""
+
+    command = hook.get("command")
+    payload = hook.get("payload")
+    shotcaller = hook.get("shotcaller")
+    session_id = hook.get("session_id")
+    capture_event_id = hook.get("capture_event_id")
+    if (
+        command not in BROKERED_HOOK_COMMANDS
+        or not isinstance(payload, dict)
+        or (shotcaller is not None and not isinstance(shotcaller, str))
+        or (session_id is not None and not isinstance(session_id, str))
+        or (
+            command == "codex-user-prompt-hook"
+            and not _valid_codex_prompt_invocation_id(capture_event_id)
+        )
+    ):
+        raise StorageRefusal("prompt_hook_invalid", "brokered hook request is invalid")
+    args = argparse.Namespace(shotcaller=shotcaller, session_id=session_id)
+    actor = _actor(store, args, payload)
+    actor_id = None if actor is None else str(actor[0])
+    callsign = None if actor is None else str(actor[1])
+    actor_role = None if actor is None else str(actor[2])
+    scope = None if actor is None else _scope(store, actor_id, str(callsign))
+    if command == "codex-stop-hook":
+        if actor is None:
+            return {"hook_output": {}, "capture": None}
+        assert actor_id is not None and callsign is not None and scope is not None
+        terminal, _ = _codex_stop_generation(args, payload)
+        if actor_role == "champion":
+            result = store.champion_stop_decision(
+                actor_id,
+                terminal,
+                datetime.now().astimezone().isoformat(timespec="seconds"),
+            )
+            return {
+                "hook_output": _champion_stop_output(command, result),
+                "capture": None,
+            }
+        result = store.stop_decision(
+            scope,
+            actor_id,
+            terminal,
+            datetime.now().astimezone().isoformat(timespec="seconds"),
+            block_on_fresh_terminal=False,
+        )
+        output = (
+            {
+                "decision": "block",
+                "reason": _codex_stop_reason(
+                    callsign,
+                    result["wait_generation"],
+                    tuple(result.get("unresolved_summaries", ())),
+                ),
+            }
+            if result["decision"] == "block"
+            else {}
+        )
+        return {"hook_output": output, "capture": None}
+    captured = _capture_prompt(
+        store,
+        scope,
+        actor_id,
+        actor_role,
+        payload,
+        adapter_kind="codex" if command == "codex-user-prompt-hook" else "cursor",
+        capture_event_id=capture_event_id,
+    )
+    priority_eligible = _priority_eligible_capture(actor_id, actor_role, captured)
+    return {
+        "hook_output": {},
+        "capture": {
+            "prompt_id": captured.get("prompt_id"),
+            "idempotent": bool(captured.get("idempotent", False)),
+            "owned_by_shotcaller": actor_role == "shotcaller",
+            "wake_committed": captured.get("wake_committed") is True,
+            "priority_eligible": priority_eligible,
+            "suppressed": captured.get("suppressed"),
+            "state": captured.get("triage_state") or captured.get("state"),
+        },
+    }
+
+
+def _broker_hook(
+    args: argparse.Namespace,
+    payload: dict[str, Any],
+    *,
+    timeout_seconds: float = 0.1,
+    capture_event_id: str | None = None,
+) -> dict[str, Any]:
+    locator = f"unix:{PersistentSupervisor(_state_root()).socket_path}"
+    return send_supervisor_message(
+        locator,
+        {
+            "kind": "hook",
+            "hook": {
+                "command": args.command,
+                "shotcaller": args.shotcaller,
+                "session_id": args.session_id,
+                "payload": payload,
+                "capture_event_id": capture_event_id,
+            },
+        },
+        timeout_seconds=timeout_seconds,
+    )
+
+
+def _persistent_service_lock_held(state_root: Path) -> bool:
+    supervisor = PersistentSupervisor(state_root)
+    supervisor.lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock = supervisor.lock_path.open("a+")
+    try:
+        try:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+        return False
+    finally:
+        lock.close()
+
+
+@contextmanager
+def _direct_hook_fallback_store(
+    args: argparse.Namespace, payload: dict[str, Any]
+) -> Iterator[SQLiteStorage]:
+    """Open one direct-hook store behind the shared service-start fence."""
+
+    state_root = _state_root()
+    supervisor = PersistentSupervisor(state_root)
+    supervisor.lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock = supervisor.lock_path.open("a+")
+    acquired = False
+    try:
+        try:
+            # Direct hooks may run concurrently, but a persistent supervisor's
+            # exclusive service lock fences every direct fallback boundary.
+            fcntl.flock(lock.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)
+            acquired = True
+        except BlockingIOError as exc:
+            raise StorageRefusal(
+                "supervisor_ownership_uncertain",
+                "persistent supervisor owns or may be starting this hook boundary",
+                retryable=True,
+            ) from exc
+        if supervisor.socket_path.exists():
+            raise StorageRefusal(
+                "supervisor_ownership_uncertain",
+                "persistent supervisor socket exists without a verified broker response",
+                retryable=True,
+            )
+        with SQLiteStorage(
+            state_root,
+            busy_timeout_ms=_hook_busy_timeout(args.command),
+        ) as store:
+            actor = _actor(store, args, payload)
+            registration = (
+                None if actor is None else store.watcher_registration(str(actor[0]))
+            )
+            if registration is not None and not str(
+                registration["wake_locator"]
+            ).startswith("sqlite-supervise:"):
+                try:
+                    leased_until = datetime.fromisoformat(
+                        str(registration["leased_until"])
+                    )
+                except (TypeError, ValueError) as exc:
+                    raise StorageRefusal(
+                        "supervisor_ownership_uncertain",
+                        "persistent supervisor lease ownership could not be verified",
+                        retryable=True,
+                    ) from exc
+                if leased_until > datetime.now().astimezone():
+                    raise StorageRefusal(
+                        "supervisor_ownership_uncertain",
+                        "persistent supervisor still owns the hook boundary",
+                        retryable=True,
+                    )
+            yield store
+    finally:
+        if acquired:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+        lock.close()
 
 
 def _supervision_snapshot(
@@ -590,7 +881,10 @@ def _supervise(
                 for key, value in current["obligations"].items()
                 if key != "pending_deliveries"
             }
-            if after_obligations != before_obligations:
+            if (
+                after_obligations != before_obligations
+                and current["obligations"]["pending_deliveries"] == 0
+            ):
                 return {
                     "event": "obligations-changed",
                     "before": before_obligations,
@@ -626,19 +920,80 @@ def main(argv: list[str] | None = None) -> int:
         "cursor-before-submit-hook",
         "deliver",
         "supervise",
+        "service-run",
+        "service-resume",
+        "service-status",
+        "service-stop",
+        "service-pause",
         "status",
     }:
         raise StorageRefusal(
             "legacy_writer_fenced",
             "SQLite is canonical; this legacy writer command is fenced",
         )
-    payload = _payload() if args.command.endswith("-hook") else {}
-    try:
-        store_context = SQLiteStorage(
+    if args.command == "service-run":
+        return PersistentSupervisor(
             _state_root(),
-            busy_timeout_ms=_hook_busy_timeout(args.command),
+            callsign=args.shotcaller,
+            lease_seconds=args.lease_seconds,
+            renew_seconds=args.renew_seconds,
+        ).run()
+    if args.command == "service-resume":
+        _emit(resume_supervisor(_state_root(), args.shotcaller))
+        return 0
+    if args.command == "service-status":
+        _emit(supervisor_status(_state_root(), args.shotcaller))
+        return 0
+    if args.command == "service-stop":
+        _emit(stop_supervisor(_state_root(), args.shotcaller))
+        return 0
+    if args.command == "service-pause":
+        _emit(pause_supervisor(_state_root(), args.shotcaller))
+        return 0
+    payload = _payload() if args.command.endswith("-hook") else {}
+    capture_event_id = (
+        _codex_prompt_invocation_id()
+        if args.command == "codex-user-prompt-hook"
+        else None
+    )
+    fallback_store = None
+    if args.command in BROKERED_HOOK_COMMANDS:
+        try:
+            response = _broker_hook(
+                args, payload, capture_event_id=capture_event_id
+            )
+        except StorageRefusal:
+            raise
+        except SupervisorUnavailable:
+            if _persistent_service_lock_held(_state_root()):
+                try:
+                    response = _broker_hook(
+                        args,
+                        payload,
+                        timeout_seconds=0.4,
+                        capture_event_id=capture_event_id,
+                    )
+                except SupervisorUnavailable:
+                    pass
+                else:
+                    _emit(response["hook_output"])
+                    return 0
+            fallback_store = _direct_hook_fallback_store(args, payload)
+        else:
+            _emit(response["hook_output"])
+            return 0
+    stack = ExitStack()
+    try:
+        store = stack.enter_context(
+            fallback_store
+            if fallback_store is not None
+            else SQLiteStorage(
+                _state_root(),
+                busy_timeout_ms=_hook_busy_timeout(args.command),
+            )
         )
     except StorageRefusal as exc:
+        stack.close()
         if exc.code == "busy" and args.command in {
             "codex-stop-hook",
             "cursor-stop-hook",
@@ -646,14 +1001,14 @@ def main(argv: list[str] | None = None) -> int:
             _emit(_busy_stop_result(args, payload))
             return 0
         raise
-    with store_context as store:
+    with stack:
         actor = _actor(store, args, payload)
         actor_id = None if actor is None else str(actor[0])
         callsign = None if actor is None else str(actor[1])
         actor_role = None if actor is None else str(actor[2])
         scope = None if actor is None else _scope(store, actor_id, callsign)
         if args.command in {"codex-user-prompt-hook", "cursor-before-submit-hook"}:
-            _capture_prompt(
+            captured = _capture_prompt(
                 store,
                 scope,
                 actor_id,
@@ -662,7 +1017,9 @@ def main(argv: list[str] | None = None) -> int:
                 adapter_kind=(
                     "codex" if args.command == "codex-user-prompt-hook" else "cursor"
                 ),
+                capture_event_id=capture_event_id,
             )
+            _notify_direct_user_priority(store, actor_id, actor_role, captured)
             _emit({})
             return 0
         if actor is None:
@@ -706,23 +1063,37 @@ def main(argv: list[str] | None = None) -> int:
                 ).hexdigest()
                 turn_id = None
             try:
-                result = store.stop_decision(
-                    scope,
-                    actor_id,
-                    terminal,
-                    datetime.now().astimezone().isoformat(timespec="seconds"),
-                    block_on_fresh_terminal=args.command == "codex-stop-hook",
-                )
+                if actor_role == "champion":
+                    result = store.champion_stop_decision(
+                        actor_id,
+                        terminal,
+                        datetime.now().astimezone().isoformat(timespec="seconds"),
+                    )
+                else:
+                    result = store.stop_decision(
+                        scope,
+                        actor_id,
+                        terminal,
+                        datetime.now().astimezone().isoformat(timespec="seconds"),
+                        block_on_fresh_terminal=False,
+                    )
             except StorageRefusal as exc:
                 if exc.code != "busy":
                     raise
                 _emit(_busy_stop_result(args, payload))
                 return 0
+            if actor_role == "champion":
+                _emit(_champion_stop_output(args.command, result))
+                return 0
             blocked = result["decision"] == "block"
             if args.command == "cursor-stop-hook":
                 _emit({"followup_message": "League has unresolved obligations."} if blocked else {})
             else:
-                reason = _codex_stop_reason(callsign, result["wait_generation"])
+                reason = _codex_stop_reason(
+                    callsign,
+                    result["wait_generation"],
+                    tuple(result.get("unresolved_summaries", ())),
+                )
                 _emit(
                     {"decision": "block", "reason": reason}
                     if blocked

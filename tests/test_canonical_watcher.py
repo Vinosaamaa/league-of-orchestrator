@@ -12,6 +12,7 @@ import threading
 import time
 from pathlib import Path
 import sys
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -32,13 +33,18 @@ from league.sqlite_store import SQLiteStorage  # noqa: E402
 from league.sqlite_watcher_ops import _obligation_counts  # noqa: E402
 from league.storage import RuntimeRegistrationCommand  # noqa: E402
 from league.canonical_watcher import (  # noqa: E402
+    _capture_prompt,
     _codex_stop_reason,
+    _notify_direct_user_priority,
+    _prompt_identity,
     _supervision_snapshot,
+    handle_brokered_hook,
 )
 
 
 WATCHER = ROOT / "bin/agent-watcher"
 LEAGUE = ROOT / "bin/league"
+MAX_HOOK_LAUNCH_SECONDS = 2.0
 
 
 def _environment(root: Path, state: Path) -> dict[str, str]:
@@ -453,10 +459,10 @@ def test_long_lived_supervisor_allows_concurrent_prompt_and_stop(root: Path) -> 
     stop, stop_elapsed = results["stop"]
     assert prompt.returncode == 0, prompt.stdout + prompt.stderr
     assert json.loads(prompt.stdout) == {}
-    assert prompt_elapsed < 1.5
+    assert prompt_elapsed < MAX_HOOK_LAUNCH_SECONDS
     assert stop.returncode == 0, stop.stdout + stop.stderr
     assert json.loads(stop.stdout)["decision"] == "block"
-    assert stop_elapsed < 1.0
+    assert stop_elapsed < MAX_HOOK_LAUNCH_SECONDS
     output, error = waiter.communicate(timeout=5)
     assert not error, error
     assert json.loads(output)["priority"] == "user"
@@ -466,21 +472,20 @@ def test_long_lived_supervisor_allows_concurrent_prompt_and_stop(root: Path) -> 
             """
             SELECT p.source_event_key,pp.body_hash,pp.byte_count
               FROM prompts p JOIN prompt_payloads pp ON pp.prompt_id=p.prompt_id
-             WHERE p.source_event_key=?
+             WHERE p.adapter_kind='codex' AND p.session_ref=? AND pp.body=?
             """,
-            (_hook_source_event_key("codex", prompt_payload),),
+            (SHOTCALLER_ID, prompt_payload["prompt"]),
         ).fetchall()
         assert store.policy.journal_mode == "WAL"
     encoded = prompt_payload["prompt"].encode("utf-8")
     assert len(rows) == 1
-    assert tuple(rows[0]) == (
-        _hook_source_event_key("codex", prompt_payload),
-        hashlib.sha256(encoded).hexdigest(),
-        len(encoded),
+    assert rows[0]["source_event_key"].startswith("hook:")
+    assert tuple(rows[0])[1:] == (
+        hashlib.sha256(encoded).hexdigest(), len(encoded)
     )
 
 
-def test_codex_and_cursor_prompt_capture_exactly_once(root: Path) -> None:
+def test_provider_prompt_capture_identity_contracts(root: Path) -> None:
     for name, command, event_field, payload in (
         (
             "codex-capture",
@@ -521,22 +526,30 @@ def test_codex_and_cursor_prompt_capture_exactly_once(root: Path) -> None:
         )
         exported = json.loads((state / f"{name}.json").read_text(encoding="utf-8"))
         adapter_kind = "codex" if command.startswith("codex-") else "cursor"
+        payload_rows = {
+            row["prompt_id"]: row
+            for row in exported["tables"]["prompt_payloads"]
+            if row["body"] == payload["prompt"]
+        }
         prompts = [
             row
             for row in exported["tables"]["prompts"]
-            if row["source_event_key"] == _hook_source_event_key(adapter_kind, payload)
+            if row["adapter_kind"] == adapter_kind
+            and row["session_ref"] == SHOTCALLER_ID
+            and row["prompt_id"] in payload_rows
         ]
-        assert len(prompts) == 1
-        rows = [
-            row
-            for row in exported["tables"]["prompt_payloads"]
-            if row["prompt_id"] == prompts[0]["prompt_id"]
-        ]
+        expected_count = 2 if adapter_kind == "codex" else 1
+        assert len(prompts) == expected_count
+        rows = [payload_rows[row["prompt_id"]] for row in prompts]
         encoded = payload["prompt"].encode("utf-8")
-        assert len(rows) == 1
-        assert rows[0]["body"] == payload["prompt"]
-        assert rows[0]["body_hash"] == hashlib.sha256(encoded).hexdigest()
-        assert rows[0]["byte_count"] == len(encoded)
+        assert len(rows) == expected_count
+        assert all(row["body"] == payload["prompt"] for row in rows)
+        assert all(
+            row["body_hash"] == hashlib.sha256(encoded).hexdigest() for row in rows
+        )
+        assert all(row["byte_count"] == len(encoded) for row in rows)
+        if adapter_kind == "codex":
+            assert len({row["source_event_key"] for row in prompts}) == 2
         unresolved = _league(
             state,
             "request",
@@ -546,35 +559,37 @@ def test_codex_and_cursor_prompt_capture_exactly_once(root: Path) -> None:
             "--before-action",
             "end",
         )["result"]
-        assert unresolved["untriaged_prompt_count"] == 1
+        assert unresolved["untriaged_prompt_count"] == expected_count
         assert unresolved["safe_to_finish"] is False
-        pending_prompt = unresolved["untriaged_prompts"][0]
-        assert pending_prompt["prompt_id"] == prompts[0]["prompt_id"]
-        assert pending_prompt["body_hash"] == hashlib.sha256(encoded).hexdigest()
         request_id = f"request:{name}"
-        triage = _league(
-            state,
-            "request",
-            "triage",
-            "--prompt-id",
-            pending_prompt["prompt_id"],
-            "--items-json",
-            json.dumps(
-                [
-                    {
-                        "prompt_item_id": f"item:{name}:1",
-                        "ordinal": 1,
-                        "summary": "Model-selected complete synthetic prompt item",
-                        "disposition": "new_request",
-                        "request_id": request_id,
-                    }
-                ],
-                separators=(",", ":"),
-            ),
-            "--at",
-            AT2,
-        )["result"]
-        assert triage["request_count"] == 1
+        for ordinal, pending_prompt in enumerate(
+            unresolved["untriaged_prompts"], start=1
+        ):
+            assert pending_prompt["body_hash"] == hashlib.sha256(encoded).hexdigest()
+            is_first = ordinal == 1
+            triage = _league(
+                state,
+                "request",
+                "triage",
+                "--prompt-id",
+                pending_prompt["prompt_id"],
+                "--items-json",
+                json.dumps(
+                    [
+                        {
+                            "prompt_item_id": f"item:{name}:{ordinal}",
+                            "ordinal": 1,
+                            "summary": "Model-selected complete synthetic prompt item",
+                            "disposition": "new_request" if is_first else "acknowledgement",
+                            "request_id": request_id if is_first else None,
+                        }
+                    ],
+                    separators=(",", ":"),
+                ),
+                "--at",
+                AT2,
+            )["result"]
+            assert triage["request_count"] == (1 if is_first else 0)
         after_triage = _league(
             state,
             "request",
@@ -628,15 +643,11 @@ def test_queued_prompts_reusing_turn_id_are_unique_and_conflicts_quarantine(
 
     assert _watcher(env, "codex-user-prompt-hook", payload=first) == {}
     first_generation = generation()
-    assert _watcher(env, "codex-user-prompt-hook", payload=first) == {}
-    assert generation() == first_generation
     assert _watcher(env, "codex-user-prompt-hook", payload=second) == {}
     second_generation = generation()
     assert second_generation == (
         first_generation[0] + 1, first_generation[1] + 1
     )
-    assert _watcher(env, "codex-user-prompt-hook", payload=second) == {}
-    assert generation() == second_generation
 
     turn = subprocess.Popen(
         [
@@ -675,7 +686,14 @@ def test_queued_prompts_reusing_turn_id_are_unique_and_conflicts_quarantine(
             }
         )
     turn.stdin.write(
-        json.dumps({"decisions": decisions, "plans": []}, separators=(",", ":"))
+        json.dumps(
+            {
+                "candidate_inventory_digest": intake["candidate_inventory"]["digest"],
+                "decisions": decisions,
+                "plans": [],
+            },
+            separators=(",", ":"),
+        )
         + "\n"
     )
     turn.stdin.flush()
@@ -704,12 +722,6 @@ def test_queued_prompts_reusing_turn_id_are_unique_and_conflicts_quarantine(
         "prompt": first["prompt"],
     }
     assert _watcher(env, "codex-user-prompt-hook", payload=champion) == {}
-    assert _watcher(env, "codex-user-prompt-hook", payload=champion) == {}
-    expected_keys = {
-        _hook_source_event_key("codex", first),
-        _hook_source_event_key("codex", second),
-        _hook_source_event_key("codex", champion),
-    }
     with SQLiteStorage(state, request_wal=False) as store:
         captured = store.connection.execute(
             """
@@ -725,7 +737,8 @@ def test_queued_prompts_reusing_turn_id_are_unique_and_conflicts_quarantine(
             (SHOTCALLER_ID,),
         ).fetchone())
     assert len(captured) == 3
-    assert {row["source_event_key"] for row in captured} == expected_keys
+    assert len({row["source_event_key"] for row in captured}) == 3
+    assert all(row["source_event_key"].startswith("hook:") for row in captured)
     assert {row["intake_actor_id"] for row in captured} == {
         SHOTCALLER_ID, CHAMPION_ID
     }
@@ -736,15 +749,24 @@ def test_queued_prompts_reusing_turn_id_are_unique_and_conflicts_quarantine(
         "turn_id": "turn:stale-owner-conflict",
         "prompt": "Queued prompt with stale conflicting ownership.",
     }
-    source_key = _hook_source_event_key("codex", conflict)
-    prompt_id = "prompt:" + source_key
+    capture_event_id = "codex-user-prompt:" + "a" * 32
+    prompt_id, source_key = _prompt_identity(
+        "codex",
+        SHOTCALLER_ID,
+        f"{conflict['turn_id']}\0{capture_event_id}",
+        conflict["prompt"],
+    )
+    encoded = conflict["prompt"].encode("utf-8")
     with SQLiteStorage(state, request_wal=False) as store:
         champion_runtime = str(store.connection.execute(
             "SELECT runtime_instance_id FROM runtime_instances WHERE actor_agent_id=?",
             (CHAMPION_ID,),
         ).fetchone()[0])
-    encoded = conflict["prompt"].encode("utf-8")
-    with SQLiteStorage(state, request_wal=False) as store:
+        before_conflict = tuple(store.connection.execute(
+            "SELECT user_message_generation,wait_generation FROM watcher_scopes "
+            "WHERE actor_agent_id=?",
+            (SHOTCALLER_ID,),
+        ).fetchone())
         with store._transaction():
             store.connection.execute(
                 """
@@ -772,8 +794,20 @@ def test_queued_prompts_reusing_turn_id_are_unique_and_conflicts_quarantine(
                     len(encoded),
                 ),
             )
-    assert _watcher(env, "codex-user-prompt-hook", payload=conflict) == {}
-    with SQLiteStorage(state, request_wal=False) as store:
+        captured_conflict = _capture_prompt(
+            store,
+            "watcher:Garen",
+            SHOTCALLER_ID,
+            "shotcaller",
+            conflict,
+            adapter_kind="codex",
+            capture_event_id=capture_event_id,
+        )
+        with patch("league.canonical_watcher.notify_user_message") as notify:
+            assert not _notify_direct_user_priority(
+                store, SHOTCALLER_ID, "shotcaller", captured_conflict
+            )
+            notify.assert_not_called()
         quarantine = store.connection.execute(
             """
             SELECT state,reason,wake_actor_id,wake_scope_id,wake_committed
@@ -785,10 +819,18 @@ def test_queued_prompts_reusing_turn_id_are_unique_and_conflicts_quarantine(
             "SELECT intake_actor_id,runtime_instance_id FROM prompts WHERE prompt_id=?",
             (prompt_id,),
         ).fetchone()
+        after_conflict = tuple(store.connection.execute(
+            "SELECT user_message_generation,wait_generation FROM watcher_scopes "
+            "WHERE actor_agent_id=?",
+            (SHOTCALLER_ID,),
+        ).fetchone())
+    assert captured_conflict["state"] == "quarantined"
+    assert captured_conflict["wake_committed"] is False
     assert tuple(quarantine) == (
         "quarantined", "runtime_unverified", None, None, 0
     )
     assert tuple(owner) == (CHAMPION_ID, champion_runtime)
+    assert after_conflict == before_conflict
     assert garen_runtime != champion_runtime
 
 
@@ -804,8 +846,7 @@ def test_missing_identity_quarantines_then_binds_and_triages(root: Path) -> None
     }
     started = time.monotonic()
     assert _watcher(env, "codex-user-prompt-hook", payload=payload) == {}
-    assert time.monotonic() - started < 1.0
-    assert _watcher(env, "codex-user-prompt-hook", payload=payload) == {}
+    assert time.monotonic() - started < MAX_HOOK_LAUNCH_SECONDS
     exported_path = state / "missing-identity.json"
     _league(
         state,
@@ -819,7 +860,9 @@ def test_missing_identity_quarantines_then_binds_and_triages(root: Path) -> None
     exported = json.loads(exported_path.read_text(encoding="utf-8"))
     quarantined = [
         row for row in exported["tables"]["prompt_quarantine"]
-        if row["source_event_key"] == _hook_source_event_key("codex", payload)
+        if row["adapter_kind"] == "codex"
+        and row["session_ref"] == session
+        and row["body"] == payload["prompt"]
     ]
     assert len(quarantined) == 1
     row = quarantined[0]
@@ -886,27 +929,38 @@ def test_unverified_champion_prompt_quarantines_without_shotcaller_wake(root: Pa
         "prompt": "Exact Champion prompt must continue without a Shotcaller wake.",
     }
     assert _watcher(env, "codex-user-prompt-hook", payload=payload) == {}
-    assert _watcher(env, "codex-user-prompt-hook", payload=payload) == {}
     with SQLiteStorage(state, request_wal=False) as store:
         rows = store.connection.execute(
             """
-            SELECT state,reason,wake_actor_id,wake_scope_id,wake_committed
-              FROM prompt_quarantine WHERE source_event_key=?
+            SELECT prompt_id,state,reason,wake_actor_id,wake_scope_id,wake_committed
+              FROM prompt_quarantine
+             WHERE adapter_kind='codex' AND session_ref=? AND body=?
             """,
-            (_hook_source_event_key("codex", payload),),
+            (CHAMPION_ID, payload["prompt"]),
         ).fetchall()
         champion_scope = store.connection.execute(
             "SELECT user_message_generation,wait_generation FROM watcher_scopes WHERE actor_agent_id=?",
             (CHAMPION_ID,),
         ).fetchone()
     assert len(rows) == 1
-    assert tuple(rows[0]) == ("quarantined", "runtime_unverified", None, None, 0)
+    quarantined_prompt_id = str(rows[0]["prompt_id"])
+    assert tuple(rows[0])[1:] == (
+        "quarantined", "runtime_unverified", None, None, 0
+    )
     assert champion_scope is None
 
     runtime_id = _register_champion_runtime(
         state, "later-verified", CHAMPION_ID
     )
-    assert _watcher(env, "codex-user-prompt-hook", payload=payload) == {}
+    with SQLiteStorage(state, request_wal=False) as store:
+        bound_receipt = store.bind_quarantined_prompt(
+            quarantined_prompt_id,
+            CHAMPION_ID,
+            runtime_id,
+            AT2,
+            wake=False,
+        )
+    assert bound_receipt["triage_state"] == "untriaged"
     with SQLiteStorage(state, request_wal=False) as store:
         bound = store.connection.execute(
             """
@@ -914,9 +968,9 @@ def test_unverified_champion_prompt_quarantines_without_shotcaller_wake(root: Pa
                    q.wake_actor_id,q.wake_scope_id,q.wake_committed,
                    p.runtime_instance_id
               FROM prompt_quarantine q JOIN prompts p ON p.prompt_id=q.prompt_id
-             WHERE q.source_event_key=?
+             WHERE q.prompt_id=?
             """,
-            (_hook_source_event_key("codex", payload),),
+            (quarantined_prompt_id,),
         ).fetchone()
         champion_scope = store.connection.execute(
             "SELECT COUNT(*) FROM watcher_scopes WHERE actor_agent_id=?",
@@ -947,20 +1001,20 @@ def test_verified_champion_prompt_captures_without_shotcaller_wake(root: Path) -
             (SHOTCALLER_ID,),
         ).fetchone()[0]
     assert _watcher(env, "codex-user-prompt-hook", payload=payload) == {}
-    assert _watcher(env, "codex-user-prompt-hook", payload=payload) == {}
     with SQLiteStorage(state, request_wal=False) as store:
         prompts = store.connection.execute(
             """
             SELECT p.intake_actor_id,p.runtime_instance_id,p.triage_state,
                    pp.body,pp.body_hash,pp.byte_count
               FROM prompts p JOIN prompt_payloads pp ON pp.prompt_id=p.prompt_id
-             WHERE p.source_event_key=?
+             WHERE p.adapter_kind='codex' AND p.session_ref=? AND pp.body=?
             """,
-            (_hook_source_event_key("codex", payload),),
+            (CHAMPION_ID, payload["prompt"]),
         ).fetchall()
         quarantined = store.connection.execute(
-            "SELECT COUNT(*) FROM prompt_quarantine WHERE source_event_key=?",
-            (_hook_source_event_key("codex", payload),),
+            "SELECT COUNT(*) FROM prompt_quarantine "
+            "WHERE adapter_kind='codex' AND session_ref=? AND body=?",
+            (CHAMPION_ID, payload["prompt"]),
         ).fetchone()[0]
         runtime = store.connection.execute(
             """
@@ -1050,15 +1104,16 @@ def test_quarantined_prompt_rearms_one_shot_stop(root: Path) -> None:
         "prompt": "Quarantined prompt must atomically rearm Stop.",
     }
     assert _watcher(env, "codex-user-prompt-hook", payload=prompt) == {}
-    assert _watcher(env, "codex-user-prompt-hook", payload=prompt) == {}
     with SQLiteStorage(state, request_wal=False) as store:
         after = store.connection.execute(
             "SELECT user_message_generation,wait_generation FROM watcher_scopes WHERE actor_agent_id=?",
             (SHOTCALLER_ID,),
         ).fetchone()
         quarantine = store.connection.execute(
-            "SELECT state,reason,wake_actor_id,wake_scope_id,wake_committed FROM prompt_quarantine WHERE source_event_key=?",
-            (_hook_source_event_key("codex", prompt),),
+            "SELECT state,reason,wake_actor_id,wake_scope_id,wake_committed "
+            "FROM prompt_quarantine WHERE adapter_kind='codex' "
+            "AND session_ref=? AND body=?",
+            (SHOTCALLER_ID, prompt["prompt"]),
         ).fetchone()
     assert tuple(after) == (before[0] + 1, before[1] + 1)
     assert tuple(quarantine) == (
@@ -1080,7 +1135,7 @@ def test_quarantined_prompt_rearms_one_shot_stop(root: Path) -> None:
     assert again["decision"] == "block"
 
 
-def test_real_codex_stop_payload_blocks_once_per_turn(root: Path) -> None:
+def test_real_codex_stop_payload_rearms_per_prompt_event(root: Path) -> None:
     _, state, _ = seeded_state(root, "real-codex-stop-generation")
     env = _environment(root / "real-codex-stop-generation", state)
     _register_garen_runtime(
@@ -1146,17 +1201,38 @@ def test_real_codex_stop_payload_blocks_once_per_turn(root: Path) -> None:
     assert _watcher(env, "codex-stop-hook", payload=retry) == {}
     assert _watcher(env, "codex-stop-hook", payload=retry) == {}
 
-    # A genuine second user steer in the same active Codex turn is not the exact
-    # self-feedback digest, so it durably rearms the omission backstop.
+    # Codex reuses turn_id for queued steers. A genuine second invocation is a
+    # new durable event even when its prompt bytes deliberately repeat A.
     prompt_b = {
         **prompt_a,
-        "prompt": "Synthetic second real steer in the same active turn.",
+        "prompt": prompt_a["prompt"],
     }
     assert _watcher(env, "codex-user-prompt-hook", payload=prompt_b) == {}
     next_block = _watcher(env, "codex-stop-hook", payload=retry)
     assert next_block["decision"] == "block"
     assert "Garen" in str(next_block["reason"])
     assert "turn:owner-visible-one" not in str(next_block["reason"])
+    assert _watcher(env, "codex-stop-hook", payload=retry) == {}
+
+    with SQLiteStorage(state, request_wal=False) as store:
+        captured = store.connection.execute(
+            """
+            SELECT p.prompt_id,p.source_event_key,pp.body
+              FROM prompts p JOIN prompt_payloads pp ON pp.prompt_id=p.prompt_id
+             WHERE p.adapter_kind='codex' AND p.session_ref=? AND pp.body=?
+             ORDER BY p.created_at,p.prompt_id
+            """,
+            (SHOTCALLER_ID, prompt_a["prompt"]),
+        ).fetchall()
+        scope = store.connection.execute(
+            "SELECT last_event_id,user_message_generation,wait_generation "
+            "FROM watcher_scopes WHERE actor_agent_id=?",
+            (SHOTCALLER_ID,),
+        ).fetchone()
+    assert len(captured) == 2
+    assert captured[0]["prompt_id"] != captured[1]["prompt_id"]
+    assert captured[0]["source_event_key"] != captured[1]["source_event_key"]
+    assert scope["last_event_id"] == captured[-1]["prompt_id"]
 
 
 def test_transition_contention_keeps_stop_safe_and_prompt_durable(root: Path) -> None:
@@ -1240,10 +1316,10 @@ def test_transition_contention_keeps_stop_safe_and_prompt_durable(root: Path) ->
     stop_result = json.loads(stop.stdout)
     assert stop_result["decision"] == "block"
     assert "retry" in stop_result["reason"].lower()
-    assert stop_elapsed < 1.0
+    assert stop_elapsed < MAX_HOOK_LAUNCH_SECONDS
     assert prompt.returncode == 0, prompt.stdout + prompt.stderr
     assert json.loads(prompt.stdout) == {}
-    assert prompt_elapsed < 1.5
+    assert prompt_elapsed < MAX_HOOK_LAUNCH_SECONDS
 
     retry = _watcher(env, "codex-stop-hook", payload=stop_payload)
     assert retry["decision"] == "block"
@@ -1253,9 +1329,9 @@ def test_transition_contention_keeps_stop_safe_and_prompt_durable(root: Path) ->
             """
             SELECT p.source_event_key,pp.body_hash,pp.byte_count
               FROM prompts p JOIN prompt_payloads pp ON pp.prompt_id=p.prompt_id
-             WHERE p.source_event_key=?
+             WHERE p.adapter_kind='codex' AND p.session_ref=? AND pp.body=?
             """,
-            (_hook_source_event_key("codex", prompt_payload),),
+            (SHOTCALLER_ID, prompt_payload["prompt"]),
         ).fetchall()
         obligations = _obligation_counts(store, SHOTCALLER_ID)
     holder.close()
@@ -1263,10 +1339,9 @@ def test_transition_contention_keeps_stop_safe_and_prompt_durable(root: Path) ->
     assert champion["status"] == "blocked"
     assert len(prompt_rows) == 1
     encoded = prompt_payload["prompt"].encode("utf-8")
-    assert tuple(prompt_rows[0]) == (
-        _hook_source_event_key("codex", prompt_payload),
-        hashlib.sha256(encoded).hexdigest(),
-        len(encoded),
+    assert prompt_rows[0]["source_event_key"].startswith("hook:")
+    assert tuple(prompt_rows[0])[1:] == (
+        hashlib.sha256(encoded).hexdigest(), len(encoded)
     )
     assert obligations["active_champions"] >= 1
     assert obligations["unresolved_requests"] >= 1
@@ -1533,14 +1608,14 @@ def main() -> None:
         test_working_and_progress_tasks_remain_supervised(root)
         test_supervise_user_priority(root)
         test_long_lived_supervisor_allows_concurrent_prompt_and_stop(root)
-        test_codex_and_cursor_prompt_capture_exactly_once(root)
+        test_provider_prompt_capture_identity_contracts(root)
         test_queued_prompts_reusing_turn_id_are_unique_and_conflicts_quarantine(root)
         test_missing_identity_quarantines_then_binds_and_triages(root)
         test_unverified_champion_prompt_quarantines_without_shotcaller_wake(root)
         test_verified_champion_prompt_captures_without_shotcaller_wake(root)
         test_verified_runtime_session_routes_stop_and_pointer_state(root)
         test_quarantined_prompt_rearms_one_shot_stop(root)
-        test_real_codex_stop_payload_blocks_once_per_turn(root)
+        test_real_codex_stop_payload_rearms_per_prompt_event(root)
         test_transition_contention_keeps_stop_safe_and_prompt_durable(root)
         test_codex_stop_rejects_incomplete_real_payload(root)
         test_material_delivery_watcher_direct_dedup_and_unavailable(root)

@@ -58,6 +58,246 @@ DRAIN_RECEIPT_KEYS = {
     "resource_receipt_digest",
     "callsign_release_receipt_digest",
 }
+DESCENDANT_RECONCILIATION_RECEIPT_KEYS = {
+    "schema",
+    "operation_id",
+    "reconciliation_id",
+    "snapshot_id",
+    "snapshot_digest",
+    "snapshot_row_digest",
+    "squad_id",
+    "predecessor_agent_id",
+    "successor_agent_id",
+    "champion_agent_id",
+    "task_id",
+    "runtime_instance_id",
+    "runtime_generation",
+    "runtime_receipt_digest",
+    "required_capabilities",
+    "runtime_capabilities",
+    "created_runtime",
+    "callsign_assignment_id",
+    "task_assignment_id",
+    "created_assignment",
+    "source_shape",
+    "import_provenance_digest",
+    "expected_rollover_version",
+    "expected_agent_version",
+    "expected_task_version",
+    "expected_assignment_version",
+    "expected_callsign_assignment_version",
+    "task_version",
+    "retargeted_outbox_ids",
+    "pending_delivery_count",
+    "reason",
+    "result",
+    "at",
+}
+HISTORICAL_IMPORTED_DESCENDANT_RECONCILIATION_RECEIPT_KEYS = {
+    "schema",
+    "operation_id",
+    "reconciliation_id",
+    "snapshot_id",
+    "snapshot_digest",
+    "snapshot_row_digest",
+    "squad_id",
+    "predecessor_agent_id",
+    "successor_agent_id",
+    "champion_agent_id",
+    "task_id",
+    "runtime_instance_id",
+    "runtime_generation",
+    "runtime_receipt_digest",
+    "created_runtime",
+    "callsign_assignment_id",
+    "task_assignment_id",
+    "created_assignment",
+    "source_shape",
+    "import_provenance_digest",
+    "expected_rollover_version",
+    "expected_agent_version",
+    "expected_task_version",
+    "expected_assignment_version",
+    "expected_callsign_assignment_version",
+    "task_version",
+    "retargeted_outbox_ids",
+    "pending_delivery_count",
+    "reason",
+    "result",
+    "at",
+}
+
+
+def _descendant_reconciliation_receipt_exact(receipt: Any) -> bool:
+    """Validate the complete immutable descendant reconciliation receipt."""
+
+    if (
+        not isinstance(receipt, dict)
+        or set(receipt) != DESCENDANT_RECONCILIATION_RECEIPT_KEYS
+        or receipt.get("schema")
+        != "league.rollover-descendant-reconciliation.v1"
+        or receipt.get("result") != "reconciled"
+        or type(receipt.get("created_runtime")) is not bool
+        or type(receipt.get("created_assignment")) is not bool
+    ):
+        return False
+    string_keys = DESCENDANT_RECONCILIATION_RECEIPT_KEYS - {
+        "required_capabilities",
+        "runtime_capabilities",
+        "created_runtime",
+        "created_assignment",
+        "import_provenance_digest",
+        "expected_rollover_version",
+        "expected_agent_version",
+        "expected_task_version",
+        "expected_assignment_version",
+        "expected_callsign_assignment_version",
+        "task_version",
+        "retargeted_outbox_ids",
+        "pending_delivery_count",
+    }
+    if any(
+        not isinstance(receipt.get(key), str) or not receipt[key]
+        for key in string_keys
+    ):
+        return False
+    integer_keys = {
+        "expected_rollover_version",
+        "expected_agent_version",
+        "expected_task_version",
+        "expected_assignment_version",
+        "expected_callsign_assignment_version",
+        "task_version",
+        "pending_delivery_count",
+    }
+    if any(type(receipt.get(key)) is not int for key in integer_keys):
+        return False
+    if (
+        min(
+            receipt["expected_rollover_version"],
+            receipt["expected_agent_version"],
+            receipt["expected_task_version"],
+            receipt["expected_callsign_assignment_version"],
+            receipt["task_version"],
+        )
+        < 1
+        or receipt["expected_assignment_version"] < 0
+        or receipt["pending_delivery_count"] < 0
+        or receipt["task_version"] != receipt["expected_task_version"] + 1
+        or (
+            receipt["created_assignment"]
+            and receipt["expected_assignment_version"] != 0
+        )
+        or (
+            not receipt["created_assignment"]
+            and receipt["expected_assignment_version"] < 1
+        )
+    ):
+        return False
+    try:
+        required = capabilities(receipt["required_capabilities"])
+        runtime = capabilities(receipt["runtime_capabilities"])
+        timestamp(receipt["at"], "descendant reconciliation receipt time")
+    except (TypeError, StorageRefusal):
+        return False
+    if (
+        list(required) != receipt["required_capabilities"]
+        or list(runtime) != receipt["runtime_capabilities"]
+        or not set(required).issubset(runtime)
+    ):
+        return False
+    outboxes = receipt.get("retargeted_outbox_ids")
+    if (
+        not isinstance(outboxes, list)
+        or any(not isinstance(item, str) or not item for item in outboxes)
+        or outboxes != sorted(set(outboxes))
+        or receipt["pending_delivery_count"] < len(outboxes)
+    ):
+        return False
+    digest_keys = {
+        "snapshot_digest",
+        "snapshot_row_digest",
+        "runtime_receipt_digest",
+    }
+    if any(
+        re.fullmatch(r"[0-9a-f]{64}", receipt[key]) is None
+        for key in digest_keys
+    ):
+        return False
+    source_shape = receipt.get("source_shape")
+    provenance = receipt.get("import_provenance_digest")
+    expected_reason = {
+        "modern": "committed_rollover_descendant_binding",
+        "imported_legacy_partial": "committed_rollover_imported_legacy_partial_binding",
+    }.get(source_shape)
+    return bool(
+        expected_reason
+        and receipt.get("reason") == expected_reason
+        and (
+            (source_shape == "modern" and provenance is None)
+            or (
+                source_shape == "imported_legacy_partial"
+                and isinstance(provenance, str)
+                and re.fullmatch(r"[0-9a-f]{64}", provenance) is not None
+            )
+        )
+    )
+
+
+def _historical_imported_descendant_reconciliation_receipt_exact(
+    receipt: Any,
+) -> bool:
+    """Recognize only the exact pre-capability imported reconciliation profile.
+
+    Those releases could create both the missing runtime and assignment for an
+    imported legacy task shell, but did not copy the verified capability lists
+    into the outer reconciliation receipt.  The snapshot refresh caller must
+    additionally prove the immutable assignment acceptance copy and all live
+    canonical/runtime/outbox state before relying on this profile.
+    """
+
+    if (
+        not isinstance(receipt, dict)
+        or set(receipt)
+        != HISTORICAL_IMPORTED_DESCENDANT_RECONCILIATION_RECEIPT_KEYS
+        or receipt.get("created_runtime") is not True
+        or receipt.get("created_assignment") is not True
+        or receipt.get("source_shape") != "imported_legacy_partial"
+    ):
+        return False
+    expanded = dict(receipt)
+    expanded["required_capabilities"] = []
+    expanded["runtime_capabilities"] = []
+    return _descendant_reconciliation_receipt_exact(expanded)
+
+
+def _runtime_capability_contract(
+    required_value: Any,
+    runtime_value: Any,
+    *,
+    code: str,
+    message: str,
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Validate immutable runtime capabilities against a callsign minimum."""
+
+    try:
+        required_raw = (
+            json.loads(required_value)
+            if isinstance(required_value, str)
+            else required_value
+        )
+        runtime_raw = (
+            json.loads(runtime_value)
+            if isinstance(runtime_value, str)
+            else runtime_value
+        )
+        required = capabilities(required_raw)
+        runtime = capabilities(runtime_raw)
+    except (json.JSONDecodeError, TypeError, StorageRefusal) as exc:
+        raise StorageRefusal(code, message) from exc
+    if not set(required).issubset(runtime):
+        raise StorageRefusal(code, message)
+    return required, runtime
 
 
 def _descendant_source_shape(
@@ -547,6 +787,23 @@ def rollover_descendant_target(
         raise StorageRefusal(
             "descendant_callsign_ambiguous", "descendant callsign binding is not exact"
         )
+    runtime_capabilities: tuple[str, ...] | None = None
+    try:
+        required_capabilities = capabilities(
+            json.loads(callsigns[0]["requirements_json"])
+        )
+    except (json.JSONDecodeError, TypeError, StorageRefusal) as exc:
+        raise StorageRefusal(
+            "descendant_runtime_mismatch",
+            "descendant callsign capability requirements are malformed",
+        ) from exc
+    if runtime is not None:
+        required_capabilities, runtime_capabilities = _runtime_capability_contract(
+            callsigns[0]["requirements_json"],
+            runtime["capabilities_json"],
+            code="descendant_runtime_mismatch",
+            message="canonical runtime is missing a required callsign capability",
+        )
     assignment = store.connection.execute(
         "SELECT task_assignment_id,version FROM task_assignments WHERE task_id=?", (task_id,)
     ).fetchone()
@@ -581,7 +838,12 @@ def rollover_descendant_target(
         "snapshot_row_digest": row["row_digest"],
         "runtime_count": len(runtimes),
         "runtime": None if runtime is None else dict(runtime),
-        "capabilities": json.loads(callsigns[0]["requirements_json"]),
+        "required_capabilities": list(required_capabilities),
+        "capabilities": list(
+            required_capabilities
+            if runtime_capabilities is None
+            else runtime_capabilities
+        ),
         "task_assignment_id": None if assignment is None else assignment["task_assignment_id"],
         "callsign_assignment_id": callsigns[0]["callsign_assignment_id"],
         "source_shape": source_shape,
@@ -872,6 +1134,110 @@ def rollover_bindings(
         "digest": digest(rows),
         "rows": rows,
     }
+    refresh_events = store.connection.execute(
+        """
+        SELECT detail_json FROM events
+         WHERE event_type='rollover_snapshot_refreshed' AND squad_id=?
+         ORDER BY occurred_at,event_id
+        """,
+        (operation["squad_id"],),
+    ).fetchall()
+    terminal_markers: list[dict[str, Any]] = []
+    matching_receipts = []
+    for event in refresh_events:
+        try:
+            detail = json.loads(event["detail_json"])
+            receipt = detail["receipt"]
+            receipt_digest = detail["receipt_digest"]
+        except (json.JSONDecodeError, KeyError, TypeError):
+            continue
+        snapshot_receipt = receipt.get("snapshot") if isinstance(receipt, dict) else None
+        if (
+            isinstance(snapshot_receipt, dict)
+            and receipt.get("operation_id") == operation_id
+            and snapshot_receipt.get("snapshot_id") == snapshot["snapshot_id"]
+        ):
+            matching_receipts.append((receipt, receipt_digest))
+    if int(snapshot["snapshot_version"]) > 1:
+        if len(matching_receipts) != 1:
+            raise StorageRefusal(
+                "snapshot_refresh_receipt_unverified",
+                "current refreshed snapshot lacks one exact immutable receipt",
+            )
+        refresh_receipt, refresh_receipt_digest = matching_receipts[0]
+        progress_bindings = refresh_receipt.get("progress_bindings")
+        if (
+            not isinstance(refresh_receipt_digest, str)
+            or digest(refresh_receipt) != refresh_receipt_digest
+        ):
+            raise StorageRefusal(
+                "snapshot_refresh_receipt_unverified",
+                "current refreshed snapshot receipt is malformed",
+            )
+        if progress_bindings is not None:
+            marker_keys = {
+                "champion_agent_id",
+                "task_id",
+                "state",
+                "reconciliation_id",
+                "receipt_digest",
+            }
+            snapshot_identity = {
+                (row["champion_agent_id"], row["task_id"])
+                for row in store.connection.execute(
+                    """
+                    SELECT champion_agent_id,task_id FROM active_champion_snapshot_rows
+                     WHERE snapshot_id=?
+                    """,
+                    (snapshot["snapshot_id"],),
+                )
+            }
+            if (
+                not isinstance(progress_bindings, list)
+                or len(progress_bindings) != int(snapshot["total_count"])
+                or any(
+                    not isinstance(item, dict)
+                    or set(item) != marker_keys
+                    or (item.get("champion_agent_id"), item.get("task_id"))
+                    not in snapshot_identity
+                    or item.get("state")
+                    not in {"predecessor_pending", "successor_reconciled"}
+                    or (
+                        item.get("state") == "predecessor_pending"
+                        and (
+                            item.get("reconciliation_id") is not None
+                            or item.get("receipt_digest") is not None
+                        )
+                    )
+                    or (
+                        item.get("state") == "successor_reconciled"
+                        and (
+                            not isinstance(item.get("reconciliation_id"), str)
+                            or not item["reconciliation_id"]
+                            or not isinstance(item.get("receipt_digest"), str)
+                            or not item["receipt_digest"]
+                        )
+                    )
+                    for item in progress_bindings
+                )
+                or {
+                    (item["champion_agent_id"], item["task_id"])
+                    for item in progress_bindings
+                }
+                != snapshot_identity
+            ):
+                raise StorageRefusal(
+                    "snapshot_refresh_receipt_unverified",
+                    "current refreshed snapshot progress receipt is not exact",
+                )
+            terminal_markers = sorted(
+                (
+                    dict(item)
+                    for item in progress_bindings
+                    if item["state"] == "successor_reconciled"
+                ),
+                key=lambda item: (item["champion_agent_id"], item["task_id"]),
+            )
     return {
         "schema": "league.rollover-bindings.v1",
         "operation_id": operation_id,
@@ -883,6 +1249,7 @@ def rollover_bindings(
         "expires_at": snapshot["expires_at"],
         "page": page,
         "next_cursor": next_cursor,
+        "terminal_markers": terminal_markers,
     }
 
 
@@ -1445,6 +1812,7 @@ def reconcile_rollover_descendant(
                 if (
                     retry["event_type"] != "rollover_descendant_reconciled"
                     or retry["task_id"] != task_id
+                    or not _descendant_reconciliation_receipt_exact(receipt)
                     or any(receipt.get(key) != value for key, value in expected_retry.items())
                     or digest(receipt) != receipt_digest
                 ):
@@ -1653,12 +2021,12 @@ def reconcile_rollover_descendant(
                 raise StorageRefusal(
                     "version_conflict", "descendant callsign assignment version changed"
                 )
-            required_capabilities = json.loads(callsign_assignment["requirements_json"])
-            if runtime_receipt["capabilities"] != required_capabilities:
-                raise StorageRefusal(
-                    "descendant_runtime_mismatch",
-                    "live runtime capabilities differ from the canonical callsign contract",
-                )
+            required_capabilities, receipt_capabilities = _runtime_capability_contract(
+                callsign_assignment["requirements_json"],
+                runtime_receipt["capabilities"],
+                code="descendant_runtime_mismatch",
+                message="live runtime is missing a required callsign capability",
+            )
             assignment = store.connection.execute(
                 "SELECT * FROM task_assignments WHERE task_id=?", (task_id,)
             ).fetchone()
@@ -1689,6 +2057,12 @@ def reconcile_rollover_descendant(
                         "descendant_runtime_closed",
                         "closed or failed imported runtime cannot be rebound",
                     )
+                _, canonical_runtime_capabilities = _runtime_capability_contract(
+                    callsign_assignment["requirements_json"],
+                    runtime["capabilities_json"],
+                    code="descendant_runtime_mismatch",
+                    message="canonical runtime is missing a required callsign capability",
+                )
                 if (
                     runtime["runtime_instance_id"] != runtime_instance_id
                     or not bool(runtime["verified"])
@@ -1697,7 +2071,7 @@ def reconcile_rollover_descendant(
                     or runtime["session_ref"] != runtime_receipt["session_ref"]
                     or runtime["endpoint"] != runtime_receipt["endpoint"]
                     or runtime["runtime_generation"] != runtime_receipt["runtime_generation"]
-                    or json.loads(runtime["capabilities_json"]) != required_capabilities
+                    or canonical_runtime_capabilities != receipt_capabilities
                 ):
                     raise StorageRefusal(
                         "descendant_runtime_mismatch",
@@ -1721,7 +2095,7 @@ def reconcile_rollover_descendant(
                         runtime_receipt["runtime_generation"],
                         runtime_receipt["status"],
                         at,
-                        stable_json(required_capabilities),
+                        stable_json(receipt_capabilities),
                     ),
                 )
                 if fault:
@@ -1803,6 +2177,8 @@ def reconcile_rollover_descendant(
                 "runtime_instance_id": runtime_instance_id,
                 "runtime_generation": runtime_receipt["runtime_generation"],
                 "runtime_receipt_digest": digest(dict(runtime_receipt)),
+                "required_capabilities": list(required_capabilities),
+                "runtime_capabilities": list(receipt_capabilities),
                 "created_runtime": created_runtime,
                 "callsign_assignment_id": callsign_assignment["callsign_assignment_id"],
                 "task_assignment_id": assignment_id,
@@ -1825,6 +2201,11 @@ def reconcile_rollover_descendant(
                 "result": "reconciled",
                 "at": at,
             }
+            if not _descendant_reconciliation_receipt_exact(receipt):
+                raise StorageRefusal(
+                    "descendant_reconciliation_conflict",
+                    "generated descendant reconciliation receipt is not exact",
+                )
             if created_assignment:
                 store.connection.execute(
                     """

@@ -18,6 +18,12 @@ from . import MAX_ACCEPTANCE_SENTINEL_PATHS, __version__
 from .adapters import builtin_contract_registry
 from .artifacts import ArtifactLifecycle
 from .cleanup import CleanupExecutor, CleanupFaultEvent, CleanupPlanner
+from .continuation import (
+    ContinuationIssueReopener,
+    GitHubIssueAdapter,
+    continuation_resume_thread,
+    verified_binding,
+)
 from .importer import build_import_plan
 from .orchestration import OrchestrationSignals
 from .routing import ModelRouter, load_routing_config
@@ -40,7 +46,9 @@ from .storage import (
 from .storage_request import (
     MAX_TRIAGE_JSON_BYTES,
     MAX_TRIAGE_TURN_BYTES,
+    MAX_TRIAGE_TURN_PROMPTS,
     AnswerRequestCommand,
+    ReconcileDuplicateRequestCommand,
     RequestProgressCommand,
     RequestResultCommand,
     TurnDispatchPlan,
@@ -119,6 +127,18 @@ class _BoundedSentinelPath(argparse.Action):
             )
         paths.append(value)
         setattr(namespace, self.dest, paths)
+
+
+def _turn_prompt_limit(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("turn prompt limit must be an integer") from exc
+    if not 1 <= parsed <= MAX_TRIAGE_TURN_PROMPTS:
+        raise argparse.ArgumentTypeError(
+            f"turn prompt limit must be between 1 and {MAX_TRIAGE_TURN_PROMPTS}"
+        )
+    return parsed
 
 
 def _add_acceptance_commands(groups: argparse._SubParsersAction) -> None:
@@ -653,6 +673,11 @@ def _add_task_commands(groups: argparse._SubParsersAction) -> None:
         transition.add_argument(f"--{name}", required=True)
     transition.add_argument("--expected-version", type=int, required=True)
     transition.add_argument("--blocker")
+    transition.add_argument(
+        "--attention-required",
+        action="store_true",
+        help="Wake the Shotcaller even when Calm mode would silence this transition.",
+    )
 
 
 def _add_runtime_commands(groups: argparse._SubParsersAction) -> None:
@@ -773,6 +798,45 @@ def _add_cleanup_commands(groups: argparse._SubParsersAction) -> None:
     )
 
 
+def _add_continuation_commands(groups: argparse._SubParsersAction) -> None:
+    continuation = groups.add_parser(
+        "continuation",
+        help="Claim one archived provider thread and reopen its exact owning issue.",
+    )
+    commands = continuation.add_subparsers(dest="action", required=True)
+    prepare = commands.add_parser(
+        "prepare",
+        help="Verify a new worktree and exclusively claim one exact archived thread.",
+    )
+    for name in (
+        "operation-id",
+        "archive-id",
+        "assignment-id",
+        "new-task-id",
+        "new-agent-id",
+        "repository",
+        "branch",
+        "worktree",
+        "instruction-digest",
+        "concrete-benefit",
+        "at",
+    ):
+        prepare.add_argument(f"--{name}", required=True)
+    prepare.add_argument("--issue", type=int, required=True)
+    prepare.add_argument("--expected-archive-version", type=int, required=True)
+    prepare.add_argument("--reconciliation-digest")
+    status = commands.add_parser("status", help="Read one exact continuation operation.")
+    status.add_argument("--operation-id", required=True)
+    reopen = commands.add_parser(
+        "reopen",
+        help="Reopen the exact archived owning issue under a recoverable fence.",
+    )
+    for name in ("operation-id", "executor-id", "leased-until", "at"):
+        reopen.add_argument(f"--{name}", required=True)
+    reopen.add_argument("--expected-version", type=int, required=True)
+    reopen.add_argument("--expected-fence", type=int, required=True)
+
+
 def _add_request_commands(groups: argparse._SubParsersAction) -> None:
     request = groups.add_parser(
         "request", help="Capture, triage, claim, route, resolve, answer, and reconcile requests."
@@ -803,8 +867,23 @@ def _add_request_commands(groups: argparse._SubParsersAction) -> None:
     )
     turn.add_argument("--owner-agent-id", required=True)
     turn.add_argument("--at", help=argparse.SUPPRESS)
-    turn.add_argument("--limit", type=int, default=20)
+    turn.add_argument("--limit", type=_turn_prompt_limit, default=20)
     turn.add_argument("--max-bytes", type=int, default=1_000_000)
+    turn.add_argument("--candidate-limit", type=int, default=12)
+    turn.add_argument("--candidate-max-bytes", type=int, default=24_576)
+    reconcile_duplicate = commands.add_parser(
+        "reconcile-duplicate",
+        help="Supersede one same-owner duplicate request under exact request versions.",
+    )
+    for name in (
+        "duplicate-request-id",
+        "canonical-request-id",
+        "owner-agent-id",
+        "at",
+    ):
+        reconcile_duplicate.add_argument(f"--{name}", required=True)
+    reconcile_duplicate.add_argument("--expected-duplicate-version", type=int, required=True)
+    reconcile_duplicate.add_argument("--expected-canonical-version", type=int, required=True)
     bind_prompt = commands.add_parser(
         "bind-prompt", help="Bind one quarantined prompt to an exact verified runtime."
     )
@@ -976,6 +1055,10 @@ def _add_request_commands(groups: argparse._SubParsersAction) -> None:
     untriaged.add_argument("--owner-agent-id", required=True)
     untriaged.add_argument("--limit", type=int, default=20)
     untriaged.add_argument("--max-bytes", type=int, default=1_000_000)
+    untriaged.add_argument("--candidate-limit", type=int, default=12)
+    untriaged.add_argument("--candidate-max-bytes", type=int, default=24_576)
+    untriaged.add_argument("--candidate-page", action="store_true")
+    untriaged.add_argument("--candidate-after")
 
 
 def _add_assignment_commands(groups: argparse._SubParsersAction) -> None:
@@ -1158,6 +1241,111 @@ def _add_hook_commands(groups: argparse._SubParsersAction) -> None:
     stop = commands.add_parser("stop", help="Combine request, assignment, delivery, and cleanup obligations once.")
     for name in ("scope-id", "actor-agent-id", "terminal-generation", "at"):
         stop.add_argument(f"--{name}", required=True)
+    policy = commands.add_parser(
+        "set-supervision-policy",
+        help="Configure durable all-material or Calm wake delivery without changing hooks.",
+    )
+    for name in ("scope-id", "actor-agent-id", "at"):
+        policy.add_argument(f"--{name}", required=True)
+    policy.add_argument("--mode", choices=("all_material", "calm"), required=True)
+    policy.add_argument("--unreachable-grace-seconds", type=int, default=60)
+    reconcile_silent = commands.add_parser(
+        "reconcile-silent",
+        help="Return and acknowledge one bounded page of Calm-suppressed transitions.",
+    )
+    reconcile_silent.add_argument("--actor-agent-id", required=True)
+    reconcile_silent.add_argument("--after-event-seq", type=int)
+    reconcile_silent.add_argument("--limit", type=int, default=20)
+    reconcile_silent.add_argument("--at", required=True)
+
+
+def _add_mode_commands(groups: argparse._SubParsersAction) -> None:
+    mode = groups.add_parser(
+        "mode",
+        help="Authorize and account for one durable scoped autonomous-delivery goal.",
+    )
+    commands = mode.add_subparsers(dest="action", required=True)
+    authorize = commands.add_parser(
+        "authorize", help="Create one immutable Summoner grant revision and bind its exact goal."
+    )
+    authorize.add_argument("--grant", type=Path, required=True)
+    authorize.add_argument("--expected-goal-version", type=int, required=True)
+    authorize.add_argument("--at", required=True)
+    status = commands.add_parser(
+        "status", help="Show manual or autonomous mode, exact authority, usage, and goal state."
+    )
+    status.add_argument("--goal-id", required=True)
+    status.add_argument("--at", required=True)
+    use = commands.add_parser(
+        "use", help="Authorize and record one exact external action atomically."
+    )
+    use.add_argument("--action", dest="action_spec", type=Path, required=True)
+    use.add_argument("--expected-goal-version", type=int, required=True)
+    use.add_argument("--at", required=True)
+    settle = commands.add_parser(
+        "settle", help="Settle one exact in-progress action or create its repair obligation."
+    )
+    for name in (
+        "action-use-id",
+        "goal-id",
+        "use-receipt-digest",
+        "result-receipt-digest",
+        "at",
+    ):
+        settle.add_argument(f"--{name}", required=True)
+    settle.add_argument("--expected-goal-version", type=int, required=True)
+    settle.add_argument("--outcome", choices=("succeeded", "failed"), required=True)
+    settle.add_argument("--failure-class")
+    transition = commands.add_parser(
+        "transition", help="Perform one checked non-external delivery-goal transition."
+    )
+    transition.add_argument("--goal-id", required=True)
+    transition.add_argument("--expected-goal-version", type=int, required=True)
+    transition.add_argument(
+        "--state",
+        choices=(
+            "awaiting_authority",
+            "implementing",
+            "ready_to_land",
+            "landing",
+            "deploying",
+            "verifying",
+            "repair_pending",
+            "delivered",
+            "cleanup_pending",
+            "cleaned",
+        ),
+        required=True,
+    )
+    transition.add_argument("--at", required=True)
+    revoke = commands.add_parser(
+        "revoke", help="Revoke one grant immediately while retaining in-progress evidence."
+    )
+    for name in ("grant-id", "revoked-by", "reason", "at"):
+        revoke.add_argument(f"--{name}", required=True)
+    revoke.add_argument("--expected-goal-version", type=int, required=True)
+
+
+def _add_issue_commands(groups: argparse._SubParsersAction) -> None:
+    issue = groups.add_parser(
+        "issue", help="Select, reopen, or create one issue after durable duplicate preflight."
+    )
+    commands = issue.add_subparsers(dest="action", required=True)
+    select = commands.add_parser(
+        "select",
+        help="Search open and closed issues, then reuse, reopen, or create only distinct scope.",
+    )
+    for name in (
+        "task-id",
+        "task-summary",
+        "coordinator-agent-id",
+        "repository",
+        "issue-title",
+        "at",
+    ):
+        select.add_argument(f"--{name}", required=True)
+    select.add_argument("--issue-body", type=Path, required=True)
+    select.add_argument("--reopen-action-receipt-digest")
 
 
 def _add_mode_commands(groups: argparse._SubParsersAction) -> None:
@@ -1303,6 +1491,7 @@ def _parser() -> argparse.ArgumentParser:
         _add_routing_commands,
         _add_resource_commands,
         _add_cleanup_commands,
+        _add_continuation_commands,
         _add_request_commands,
         _add_assignment_commands,
         _add_hook_commands,
@@ -1820,6 +2009,7 @@ def _task_transition(store: Storage, args: argparse.Namespace) -> CommandResult:
         args.outbox_id,
         args.recipient_agent_id,
         args.at,
+        args.attention_required,
     )
     if transition.get("outbox_id"):
         from .canonical_delivery import dispatch_event
@@ -2029,6 +2219,53 @@ def _cleanup_reconcile(store: Storage, args: argparse.Namespace) -> CommandResul
     }, None
 
 
+def _continuation_prepare(store: Storage, args: argparse.Namespace) -> CommandResult:
+    worktree = str(Path(args.worktree).resolve())
+    binding = verified_binding(
+        repository=args.repository,
+        issue=args.issue,
+        branch=args.branch,
+        worktree=worktree,
+    )
+    return store.prepare_continuation(
+        {
+            "operation_id": args.operation_id,
+            "archive_id": args.archive_id,
+            "assignment_id": args.assignment_id,
+            "new_task_id": args.new_task_id,
+            "new_agent_id": args.new_agent_id,
+            "repository": args.repository,
+            "issue": args.issue,
+            "branch": args.branch,
+            "worktree": worktree,
+            "binding": binding,
+            "instruction_digest": args.instruction_digest,
+            "reconciliation_digest": args.reconciliation_digest,
+            "concrete_benefit": args.concrete_benefit,
+            "expected_archive_version": args.expected_archive_version,
+            "at": args.at,
+        }
+    ), None
+
+
+def _continuation_status(store: Storage, args: argparse.Namespace) -> CommandResult:
+    value = store.continuation_status(args.operation_id)
+    if value is None:
+        raise StorageRefusal("continuation_unknown", "continuation operation does not exist")
+    return value, None
+
+
+def _continuation_reopen(store: Storage, args: argparse.Namespace) -> CommandResult:
+    return ContinuationIssueReopener(store, GitHubIssueAdapter()).execute(
+        args.operation_id,
+        expected_version=args.expected_version,
+        expected_fence=args.expected_fence,
+        executor_id=args.executor_id,
+        leased_until=args.leased_until,
+        at=args.at,
+    ), None
+
+
 def _request_intake(store: Storage, args: argparse.Namespace) -> CommandResult:
     return store.intake_prompt(
         args.prompt_id,
@@ -2083,6 +2320,42 @@ def _read_turn_payload(source: BinaryIO) -> dict[str, Any]:
     return value
 
 
+def _turn_begin_payload(
+    source: BinaryIO,
+    intake: dict[str, Any],
+    expected_prompt_ids: tuple[str, ...],
+) -> dict[str, Any]:
+    payload = (
+        _read_turn_payload(source)
+        if expected_prompt_ids
+        else {
+            "candidate_inventory_digest": intake["candidate_inventory"]["digest"],
+            "decisions": [],
+            "plans": [],
+        }
+    )
+    if set(payload) != {
+        "candidate_inventory_digest",
+        "decisions",
+        "plans",
+    } or not isinstance(payload["decisions"], list):
+        raise StorageRefusal(
+            "invalid_turn_payload",
+            "turn begin input must contain the candidate digest, decisions, and plans",
+        )
+    if (
+        not isinstance(payload["candidate_inventory_digest"], str)
+        or payload["candidate_inventory_digest"]
+        != intake["candidate_inventory"]["digest"]
+    ):
+        raise StorageRefusal(
+            "version_conflict",
+            "turn begin candidate digest differs from exact intake",
+            retryable=True,
+        )
+    return payload
+
+
 def _turn_time(value: Optional[str] = None) -> str:
     if value is not None:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
@@ -2101,6 +2374,12 @@ def _mechanize_turn_decisions(
     intake: dict[str, Any], value: Any, at: str
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     prompts = intake["prompts"]
+    candidate_inventory = intake.get("candidate_inventory", {})
+    candidates = {
+        row["request_id"]: row
+        for row in candidate_inventory.get("requests", [])
+        if isinstance(row, dict) and isinstance(row.get("request_id"), str)
+    }
     if not isinstance(value, list) or len(value) != len(prompts):
         raise StorageRefusal(
             "incomplete_triage_batch", "turn must decide every fetched prompt exactly once"
@@ -2122,7 +2401,7 @@ def _mechanize_turn_decisions(
             disposition = raw.get("disposition")
             allowed = {"summary", "disposition"}
             if disposition in {"follow_up", "duplicate", "deferred"}:
-                allowed.add("related_request_id")
+                allowed.update(("related_request_id", "related_request_version"))
             if disposition == "deferred":
                 allowed.add("defer_seconds")
             if set(raw) != allowed:
@@ -2136,6 +2415,7 @@ def _mechanize_turn_decisions(
                 "prompt-item", str(prompt["prompt_id"]), str(ordinal)
             )
             request_id: Optional[str] = None
+            expected_request_version: Optional[int] = None
             next_attention_at: Optional[str] = None
             if disposition == "new_request":
                 request_id = _turn_mechanical_id("request", item_id)
@@ -2146,6 +2426,24 @@ def _mechanize_turn_decisions(
                         "invalid_triage", "related request identity is required"
                     )
                 request_id = related
+                related_version = raw.get("related_request_version")
+                candidate = candidates.get(related)
+                if candidate is None:
+                    raise StorageRefusal(
+                        "candidate_request_unknown",
+                        "semantic decision references a request outside the supplied candidate inventory",
+                        retryable=True,
+                    )
+                if (
+                    type(related_version) is not int
+                    or related_version != candidate.get("version")
+                ):
+                    raise StorageRefusal(
+                        "version_conflict",
+                        "semantic decision candidate version differs from intake",
+                        retryable=True,
+                    )
+                expected_request_version = related_version
             if disposition == "deferred":
                 seconds = raw.get("defer_seconds")
                 if type(seconds) is not int or not 1 <= seconds <= 31_536_000:
@@ -2162,6 +2460,7 @@ def _mechanize_turn_decisions(
                 "summary": summary,
                 "disposition": disposition,
                 "request_id": request_id,
+                "expected_request_version": expected_request_version,
                 "next_attention_at": next_attention_at,
             }
             items.append(item)
@@ -2551,7 +2850,28 @@ def _request_unresolved(store: Storage, args: argparse.Namespace) -> CommandResu
 
 def _request_untriaged(store: Storage, args: argparse.Namespace) -> CommandResult:
     return store.untriaged_intake(
-        args.owner_agent_id, limit=args.limit, max_bytes=args.max_bytes
+        args.owner_agent_id,
+        limit=args.limit,
+        max_bytes=args.max_bytes,
+        candidate_limit=args.candidate_limit,
+        candidate_max_bytes=args.candidate_max_bytes,
+        candidate_after=args.candidate_after,
+        candidate_page=args.candidate_page,
+    ), None
+
+
+def _request_reconcile_duplicate(
+    store: Storage, args: argparse.Namespace
+) -> CommandResult:
+    return store.reconcile_duplicate_request(
+        ReconcileDuplicateRequestCommand(
+            duplicate_request_id=args.duplicate_request_id,
+            canonical_request_id=args.canonical_request_id,
+            owner_agent_id=args.owner_agent_id,
+            expected_duplicate_version=args.expected_duplicate_version,
+            expected_canonical_version=args.expected_canonical_version,
+            at=args.at,
+        )
     ), None
 
 
@@ -2593,6 +2913,17 @@ def _assign_launch(store: Storage, args: argparse.Namespace) -> CommandResult:
     champion_agent_id = args.champion_agent_id or derived_champion_agent_id(
         assignment_id
     )
+    resume_thread_id = continuation_resume_thread(
+        store,
+        assignment_id=assignment_id,
+        task_id=args.task_id,
+        champion_agent_id=champion_agent_id,
+        repository=args.repository,
+        issue=args.issue,
+        branch=args.branch,
+        worktree=args.worktree,
+        at=_turn_time(),
+    )
     workspace_id = args.workspace_id or os.environ.get("HERDR_WORKSPACE_ID", "")
     league_command = str(
         Path(args.league_command).resolve()
@@ -2624,7 +2955,9 @@ def _assign_launch(store: Storage, args: argparse.Namespace) -> CommandResult:
         required_capabilities=tuple(args.requires),
     )
     runner = SubprocessRunner()
-    adapter = HerdrCodexLaunchAdapter(options, runner)
+    adapter = HerdrCodexLaunchAdapter(
+        options, runner, resume_thread_id=resume_thread_id
+    )
     verifier = GitHubIssueVerifier(
         runner,
         selection_receipt_digest=args.issue_selection_receipt_digest,
@@ -2886,6 +3219,18 @@ def _mode_revoke(store: Storage, args: argparse.Namespace) -> CommandResult:
     ), None
 
 
+def _hook_set_supervision_policy(
+    store: Storage, args: argparse.Namespace
+) -> CommandResult:
+    return store.configure_supervision_policy(
+        args.scope_id,
+        args.actor_agent_id,
+        args.mode,
+        args.unreachable_grace_seconds,
+        args.at,
+    ), None
+
+
 def _issue_select(store: Storage, args: argparse.Namespace) -> CommandResult:
     runner = SubprocessRunner()
     service = GitHubIssueSelectionService(store, runner)
@@ -2903,6 +3248,16 @@ def _issue_select(store: Storage, args: argparse.Namespace) -> CommandResult:
         f"issue-attempt:{uuid.uuid4()}",
         args.at,
         reopen_action_receipt_digest=args.reopen_action_receipt_digest,
+    ), None
+
+
+def _hook_reconcile_silent(store: Storage, args: argparse.Namespace) -> CommandResult:
+    return store.silent_supervision_updates(
+        args.actor_agent_id,
+        after_event_seq=args.after_event_seq,
+        limit=args.limit,
+        advance_cursor=True,
+        at=args.at,
     ), None
 
 
@@ -2964,6 +3319,9 @@ HANDLERS: dict[str, CommandHandler] = {
     "cleanup.execute": _cleanup_execute,
     "cleanup.reconcile": _cleanup_reconcile,
     "cleanup.status": _cleanup_status,
+    "continuation.prepare": _continuation_prepare,
+    "continuation.reopen": _continuation_reopen,
+    "continuation.status": _continuation_status,
     "request.intake": _request_intake,
     "request.triage": _request_triage,
     "request.bind-prompt": _request_bind_prompt,
@@ -2983,6 +3341,7 @@ HANDLERS: dict[str, CommandHandler] = {
     "request.answer": _request_answer,
     "request.unresolved": _request_unresolved,
     "request.untriaged": _request_untriaged,
+    "request.reconcile-duplicate": _request_reconcile_duplicate,
     "assign.prepare": _assign_prepare,
     "assign.run": _assign_launch,
     "assign.launching": _assign_launching,
@@ -3004,6 +3363,8 @@ HANDLERS: dict[str, CommandHandler] = {
     "mode.transition": _mode_transition,
     "mode.revoke": _mode_revoke,
     "issue.select": _issue_select,
+    "hook.set-supervision-policy": _hook_set_supervision_policy,
+    "hook.reconcile-silent": _hook_reconcile_silent,
 }
 
 
@@ -3204,6 +3565,8 @@ def main(
                     args.owner_agent_id,
                     limit=args.limit,
                     max_bytes=args.max_bytes,
+                    candidate_limit=args.candidate_limit,
+                    candidate_max_bytes=args.candidate_max_bytes,
                 )
                 sink.write(
                     _envelope_bytes(command, result={"phase": "intake", **intake})
@@ -3212,18 +3575,9 @@ def main(
                 expected_prompt_ids = tuple(
                     prompt["prompt_id"] for prompt in intake["prompts"]
                 )
-                begin_payload = (
-                    _read_turn_payload(source)
-                    if expected_prompt_ids
-                    else {"decisions": [], "plans": []}
+                begin_payload = _turn_begin_payload(
+                    source, intake, expected_prompt_ids
                 )
-                if set(begin_payload) != {"decisions", "plans"} or not isinstance(
-                    begin_payload["decisions"], list
-                ):
-                    raise StorageRefusal(
-                        "invalid_turn_payload",
-                        "turn begin input must contain only decisions and plans arrays",
-                    )
                 decisions, new_requests = _mechanize_turn_decisions(
                     intake, begin_payload["decisions"], begin_at
                 )
@@ -3233,6 +3587,9 @@ def main(
                     decisions,
                     _turn_dispatch_plans(begin_payload["plans"], begin_at, new_requests),
                     begin_at,
+                    expected_candidate_digest=intake["candidate_inventory"]["snapshot_digest"],
+                    candidate_limit=args.candidate_limit,
+                    candidate_max_bytes=args.candidate_max_bytes,
                 )
                 for request, route in zip(new_requests, begun["routing"]):
                     route["mechanical"] = {

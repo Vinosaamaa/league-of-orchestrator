@@ -19,6 +19,7 @@ from league.production_cleanup import (  # noqa: E402
     ProductionCleanup,
     SystemProcessPort,
     _validate_runtime_context,
+    production_cleanup_registry,
 )
 from league.real_cleanup import SubprocessRunner  # noqa: E402
 from league.real_canary import (  # noqa: E402
@@ -31,6 +32,7 @@ from league.real_canary import (  # noqa: E402
 )
 from league.sqlite_store import SQLiteStorage  # noqa: E402
 from league.storage import StorageRefusal  # noqa: E402
+from lifecycle_fakes import issue_bound_spec  # noqa: E402
 from test_real_cleanup import FakeHerdrRunner, herdr_identity  # noqa: E402
 from storage_test_support import invoke_cli, migrated_state  # noqa: E402
 
@@ -60,6 +62,28 @@ class ProcessInspectionRunner:
         self.calls.append(tuple(arguments))
         return subprocess.CompletedProcess(
             arguments, 0, "Thu Jan  1 00:00:00 2026 Ss+\n", ""
+        )
+
+
+class ExactIssueRunner:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, ...]] = []
+
+    def run(self, arguments, *, timeout_seconds: int = 30):
+        del timeout_seconds
+        command = tuple(arguments)
+        self.calls.append(command)
+        if command != (
+            "test-gh",
+            "issue",
+            "view",
+            "83",
+            "--repo",
+            "example/league",
+        ):
+            return subprocess.CompletedProcess(command, 1, "", "identity mismatch")
+        return subprocess.CompletedProcess(
+            command, 0, "issue:\n  number: 83\n  state: open\n", ""
         )
 
 
@@ -246,7 +270,9 @@ def test_production_cleanup_crash_resume_and_lease_scope(root: Path) -> None:
     root.mkdir(parents=True, exist_ok=True)
     git = _create_git_canary(root)
     herdr = herdr_identity()
-    setup = _setup_sqlite(root, ROOT, git, herdr)
+    setup = _setup_sqlite(
+        root, ROOT, git, herdr, issue_spec_resolver=issue_bound_spec
+    )
     state = root / "league/state"
     manifest_path, _ = _cleanup_files(
         root,
@@ -386,6 +412,104 @@ def test_production_cleanup_crash_resume_and_lease_scope(root: Path) -> None:
             "SELECT COUNT(*) FROM teardown_receipts WHERE operation_id=?",
             (planned["operation_id"],),
         ).fetchone()[0] == 1
+        policy = store.connection.execute(
+            "SELECT required_policy FROM cleanup_obligations WHERE task_id=?",
+            (LIFECYCLE_TASK_ID,),
+        ).fetchone()[0]
+        receipt_policy = store.connection.execute(
+            "SELECT policy_version FROM teardown_receipts WHERE operation_id=?",
+            (planned["operation_id"],),
+        ).fetchone()[0]
+        assert receipt_policy == policy
+
+
+def test_ready_to_land_owner_cancellation_recovers_planned_fence_zero_after_reopen(
+    root: Path,
+) -> None:
+    root.mkdir(parents=True, exist_ok=True)
+    git = _create_git_canary(root)
+    herdr = herdr_identity()
+    setup = _setup_sqlite(
+        root, ROOT, git, herdr, issue_spec_resolver=issue_bound_spec
+    )
+    state = root / "league/state"
+    manifest_path, _ = _cleanup_files(
+        root,
+        git,
+        herdr,
+        f"callsign-assignment:{setup['assignment']['assignment_id']}",
+        "Lux",
+    )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["disposition"] = "cancelled"
+    operation_id = "operation:ready-to-land-owner-cancelled"
+
+    with SQLiteStorage(state, request_wal=False) as store:
+        store.transition_task(
+            LIFECYCLE_TASK_ID,
+            herdr["runtime_instance_id"],
+            3,
+            "ready_to_land",
+            "Synthetic optional task is ready to land.",
+            "Honor the owner's explicit cancellation and execute exact cleanup.",
+            None,
+            "transition:ready-to-land-cancelled",
+            "transition-key:ready-to-land-cancelled",
+            "event:ready-to-land-cancelled",
+            "outbox:ready-to-land-cancelled",
+            SHOTCALLER_ID,
+            "2026-01-01T01:01:00Z",
+        )
+        incompatible = dict(manifest)
+        incompatible["disposition"] = "failed"
+        incompatible["proof"] = {
+            **manifest["proof"],
+            "failure": {"preserved": True},
+        }
+        try:
+            CleanupPlanner(store).plan(
+                incompatible,
+                operation_id="operation:ready-to-land-incompatible",
+                at=AT_PLAN,
+            )
+        except StorageRefusal as exc:
+            assert exc.code == "cleanup_owner_refused"
+        else:
+            raise AssertionError("incompatible ready-to-land cleanup was planned")
+        assert store.cleanup_operation("operation:ready-to-land-incompatible") is None
+
+        planned = CleanupPlanner(store).plan(
+            manifest,
+            operation_id=operation_id,
+            at=AT_PLAN,
+        )
+        persisted = store.cleanup_operation(operation_id)
+        assert planned["fence"] == 0
+        assert persisted is not None
+        assert persisted["state"] == "planned" and persisted["fence"] == 0
+
+    # Reopen the canonical store before constructing the executor: execution
+    # must recover the immutable pre-upgrade operation without replanning or
+    # editing its task, obligation, operation, or fence rows.
+    runner = FakeHerdrRunner()
+    with SQLiteStorage(state, request_wal=False) as store:
+        service = ProductionCleanup(store, runner=HybridRunner(runner))
+        completed = service.execute(
+            operation_id,
+            expected_fence=0,
+            executor_id="executor:upgraded",
+            leased_until=LEASE_FIRST,
+            at=AT_PLAN,
+        )
+        assert completed["execution"]["state"] == "cleanup_completed"
+        duplicate = service.execute(
+            operation_id,
+            expected_fence=1,
+            executor_id="executor:upgraded-retry",
+            leased_until=LEASE_RESUME,
+            at=AT_RESUME,
+        )
+        assert duplicate["execution"]["idempotent"] is True
 
 
 def test_stable_execute_command_refuses_unknown_operation(root: Path) -> None:
@@ -450,13 +574,92 @@ def test_production_cleanup_accepts_visible_codex_thread_runtime() -> None:
     assert identity["session_id"] == "00000000-0000-4000-8000-000000000099"
 
 
+def test_production_registry_injects_exact_issue_adapter_boundary() -> None:
+    issue = {
+        "action_kind": "issue_close",
+        "adapter_kind": "issue",
+        "expected_identity": {
+            "repository": "git@github.com:example/league.git",
+            "issue": 83,
+            "state": "open",
+        },
+        "intended_state": {
+            "repository": "git@github.com:example/league.git",
+            "issue": 83,
+            "state": "closed",
+        },
+    }
+    actions = [
+        {
+            "action_kind": "archive_identity_evidence",
+            "adapter_kind": "archive",
+            "intended_state": {"verified": True},
+        },
+        {
+            "action_kind": "session_exit",
+            "adapter_kind": "harness",
+            "expected_identity": {
+                "agent_name": "lux",
+                "pane_id": "w1:p99",
+                "session_id": "00000000-0000-4000-8000-000000000099",
+            },
+        },
+        {
+            "action_kind": "endpoint_close",
+            "adapter_kind": "backend",
+            "expected_identity": {
+                "pane_id": "w1:p99",
+                "terminal_id": "terminal:99",
+                "runtime_instance_id": "runtime:lux",
+                "runtime_generation": "generation:99",
+            },
+        },
+        {
+            "action_kind": "callsign_release",
+            "adapter_kind": "callsign",
+            "expected_identity": {"assignment_id": "callsign:lux"},
+        },
+        issue,
+    ]
+    context = {
+        "operation": {"actions": actions},
+        "runtime_instances": [
+            {
+                "runtime_instance_id": "runtime:lux",
+                "harness_kind": "codex-thread",
+                "backend_kind": "herdr",
+                "session_ref": "00000000-0000-4000-8000-000000000099",
+                "endpoint": "w1:p99",
+                "runtime_generation": "generation:99",
+                "status": "active",
+                "verified": True,
+            }
+        ],
+    }
+    issue_runner = ExactIssueRunner()
+    registry = production_cleanup_registry(
+        object(),  # type: ignore[arg-type]
+        context,
+        at=AT_PLAN,
+        runner=ProcessInspectionRunner(),  # type: ignore[arg-type]
+        issue_runner=issue_runner,
+        issue_executable="test-gh",
+    )
+    assert registry.get("issue").inspect(issue) == issue["expected_identity"]
+    assert len(issue_runner.calls) == 1
+
+
 def main() -> None:
     test_rollover_predecessor_requires_exact_switch_and_emits_drain_receipt()
     test_process_inspection_uses_one_exact_query()
     test_production_cleanup_accepts_visible_codex_thread_runtime()
+    test_production_registry_injects_exact_issue_adapter_boundary()
     with tempfile.TemporaryDirectory(prefix="league-production-cleanup-") as temporary:
         root = Path(temporary)
         test_production_cleanup_crash_resume_and_lease_scope(root / "e2e")
+        test_ready_to_land_owner_cancellation_recovers_planned_fence_zero_after_reopen(
+            root / "ready-to-land-cancelled"
+        )
         test_stable_execute_command_refuses_unknown_operation(root / "cli")
     print(
         "PASS: canonical SQLite production cleanup, exact shared-lease release, "

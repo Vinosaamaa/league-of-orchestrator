@@ -174,4 +174,5 @@ class AssignmentStorage(Protocol):
         outbox_id: str,
         recipient_agent_id: str,
         at: str,
+        attention_required: bool = False,
     ) -> dict[str, Any]: ...

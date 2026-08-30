@@ -123,6 +123,74 @@ only before any canonical or Herdr mutation. Valid-but-mismatched identity and
 persistently malformed output still refuse. Rename and metadata reports are
 never retried by this mechanism, preserving provider and placement safety.
 
+## Retired bootstrap retry invariant
+
+A clean failed in-place Shotcaller bootstrap retains its original rolled-back
+callsign assignment and a version-2 retired `unbound` agent row. A later create
+for the same exact agent and running Codex thread may atomically re-reserve that
+same callsign and rebind the retired row only when the stored bootstrap
+baseline proves the same terminal/thread generation and the prior assignment,
+rollback event, role, scope, and failure receipt are complete.
+
+The pre-baseline compatibility path is narrower: it accepts only the complete
+version-2 rolled-back shape with exactly empty agent metadata and no active
+resource. The current route must be absent, the presentation source must not be
+League-owned, and sidebar, thread, and terminal titles must contain no retired
+callsign. League stores that clean presentation as a v2 durable baseline in the
+same transaction as re-reservation, then requires an exact second
+source/title/token/thread/terminal/generation/sequence observation before any
+Herdr publication. Before that rename, League persists one immutable publication
+attempt bound to the reservation, agent, callsign, endpoint identity, provider
+presentation, and v2 baseline digest. If the process crashes immediately after
+the routing rename, an exact retry resumes only when the alias is the reserved
+callsign and every endpoint and presentation byte still matches that attempt.
+The current global state-change sequence may be newer because unrelated state
+can advance it; League does not reuse that global value as Herdr's source-local
+metadata sequence. Retry skips the duplicate rename, applies an explicitly
+owner-tagged League overlay, and accepts only the exact first post-effect global
+fence followed by two stable observations. A later provider or user
+presentation is never reasserted over. Any mismatch clears the League-owned
+alias and restores only baseline display tokens before rolling back the new
+reservation, leaving newer presentation metadata unchanged. If an interleaved
+thread or terminal-generation change prevents exact external restoration,
+League leaves the new reservation, lease, agent baseline, publication attempt,
+and history intact as a recoverable cleanup obligation. Canonical rollback
+waits until a later exact-identity retry proves the alias and owned-token
+cleanup.
+
+One installed pre-baseline generation retained exactly
+`scope_kind=squad` and a historical Squad `scope_id` instead of empty metadata.
+That frozen profile is accepted only when those are the only keys, both values
+exactly match the sole prior rolled-back assignment, and the verified current
+thread equals the retired agent ID. The complete version-2 agent, assignment,
+rollback-event, available-callsign, and no-runtime/no-Squad/no-offer/no-lease
+fences remain unchanged. Re-reservation atomically stores the clean v2
+presentation baseline and normalizes durable metadata to `shotcaller` plus the
+exact agent/thread ID before any Herdr mutation. Extra keys, scope or subject
+tampering, another thread, incomplete history, an active assignment, or any
+owned resource refuses without publication. Exact retry is receipt-identical;
+finalization failure restores the captured presentation, rolls back only the
+new attempt, and retains the original historical assignment and event.
+
+Installed Herdr 0.2.32 exposed an additional identity-shape distinction. An
+unbound Codex pane can have a provider-generated callsign/sidebar/thread/title
+such as an owner prompt while having no routing binding and no
+`metadata_source` field. League now treats those values only as presentation:
+it infers the provider source solely from a complete, self-consistent Codex
+session/thread/identity-title envelope and normalizes Herdr's terminal
+` | codex` suffix. A real bind still requires a consistent top-level `name`,
+`routing_name`, or `routing_alias`; conflicting fields, a present invalid
+source, partial tokens, or endpoint identity drift refuse before mutation.
+
+Recovery refuses before any Herdr mutation when assignment history is
+ambiguous, the thread generation differs, the agent is not the exact bootstrap
+residue, the callsign is not available, or any runtime, lease, Squad,
+registration offer, or active assignment remains. The reservation and agent
+version updates share one SQLite transaction. A finalization failure rolls back
+only the new attempt and preserves the original rolled-back assignment and
+events. Successful exact retry returns the same creation receipt without a
+second rename, metadata write, prompt, layout action, or process start.
+
 ## Regression boundary
 
 Focused fake-Herdr coverage schedules a prompt-derived write after prompt

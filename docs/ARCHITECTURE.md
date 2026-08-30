@@ -50,6 +50,12 @@ The repository keeps the proven runtime and new storage boundary separate:
   produces an in-memory plan; it never opens a database or writes legacy files.
 - `src/league/request_services.py` owns injected visible-launch and delivery
   adapter boundaries; production adapter selection remains outside the store.
+- `src/league/sqlite_continuation_ops.py` owns immutable provider-thread
+  lineages, per-cleanup archives, exclusive continuation claims, issue-reopen
+  fences, and runtime incarnations. `continuation.py` owns the bounded GitHub
+  issue adapter, recoverable reopen service, and read-only Git binding check.
+  These extend the existing cleanup and assignment lifecycles; they do not form
+  a second scheduler or provider-session store.
 - `src/league/adapters.py`, `adapter_types.py`, and `runtime.py` own opaque
   capability contracts and orchestration over injected harness and terminal
   adapters. `cleanup.py` and `routing.py` own proof-first teardown policy and
@@ -143,32 +149,45 @@ The repository-local SQLite path is separately testable:
    endpoint generation, and declared capabilities. Cleanup validates every
    action before its first external effect and then records immutable,
    fence-bound receipts for crash-safe resumption.
-11. Orchestration resolves explicit route, continuation, then one unique strong
+11. Schema v16 replaces the all-history provider-session uniqueness index with
+   live-only uniqueness, then adds one permanent lineage for each opaque
+   provider thread, one immutable archive per completed incarnation, and one
+   exclusive active continuation claim per archive. Cleanup planning writes the
+   archive before effects; finalization exposes it only after the exact owning
+   issue is observed closed and the final teardown receipt exists.
+12. An explicit continuation verifies the new repository/issue/branch/worktree
+   binding, completed acceptance, healthy context, exact-resume declarations,
+   instruction reconciliation, closed linked runtime history, and absence of a
+   live worktree owner. A fenced external action reopens only the archived issue.
+   Ordinary assignment then allocates a current callsign, launches a fresh
+   endpoint/runtime against the exact provider thread, and appends a lineage
+   incarnation. The old endpoint and worktree are never restored.
+13. Orchestration resolves explicit route, continuation, then one unique strong
    eligible Squad before local direct/Champion execution. Canonical ownership
    moves only after acknowledgement. Parent progress has immediate and
    15-minute changed-only aggregate classes plus one five-minute-grace overdue
    escalation; no heartbeat is synthesized.
-12. Model routing records policy/provider versions, structured semantic
+14. Model routing records policy/provider versions, structured semantic
    signals, explicit and expiring operator overrides, capability fallback,
    evidence-gated downgrade, and at most one safe-boundary escalation child.
-13. Configuration, hooks, guides, launchers, immutable failure/teardown/archive
+15. Configuration, hooks, guides, launchers, immutable failure/teardown/archive
    evidence, installer backups, and other-product state remain files. The
    universal agent guide is terminal-environment-toolkit-owned; League owns
    only its `league/AGENTS.md` orchestration supplement.
-14. Skill roots remain external file-owned inputs. The repository stores only
+16. Skill roots remain external file-owned inputs. The repository stores only
     public labels, identity/provenance/version/capability declarations, content
     hashes, and sanitized parity receipts; it stores no root path or skill body.
-15. Project aliases, codes, exact roots/repositories, and ordered suggested
+17. Project aliases, codes, exact roots/repositories, and ordered suggested
     Squads are versioned catalog facts. Suggestion changes never mutate tasks,
     assignments, requests, events, or instructions; explicit routing stays
     separate and authoritative.
-16. `league.roster-snapshot.v1` groups current work from one bounded read
+18. `league.roster-snapshot.v1` groups current work from one bounded read
     transaction. It is non-canonical, has explicit limits/truncation, and links
     every item to exact canonical keys without persisting a report cache.
-16. `league.report.v1` streams timestamp-indexed canonical facts and refuses
+19. `league.report.v1` streams timestamp-indexed canonical facts and refuses
     both fact and completion scans above their explicit bounds. Markdown and
     portable HTML are pure renderers over that versioned JSON object.
-17. Exact project roots and full evidence remain classified `local_only`.
+20. Exact project roots and full evidence remain classified `local_only`.
     Every remote adapter validates the final rendered bytes with the same
     fail-closed policy immediately before invoking its injected transport.
 

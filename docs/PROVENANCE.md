@@ -540,6 +540,52 @@ prompt, and rollback preserves newer user-owned presentation metadata while
 restoring only League-owned sidebar/thread tokens to baseline and releasing the
 League route and callsign reservation. Focused fakes prove unrelated user
 tokens remain exact, zero layout/process creation, and no Squad registration.
+One owner-authorized compatibility exception covers a pre-baseline version-2
+retired unbound Shotcaller residue whose metadata is exactly empty. It still
+requires the complete single rolled-back assignment/event history and absence
+of every active resource. League accepts only a current unbound presentation
+whose source is not League-owned and whose title/sidebar/thread contain no
+retired callsign, then atomically records a v2 baseline containing its source,
+title, endpoint generation, and state-change sequence with the new reservation.
+A second exact observation before publication refuses any source, title, token,
+thread, terminal, generation, route, or sequence race. Before the first rename,
+League records an immutable assignment-bound publication attempt containing the
+exact endpoint, provider presentation, baseline digest, and observed global
+state-change sequence. An exact reserved retry may resume an already-published
+callsign alias when every identity and presentation byte still matches that
+attempt and the current global sequence is not older. It does not require
+`baseline + 1`: Herdr metadata freshness is source-local, while unrelated pane
+state can advance the global observation sequence. Retry skips the duplicate
+rename and reports the League overlay without supplying that global value as a
+Herdr source sequence. Explicit owner/source tokens identify the completed
+overlay, followed by an exact first post-effect global fence and two stable
+observations. Any later provider or user presentation refuses and is preserved.
+Any other routed partial effect restores the owned alias and baseline tokens
+before canonical rollback. If endpoint identity changes before restoration can
+be proven, League retains the reservation, lease, rebound agent, baseline, and
+publication attempt as the cleanup obligation; canonical rollback occurs only
+after an exact retry proves and completes the external cleanup.
+One still-older frozen profile contains exactly two metadata keys. It is
+eligible only when `scope_kind=squad`, `scope_id` exactly equals the sole prior
+rolled-back assignment's historical Squad scope, and the currently verified
+thread ID exactly equals the retired agent ID. Every existing version-2 agent,
+single-assignment, exact-subject, rollback-event, available-callsign, and
+no-runtime/no-Squad/no-offer/no-lease fence remains mandatory. League captures
+the clean current v2 presentation baseline in the same reservation transaction
+and normalizes durable metadata to `scope_kind=shotcaller` and
+`scope_id=<exact-agent-thread-id>` before Herdr publication. Any extra metadata
+key, changed historical scope, different thread, incomplete history, owned
+resource, or interleaved presentation refuses without publication.
+Installed Herdr can omit `metadata_source` while still exposing its complete
+provider presentation envelope. Shotcaller preflight accepts that shape only
+when `harness`, identity thread/title, callsign, sidebar, thread, logical
+terminal title, and provider session source agree exactly; the terminal's
+provider suffix is normalized without changing the stored title. Presentation
+tokens never establish routing. Only consistent top-level `name`,
+`routing_name`, or `routing_alias` fields do, and any conflicting route,
+present-but-invalid source, partial envelope, thread, terminal, or generation
+observation refuses before mutation. A settled Herdr `done` Codex remains a
+live exact endpoint under the same fences.
 The reopened issue adds one deliberately separate legacy provenance path:
 owner-authorized reconciliation binds the exact canonical Champion identity to
 the expected live presentation, writes immutable intent before the external
@@ -587,3 +633,231 @@ temporary roots and fake GitHub/Herdr boundaries; they perform no live grant,
 merge, release, installation, deployment, production action, or teardown.
 The rules live in the League supplement; the toolkit-owned universal guide and
 the supplement's existing 16 KiB fail-closed staging bound remain unchanged.
+
+## Issue-coupled cleanup and exact-thread continuation provenance
+
+Issue #83 implements the continuation portion of the accepted issue-#15 policy
+as original League code; the integrated repository version remains `0.2.29`.
+Migration v16 is contiguous and named
+`issue-coupled-cleanup-and-exact-thread-continuation`. It deliberately replaces
+the historical all-row runtime-session uniqueness index with a live-row partial
+unique index, while adding permanent thread lineages, immutable cleanup
+archives, linked runtime incarnations, and exclusive fenced continuation
+operations. Historical runtime, task, assignment, cleanup, Git, callsign, and
+issue receipts remain separate and are never rewritten into a synthetic
+continuous runtime.
+
+The deliberate baseline differences are: eligible Champion cleanup may append
+one exact owning-issue close action after callsign release; archive availability
+requires that action's verified receipt and the final teardown receipt; and an
+explicit successor may claim that archive, reopen only its owning issue, and
+activate a new runtime carrying the same provider thread identity. The callsign
+queue remains unchanged and may allocate any currently compatible entry.
+
+The GitHub issue adapter, read-only Git binding check, Codex exact-resume launch
+argument, post-start thread equality check, storage protocols/operations, CLI
+commands, incident analysis, and focused synthetic tests are original to this
+repository. Provider thread values remain opaque in the canonical store. The
+current launch edge verifies the Codex UUID required by the installed Codex CLI;
+other providers fail closed until an operational exact-resume driver exists.
+Live Herdr acceptance showed that a resumed Codex process does not republish its
+session identifier automatically. The `0.2.29` launch edge therefore verifies
+the exact foreground `codex resume` argv and worktree before reporting that
+opaque session identifier through Herdr's canonical Codex metadata source and
+next sequence; mismatched or ambiguous processes still fail before activation.
+The `0.2.29` correction deliberately replaces the duplicated cleanup
+task-state/disposition rules with one shared matrix at both the atomic planning
+and pre-claim execution boundaries. An explicit owner cancellation or rejection
+may clean a `ready_to_land` task; truly incompatible combinations refuse before
+claiming a cleanup revision. Focused synthetic recovery persists a fence-zero
+cancelled plan, reopens the canonical store as the upgraded executor, executes
+without replanning or direct state edits, and proves the completed retry is
+idempotent.
+The v16 target-version binding changes only the deterministic acceptance
+fixture's dry-run report digest; its source and imported-row parity digests are
+unchanged.
+
+## Semantic-triage ablation provenance
+
+Issue #66 adds a repository-local diagnostic benchmark, public synthetic
+120-prompt corpus, structured-output schema, and focused fake-model test. The
+triage-off arm is benchmark-only and does not create a second production path;
+normal League behavior continues to require model-authored semantic accounting.
+
+The installed 0.2.27 turn refuses a 25-prompt batch because its internal bound
+is 20. The source candidate deliberately raises only that existing bound to 25
+so the owner-required 1/6/25 scaling matrix can execute. It does not change the
+per-prompt 32-item bound, 20-new-request plan bound, transaction shape, storage
+schema, migration set, journal policy, hooks, watcher, installation, or live
+state. The benchmark and focused test use explicit synthetic temporary roots.
+
+## Inline-triage and persistent-supervision provenance
+
+The issue-#66 successor keeps the completed Luna xhigh ablation receipt
+immutable and changes the production design rather than selecting a faster
+synchronous classifier. The active Shotcaller authors ordered semantic items
+for its existing one-process turn. The adapter validates, exact-deduplicates,
+version-links, and commits locally; no ordinary turn starts a second model.
+
+The deliberate source differences are a 12-row/24,576-byte deterministic
+same-owner candidate shortlist, complete-snapshot fencing before external
+dispatch, deterministic off-path candidate pages, schema-19 agent-authored
+duplicate reconciliation, and one persistent event-driven supervisor runtime
+with renewable/fenced ownership. Stop remains an omission backstop and does not
+merge requests. A source launchd template declares the intended owner boundary
+but is neither rendered nor installed.
+
+The deliberate supervision follow-up adds Calm filtering plus durable
+supervising/paused policy state, one exact pause receipt, bounded resume
+reconciliation, one-shot Champion Stop protection, and fenced canonical
+runtime reconciliation. Calm with supervision on keeps an event-driven wait
+outside model inference and uses the registered Unix socket. Calm with
+supervision off ends the model turn while the non-model monitor and its lease
+remain live; routine transitions stay silent and attention uses the verified
+exact-once direct recipient path. Real owner prompts keep priority.
+
+Normal transition delivery is immediate. A missing runtime gets one
+configurable 60-second grace before CAS-safe reconciliation. A 300-second
+bounded SQLite audit is lost-notification/restart recovery only. The monitor
+renews silently every 20 seconds, ownership expires after 60 seconds, and the
+launchd template throttles restart to five seconds. The retained one-second
+`supervise` loop is diagnostic compatibility, not the production runtime.
+
+Owner-source installed 0.2.28 truth remains distinct: its foreground legacy
+loop has a 30-second runtime snapshot, two matching observations (about 60
+seconds) before a stall fallback, and a 300-second liveness deadline that only
+resets silently. It has no separate OS timer or always-running liveness process,
+and both timers vanish when the foreground loop exits. Those legacy timers are
+not the source candidate behavior. The launchd/socket source in this change
+remains uninstalled.
+
+The post-0.2.35 issue-#66 Stop correction treats Codex `turn_id` as a turn
+scope, not a per-prompt event key. Each real `UserPromptSubmit` invocation
+mints one opaque League capture identity, carries that same identity through a
+broker retry or direct fallback, and binds it to the immutable prompt/source
+provenance. Two genuine same-turn invocations therefore remain distinct even
+when their prompt bytes are identical. Stop rearms only from a committed
+durable wait event; a fresh-looking terminal identifier alone cannot add a
+second block. The exact pending League feedback remains one-time suppressed,
+and the matching Stop retry is allowed. This source-only correction adds no
+schema migration and performs no installation, hook mutation, live
+reconciliation, or runtime cutover.
+
+The 3×3 prompt-size/intent-count matrix measures exact capture, JSON sideband,
+candidate linking, SQLite commit, and one-process completion on synthetic
+temporary roots. Its gold sideband proves local mechanics only; it does not
+claim active-model split quality, installed prompt capture, live supervision,
+or the #23 owner-visible E2E. No global file, hook, service, model route,
+canonical database, or live runtime is changed.
+
+Current main's issue-coupled continuation, rollover-snapshot, and scoped
+autonomous-delivery migrations remain canonical schemas 16, 17, and 18.
+Issue #66 appends agent-authored request reconciliation as schema 19; it does
+not renumber, replace, or mutate any main migration. The deterministic
+acceptance dry-run report receipt is refreshed for that schema-19 target. Its
+legacy-source digest and exact
+post-import parity digest remain unchanged; only the truthful target-version
+report digest changes.
+
+## Rollover runtime capability provenance
+
+Issue #23 preserves callsign capabilities as minimum requirements, not an
+exact runtime inventory. Snapshot refresh and descendant reconciliation accept
+one verified canonical runtime only when every active callsign requirement is
+present in that runtime's normalized immutable capability set. A strict
+runtime superset is retained unchanged; missing requirements, malformed sets,
+runtime drift, and unverified identities still refuse before reconciliation.
+
+The immutable refresh and descendant reconciliation receipts record both the
+minimum requirement set and the actual canonical runtime set. This source-only
+correction changes no schema, callsign requirement, live runtime, hook,
+installed release, or active rollover state. Focused synthetic tests cover
+superset preservation, missing requirements, runtime drift, unverified
+identity, exact retry, and unchanged snapshot/ownership CAS boundaries.
+
+## Partial-progress rollover refresh provenance
+
+Issue #23 deliberately extends only the expired switched-rollover refresh
+boundary. A descendant still owned by the predecessor keeps the prior checks.
+A descendant already owned by the successor is accepted only when one durable
+`rollover_descendant_reconciled` receipt proves the same operation and exact
+task, assignment, callsign, runtime, capability, and outbox transfer. Capture
+history and prior snapshot revisions remain immutable. The proof validator
+requires the complete reconciliation receipt schema for both newly created and
+pre-existing task assignments; any missing, extra, or type-changed immutable
+live-evidence field refuses even when the attacker recomputes the outer digest.
+
+The replacement snapshot retains the complete original Champion/task/callsign
+set. Its immutable refresh receipt records predecessor-pending and
+successor-reconciled progress separately; `rollover bindings` exposes only the
+proved successor entries as terminal markers. Missing, duplicate, forged,
+stale, partially retargeted, or concurrently changed proof refuses before the
+snapshot pointer CAS. This changes no schema, release, installation, or live
+rollover state.
+
+### Historical imported-descendant receipt compatibility
+
+The first source release that reconciled imported legacy task shells wrote an
+exact durable receipt before minimum and actual runtime capability lists were
+added to that receipt schema. Issue #23 keeps that historical evidence usable
+without treating arbitrary missing fields as compatible. The compatibility
+profile is generic to imported legacy descendants and requires the exact old
+field set, `source_shape=imported_legacy_partial`, and atomically created runtime
+and assignment. The reconciliation event digest and the created assignment's
+unchanged acceptance receipt must agree exactly with that historical receipt.
+
+Refresh then re-proves the original immutable snapshot row and current task,
+assignment, callsign, verified runtime, callsign-capability subset, and complete
+pending-outbox transfer. The actual canonical runtime capability superset is
+retained in the refreshed binding and receipt; it is never replaced by the
+historical receipt's absent fields. A current receipt with deleted fields, a
+pre-existing assignment, a missing or duplicate event, a changed acceptance
+copy, malformed types, extra fields, or canonical/outbox drift still refuses
+before any refreshed snapshot row or pointer mutation. This source-only fix
+adds no schema migration and performs no live refresh or reconciliation. For
+the historical profile, `pending_delivery_count` must equal the sorted unique
+`retargeted_outbox_ids` count. Older receipts that counted unenumerated
+successor-pending deliveries remain unverifiable and refuse instead of being
+guessed from current state.
+
+### Imported legacy null-route adoption
+
+Issue #23 permits one additional mutation inside the existing switched,
+expired-snapshot refresh transaction. A predecessor-owned descendant with both
+canonical route and display identity null may adopt a route only when its task,
+callsign assignment, and import run/artifact/legacy-event linkage still match
+the exact `imported_legacy_partial` production shape. A modern task whose route
+was cleared, a successor-owned row, or any non-null partial identity refuses.
+The frozen binding may equal the current null-route binding exactly, or it may
+equal that same current non-runtime identity with every runtime field null when
+the sole later change is exactly one verified active/idle canonical runtime.
+That runtime must match agent kind, backend, thread/session, endpoint, required
+capabilities, and the live Herdr observation. A prior frozen runtime change,
+any non-runtime identity change, multiple/unverified/inactive runtimes, or a
+capability gap refuses.
+
+The Herdr adapter must find exactly one live interactive Codex endpoint by the
+combined canonical pane, exact thread/session, and normalized callsign. The
+top-level Herdr name must equal the lowercase callsign; terminal titles,
+sidebar tokens, and other display metadata are not routing evidence. Optional
+explicit `routing_name` and `routing_alias` fields may be absent, null, or the
+empty string; every non-empty explicit route field must exactly equal the same
+lowercase callsign, while non-string, whitespace, or conflicting values refuse.
+Exact
+pane, route, session, cwd, foreground cwd, terminal, state sequence, live
+status, and deterministic runtime generation are observed twice. Any missing,
+mismatched, closed, unready, or overlapping endpoint refuses before mutation.
+
+After the final stable observation, League rechecks the frozen source binding,
+agent version, callsign assignment/version/requirements, and zero-or-one exact
+runtime identity/generation/status/capabilities. It then CAS-updates only the
+null route plus `display_agent=codex`, increments that agent version, and emits
+one immutable hash-bound adoption event/receipt. The receipt binds the frozen
+source, pre-adoption current, and resulting binding digests plus the actual
+runtime id, generation, status, and capability set. The refreshed snapshot rows
+are constructed from the post-adoption canonical bindings, and the enclosing
+refresh receipt binds every adopted descendant's prior and resulting agent
+version. Route events,
+agent updates, snapshot rows, and the rollover pointer share one transaction;
+fault or CAS failure rolls all of them back. No schema, live rollover, hook,
+installation, layout, process, task owner, or successor row changes here.

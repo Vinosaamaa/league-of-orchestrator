@@ -18,6 +18,7 @@ from typing import Any, Mapping, Protocol, Sequence
 from .request_services import AssignmentService, AssignmentSpec, LaunchAdapterError
 from .issue_first import IssueVerifier
 from .storage import Storage, StorageRefusal
+from .worktree import verified_worktree_repository_root
 
 
 MAX_COMMAND_OUTPUT_BYTES = 1024 * 1024
@@ -274,54 +275,6 @@ def _validate_options(options: VisibleLaunchOptions) -> None:
         raise StorageRefusal("launch_scope_invalid", "Herdr startup timeout is invalid")
 
 
-def _codex_trust_root(worktree: Path) -> Path:
-    marker = worktree / ".git"
-    if marker.is_dir() and not marker.is_symlink():
-        return worktree.resolve()
-    if not marker.is_file() or marker.is_symlink() or marker.stat().st_size > 4096:
-        raise StorageRefusal(
-            "launch_scope_invalid", "visible launch worktree has no exact Git identity"
-        )
-    try:
-        line = marker.read_text(encoding="utf-8").strip()
-    except (OSError, UnicodeError) as exc:
-        raise StorageRefusal(
-            "launch_scope_invalid", "visible launch Git identity could not be read"
-        ) from exc
-    if not line.startswith("gitdir: ") or "\n" in line or "\0" in line:
-        raise StorageRefusal(
-            "launch_scope_invalid", "visible launch Git identity is malformed"
-        )
-    supplied = Path(line.removeprefix("gitdir: "))
-    git_dir = (
-        supplied if supplied.is_absolute() else marker.parent / supplied
-    ).resolve(strict=False)
-    common_dir = git_dir.parent.parent
-    repository = common_dir.parent
-    backref = git_dir / "gitdir"
-    try:
-        recorded_marker = Path(backref.read_text(encoding="utf-8").strip()).resolve()
-    except (OSError, UnicodeError) as exc:
-        raise StorageRefusal(
-            "launch_scope_invalid", "visible launch worktree registration is incomplete"
-        ) from exc
-    exact = (
-        git_dir.is_dir()
-        and git_dir.parent.name == "worktrees"
-        and common_dir.name == ".git"
-        and common_dir.is_dir()
-        and not common_dir.is_symlink()
-        and repository.is_dir()
-        and not repository.is_symlink()
-        and recorded_marker == marker.resolve()
-    )
-    if not exact:
-        raise StorageRefusal(
-            "launch_scope_invalid", "visible launch worktree registration is not exact"
-        )
-    return repository.resolve()
-
-
 class HerdrCodexLaunchAdapter:
     """Own one exact new Herdr tab and its generated Codex thread identity."""
 
@@ -331,11 +284,17 @@ class HerdrCodexLaunchAdapter:
         runner: CommandRunner | None = None,
         *,
         environment: Mapping[str, str] | None = None,
+        resume_thread_id: str | None = None,
     ) -> None:
         _validate_options(options)
         self.options = options
         self.runner = runner or SubprocessRunner()
         self.environment = dict(environment or os.environ)
+        if resume_thread_id is not None and THREAD_UUID.fullmatch(resume_thread_id) is None:
+            raise StorageRefusal(
+                "thread_identity_missing", "Codex resume requires one exact archived thread UUID"
+            )
+        self.resume_thread_id = resume_thread_id
         self._created: dict[str, str] | None = None
         self._receipt: dict[str, Any] | None = None
         if self.environment.get("HERDR_ENV") != "1":
@@ -388,6 +347,101 @@ class HerdrCodexLaunchAdapter:
             )
         return matches[0] if matches else None
 
+    def _verify_resume_process(
+        self,
+        spec: AssignmentSpec,
+        pane_id: str,
+    ) -> bool:
+        """Verify that the endpoint foreground is the exact archived resume process."""
+
+        result, _ = self._command(
+            ("herdr", "pane", "process-info", "--pane", pane_id),
+            "Herdr Codex resume process inspection",
+        )
+        process_info = result.get("process_info")
+        processes = (
+            process_info.get("foreground_processes")
+            if isinstance(process_info, Mapping)
+            else None
+        )
+        if not isinstance(processes, list) or any(
+            not isinstance(item, Mapping) for item in processes
+        ):
+            raise StorageRefusal(
+                "launch_identity_unverified",
+                "Herdr resume process inventory is malformed",
+            )
+        codex_processes = [item for item in processes if item.get("name") == "codex"]
+        if not codex_processes:
+            return False
+        worktree = str(Path(spec.worktree).resolve())
+        expected_tail = [
+            "resume",
+            "--model",
+            self.options.model,
+            "--config",
+            f'model_reasoning_effort="{self.options.effort}"',
+            "--add-dir",
+            self.options.state_root,
+            "--cd",
+            worktree,
+            str(self.resume_thread_id),
+        ]
+        exact = []
+        for process in codex_processes:
+            arguments = process.get("argv")
+            if not isinstance(arguments, list) or any(
+                not isinstance(value, str) for value in arguments
+            ):
+                continue
+            try:
+                resume_index = arguments.index("resume")
+            except ValueError:
+                continue
+            if (
+                arguments[resume_index:] == expected_tail
+                and process.get("cwd") == worktree
+            ):
+                exact.append(process)
+        if len(codex_processes) != 1 or len(exact) != 1:
+            raise StorageRefusal(
+                "thread_identity_ambiguous",
+                "foreground Codex process is not the exact archived resume and binding",
+            )
+        return True
+
+    def _report_verified_resume_session(
+        self,
+        spec: AssignmentSpec,
+        pane_id: str,
+        state_change_seq: int,
+    ) -> bool:
+        """Publish Herdr session metadata only after exact process verification."""
+
+        if not self._verify_resume_process(spec, pane_id):
+            return False
+        self._command(
+            (
+                "herdr",
+                "pane",
+                "report-agent-session",
+                pane_id,
+                "--source",
+                "herdr:codex",
+                "--agent",
+                "codex",
+                "--agent-session-id",
+                str(self.resume_thread_id),
+                "--session-start-source",
+                "codex-resume",
+                "--seq",
+                str(state_change_seq + 1),
+            ),
+            "Herdr Codex resume session report",
+            allow_silent_success=True,
+        )
+        return True
+
     def _verify_agent(
         self,
         agent: Mapping[str, Any],
@@ -432,7 +486,7 @@ class HerdrCodexLaunchAdapter:
         terminal_id: str,
     ) -> dict[str, Any]:
         """Persist a just-started Codex thread before assignment activation."""
-        if _session_id(agent) is not None:
+        if self.resume_thread_id is None and _session_id(agent) is not None:
             return dict(agent)
         expected_cwd = str(Path(spec.worktree).resolve())
         exact_private_launch = (
@@ -450,6 +504,41 @@ class HerdrCodexLaunchAdapter:
                 "launch_identity_unverified",
                 "new Codex endpoint did not expose one exact pre-context session identity",
             )
+        if self.resume_thread_id is not None:
+            session_reported = False
+            published = dict(agent)
+            deadline = time.monotonic() + min(
+                self.options.startup_timeout_ms / 1000, 12.0
+            )
+            delay = 0.05
+            while time.monotonic() < deadline:
+                if (
+                    published.get("pane_id") != pane_id
+                    or published.get("terminal_id") != terminal_id
+                    or published.get("cwd") != expected_cwd
+                    or published.get("foreground_cwd") != expected_cwd
+                ):
+                    break
+                process_verified = self._verify_resume_process(spec, pane_id)
+                if process_verified and _session_id(published) == self.resume_thread_id:
+                    return published
+                if process_verified and not session_reported:
+                    state_change_seq = published.get("state_change_seq")
+                    if not isinstance(state_change_seq, int) or state_change_seq < 0:
+                        raise StorageRefusal(
+                            "launch_identity_unverified",
+                            "Herdr resume endpoint has no exact metadata sequence",
+                        )
+                    session_reported = self._report_verified_resume_session(
+                        spec, pane_id, state_change_seq
+                    )
+                time.sleep(delay)
+                delay = min(delay * 2, 0.5)
+                published = self._get_agent(str(spec.callsign).lower())
+            raise StorageRefusal(
+                "thread_identity_ambiguous",
+                "Codex did not publish the exact archived thread after resume",
+            )
         nonce = _sha256(spec.assignment_id.encode("utf-8"))[:12]
         self._command(
             (
@@ -462,7 +551,11 @@ class HerdrCodexLaunchAdapter:
             ),
             "Herdr Codex identity handshake",
         )
-        for _ in range(120):
+        deadline = time.monotonic() + min(
+            self.options.startup_timeout_ms / 1000, 12.0
+        )
+        delay = 0.05
+        while time.monotonic() < deadline:
             published = self._get_agent(str(spec.callsign).lower())
             session_id = _session_id(published)
             if isinstance(session_id, str) and THREAD_UUID.fullmatch(session_id):
@@ -474,11 +567,47 @@ class HerdrCodexLaunchAdapter:
                 or published.get("foreground_cwd") != expected_cwd
             ):
                 break
-            time.sleep(0.1)
+            time.sleep(delay)
+            delay = min(delay * 2, 0.5)
         raise StorageRefusal(
             "launch_identity_unverified",
             "Codex did not publish one authoritative session after the launch handshake",
         )
+
+    def _complete_started_endpoint(
+        self,
+        spec: AssignmentSpec,
+        agent: Mapping[str, Any],
+        pane_id: str,
+        terminal_id: str,
+    ) -> None:
+        agent = self._await_initial_session(agent, spec, pane_id, terminal_id)
+        identity = self._verify_agent(agent, spec, pane_id, terminal_id)
+        assert self._created is not None
+        self._created.update(identity)
+        applies_to_source = _session_source(agent)
+        observed_sequence = agent.get("state_change_seq")
+        if not isinstance(applies_to_source, str) or not isinstance(
+            observed_sequence, int
+        ):
+            raise StorageRefusal(
+                "launch_title_unverified",
+                "Champion metadata authority source or sequence is missing",
+            )
+        self._report_title(
+            pane_id=pane_id,
+            assignment_id=spec.assignment_id,
+            callsign=str(spec.callsign),
+            applies_to_source=applies_to_source,
+            sequence=observed_sequence + 1,
+        )
+        observation = self._verify_title(
+            str(spec.callsign).lower(),
+            str(spec.callsign),
+            spec.assignment_id,
+            stable_observations=1,
+        )
+        self._created["state_change_seq"] = str(observation["state_change_seq"])
 
     def _title_owner(self, assignment_id: str) -> str:
         return _sha256(assignment_id.encode("utf-8"))[:16]
@@ -703,103 +832,127 @@ class HerdrCodexLaunchAdapter:
             or spec.callsign is None
         ):
             raise LaunchAdapterError("invalid_launch_worktree")
-        _codex_trust_root(worktree)
+        verified_worktree_repository_root(worktree)
         routing_name = str(spec.callsign).lower()
         if not SAFE_ROUTING_NAME.fullmatch(routing_name):
             raise LaunchAdapterError("invalid_launch_routing_name")
-        if self._matching_agent(routing_name) is not None:
+        matching = self._matching_agent(routing_name)
+        if matching is not None and self.resume_thread_id is None:
             raise LaunchAdapterError("launch_routing_conflict")
-        try:
-            result, _ = self._command(
-                (
-                    "herdr",
-                    "tab",
-                    "create",
-                    "--workspace",
-                    self.options.workspace_id,
-                    "--cwd",
-                    str(worktree.resolve()),
-                    "--label",
-                    f"{spec.callsign} · {self.options.task_label}",
-                    "--no-focus",
-                ),
-                "Herdr tab creation",
+        if matching is not None:
+            expected_worktree = str(worktree.resolve())
+            tab_id = matching.get("tab_id")
+            pane_id = matching.get("pane_id")
+            terminal_id = matching.get("terminal_id")
+            exact_retry_endpoint = (
+                matching.get("name") == routing_name
+                and matching.get("agent") == "codex"
+                and matching.get("workspace_id") == self.options.workspace_id
+                and matching.get("cwd") == expected_worktree
+                and matching.get("foreground_cwd") == expected_worktree
+                and all(
+                    isinstance(value, str) and value
+                    for value in (tab_id, pane_id, terminal_id)
+                )
             )
-            tab = result.get("tab")
-            pane = result.get("root_pane")
-            if not isinstance(tab, Mapping) or not isinstance(pane, Mapping):
-                raise StorageRefusal(
-                    "launch_identity_unverified", "Herdr tab receipt is incomplete"
-                )
-            tab_id = tab.get("tab_id")
-            pane_id = pane.get("pane_id")
-            terminal_id = pane.get("terminal_id")
-            if not all(isinstance(value, str) and value for value in (tab_id, pane_id, terminal_id)):
-                raise StorageRefusal(
-                    "launch_identity_unverified", "Herdr endpoint receipt is incomplete"
-                )
+            if not exact_retry_endpoint:
+                raise LaunchAdapterError("launch_routing_conflict")
+            try:
+                if not self._verify_resume_process(spec, str(pane_id)):
+                    raise LaunchAdapterError("launch_routing_conflict")
+            except StorageRefusal as exc:
+                raise LaunchAdapterError(exc.code) from exc
             self._created = {
                 "tab_id": str(tab_id),
                 "pane_id": str(pane_id),
                 "terminal_id": str(terminal_id),
                 "routing_name": routing_name,
-                "worktree": str(worktree.resolve()),
+                "worktree": expected_worktree,
             }
-            self._command(
-                (
-                    "herdr",
-                    "agent",
-                    "start",
-                    routing_name,
-                    "--kind",
-                    "codex",
-                    "--pane",
-                    str(pane_id),
-                    "--timeout",
-                    str(self.options.startup_timeout_ms),
-                    "--",
+        try:
+            if matching is not None:
+                self._complete_started_endpoint(
+                    spec, matching, str(pane_id), str(terminal_id)
+                )
+            else:
+                result, _ = self._command(
+                    (
+                        "herdr",
+                        "tab",
+                        "create",
+                        "--workspace",
+                        self.options.workspace_id,
+                        "--cwd",
+                        str(worktree.resolve()),
+                        "--label",
+                        f"{spec.callsign} · {self.options.task_label}",
+                        "--no-focus",
+                    ),
+                    "Herdr tab creation",
+                )
+                tab = result.get("tab")
+                pane = result.get("root_pane")
+                if not isinstance(tab, Mapping) or not isinstance(pane, Mapping):
+                    raise StorageRefusal(
+                        "launch_identity_unverified", "Herdr tab receipt is incomplete"
+                    )
+                tab_id = tab.get("tab_id")
+                pane_id = pane.get("pane_id")
+                terminal_id = pane.get("terminal_id")
+                if not all(
+                    isinstance(value, str) and value
+                    for value in (tab_id, pane_id, terminal_id)
+                ):
+                    raise StorageRefusal(
+                        "launch_identity_unverified", "Herdr endpoint receipt is incomplete"
+                    )
+                self._created = {
+                    "tab_id": str(tab_id),
+                    "pane_id": str(pane_id),
+                    "terminal_id": str(terminal_id),
+                    "routing_name": routing_name,
+                    "worktree": str(worktree.resolve()),
+                }
+                codex_arguments = [
                     "--model",
                     self.options.model,
                     "--config",
                     f'model_reasoning_effort="{self.options.effort}"',
                     "--add-dir",
                     self.options.state_root,
-                ),
-                "Herdr Codex start",
-                timeout_seconds=(self.options.startup_timeout_ms // 1000) + 10,
-            )
-            agent = self._await_initial_session(
-                self._get_agent(routing_name), spec, str(pane_id), str(terminal_id)
-            )
-            identity = self._verify_agent(
-                agent, spec, str(pane_id), str(terminal_id)
-            )
-            self._created.update(identity)
-            applies_to_source = _session_source(agent)
-            observed_sequence = agent.get("state_change_seq")
-            if not isinstance(applies_to_source, str) or not isinstance(
-                observed_sequence, int
-            ):
-                raise StorageRefusal(
-                    "launch_title_unverified",
-                    "Champion metadata authority source or sequence is missing",
+                ]
+                if self.resume_thread_id is not None:
+                    codex_arguments = [
+                        "resume",
+                        *codex_arguments,
+                        "--cd",
+                        str(worktree.resolve()),
+                        self.resume_thread_id,
+                    ]
+                self._command(
+                    (
+                        "herdr",
+                        "agent",
+                        "start",
+                        routing_name,
+                        "--kind",
+                        "codex",
+                        "--pane",
+                        str(pane_id),
+                        "--timeout",
+                        str(self.options.startup_timeout_ms),
+                        "--",
+                        *codex_arguments,
+                    ),
+                    "Herdr Codex start",
+                    timeout_seconds=(self.options.startup_timeout_ms // 1000) + 10,
                 )
-            self._report_title(
-                pane_id=str(pane_id),
-                assignment_id=spec.assignment_id,
-                callsign=str(spec.callsign),
-                applies_to_source=applies_to_source,
-                sequence=observed_sequence + 1,
-            )
-            observation = self._verify_title(
-                routing_name,
-                str(spec.callsign),
-                spec.assignment_id,
-                stable_observations=1,
-            )
-            self._created["state_change_seq"] = str(
-                observation["state_change_seq"]
-            )
+                self._complete_started_endpoint(
+                    spec,
+                    self._get_agent(routing_name),
+                    str(pane_id),
+                    str(terminal_id),
+                )
         except LaunchAdapterError:
             raise
         except Exception as exc:

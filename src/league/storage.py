@@ -10,6 +10,7 @@ from .storage_assignment import (
     PrepareAssignmentCommand,
 )
 from .storage_callsign import CallsignQueueStorage
+from .storage_continuation import ContinuationStorage
 from .storage_delivery import DeliveryStorage
 from .storage_lifecycle import LifecycleStorage
 from .storage_issue import IssueStorage
@@ -20,6 +21,7 @@ from .storage_reporting import ReportingStorage
 from .storage_request import (
     AnswerRequestCommand,
     DispatchRequestCommand,
+    ReconcileDuplicateRequestCommand,
     RequestResultCommand,
     RequestStorage,
 )
@@ -55,6 +57,7 @@ class Storage(
     RolloverStorage,
     ModeStorage,
     IssueStorage,
+    ContinuationStorage,
 ):
     """The only domain-facing persistence interface.
 
@@ -72,6 +75,7 @@ __all__ = [
     "LegacyDisplayReconciliationCommand",
     "AnswerRequestCommand",
     "DispatchRequestCommand",
+    "ReconcileDuplicateRequestCommand",
     "OutboxDispatchIdentity",
     "PrepareAssignmentCommand",
     "RequestResultCommand",

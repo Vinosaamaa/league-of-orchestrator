@@ -10,7 +10,7 @@ from .orchestration import OrchestrationSignals
 
 MAX_TRIAGE_JSON_BYTES = 65_536
 MAX_TRIAGE_TURN_BYTES = 1_000_000
-MAX_TRIAGE_TURN_PROMPTS = 20
+MAX_TRIAGE_TURN_PROMPTS = 25
 MAX_TASK_RESULT_SOURCES = 128
 
 
@@ -97,6 +97,16 @@ class TurnDispatchPlan:
     command: DispatchRequestCommand
 
 
+@dataclass(frozen=True)
+class ReconcileDuplicateRequestCommand:
+    duplicate_request_id: str
+    canonical_request_id: str
+    owner_agent_id: str
+    expected_duplicate_version: int
+    expected_canonical_version: int
+    at: str
+
+
 class RequestStorage(Protocol):
     def intake_prompt(
         self,
@@ -138,6 +148,10 @@ class RequestStorage(Protocol):
         decisions: list[dict[str, Any]],
         plans: tuple[TurnDispatchPlan, ...],
         at: str,
+        *,
+        expected_candidate_digest: Optional[str] = None,
+        candidate_limit: int = 12,
+        candidate_max_bytes: int = 24_576,
     ) -> dict[str, Any]: ...
 
     def commit_request_turn(
@@ -148,6 +162,10 @@ class RequestStorage(Protocol):
     ) -> dict[str, Any]: ...
 
     def request_turn_boundary(self, owner_agent_id: str) -> dict[str, Any]: ...
+
+    def reconcile_duplicate_request(
+        self, command: ReconcileDuplicateRequestCommand
+    ) -> dict[str, Any]: ...
 
     def claim_request(
         self,
@@ -218,4 +236,10 @@ class RequestStorage(Protocol):
         *,
         limit: int = 20,
         max_bytes: int = 1_000_000,
+        candidate_limit: int = 12,
+        candidate_max_bytes: int = 24_576,
+        candidate_after: Optional[str] = None,
+        candidate_page: bool = False,
     ) -> dict[str, Any]: ...
+
+    def semantic_recovery_backlog(self, *, limit: int = 20) -> dict[str, Any]: ...

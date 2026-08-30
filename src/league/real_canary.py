@@ -16,7 +16,7 @@ import subprocess
 import time
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from .acceptance import NAMESPACE_PATTERN, _atomic_write, _sha256, _stable_bytes, _write_json
 from .orchestration import OrchestrationSignals
@@ -632,6 +632,10 @@ def _setup_sqlite(
     source_root: Path,
     git: Mapping[str, str],
     herdr: Mapping[str, str],
+    issue_spec_resolver: Callable[
+        [SQLiteStorage, AssignmentSpec, str], AssignmentSpec
+    ]
+    | None = None,
 ) -> dict[str, Any]:
     clock = _Clock()
     ids = _Ids()
@@ -752,8 +756,15 @@ def _setup_sqlite(
                 worktree=git["worktree"],
                 issue_receipt=None,
             )
+        bound_spec = (
+            _owner_verified_issue_spec(
+                store, Path(git["worktree"]), assignment_spec, clock.now()
+            )
+            if issue_spec_resolver is None
+            else issue_spec_resolver(store, assignment_spec, clock.now())
+        )
         assignment = AssignmentService(store, _RealLaunchReceipt(herdr), clock, ids).assign(
-            _owner_verified_issue_spec(store, worktree, assignment_spec, clock.now())
+            bound_spec
         )
         if assignment.get("state") != "active":
             raise StorageRefusal("real_canary_assignment_failed", "real Codex assignment did not activate")

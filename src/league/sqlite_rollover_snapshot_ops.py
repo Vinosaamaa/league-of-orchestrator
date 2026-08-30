@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
-from typing import Any, Mapping, Optional, Sequence
+from typing import Any, Callable, Mapping, Optional, Sequence
 
 from .rollover_descendant import _herdr_runtime_generation
 from .sqlite_callsign_ops import digest, stable_json, timestamp
@@ -517,13 +517,15 @@ def refresh(
     at: str,
     canonical_digest: str,
     observations: Sequence[Mapping[str, Any]],
-    final_observations: Sequence[Mapping[str, Any]],
+    final_observer: Callable[
+        [list[dict[str, Any]]], Sequence[Mapping[str, Any]]
+    ],
     *,
     fault: Optional[FaultInjector] = None,
 ) -> dict[str, Any]:
     event_id = _event_id(refresh_id)
     try:
-        with store._transaction():
+        with store._transaction(immediate=False):
             retry = _retry(
                 store,
                 event_id,
@@ -560,18 +562,6 @@ def refresh(
             normalized, observation_digest = _observations(
                 context["descendants"], observations
             )
-            final_candidate = sorted(
-                (dict(item) for item in final_observations),
-                key=lambda item: item.get("champion_agent_id", ""),
-            )
-            if normalized != final_candidate:
-                raise StorageRefusal(
-                    "snapshot_refresh_live_changed",
-                    "live descendant identity changed during snapshot refresh",
-                )
-            final_normalized, final_observation_digest = _observations(
-                context["descendants"], final_candidate
-            )
             next_snapshot_version = expected_snapshot_version + 1
             next_rollover_version = expected_rollover_version + 1
             snapshot_id = f"snapshot:{operation_id}:v{next_snapshot_version}"
@@ -588,6 +578,40 @@ def refresh(
                 )
                 refreshed_rows.append(row)
             snapshot_digest = _snapshot_digest(refreshed_rows)
+            final_candidate = sorted(
+                (
+                    dict(item)
+                    for item in final_observer(
+                        [dict(item) for item in context["descendants"]]
+                    )
+                ),
+                key=lambda item: item.get("champion_agent_id", ""),
+            )
+            if normalized != final_candidate:
+                raise StorageRefusal(
+                    "snapshot_refresh_live_changed",
+                    "live descendant identity changed during snapshot refresh",
+                )
+            final_normalized, final_observation_digest = _observations(
+                context["descendants"], final_candidate
+            )
+            changed = store.connection.execute(
+                """
+                UPDATE rollover_operations SET snapshot_id=?,version=?,updated_at=?
+                 WHERE operation_id=? AND state='switched' AND version=? AND snapshot_id=?
+                """,
+                (
+                    snapshot_id, next_rollover_version, at, operation_id,
+                    expected_rollover_version, context["snapshot"]["snapshot_id"],
+                ),
+            )
+            if changed.rowcount != 1:
+                raise StorageRefusal(
+                    "snapshot_refresh_concurrent_mutation",
+                    "rollover snapshot pointer changed during refresh",
+                )
+            if fault:
+                fault("after_refresh_operation_cas")
             store.connection.execute(
                 """
                 INSERT INTO active_champion_snapshots
@@ -619,23 +643,6 @@ def refresh(
             )
             if fault:
                 fault("after_refresh_rows")
-            changed = store.connection.execute(
-                """
-                UPDATE rollover_operations SET snapshot_id=?,version=?,updated_at=?
-                 WHERE operation_id=? AND state='switched' AND version=? AND snapshot_id=?
-                """,
-                (
-                    snapshot_id, next_rollover_version, at, operation_id,
-                    expected_rollover_version, context["snapshot"]["snapshot_id"],
-                ),
-            )
-            if changed.rowcount != 1:
-                raise StorageRefusal(
-                    "snapshot_refresh_concurrent_mutation",
-                    "rollover snapshot pointer changed during refresh",
-                )
-            if fault:
-                fault("after_refresh_operation_cas")
             snapshot_value = {
                 "snapshot_id": snapshot_id,
                 "version": next_snapshot_version,

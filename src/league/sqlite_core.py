@@ -28,7 +28,7 @@ class SQLiteTransactionCore:
         return StorageRefusal("database_error", message)
 
     @contextmanager
-    def _transaction(self) -> Iterator[None]:
+    def _transaction(self, *, immediate: bool = True) -> Iterator[None]:
         if self.connection.in_transaction:
             depth = int(getattr(self, "_transaction_depth", 0)) + 1
             setattr(self, "_transaction_depth", depth)
@@ -45,7 +45,7 @@ class SQLiteTransactionCore:
                 setattr(self, "_transaction_depth", depth - 1)
             return
         try:
-            self.connection.execute("BEGIN IMMEDIATE")
+            self.connection.execute("BEGIN IMMEDIATE" if immediate else "BEGIN")
             yield
             self.connection.execute("COMMIT")
         except BaseException:

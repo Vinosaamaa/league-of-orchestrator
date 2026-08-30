@@ -68,7 +68,8 @@ Nothing here installs files, changes hooks, or connects to live Roster state.
   and two identical complete live Herdr identity observations. Runtime
   generations are derived from the observed terminal and exact thread/session,
   and must also match an existing canonical generation; stale rows are never
-  reused.
+  reused. The final observation runs in the consistent deferred transaction
+  immediately before pointer CAS without reserving the SQLite writer lock.
 - Deterministic bounded activity reports with stable JSON, exact range/timezone
   and scope, immutable show/since specifications, completion gates, indexed
   pagination, and JSON-derived Markdown/portable HTML.

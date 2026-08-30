@@ -183,11 +183,9 @@ class RolloverSnapshotRefreshService:
             expires_at,
             at,
         )
-        observations: list[dict[str, Any]] = []
-        final_observations: list[dict[str, Any]] = []
-        if not target["refreshed"]:
-            observations = self.adapter.observe(target["descendants"])
-            final_observations = self.adapter.observe(target["descendants"])
+        observations = (
+            [] if target["refreshed"] else self.adapter.observe(target["descendants"])
+        )
         return self.store.refresh_rollover_snapshot(
             operation_id,
             refresh_id,
@@ -201,5 +199,5 @@ class RolloverSnapshotRefreshService:
             at,
             target.get("canonical_digest", ""),
             observations,
-            final_observations,
+            self.adapter.observe,
         )

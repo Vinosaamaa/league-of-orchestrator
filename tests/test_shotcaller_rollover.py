@@ -1213,6 +1213,72 @@ def test_snapshot_refresh_refuses_a_changed_final_live_observation(root: Path) -
             ).fetchone()[0] == 0
 
 
+def test_snapshot_refresh_reobserves_inside_the_final_pointer_boundary(
+    root: Path,
+) -> None:
+    state, _ = migrated_state(root, "refresh-final-pointer-boundary")
+    with SQLiteStorage(state) as store:
+        context = seed_rollover(store, champion_count=1)
+        prepared, switched = switch_rollover(store, context)
+
+        class PointerBoundaryInventory(ExactSnapshotInventory):
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def observe(self, descendants: list[dict]) -> list[dict]:
+                observations = super().observe(descendants)
+                self.calls += 1
+                if self.calls == 2:
+                    assert store.connection.in_transaction is True
+                    with SQLiteStorage(state) as writer_probe:
+                        writer_probe.connection.execute("BEGIN IMMEDIATE")
+                        writer_probe.connection.execute("ROLLBACK")
+                    operation = store.connection.execute(
+                        "SELECT version,snapshot_id FROM rollover_operations WHERE operation_id=?",
+                        (prepared["operation_id"],),
+                    ).fetchone()
+                    assert tuple(operation) == (
+                        switched["version"],
+                        prepared["snapshot"]["snapshot_id"],
+                    )
+                    assert store.connection.execute(
+                        "SELECT COUNT(*) FROM active_champion_snapshots WHERE operation_id=?",
+                        (prepared["operation_id"],),
+                    ).fetchone()[0] == 1
+                    observations[0]["state_change_seq"] += 1
+                return observations
+
+        inventory = PointerBoundaryInventory()
+        try:
+            RolloverSnapshotRefreshService(store, inventory).refresh(
+                operation_id=prepared["operation_id"],
+                refresh_id="refresh:final-pointer-boundary",
+                squad_id=SQUAD_ID,
+                predecessor_agent_id=OLD_ID,
+                successor_agent_id=NEW_ID,
+                expected_rollover_version=switched["version"],
+                expected_snapshot_version=prepared["snapshot"]["version"],
+                expected_snapshot_digest=prepared["snapshot"]["digest"],
+                expires_at="2026-01-01T03:00:00Z",
+                at="2026-01-01T02:00:00Z",
+            )
+        except StorageRefusal as exc:
+            assert exc.code == "snapshot_refresh_live_changed"
+        else:
+            raise AssertionError("final live change advanced the rollover pointer")
+        assert inventory.calls == 2
+        status = store.rollover_status(prepared["operation_id"])
+        assert status["version"] == switched["version"]
+        assert status["snapshot"] == prepared["snapshot"]
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM active_champion_snapshots WHERE operation_id=?",
+            (prepared["operation_id"],),
+        ).fetchone()[0] == 1
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM events WHERE event_type='rollover_snapshot_refreshed'"
+        ).fetchone()[0] == 0
+
+
 def test_snapshot_refresh_faults_restore_the_expired_snapshot(root: Path) -> None:
     points = (
         "after_refresh_snapshot",
@@ -1249,7 +1315,7 @@ def test_snapshot_refresh_faults_restore_the_expired_snapshot(root: Path) -> Non
                     **inputs,
                     canonical_digest=target["canonical_digest"],
                     observations=observations,
-                    final_observations=observations,
+                    final_observer=lambda _descendants: observations,
                     fault=crash,
                 )
             except InjectedCrash as exc:
@@ -1263,7 +1329,7 @@ def test_snapshot_refresh_faults_restore_the_expired_snapshot(root: Path) -> Non
                 **inputs,
                 canonical_digest=target["canonical_digest"],
                 observations=observations,
-                final_observations=observations,
+                final_observer=lambda _descendants: observations,
             )
             assert recovered["snapshot"]["version"] == 2
 
@@ -3108,6 +3174,7 @@ def main() -> None:
         test_refreshed_snapshot_drives_descendant_reconciliation(root)
         test_snapshot_refresh_refuses_concurrent_canonical_mutation(root)
         test_snapshot_refresh_refuses_a_changed_final_live_observation(root)
+        test_snapshot_refresh_reobserves_inside_the_final_pointer_boundary(root)
         test_snapshot_refresh_faults_restore_the_expired_snapshot(root)
         test_snapshot_refresh_refuses_changed_rollover_identity(root)
         test_manual_imported_legacy_partial_fixture_matches_supported_importer(root)

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Mapping, Optional, Protocol, Sequence
+from typing import Any, Callable, Mapping, Optional, Protocol, Sequence
 
 from .storage_types import FaultInjector
 
@@ -61,7 +61,9 @@ class RolloverStorage(Protocol):
         at: str,
         canonical_digest: str,
         observations: Sequence[Mapping[str, Any]],
-        final_observations: Sequence[Mapping[str, Any]],
+        final_observer: Callable[
+            [list[dict[str, Any]]], Sequence[Mapping[str, Any]]
+        ],
         *,
         fault: Optional[FaultInjector] = None,
     ) -> dict[str, Any]: ...

@@ -14,7 +14,7 @@ import stat
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Optional, Sequence
+from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
 
 from . import sqlite_runtime_ops
 from .sqlite_artifact_ops import declare as declare_repository_artifact_operation
@@ -2186,7 +2186,9 @@ class SQLiteStorage(SQLiteTransactionCore):
         at: str,
         canonical_digest: str,
         observations: Sequence[dict[str, Any]],
-        final_observations: Sequence[dict[str, Any]],
+        final_observer: Callable[
+            [list[dict[str, Any]]], Sequence[Mapping[str, Any]]
+        ],
         *,
         fault: Optional[FaultInjector] = None,
     ) -> dict[str, Any]:
@@ -2204,7 +2206,7 @@ class SQLiteStorage(SQLiteTransactionCore):
             at,
             canonical_digest,
             observations,
-            final_observations,
+            final_observer,
             fault=fault,
         )
 

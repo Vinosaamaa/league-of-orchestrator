@@ -240,10 +240,12 @@ every prior snapshot revision while allowing the exact switched operation to
 CAS-point at one refreshed immutable revision. The source-only refresh observes
 two fake Herdr inventories through the production adapter boundary, requires
 their normalized endpoint/route/session/terminal/sequence evidence to remain
-identical, and binds both observation digests to the committed receipt. Runtime
-generation is deterministically derived from the observed terminal and exact
-thread/session proof, and must match canonical generation when present. It does
-not reuse an expired page or row input.
+identical, and binds both observation digests to the committed receipt. The
+second inventory runs inside the consistent deferred transaction immediately
+before pointer CAS; a recording writer probe proves the external read reserves
+no SQLite writer lock. Runtime generation is deterministically derived from the
+observed terminal and exact thread/session proof, and must match canonical
+generation when present. It does not reuse an expired page or row input.
 Focused tests use temporary roots and
 recording fake Herdr adapters for no-runtime import, closed/mismatched/ambiguous
 refusal, exact CAS and delivery-claim races, repeatable intake paging,

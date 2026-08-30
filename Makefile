@@ -28,7 +28,8 @@ REQUEST_LIFECYCLE_TESTS := \
 	tests/test_request_lifecycle_cli.py
 
 BENCHMARK_TESTS := \
-	tests/test_request_turn_benchmark.py
+	tests/test_request_turn_benchmark.py \
+	tests/test_semantic_triage_benchmark.py
 
 RUNTIME_LIFECYCLE_TESTS := \
 	tests/test_runtime_adapters.py \

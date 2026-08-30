@@ -630,3 +630,17 @@ idempotent.
 The v16 target-version binding changes only the deterministic acceptance
 fixture's dry-run report digest; its source and imported-row parity digests are
 unchanged.
+
+## Semantic-triage ablation provenance
+
+Issue #66 adds a repository-local diagnostic benchmark, public synthetic
+120-prompt corpus, structured-output schema, and focused fake-model test. The
+triage-off arm is benchmark-only and does not create a second production path;
+normal League behavior continues to require model-authored semantic accounting.
+
+The installed 0.2.24 turn refuses a 25-prompt batch because its internal bound
+is 20. The source candidate deliberately raises only that existing bound to 25
+so the owner-required 1/6/25 scaling matrix can execute. It does not change the
+per-prompt 32-item bound, 20-new-request plan bound, transaction shape, storage
+schema, migration set, journal policy, hooks, watcher, installation, or live
+state. The benchmark and focused test use explicit synthetic temporary roots.

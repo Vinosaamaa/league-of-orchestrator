@@ -20,6 +20,7 @@ from request_lifecycle_fixture import GAREN_RUNTIME, create_context  # noqa: E40
 from storage_fixture import SHOTCALLER_ID  # noqa: E402
 from league.cli import main as league_main  # noqa: E402
 from league.sqlite_store import SQLiteStorage  # noqa: E402
+from league.storage import StorageRefusal  # noqa: E402
 
 
 def _capture(store, clock, prompt_id: str, body: str) -> None:
@@ -433,6 +434,12 @@ def test_small_shortlist_does_not_block_direct_and_pages_off_path(root: Path) ->
     assert inventory["total_count"] == 80
     assert inventory["returned_count"] == 12 and inventory["truncated"]
     assert inventory["ranking"] == "routing-lexical-recency"
+    try:
+        store.untriaged_intake(SHOTCALLER_ID, candidate_limit=21)
+    except StorageRefusal as exc:
+        assert exc.code == "invalid_limit"
+    else:
+        raise AssertionError("inline candidate inventory exceeded its 20-row contract")
     page_one = store.untriaged_intake(
         SHOTCALLER_ID, candidate_limit=12, candidate_page=True
     )["candidate_inventory"]

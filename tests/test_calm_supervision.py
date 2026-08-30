@@ -326,19 +326,14 @@ def test_registration_and_silent_reconciliation_are_atomic(root: Path) -> None:
         store.close()
 
 
-def test_calm_event_ipc_pause_resume_and_recovery(root: Path) -> None:
-    state, store, active = _active_champion(root)
-    first_wakes = FakeWakeAdapter()
-    runtime = PersistentSupervisor(
-        state,
-        callsign="Garen",
-        lease_seconds=0.8,
-        renew_seconds=0.2,
-        recovery_seconds=0.3,
-        wake_adapter=first_wakes,
-        runtime_observer=FakeRuntimeObserver(),
-    )
-    thread, errors = _start(runtime)
+def _exercise_calm_event_ipc_pause_resume_and_recovery(
+    state: Path,
+    store: SQLiteStorage,
+    active: dict[str, object],
+    first_wakes: FakeWakeAdapter,
+    runtime: PersistentSupervisor,
+    thread: threading.Thread,
+) -> None:
     status = supervisor_status(state, "Garen")
     assert status["live"] and status["mode"] == "calm"
 
@@ -449,10 +444,32 @@ def test_calm_event_ipc_pause_resume_and_recovery(root: Path) -> None:
         delay = min(delay * 2, 0.1)
     assert recovered["state"] == "delivered"
 
-    stop_supervisor(state, "Garen")
-    thread.join(timeout=5)
+def test_calm_event_ipc_pause_resume_and_recovery(root: Path) -> None:
+    state, store, active = _active_champion(root)
+    first_wakes = FakeWakeAdapter()
+    runtime = PersistentSupervisor(
+        state,
+        callsign="Garen",
+        lease_seconds=0.8,
+        renew_seconds=0.2,
+        recovery_seconds=0.3,
+        wake_adapter=first_wakes,
+        runtime_observer=FakeRuntimeObserver(),
+    )
+    thread, errors = _start(runtime)
+    try:
+        _exercise_calm_event_ipc_pause_resume_and_recovery(
+            state, store, active, first_wakes, runtime, thread
+        )
+    finally:
+        try:
+            if supervisor_status(state, "Garen")["live"]:
+                stop_supervisor(state, "Garen")
+        except StorageRefusal:
+            runtime.stop_requested.set()
+        thread.join(timeout=5)
+        store.close()
     assert not thread.is_alive() and not errors
-    store.close()
 
 
 def test_paused_stop_and_unreachable_are_bounded(root: Path) -> None:

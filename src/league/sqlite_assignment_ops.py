@@ -2772,7 +2772,11 @@ def _task_transition_retry(
     ).fetchone()
     if duplicate is None:
         return None
-    detail = json.loads(str(duplicate["detail_json"]))
+    detail = _stored_object(
+        duplicate["detail_json"],
+        "transition_history_malformed",
+        "stored transition retry history is malformed",
+    )
     if (
         duplicate["task_id"] != task_id
         or duplicate["to_state"] != state

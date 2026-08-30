@@ -2376,7 +2376,7 @@ def _candidate_request_inventory(
             (owner_agent_id,),
         ).fetchone()[0]
     )
-    pool_limit = limit + 1 if page else min(500, limit * 4) + 1
+    pool_limit = limit + 1 if page else min(48, limit * 4) + 1
     if page:
         rows = store.connection.execute(
             """
@@ -2528,7 +2528,7 @@ def untriaged_intake(
     if (
         not 1 <= limit <= 100
         or not MAX_PROMPT_BYTES <= max_bytes <= 4_000_000
-        or not 1 <= candidate_limit <= 500
+        or not 1 <= candidate_limit <= (500 if candidate_page else 20)
         or not 1_024 <= candidate_max_bytes <= 1_000_000
         or (candidate_after is not None and not candidate_page)
     ):

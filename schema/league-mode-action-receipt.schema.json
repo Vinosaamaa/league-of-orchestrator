@@ -3,7 +3,7 @@
   "$id": "https://github.com/Vinosaamaa/league-of-orchestrator/schema/league-mode-action-receipt.schema.json",
   "title": "Autonomous external-action use receipt",
   "type": "object",
-  "required": ["schema", "action_use_id", "goal_id", "grant_id", "grant_revision", "action_kind", "external_action_owner", "state", "use_receipt_digest", "result_receipt_digest", "goal_state", "goal_version", "idempotent"],
+  "required": ["schema", "action_use_id", "goal_id", "grant_id", "grant_revision", "action_kind", "external_action_owner", "state", "use_receipt_digest", "result_receipt_digest", "goal_version_at_use", "goal_state", "goal_version", "idempotent"],
   "properties": {
     "schema": {"const": "league.mode-action-receipt.v1"},
     "action_use_id": {"type": "string", "minLength": 1},
@@ -15,6 +15,7 @@
     "state": {"enum": ["in_progress", "succeeded", "failed"]},
     "use_receipt_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "result_receipt_digest": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+    "goal_version_at_use": {"type": ["integer", "null"], "minimum": 1},
     "goal_state": {"type": "string", "minLength": 1},
     "goal_version": {"type": "integer", "minimum": 1},
     "idempotent": {"type": "boolean"},

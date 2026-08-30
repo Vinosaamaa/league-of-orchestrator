@@ -90,12 +90,21 @@ gates. Each gate maps to one explicit action category: live reconciliation,
 retirement, Shotcaller creation, Squad registration, or teardown. Supplying
 `--mode-action` and `--expected-mode-goal-version` atomically validates the
 active grant and binds the normalized action receipt to the exact command-name
-and command-scope digest before the protected operation runs. Success or
+and command-scope digest before the protected operation runs. The action
+resource scope must declare exactly that one digest, and the immutable grant's
+resource boundary must contain it; changing only the action and target cannot
+expand owner authority. A foreign action target or a target outside the grant
+therefore refuses before action use or protected effect. Success or
 failure then settles both the action and one immutable
 [`league.protected-gate-receipt.v1`](../../schema/league-protected-gate-receipt.schema.json)
 receipt. Rollover preparation derives its automatic authority digest from that
 exact use receipt, and legacy-display reconciliation treats it as the required
 owner authorization; either command refuses mixed manual and mode authority.
+Each action use also records its exact post-use goal version. Settlement checks
+that immutable fence but CAS-updates the current goal version, so another
+authorized concurrent use may advance the goal without permanently stranding
+the older valid use. Migrated pre-v20 in-progress rows without that binding
+refuse for explicit reconciliation.
 
 The protected mapping covers assignment runtime/display reconciliation,
 Shotcaller creation, Squad registration/acceptance, rollover
@@ -165,7 +174,8 @@ inside the same bounded read-only perimeter.
 - Platform-safety bypass, unavailable permission, ambiguous target, provider
   restriction, and unsupported cleanup remain unconditional refusals.
 - A protected effect begins only after one exact grant use is durably bound to
-  its command and canonical scope; every outcome durably settles that binding.
+  its command and canonical scope, with the target digest proven inside both
+  action and grant resource scope; every outcome durably settles that binding.
 - Accepted goal-scoped authority suppresses duplicate owner prompts only for
   categories explicitly listed in the grant. Adjacent categories still refuse.
 - Verification failure creates repair work; it never implies delivery or
@@ -182,8 +192,9 @@ inside the same bounded read-only perimeter.
 Migrations v18 and v20 are contiguous in the repository sequence and use the existing checksummed,
 transactional migration ledger. Upgrading an existing store still requires the
 normal verified pre-migration SQLite backup. Migration v20 adds immutable
-protected-use and protected-settlement tables without rewriting v18 authority
-rows. The existing online-backup path copies and verifies both sets of rows,
+protected-use and protected-settlement tables plus a nullable action-use fence
+for fail-closed migration of pre-v20 rows, without rewriting v18 authority
+identity. The existing online-backup path copies and verifies both sets of rows,
 and rollback exports include them as non-canonical records. Inspection exports redact exact goals, issuer identity, scope/resource
 details, action scope/risk/resource data, repair failures, and issue titles.
 The import registry includes every authority, action, protected-gate, repair,
@@ -199,8 +210,10 @@ authorized closed recurrence with prior linkage, distinct-scope creation,
 concurrent-create serialization, valid issue-first launch, exact retry, and the
 expanded direct/hidden routing boundary. Protected-gate tests prove sequential
 multi-action propagation under one grant, an adjacent ungranted refusal before
-operation, two-writer CAS, exact use/settlement persistence, and command-facade
-delivery. Installed/live acceptance remains a separate gate.
+operation, foreign-target refusal at both the action and grant boundaries,
+effect-free settled retry, two-writer use CAS, max-concurrency settlement of an
+older valid use, exact use/settlement persistence, and command-facade delivery.
+Installed/live acceptance remains a separate gate.
 
 ## Remaining limits and cutover boundary
 

@@ -642,13 +642,20 @@ immutably bound to its command category and canonical scope digest before the
 effect, and each effect outcome settles a separate receipt. It does not infer
 authority from mode state, combine manual and autonomous authority, bypass an
 existing platform or provider refusal, or broaden any grant category.
+The current correction additionally requires the exact target digest as a
+singleton action resource contained by the immutable grant resource boundary,
+makes settled receipt retry effect-free, and records an immutable action-use
+goal fence so a later authorized concurrent use cannot strand an older one at
+settlement. Pre-v20 in-progress rows without that fence refuse for explicit
+reconciliation.
 
 Migration v20 is named
 `autonomous-protected-gate-authority-propagation`, checksum
-`f5a80c7a8b312063c35d6a3504c893ac0a45d96952ac6e288e6f251188efe708`.
+`b36865213f931b6522f2f8c807dcea60c3949a08eab05772c6ad8567fbdcf71a`.
 Existing migrations remain byte-for-byte unchanged. Focused temporary-root
-tests cover one grant across multiple protected actions, an adjacent ungranted
-refusal before operation, exact CLI propagation, two-writer CAS, immutable
+tests cover one grant across multiple protected actions, adjacent and foreign
+target refusal before operation, effect-free settled retry, exact CLI
+propagation, two-writer use CAS, max-concurrency settlement, immutable
 receipt migration rollback, backup/export/import, and schema validation. This
 source slice performs no installation, live grant mutation, reconciliation,
 Squad creation, deployment, teardown, or merge.

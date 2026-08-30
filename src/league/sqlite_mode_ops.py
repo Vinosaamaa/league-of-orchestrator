@@ -15,6 +15,7 @@ from .storage_mode import (
     BeginProtectedGateCommand,
     SettleModeActionCommand,
     SettleProtectedGateCommand,
+    protected_gate_scope_digest,
 )
 from .storage_types import StorageRefusal
 
@@ -552,6 +553,11 @@ def _action_result(row: sqlite3.Row, goal: sqlite3.Row, *, idempotent: bool) -> 
         "state": row["state"],
         "use_receipt_digest": row["use_receipt_digest"],
         "result_receipt_digest": row["result_receipt_digest"],
+        "goal_version_at_use": (
+            None
+            if row["goal_version_at_use"] is None
+            else int(row["goal_version_at_use"])
+        ),
         "goal_state": goal["state"],
         "goal_version": int(goal["version"]),
         "idempotent": idempotent,
@@ -696,8 +702,9 @@ def use_mode_action(
                   (action_use_id,idempotency_key,goal_id,grant_id,grant_revision,
                    external_owner_agent_id,action_kind,action_scope_json,risk_categories_json,
                    sensitive_categories_json,resource_use_json,attempt_count,cost_microunits,
-                   changed_files,duration_seconds,state,use_receipt_digest,started_at)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'in_progress',?,?)
+                   changed_files,duration_seconds,state,use_receipt_digest,started_at,
+                   goal_version_at_use)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'in_progress',?,?,?)
                 """,
                 (
                     action["action_use_id"], action["idempotency_key"], action["goal_id"],
@@ -707,6 +714,7 @@ def use_mode_action(
                     _json(action["resources"]), action["usage"]["attempts"],
                     action["usage"]["cost_microunits"], action["usage"]["changed_files"],
                     action["usage"]["duration_seconds"], action["use_receipt_digest"], at,
+                    next_version,
                 ),
             )
             if repair is not None:
@@ -810,9 +818,23 @@ def settle_mode_action(store: Any, command: SettleModeActionCommand) -> dict[str
                 ).fetchone()
                 result["repair"] = _repair_record(repair)
                 return result
-            if int(goal["version"]) != expected_goal_version:
-                raise StorageRefusal("goal_version_conflict", "goal changed before action settlement")
-            next_version = expected_goal_version + 1
+            goal_version_at_use = action["goal_version_at_use"]
+            if goal_version_at_use is None:
+                raise StorageRefusal(
+                    "mode_action_reconciliation_required",
+                    "in-progress action predates concurrency-safe settlement binding",
+                )
+            if int(goal_version_at_use) != expected_goal_version:
+                raise StorageRefusal(
+                    "goal_version_conflict",
+                    "settlement does not match the action use goal version",
+                )
+            current_goal_version = int(goal["version"])
+            if current_goal_version < int(goal_version_at_use):
+                raise StorageRefusal(
+                    "goal_version_conflict", "goal predates the exact action use"
+                )
+            next_version = current_goal_version + 1
             repair = None
             if outcome == "failed":
                 if action["action_kind"] == "repair":
@@ -907,7 +929,7 @@ def settle_mode_action(store: Any, command: SettleModeActionCommand) -> dict[str
                        version=?,updated_at=?
                  WHERE goal_id=? AND version=?
                 """,
-                (next_state, next_action, next_version, at, goal_id, expected_goal_version),
+                (next_state, next_action, next_version, at, goal_id, current_goal_version),
             )
             if updated.rowcount != 1:
                 raise StorageRefusal("goal_version_conflict", "goal changed before action settlement")
@@ -926,14 +948,6 @@ def settle_mode_action(store: Any, command: SettleModeActionCommand) -> dict[str
         raise
     except sqlite3.DatabaseError as exc:
         raise store._translate_database_error(exc, "autonomous action settlement conflicted") from exc
-
-
-def _gate_scope_digest(value: Mapping[str, Any]) -> str:
-    if not isinstance(value, dict) or len(_json(value).encode("utf-8")) > 16_384:
-        raise StorageRefusal(
-            "protected_gate_invalid", "protected gate scope is invalid or unbounded"
-        )
-    return _digest(value)
 
 
 def _protected_gate_receipt(
@@ -972,7 +986,15 @@ def begin_protected_gate(
             "protected_gate_action_mismatch",
             "protected gate action category does not match the command",
         )
-    scope_digest = _gate_scope_digest(command.gate_scope)
+    scope_digest = protected_gate_scope_digest(command.gate_scope)
+    declared_scope_digests = action["resources"].get(
+        "protected_gate_scope_digests"
+    )
+    if declared_scope_digests != [scope_digest]:
+        raise StorageRefusal(
+            "protected_gate_scope_mismatch",
+            "protected target is absent from the exact action resource scope",
+        )
     binding_value = {
         "action_use_id": action["action_use_id"],
         "gate_name": command.gate_name,

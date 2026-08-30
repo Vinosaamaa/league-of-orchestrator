@@ -324,12 +324,16 @@ Grant and action input schemas are
 protected-gate receipts have separate public schemas. A protected command such
 as `assign reconcile-runtime` accepts `--mode-action` with
 `--expected-mode-goal-version`; League binds the exact command scope to that
-action, runs the command, and durably settles both receipts. The grant must
+action, proves its singleton target digest is contained by the grant's allowed
+resource scope, runs the command, and durably settles both receipts. The grant must
 explicitly include the command's category (`live_reconcile`, `retire`,
 `shotcaller_create`, `squad_register`, or `teardown`). Manual authority remains
 available, but a caller cannot combine it with mode authority for the same
 gate. Stale, revoked, expired, sensitive, excluded, out-of-scope, over-limit,
 or safety-bypass actions still refuse before the protected operation.
+Each action receipt retains its immutable goal version at use, so authorized
+concurrent uses settle against their own fence while atomically advancing the
+current goal version; a later use cannot strand an older valid one.
 
 An autonomous grant never
 makes repository implementation direct: `request dispatch` still requires a

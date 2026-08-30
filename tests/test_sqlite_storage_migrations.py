@@ -137,7 +137,7 @@ def test_transactional_upgrade_backup_and_rollback(root: Path) -> None:
             (17, "immutable-switched-rollover-snapshot-revisions", "69dabdd22e3a4d099eb574ff11833681188e53ccf0d6ac9d787d7ed1e9764b26"),
             (18, "scoped-autonomous-delivery-and-issue-first-assignment", "b517b9103fedcc0db8a1f0dd7d06d475f309f3a135d87356209ab34dbd957631"),
             (19, "agent-authored-request-reconciliation", "038abf84401775c692954c5eea8f12e2f19a23d6b67ab727245f651751f438c0"),
-            (20, "autonomous-protected-gate-authority-propagation", "f5a80c7a8b312063c35d6a3504c893ac0a45d96952ac6e288e6f251188efe708"),
+            (20, "autonomous-protected-gate-authority-propagation", "b36865213f931b6522f2f8c807dcea60c3949a08eab05772c6ad8567fbdcf71a"),
         ]
         assert store.connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
 
@@ -521,6 +521,13 @@ def test_v19_to_v20_rolls_back_protected_gate_receipts(root: Path) -> None:
             )
         }
         assert {"protected_gate_uses", "protected_gate_settlements"} <= tables
+        action_columns = {
+            row[1]
+            for row in store.connection.execute(
+                "PRAGMA table_info(autonomous_action_uses)"
+            )
+        }
+        assert "goal_version_at_use" in action_columns
         assert store.connection.execute(
             "SELECT COUNT(*) FROM sqlite_master "
             "WHERE type='index' AND name='ix_protected_gate_uses_name_scope'"

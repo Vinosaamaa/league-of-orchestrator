@@ -7,6 +7,11 @@ MIGRATION_NAME = "autonomous-protected-gate-authority-propagation"
 
 STATEMENTS = (
     """
+    ALTER TABLE autonomous_action_uses
+      ADD COLUMN goal_version_at_use INTEGER
+      CHECK (goal_version_at_use IS NULL OR goal_version_at_use > 0)
+    """,
+    """
     CREATE TABLE protected_gate_uses (
       action_use_id TEXT PRIMARY KEY REFERENCES autonomous_action_uses(action_use_id),
       gate_name TEXT NOT NULL,

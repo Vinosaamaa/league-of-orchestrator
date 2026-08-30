@@ -1404,7 +1404,7 @@ _IMPORT_COLUMNS: dict[str, tuple[str, ...]] = {
         "action_scope_json", "risk_categories_json", "sensitive_categories_json",
         "resource_use_json", "attempt_count", "cost_microunits", "changed_files",
         "duration_seconds", "state", "use_receipt_digest", "result_receipt_digest",
-        "failure_class", "started_at", "settled_at",
+        "failure_class", "started_at", "settled_at", "goal_version_at_use",
     ),
     "protected_gate_uses": (
         "action_use_id", "gate_name", "action_kind", "gate_scope_digest",

@@ -38,6 +38,32 @@ def _session(agent: Mapping[str, Any]) -> str | None:
     return value if isinstance(value, str) else None
 
 
+def _herdr_interactive_ready(agent: Mapping[str, Any]) -> bool:
+    """Honor affirmative readiness or legacy settled-state readiness only."""
+
+    if "interactive_ready" in agent:
+        return agent.get("interactive_ready") is True
+    return agent.get("agent_status") in {"done", "idle"}
+
+
+def _public_descendant_locator(target: Mapping[str, Any]) -> str:
+    callsign = target.get("callsign")
+    if (
+        isinstance(callsign, str)
+        and 1 <= len(callsign) <= 64
+        and callsign[0].isalpha()
+        and all(
+            character.isalnum() or character in {"_", "-"}
+            for character in callsign
+        )
+    ):
+        return callsign
+    opaque = hashlib.sha256(
+        str(target.get("champion_agent_id", "unknown")).encode("utf-8")
+    ).hexdigest()[:12]
+    return f"descendant-{opaque}"
+
+
 class HerdrDescendantRuntimeAdapter:
     """Observe one already-running Champion without creating or changing layout."""
 
@@ -65,6 +91,7 @@ class HerdrDescendantRuntimeAdapter:
         expected_pane = target.get("address")
         expected_route = target.get("routing_name")
         expected_thread = target.get("thread_id")
+        locator = _public_descendant_locator(target)
         related = [
             dict(agent)
             for agent in agents
@@ -75,17 +102,20 @@ class HerdrDescendantRuntimeAdapter:
         if len(related) > 1:
             raise StorageRefusal(
                 "descendant_runtime_ambiguous",
-                "multiple Herdr endpoints overlap the frozen Champion identity",
+                f"{locator}: multiple Herdr endpoints overlap the frozen "
+                "Champion identity",
             )
         if not related:
             raise StorageRefusal(
-                "descendant_runtime_missing", "frozen Champion is absent from Herdr inventory"
+                "descendant_runtime_missing",
+                f"{locator}: frozen Champion is absent from Herdr inventory",
             )
         agent = related[0]
         status = agent.get("agent_status")
         if status in CLOSED_STATUSES:
             raise StorageRefusal(
-                "descendant_runtime_closed", "frozen Champion Herdr endpoint is closed"
+                "descendant_runtime_closed",
+                f"{locator}: frozen Champion Herdr endpoint is closed",
             )
         worktree = Path(str(target.get("worktree", "")))
         terminal_id = agent.get("terminal_id")
@@ -94,7 +124,7 @@ class HerdrDescendantRuntimeAdapter:
             target.get("kind") == "codex-thread"
             and target.get("backend") == "herdr"
             and agent.get("agent") == "codex"
-            and agent.get("interactive_ready") is True
+            and _herdr_interactive_ready(agent)
             and agent.get("pane_id") == expected_pane
             and agent.get("name") == expected_route
             and _session(agent) == expected_thread
@@ -114,7 +144,8 @@ class HerdrDescendantRuntimeAdapter:
         if not exact:
             raise StorageRefusal(
                 "descendant_runtime_mismatch",
-                "Herdr endpoint, route, thread, terminal, or worktree differs from the frozen Champion",
+                f"{locator}: live Herdr identity or readiness differs from the "
+                "frozen Champion",
             )
         runtime_status = "idle" if status in {"done", "idle"} else "active"
         generation = _herdr_runtime_generation(terminal_id, expected_thread)

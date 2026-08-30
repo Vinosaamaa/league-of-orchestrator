@@ -31,6 +31,17 @@ class CallsignQueueStorage(Protocol):
 
     def shotcaller_bootstrap_baseline(self, assignment_id: str) -> Optional[dict[str, Any]]: ...
 
+    def record_shotcaller_bootstrap_publication(
+        self,
+        assignment_id: str,
+        expected_version: int,
+        publication: Mapping[str, Any],
+    ) -> dict[str, Any]: ...
+
+    def shotcaller_bootstrap_publication(
+        self, assignment_id: str
+    ) -> Optional[dict[str, Any]]: ...
+
     def reconcile_callsign_pool(
         self,
         role: str,

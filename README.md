@@ -65,6 +65,15 @@ Nothing here installs files, changes hooks, or connects to live Roster state.
   provider-generated presentation tokens are never treated as a routing bind:
   only consistent top-level route fields bind the pane, while a source-less
   provider presentation is accepted only as one complete thread-bound envelope.
+  Legacy recovery records an assignment-bound publication attempt before the
+  first Herdr rename. An exact reserved retry may resume a route-only partial
+  publication despite unrelated global state-sequence advances only when the
+  endpoint identity and every provider presentation byte still match that
+  attempt. League's title overlay carries explicit owner/source tokens and uses
+  Herdr's provider-source authority without borrowing its source-local sequence;
+  a later provider or user presentation refuses and is preserved. Rollback
+  either proves the exact external restoration before releasing the reservation
+  or leaves that reservation as the durable retry obligation.
 - One active-turn semantic sideband with a 12-row/24 KiB same-owner candidate
   shortlist, version-fenced duplicate/follow-up links, and external-dispatch
   refusal when the complete candidate inventory is unavailable or changed.

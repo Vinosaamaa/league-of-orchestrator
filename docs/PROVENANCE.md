@@ -548,15 +548,23 @@ whose source is not League-owned and whose title/sidebar/thread contain no
 retired callsign, then atomically records a v2 baseline containing its source,
 title, endpoint generation, and state-change sequence with the new reservation.
 A second exact observation before publication refuses any source, title, token,
-thread, terminal, generation, route, or sequence race. One crash-only exception
-resumes an already-published exact callsign alias when every presentation byte
-still matches the v2 baseline and the sequence is exactly baseline plus one;
-retry skips the rename and continues publication. Any other routed partial
-effect restores the owned alias and baseline tokens before canonical rollback,
-preserving a newer user presentation. If endpoint identity changes before that
-restoration can be proven, League retains the reservation, lease, rebound agent,
-and v2 baseline as the cleanup obligation; canonical rollback occurs only after
-an exact retry proves and completes the external cleanup.
+thread, terminal, generation, route, or sequence race. Before the first rename,
+League records an immutable assignment-bound publication attempt containing the
+exact endpoint, provider presentation, baseline digest, and observed global
+state-change sequence. An exact reserved retry may resume an already-published
+callsign alias when every identity and presentation byte still matches that
+attempt and the current global sequence is not older. It does not require
+`baseline + 1`: Herdr metadata freshness is source-local, while unrelated pane
+state can advance the global observation sequence. Retry skips the duplicate
+rename and reports the League overlay without supplying that global value as a
+Herdr source sequence. Explicit owner/source tokens identify the completed
+overlay, followed by an exact first post-effect global fence and two stable
+observations. Any later provider or user presentation refuses and is preserved.
+Any other routed partial effect restores the owned alias and baseline tokens
+before canonical rollback. If endpoint identity changes before restoration can
+be proven, League retains the reservation, lease, rebound agent, baseline, and
+publication attempt as the cleanup obligation; canonical rollback occurs only
+after an exact retry proves and completes the external cleanup.
 One still-older frozen profile contains exactly two metadata keys. It is
 eligible only when `scope_kind=squad`, `scope_id` exactly equals the sole prior
 rolled-back assignment's historical Squad scope, and the currently verified

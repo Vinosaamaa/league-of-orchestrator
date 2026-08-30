@@ -15,6 +15,12 @@ perform without returning for authority. Treating a prompt or an informal
 approval sentence as that object made scope, expiry, revocation, limits, and
 retries ambiguous.
 
+The initial autonomous-delivery slice also stopped at `mode use`: later
+protected command gates still demanded their older one-off authority flag or
+digest. A valid goal-scoped grant therefore caused repeated owner prompts for
+in-scope live reconciliation, Shotcaller creation, and Squad registration, and
+the protected effect had no durable semantic binding to its mode action.
+
 Visible assignment also accepted an issue number as unverified metadata. It did
 not prove that the issue belonged to the named repository, remained open, or
 contained durable scope, acceptance, and authority boundaries. A captured
@@ -79,6 +85,35 @@ new use while retaining already-started action evidence. Durable per-goal usage
 counters make limit checks constant-size while each action receipt remains the
 immutable audit source.
 
+Migration v20 carries the same accepted grant into later protected command
+gates. Each gate maps to one explicit action category: live reconciliation,
+retirement, Shotcaller creation, Squad registration, or teardown. Supplying
+`--mode-action` and `--expected-mode-goal-version` atomically validates the
+active grant and binds the normalized action receipt to the exact command-name
+and command-scope digest before the protected operation runs. The action
+resource scope must declare exactly that one digest, and the immutable grant's
+resource boundary must contain it; changing only the action and target cannot
+expand owner authority. A foreign action target or a target outside the grant
+therefore refuses before action use or protected effect. Success or
+failure then settles both the action and one immutable
+[`league.protected-gate-receipt.v1`](../../schema/league-protected-gate-receipt.schema.json)
+receipt. Rollover preparation derives its automatic authority digest from that
+exact use receipt, and legacy-display reconciliation treats it as the required
+owner authorization; either command refuses mixed manual and mode authority.
+Each action use also records its exact post-use goal version. Settlement checks
+that immutable fence but CAS-updates the current goal version, so another
+authorized concurrent use may advance the goal without permanently stranding
+the older valid use. Migrated pre-v20 in-progress rows without that binding
+refuse for explicit reconciliation.
+
+The protected mapping covers assignment runtime/display reconciliation,
+Shotcaller creation, Squad registration/acceptance, rollover
+prepare/commit/descendant/intake reconciliation, rollover drain, callsign
+release, and cleanup execution/reconciliation. Landing, release, installation,
+deployment, verification, smoke, repair, issue reopen, and cleanup retain their
+existing explicit action-use boundary. No category is implied by the goal or
+by another allowed action.
+
 Before the production `league assign run` path reserves a callsign, it proves
 the supplied selection digest from canonical SQLite and reads the
 exact GitHub issue from the repository owner API. The issue must match the
@@ -138,6 +173,11 @@ inside the same bounded read-only perimeter.
   authority and every out-of-scope or over-limit action.
 - Platform-safety bypass, unavailable permission, ambiguous target, provider
   restriction, and unsupported cleanup remain unconditional refusals.
+- A protected effect begins only after one exact grant use is durably bound to
+  its command and canonical scope, with the target digest proven inside both
+  action and grant resource scope; every outcome durably settles that binding.
+- Accepted goal-scoped authority suppresses duplicate owner prompts only for
+  categories explicitly listed in the grant. Adjacent categories still refuse.
 - Verification failure creates repair work; it never implies delivery or
   teardown.
 - Assignment issue verification completes before callsign reservation, task
@@ -149,15 +189,17 @@ inside the same bounded read-only perimeter.
 
 ## Migration, rollback, and evidence
 
-Migration v18 is contiguous after v17 and uses the existing checksummed,
+Migrations v18 and v20 are contiguous in the repository sequence and use the existing checksummed,
 transactional migration ledger. Upgrading an existing store still requires the
-normal verified pre-migration SQLite backup. The existing online-backup path
-copies and verifies v18 rows, and rollback exports include them as non-canonical
-records. Inspection exports redact exact goals, issuer identity, scope/resource
+normal verified pre-migration SQLite backup. Migration v20 adds immutable
+protected-use and protected-settlement tables plus a nullable action-use fence
+for fail-closed migration of pre-v20 rows, without rewriting v18 authority
+identity. The existing online-backup path copies and verifies both sets of rows,
+and rollback exports include them as non-canonical records. Inspection exports redact exact goals, issuer identity, scope/resource
 details, action scope/risk/resource data, repair failures, and issue titles.
-The import registry includes every v18 authority, action, repair, selection, and
-binding table, so collision checks and atomic import table coverage cannot omit
-the autonomous-delivery slice.
+The import registry includes every authority, action, protected-gate, repair,
+selection, and binding table, so collision checks and atomic import table
+coverage cannot omit the autonomous-delivery slice.
 
 Focused synthetic tests use temporary SQLite roots and fake GitHub/Herdr
 adapters. They cover default manual status, grant retry/CAS, expiry, revocation,
@@ -166,7 +208,12 @@ repair creation, backup/restore, redacted and rollback export,
 missing/wrong/closed/mismatched/unproven issue refusal, open-equivalent reuse,
 authorized closed recurrence with prior linkage, distinct-scope creation,
 concurrent-create serialization, valid issue-first launch, exact retry, and the
-expanded direct/hidden routing boundary.
+expanded direct/hidden routing boundary. Protected-gate tests prove sequential
+multi-action propagation under one grant, an adjacent ungranted refusal before
+operation, foreign-target refusal at both the action and grant boundaries,
+effect-free settled retry, two-writer use CAS, max-concurrency settlement of an
+older valid use, exact use/settlement persistence, and command-facade delivery.
+Installed/live acceptance remains a separate gate.
 
 ## Remaining limits and cutover boundary
 

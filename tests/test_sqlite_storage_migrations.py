@@ -137,6 +137,7 @@ def test_transactional_upgrade_backup_and_rollback(root: Path) -> None:
             (17, "immutable-switched-rollover-snapshot-revisions", "69dabdd22e3a4d099eb574ff11833681188e53ccf0d6ac9d787d7ed1e9764b26"),
             (18, "scoped-autonomous-delivery-and-issue-first-assignment", "b517b9103fedcc0db8a1f0dd7d06d475f309f3a135d87356209ab34dbd957631"),
             (19, "agent-authored-request-reconciliation", "038abf84401775c692954c5eea8f12e2f19a23d6b67ab727245f651751f438c0"),
+            (20, "autonomous-protected-gate-authority-propagation", "b36865213f931b6522f2f8c807dcea60c3949a08eab05772c6ad8567fbdcf71a"),
         ]
         assert store.connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
 
@@ -468,7 +469,9 @@ def test_v18_to_v19_rolls_back_request_reconciliation(root: Path) -> None:
             "WHERE type='table' AND name='request_reconciliations'"
         ).fetchone()[0] == 0
 
-        receipt = store.migrate(backup_name="backups/pre-v19-retry.sqlite3")
+        receipt = store.migrate(
+            backup_name="backups/pre-v19-retry.sqlite3", target_version=19
+        )
         assert receipt["from_version"] == 18
         assert receipt["to_version"] == 19
         assert receipt["applied"] == [19]
@@ -480,6 +483,67 @@ def test_v18_to_v19_rolls_back_request_reconciliation(root: Path) -> None:
             "SELECT COUNT(*) FROM sqlite_master "
             "WHERE type='index' AND name='ix_requests_owner_updated'"
         ).fetchone()[0] == 1
+        assert store.integrity()["ok"]
+
+
+def test_v19_to_v20_rolls_back_protected_gate_receipts(root: Path) -> None:
+    state, _ = migrated_state(root, "v19-to-v20", target_version=19)
+    with SQLiteStorage.for_migration(state) as store:
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM sqlite_master "
+            "WHERE type='table' AND name='protected_gate_uses'"
+        ).fetchone()[0] == 0
+
+        def crash(point: str) -> None:
+            if point == "after_migration_20":
+                raise InjectedCrash(point)
+
+        try:
+            store.migrate(backup_name="backups/pre-v20.sqlite3", fault=crash)
+        except InjectedCrash:
+            pass
+        else:
+            raise AssertionError("v20 migration crash was not injected")
+        assert store.connection.execute("PRAGMA user_version").fetchone()[0] == 19
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM sqlite_master "
+            "WHERE type='table' AND name='protected_gate_uses'"
+        ).fetchone()[0] == 0
+
+        receipt = store.migrate(backup_name="backups/pre-v20-retry.sqlite3")
+        assert receipt["from_version"] == 19
+        assert receipt["to_version"] == 20
+        assert receipt["applied"] == [20]
+        tables = {
+            row[0]
+            for row in store.connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        assert {"protected_gate_uses", "protected_gate_settlements"} <= tables
+        action_columns = {
+            row[1]
+            for row in store.connection.execute(
+                "PRAGMA table_info(autonomous_action_uses)"
+            )
+        }
+        assert "goal_version_at_use" in action_columns
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM sqlite_master "
+            "WHERE type='index' AND name='ix_protected_gate_uses_name_scope'"
+        ).fetchone()[0] == 1
+        triggers = {
+            row[0]
+            for row in store.connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='trigger'"
+            )
+        }
+        assert {
+            "protected_gate_uses_immutable_update",
+            "protected_gate_uses_immutable_delete",
+            "protected_gate_settlements_immutable_update",
+            "protected_gate_settlements_immutable_delete",
+        } <= triggers
         assert store.integrity()["ok"]
 
 
@@ -565,6 +629,7 @@ def main() -> None:
         test_schema_refusals_without_test_sql(root)
         test_v17_active_assignment_requires_migration18_issue_reconciliation(root)
         test_v18_to_v19_rolls_back_request_reconciliation(root)
+        test_v19_to_v20_rolls_back_protected_gate_receipts(root)
         test_v3_upgrade_preserves_cleanup_and_indexes_legacy_project(root)
         test_backup_collision_and_corruption(root)
     print("PASS: SQLite runtime gate, migrations, verified backup, rollback, drift, and corruption refusal")

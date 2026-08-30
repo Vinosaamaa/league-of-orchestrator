@@ -11,7 +11,7 @@
     "goal_id": {"type": "string", "minLength": 1, "maxLength": 256},
     "grant_id": {"type": "string", "minLength": 1, "maxLength": 256},
     "actor_agent_id": {"type": "string", "minLength": 1, "maxLength": 256},
-    "action_kind": {"enum": ["land", "merge", "release", "publish", "install", "deploy", "verify", "smoke", "repair", "cleanup", "issue_reopen"]},
+    "action_kind": {"enum": ["land", "merge", "release", "publish", "install", "deploy", "verify", "smoke", "repair", "cleanup", "issue_reopen", "live_reconcile", "retire", "shotcaller_create", "squad_register", "teardown"]},
     "scope": {
       "type": "object",
       "required": ["project_id", "repository", "environment", "deployment_target"],

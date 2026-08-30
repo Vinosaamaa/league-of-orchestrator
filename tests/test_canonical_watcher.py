@@ -122,6 +122,37 @@ def _league_env(
     return json.loads(result.stdout)
 
 
+def _wait_for_watcher_registration(
+    state: Path, waiter: subprocess.Popen[str], *, timeout: float = 3
+) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if waiter.poll() is not None:
+            output, error = waiter.communicate()
+            raise AssertionError(
+                f"watcher exited before canonical registration: {output}{error}"
+            )
+        with SQLiteStorage(state, busy_timeout_ms=100, request_wal=False) as observer:
+            registered = observer.connection.execute(
+                "SELECT 1 FROM watcher_registrations WHERE actor_agent_id=?",
+                (SHOTCALLER_ID,),
+            ).fetchone() is not None
+            assert observer.policy.journal_mode == "WAL"
+        if registered:
+            assert waiter.poll() is None
+            return
+        time.sleep(0.02)
+    waiter.terminate()
+    try:
+        output, error = waiter.communicate(timeout=1)
+    except subprocess.TimeoutExpired:
+        waiter.kill()
+        output, error = waiter.communicate(timeout=1)
+    raise AssertionError(
+        f"watcher registration did not become ready within {timeout}s: {output}{error}"
+    )
+
+
 def _register_garen_runtime(
     state: Path, suffix: str, *, session_ref: str | None = None
 ) -> str:
@@ -375,21 +406,7 @@ def test_long_lived_supervisor_allows_concurrent_prompt_and_stop(root: Path) -> 
         stderr=subprocess.PIPE,
         env=env,
     )
-    deadline = time.monotonic() + 3
-    registered = False
-    while time.monotonic() < deadline:
-        with SQLiteStorage(
-            state, busy_timeout_ms=100, request_wal=False
-        ) as observer:
-            registered = observer.connection.execute(
-                "SELECT 1 FROM watcher_registrations WHERE actor_agent_id=?",
-                (SHOTCALLER_ID,),
-            ).fetchone() is not None
-            assert observer.policy.journal_mode == "WAL"
-        if registered:
-            break
-        time.sleep(0.02)
-    assert registered and waiter.poll() is None
+    _wait_for_watcher_registration(state, waiter)
 
     prompt_payload = {
         "session_id": SHOTCALLER_ID,
@@ -1291,18 +1308,7 @@ def test_material_delivery_watcher_direct_dedup_and_unavailable(root: Path) -> N
         stderr=subprocess.PIPE,
         env=watcher_env,
     )
-    deadline = time.monotonic() + 3
-    registered = False
-    while time.monotonic() < deadline:
-        with SQLiteStorage(watcher_state) as observer:
-            registered = observer.connection.execute(
-                "SELECT 1 FROM watcher_registrations WHERE actor_agent_id=?",
-                (SHOTCALLER_ID,),
-            ).fetchone() is not None
-        if registered:
-            break
-        time.sleep(0.02)
-    assert registered and waiter.poll() is None
+    _wait_for_watcher_registration(watcher_state, waiter)
     current = _league(watcher_state, "agent", "status", "--agent-id", CHAMPION_ID)
     version = current["result"]["agent"]["version"]
     transitioned = _league(
@@ -1459,8 +1465,7 @@ def test_task_transition_cli_dispatches_exact_watcher_receipt(root: Path) -> Non
         stderr=subprocess.PIPE,
         env=env,
     )
-    time.sleep(0.15)
-    assert waiter.poll() is None
+    _wait_for_watcher_registration(state, waiter)
     transitioned = _league_env(
         state,
         env,
@@ -1501,6 +1506,23 @@ def test_task_transition_cli_dispatches_exact_watcher_receipt(root: Path) -> Non
     assert wake["status"] == "working"
 
 
+def test_watcher_readiness_timeout_terminates_exact_supervisor(root: Path) -> None:
+    _, state, _ = seeded_state(root, "watcher-readiness-timeout")
+    waiter = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        _wait_for_watcher_registration(state, waiter, timeout=0.05)
+    except AssertionError as exc:
+        assert "watcher registration did not become ready" in str(exc)
+    else:
+        raise AssertionError("missing watcher registration unexpectedly became ready")
+    assert waiter.poll() is not None
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="league-canonical-watcher-") as temporary:
         root = Path(temporary)
@@ -1522,6 +1544,7 @@ def main() -> None:
         test_codex_stop_rejects_incomplete_real_payload(root)
         test_material_delivery_watcher_direct_dedup_and_unavailable(root)
         test_task_transition_cli_dispatches_exact_watcher_receipt(root)
+        test_watcher_readiness_timeout_terminates_exact_supervisor(root)
     print("PASS: installed SQLite Stop/supervise plus watcher/direct exact-once delivery and pending fallback")
 
 

@@ -12,6 +12,7 @@ import threading
 import time
 from pathlib import Path
 import sys
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -32,7 +33,9 @@ from league.sqlite_store import SQLiteStorage  # noqa: E402
 from league.sqlite_watcher_ops import _obligation_counts  # noqa: E402
 from league.storage import RuntimeRegistrationCommand  # noqa: E402
 from league.canonical_watcher import (  # noqa: E402
+    _capture_prompt,
     _codex_stop_reason,
+    _notify_direct_user_priority,
     _prompt_identity,
     _supervision_snapshot,
     handle_brokered_hook,
@@ -791,16 +794,20 @@ def test_queued_prompts_reusing_turn_id_are_unique_and_conflicts_quarantine(
                     len(encoded),
                 ),
             )
-        handled = handle_brokered_hook(
+        captured_conflict = _capture_prompt(
             store,
-            {
-                "command": "codex-user-prompt-hook",
-                "shotcaller": "Garen",
-                "session_id": None,
-                "capture_event_id": capture_event_id,
-                "payload": conflict,
-            },
+            "watcher:Garen",
+            SHOTCALLER_ID,
+            "shotcaller",
+            conflict,
+            adapter_kind="codex",
+            capture_event_id=capture_event_id,
         )
+        with patch("league.canonical_watcher.notify_user_message") as notify:
+            assert not _notify_direct_user_priority(
+                store, SHOTCALLER_ID, "shotcaller", captured_conflict
+            )
+            notify.assert_not_called()
         quarantine = store.connection.execute(
             """
             SELECT state,reason,wake_actor_id,wake_scope_id,wake_committed
@@ -817,7 +824,8 @@ def test_queued_prompts_reusing_turn_id_are_unique_and_conflicts_quarantine(
             "WHERE actor_agent_id=?",
             (SHOTCALLER_ID,),
         ).fetchone())
-    assert handled["capture"]["state"] == "quarantined"
+    assert captured_conflict["state"] == "quarantined"
+    assert captured_conflict["wake_committed"] is False
     assert tuple(quarantine) == (
         "quarantined", "runtime_unverified", None, None, 0
     )

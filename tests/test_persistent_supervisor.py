@@ -6,6 +6,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
 import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -21,9 +22,16 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / "src"), str(ROOT / "tests")]
 
-from request_lifecycle_fixture import GAREN_RUNTIME, GAREN_RUNTIME_TWO, create_context  # noqa: E402
+from request_lifecycle_fixture import (  # noqa: E402
+    GAREN_RUNTIME,
+    GAREN_RUNTIME_TWO,
+    JARVAN_ID,
+    JARVAN_RUNTIME,
+    create_context,
+)
 from storage_fixture import SHOTCALLER_ID  # noqa: E402
 from league.canonical_delivery import InstalledDeliveryAdapter  # noqa: E402
+from league.canonical_watcher import _prompt_identity  # noqa: E402
 from league.persistent_supervisor import (  # noqa: E402
     BoundedRuntimeCommandRunner,
     PersistentSupervisor,
@@ -300,6 +308,98 @@ def main() -> None:
         recovery.release.set()
         assert recovery.completed.wait(timeout=2)
         assert recovery.calls and len(recovery.calls[0][1]) == 1
+
+        conflict_payload = {
+            "session_id": f"session:{GAREN_RUNTIME}",
+            "turn_id": "turn:brokered-owner-conflict",
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "Synthetic prompt with conflicting durable ownership",
+        }
+        capture_event_id = "codex-user-prompt:" + "b" * 32
+        prompt_id, source_event_key = _prompt_identity(
+            "codex",
+            conflict_payload["session_id"],
+            f"{conflict_payload['turn_id']}\0{capture_event_id}",
+            conflict_payload["prompt"],
+        )
+        encoded = conflict_payload["prompt"].encode("utf-8")
+        with SQLiteStorage(state) as observer:
+            before_scope = tuple(observer.connection.execute(
+                "SELECT user_message_generation,wait_generation FROM watcher_scopes "
+                "WHERE actor_agent_id=?",
+                (SHOTCALLER_ID,),
+            ).fetchone())
+            with observer._transaction():
+                observer.connection.execute(
+                    """
+                    INSERT INTO prompts
+                      (prompt_id,intake_actor_id,runtime_instance_id,adapter_kind,session_ref,
+                       source_event_key,triage_state,triage_digest,created_at,
+                       current_owner_agent_id,current_owner_runtime_instance_id)
+                    VALUES(?,?,?,?,?,?,'untriaged',NULL,?,?,?)
+                    """,
+                    (
+                        prompt_id, JARVAN_ID, JARVAN_RUNTIME, "codex",
+                        conflict_payload["session_id"], source_event_key, clock.now(),
+                        JARVAN_ID, JARVAN_RUNTIME,
+                    ),
+                )
+                observer.connection.execute(
+                    """
+                    INSERT INTO prompt_payloads
+                      (prompt_id,body,body_hash,byte_count,pruned_at)
+                    VALUES(?,?,?,?,NULL)
+                    """,
+                    (
+                        prompt_id,
+                        conflict_payload["prompt"],
+                        hashlib.sha256(encoded).hexdigest(),
+                        len(encoded),
+                    ),
+                )
+        runtime.user_priority.clear()
+        before_priority = runtime.user_priority_generation
+        conflict_result = send_supervisor_message(
+            f"unix:{runtime.socket_path}",
+            {
+                "kind": "hook",
+                "hook": {
+                    "command": "codex-user-prompt-hook",
+                    "shotcaller": "Garen",
+                    "session_id": None,
+                    "payload": conflict_payload,
+                    "capture_event_id": capture_event_id,
+                },
+            },
+        )
+        assert conflict_result["priority"] is None
+        assert conflict_result["capture"]["state"] == "quarantined"
+        assert conflict_result["capture"]["wake_committed"] is False
+        assert conflict_result["capture"]["priority_eligible"] is False
+        assert runtime.user_priority_generation == before_priority
+        assert not runtime.user_priority.is_set()
+        with SQLiteStorage(state) as observer:
+            quarantine = observer.connection.execute(
+                """
+                SELECT state,reason,wake_actor_id,wake_scope_id,wake_committed
+                  FROM prompt_quarantine WHERE prompt_id=?
+                """,
+                (prompt_id,),
+            ).fetchone()
+            owner = observer.connection.execute(
+                "SELECT intake_actor_id,runtime_instance_id FROM prompts WHERE prompt_id=?",
+                (prompt_id,),
+            ).fetchone()
+            after_scope = tuple(observer.connection.execute(
+                "SELECT user_message_generation,wait_generation FROM watcher_scopes "
+                "WHERE actor_agent_id=?",
+                (SHOTCALLER_ID,),
+            ).fetchone())
+        assert tuple(quarantine) == (
+            "quarantined", "runtime_unverified", None, None, 0
+        )
+        assert tuple(owner) == (JARVAN_ID, JARVAN_RUNTIME)
+        assert after_scope == before_scope
 
         with SQLiteStorage(state) as observer:
             target = observer.delivery_target(SHOTCALLER_ID, _future(0))

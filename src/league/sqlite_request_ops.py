@@ -263,6 +263,7 @@ def intake_prompt(
                     "prompt_id": existing["prompt_id"],
                     "triage_state": existing["triage_state"],
                     "idempotent": True,
+                    "wake_committed": False,
                 }
             runtime = store.connection.execute(
                 """
@@ -362,7 +363,12 @@ def intake_prompt(
         raise
     except sqlite3.DatabaseError as exc:
         raise store._translate_database_error(exc, "prompt intake conflicted with canonical state") from exc
-    return {"prompt_id": prompt_id, "triage_state": "untriaged", "idempotent": False}
+    return {
+        "prompt_id": prompt_id,
+        "triage_state": "untriaged",
+        "idempotent": False,
+        "wake_committed": wake_scope_id is not None,
+    }
 
 
 def quarantine_prompt(
@@ -408,6 +414,7 @@ def quarantine_prompt(
                     "state": existing["state"],
                     "reason": existing["reason"],
                     "idempotent": True,
+                    "wake_committed": False,
                 }
             store.connection.execute(
                 """
@@ -462,6 +469,7 @@ def quarantine_prompt(
         "state": "quarantined",
         "reason": "runtime_unverified",
         "idempotent": False,
+        "wake_committed": wake_scope_id is not None,
     }
 
 
@@ -492,7 +500,12 @@ def bind_quarantined_prompt(
                 )
                 if not exact:
                     raise StorageRefusal("prompt_binding_conflict", "prompt was bound to a different runtime")
-                return {"prompt_id": prompt_id, "triage_state": "untriaged", "idempotent": True}
+                return {
+                    "prompt_id": prompt_id,
+                    "triage_state": "untriaged",
+                    "idempotent": True,
+                    "wake_committed": False,
+                }
             runtime = store.connection.execute(
                 """
                 SELECT actor_agent_id,status,verified,session_ref
@@ -582,7 +595,12 @@ def bind_quarantined_prompt(
         raise
     except sqlite3.DatabaseError as exc:
         raise store._translate_database_error(exc, "prompt binding conflicted with canonical state") from exc
-    return {"prompt_id": prompt_id, "triage_state": "untriaged", "idempotent": False}
+    return {
+        "prompt_id": prompt_id,
+        "triage_state": "untriaged",
+        "idempotent": False,
+        "wake_committed": wake_scope_id is not None,
+    }
 
 
 def _normalize_triage_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:

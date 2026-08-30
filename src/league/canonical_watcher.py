@@ -486,6 +486,33 @@ def _capture_prompt(
         )
 
 
+def _priority_eligible_capture(
+    actor_id: str | None,
+    actor_role: str | None,
+    captured: dict[str, Any],
+) -> bool:
+    """Trust only the atomic storage receipt for user-priority delivery."""
+
+    return bool(
+        actor_role == "shotcaller"
+        and actor_id is not None
+        and isinstance(captured.get("prompt_id"), str)
+        and captured.get("wake_committed") is True
+    )
+
+
+def _notify_direct_user_priority(
+    store: SQLiteStorage,
+    actor_id: str | None,
+    actor_role: str | None,
+    captured: dict[str, Any],
+) -> bool:
+    if not _priority_eligible_capture(actor_id, actor_role, captured):
+        return False
+    assert actor_id is not None
+    return notify_user_message(store, actor_id, str(captured["prompt_id"]))
+
+
 def handle_brokered_hook(
     store: SQLiteStorage, hook: dict[str, Any]
 ) -> dict[str, Any]:
@@ -557,12 +584,15 @@ def handle_brokered_hook(
         adapter_kind="codex" if command == "codex-user-prompt-hook" else "cursor",
         capture_event_id=capture_event_id,
     )
+    priority_eligible = _priority_eligible_capture(actor_id, actor_role, captured)
     return {
         "hook_output": {},
         "capture": {
             "prompt_id": captured.get("prompt_id"),
             "idempotent": bool(captured.get("idempotent", False)),
             "owned_by_shotcaller": actor_role == "shotcaller",
+            "wake_committed": captured.get("wake_committed") is True,
+            "priority_eligible": priority_eligible,
             "suppressed": captured.get("suppressed"),
             "state": captured.get("triage_state") or captured.get("state"),
         },
@@ -989,13 +1019,7 @@ def main(argv: list[str] | None = None) -> int:
                 ),
                 capture_event_id=capture_event_id,
             )
-            if (
-                actor_role == "shotcaller"
-                and actor_id is not None
-                and captured.get("prompt_id")
-                and not captured.get("idempotent", False)
-            ):
-                notify_user_message(store, actor_id, str(captured["prompt_id"]))
+            _notify_direct_user_priority(store, actor_id, actor_role, captured)
             _emit({})
             return 0
         if actor is None:

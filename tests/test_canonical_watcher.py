@@ -256,7 +256,9 @@ def test_supervise_wakes_and_stop_allows_after_settlement(root: Path) -> None:
     output, error = waiter.communicate(timeout=5)
     assert not error, error
     wake = json.loads(output)
-    assert wake["event"] == "champions-idle"
+    assert wake["event"] == "champion-update"
+    assert wake["event_id"] == settled["result"]["event_id"]
+    assert wake["status"] == "completed"
     assert wake["writer"] == "sqlite"
     status = _watcher(env, "--shotcaller", "Garen", "status")
     assert status == {"shotcaller": "Garen", "writer": "sqlite"}
@@ -1245,9 +1247,12 @@ def test_material_delivery_watcher_direct_dedup_and_unavailable(root: Path) -> N
         "2026-01-01T00:02:00Z",
     )
     assert transitioned["result"]["delivery"]["state"] == "delivered"
+    assert transitioned["result"]["delivery"]["effect_kind"] == "watcher_event"
     output, error = waiter.communicate(timeout=5)
     assert not error, error
-    assert json.loads(output)["event"] == "champion-update"
+    wake = json.loads(output)
+    assert wake["event"] == "champion-update"
+    assert wake["event_id"] == transitioned["result"]["event_id"]
 
     _, direct_state, _ = seeded_state(root, "direct-delivery")
     direct_env = _environment(root / "direct-delivery", direct_state)

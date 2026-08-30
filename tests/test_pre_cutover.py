@@ -1088,6 +1088,43 @@ def test_backup_fault_blocks_resumably_without_live_change(root: Path) -> None:
     assert fixture["hook"].read_bytes() == before
 
 
+def test_staging_fault_is_forwarded_and_blocks_resumably(root: Path) -> None:
+    fixture = fixture_plan(root)
+    temporary_root = root / "sandbox"
+    temporary_root.mkdir()
+    before = fixture["hook"].read_bytes()
+
+    def fail(stage: str) -> None:
+        if stage == "after_release_file:VERSION":
+            raise StorageRefusal(
+                "synthetic_staging_fault", "synthetic staging fault"
+            )
+
+    refused(
+        lambda: run_pre_cutover(
+            temporary_root,
+            "staging-fault",
+            plan_path=fixture["plan_path"],
+            sentinel_paths=(fixture["legacy"],),
+            config_sentinel=fixture["hook"],
+            process_sentinel=fixture["processes"],
+            source_root=ROOT,
+            fault=fail,
+        ),
+        "synthetic_staging_fault",
+    )
+    operation = json.loads(
+        (
+            temporary_root
+            / "league-staging-fault-precutover/precutover-operation.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert operation["state"] == "blocked"
+    assert operation["resumable"] is True
+    assert operation["error_code"] == "synthetic_staging_fault"
+    assert fixture["hook"].read_bytes() == before
+
+
 def test_schema_contracts_are_current_and_state_specific() -> None:
     acceptance = json.loads(
         (ROOT / "schema/league-acceptance-receipt.schema.json").read_text(encoding="utf-8")
@@ -1167,6 +1204,9 @@ def main() -> int:
         test_late_failure_emits_no_reconciliation_receipt(base / "late-failure")
         test_reconciliation_scope_and_initialization_guards(base / "guards")
         test_backup_fault_blocks_resumably_without_live_change(base / "fault")
+        test_staging_fault_is_forwarded_and_blocks_resumably(
+            base / "staging-fault"
+        )
     test_schema_contracts_are_current_and_state_specific()
     print("PASS pre-cutover isolated command, parity, supervision, and failure tests")
     return 0

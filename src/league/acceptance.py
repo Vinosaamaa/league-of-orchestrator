@@ -13,7 +13,10 @@ import importlib.util
 import json
 import os
 import re
+import secrets
+import shutil
 import signal
+import stat
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -30,6 +33,7 @@ from .guidance import (
 from .importer import build_import_plan
 from .sqlite_store import CURRENT_SCHEMA_VERSION, SQLiteStorage
 from .storage import StorageRefusal
+from .storage_types import FaultInjector
 
 
 RECEIPT_SCHEMA = "league.acceptance-receipt.v1"
@@ -54,6 +58,10 @@ PENDING_SLICES = (
 )
 UNVERIFIED_RUNTIMES = ("codex", "cursor", "pi", "herdr", "tmux")
 FIXTURE_RUNTIME_ROOT = Path("/synthetic/league-acceptance-runtime")
+MAX_RELEASE_FILE_BYTES = 4 * 1024 * 1024
+RELEASE_READ_CHUNK_BYTES = 64 * 1024
+STAGING_RESERVATION_FILENAME = ".league-staging-reservation.json"
+STAGING_RESERVATION_SCHEMA = "league.staging-reservation.v1"
 
 
 def _stable_bytes(value: Any) -> bytes:
@@ -336,6 +344,83 @@ def _migration_shadow(home: Path, source_root: Path) -> dict[str, Any]:
     }
 
 
+def _open_release_descriptor(
+    root: Path,
+    relative: Path,
+    *,
+    directory: bool,
+    refusal_code: str,
+) -> int:
+    if (
+        not root.is_absolute()
+        or relative.is_absolute()
+        or not relative.parts
+        or any(part in {"", ".", ".."} for part in relative.parts)
+    ):
+        raise StorageRefusal(
+            refusal_code, "release paths must stay beneath one explicit root"
+        )
+    opened_directories: list[int] = []
+    try:
+        root_status = root.lstat()
+        if not stat.S_ISDIR(root_status.st_mode):
+            raise StorageRefusal(
+                refusal_code, "release root must be an explicit directory"
+            )
+        canonical_root = root.resolve(strict=True)
+        flags = (
+            os.O_RDONLY
+            | os.O_DIRECTORY
+            | os.O_NOFOLLOW
+            | getattr(os, "O_CLOEXEC", 0)
+        )
+        current = os.open(canonical_root.anchor, flags)
+        opened_directories.append(current)
+        for component in canonical_root.parts[1:]:
+            current = os.open(component, flags, dir_fd=current)
+            opened_directories.append(current)
+        for component in relative.parts[:-1]:
+            current = os.open(component, flags, dir_fd=current)
+            opened_directories.append(current)
+        final_flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+        if directory:
+            final_flags |= os.O_DIRECTORY
+        return os.open(relative.parts[-1], final_flags, dir_fd=current)
+    except StorageRefusal:
+        raise
+    except (OSError, RuntimeError) as exc:
+        raise StorageRefusal(
+            refusal_code, "release path traversal requires non-symlink components"
+        ) from exc
+    finally:
+        for descriptor in reversed(opened_directories):
+            os.close(descriptor)
+
+
+def _release_directory_files(
+    source_root: Path, relative: Path, suffix: str
+) -> list[Path]:
+    descriptor = _open_release_descriptor(
+        source_root,
+        relative,
+        directory=True,
+        refusal_code="release_incomplete",
+    )
+    try:
+        names = sorted(
+            name
+            for name in os.listdir(descriptor)
+            if not name.startswith(".") and name.endswith(suffix)
+        )
+    except OSError as exc:
+        raise StorageRefusal(
+            "release_incomplete", "release manifest directory is unreadable"
+        ) from exc
+    finally:
+        os.close(descriptor)
+    return [source_root / relative / name for name in names]
+
+
 def _release_files(source_root: Path) -> list[Path]:
     files = [
         source_root / "VERSION",
@@ -347,13 +432,455 @@ def _release_files(source_root: Path) -> list[Path]:
         source_root / "skills/league-report/SKILL.md",
         source_root / "global-agent-instructions/league/AGENTS.md",
     ]
-    files.extend(sorted((source_root / "src/league").glob("*.py")))
-    files.extend(sorted((source_root / "schema").glob("*.json")))
-    if any(not path.is_file() or path.is_symlink() for path in files):
-        raise StorageRefusal(
-            "release_incomplete", "release manifest contains a missing source file"
+    files.extend(_release_directory_files(source_root, Path("src/league"), ".py"))
+    files.extend(_release_directory_files(source_root, Path("schema"), ".json"))
+    for path in files:
+        _validate_regular_file(
+            path, root=source_root, refusal_code="release_incomplete"
         )
     return files
+
+
+def _validate_regular_file(path: Path, *, root: Path, refusal_code: str) -> None:
+    descriptor: Optional[int] = None
+    verification_descriptor: Optional[int] = None
+    try:
+        try:
+            relative = path.relative_to(root)
+        except ValueError as exc:
+            raise StorageRefusal(
+                refusal_code, "release path escapes its explicit root"
+            ) from exc
+        descriptor = _open_release_descriptor(
+            root,
+            relative,
+            directory=False,
+            refusal_code=refusal_code,
+        )
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_size > MAX_RELEASE_FILE_BYTES
+        ):
+            raise StorageRefusal(
+                refusal_code, "release source must be one bounded regular file"
+            )
+        verification_descriptor = _open_release_descriptor(
+            root,
+            relative,
+            directory=False,
+            refusal_code=refusal_code,
+        )
+        current = os.fstat(verification_descriptor)
+        if (
+            not stat.S_ISREG(current.st_mode)
+            or (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino)
+            or current.st_size != opened.st_size
+            or current.st_mtime_ns != opened.st_mtime_ns
+        ):
+            raise StorageRefusal(
+                refusal_code, "release file identity changed during preflight"
+            )
+    except StorageRefusal:
+        raise
+    except OSError as exc:
+        raise StorageRefusal(
+            refusal_code, "release source requires a stable regular file"
+        ) from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        if verification_descriptor is not None:
+            os.close(verification_descriptor)
+
+
+def _read_regular_file(
+    path: Path,
+    *,
+    root: Path,
+    refusal_code: str,
+    capture: bool,
+) -> tuple[Optional[bytes], str]:
+    descriptor: Optional[int] = None
+    verification_descriptor: Optional[int] = None
+    try:
+        try:
+            relative = path.relative_to(root)
+        except ValueError as exc:
+            raise StorageRefusal(
+                refusal_code, "release path escapes its explicit root"
+            ) from exc
+        descriptor = _open_release_descriptor(
+            root,
+            relative,
+            directory=False,
+            refusal_code=refusal_code,
+        )
+        opened = os.fstat(descriptor)
+        identity = (opened.st_dev, opened.st_ino)
+        if not stat.S_ISREG(opened.st_mode):
+            raise StorageRefusal(
+                refusal_code, "release bytes must come from a regular file"
+            )
+        if opened.st_size > MAX_RELEASE_FILE_BYTES:
+            raise StorageRefusal(
+                refusal_code, "release file exceeds the bounded staging size"
+            )
+        digest = hashlib.sha256()
+        chunks: list[bytes] = []
+        byte_count = 0
+        with os.fdopen(descriptor, "rb") as handle:
+            descriptor = None
+            while chunk := handle.read(RELEASE_READ_CHUNK_BYTES):
+                byte_count += len(chunk)
+                if byte_count > MAX_RELEASE_FILE_BYTES:
+                    raise StorageRefusal(
+                        refusal_code, "release file exceeds the bounded staging size"
+                    )
+                digest.update(chunk)
+                if capture:
+                    chunks.append(chunk)
+            after_descriptor = os.fstat(handle.fileno())
+        verification_descriptor = _open_release_descriptor(
+            root,
+            relative,
+            directory=False,
+            refusal_code=refusal_code,
+        )
+        current = os.fstat(verification_descriptor)
+        if (
+            not stat.S_ISREG(current.st_mode)
+            or (after_descriptor.st_dev, after_descriptor.st_ino) != identity
+            or (current.st_dev, current.st_ino) != identity
+            or current.st_size != opened.st_size
+            or current.st_mtime_ns != opened.st_mtime_ns
+            or after_descriptor.st_size != opened.st_size
+            or after_descriptor.st_mtime_ns != opened.st_mtime_ns
+            or byte_count != opened.st_size
+        ):
+            raise StorageRefusal(
+                refusal_code, "release file identity changed while it was read"
+            )
+        return (b"".join(chunks) if capture else None), digest.hexdigest()
+    except StorageRefusal:
+        raise
+    except OSError as exc:
+        raise StorageRefusal(
+            refusal_code, "release bytes require a stable regular file"
+        ) from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        if verification_descriptor is not None:
+            os.close(verification_descriptor)
+
+
+def _read_regular_bytes(path: Path, *, root: Path, refusal_code: str) -> bytes:
+    payload, _ = _read_regular_file(
+        path, root=root, refusal_code=refusal_code, capture=True
+    )
+    if payload is None:
+        raise AssertionError("captured release bytes are required")
+    return payload
+
+
+def _regular_file_digest(path: Path, *, root: Path, refusal_code: str) -> str:
+    _, digest = _read_regular_file(
+        path, root=root, refusal_code=refusal_code, capture=False
+    )
+    return digest
+
+
+def _directory_identity(path: Path) -> tuple[int, int]:
+    status = path.lstat()
+    if not stat.S_ISDIR(status.st_mode):
+        raise OSError("reserved release identity is not a directory")
+    return status.st_dev, status.st_ino
+
+
+def _remove_reserved_directory(
+    path: Path,
+    identity: tuple[int, int],
+    *,
+    recursive: bool,
+    fault: Optional[FaultInjector] = None,
+) -> None:
+    if fault is not None:
+        fault(f"before_reserved_cleanup:{path.name}")
+    quarantine = path.with_name(
+        f".{path.name}.cleanup-{secrets.token_hex(16)}"
+    )
+    moved = False
+    try:
+        os.rename(path, quarantine)
+        moved = True
+        try:
+            matches = _directory_identity(quarantine) == identity
+        except OSError:
+            matches = False
+        if not matches:
+            if not os.path.lexists(path):
+                os.rename(quarantine, path)
+            return
+        if recursive:
+            shutil.rmtree(quarantine)
+        else:
+            quarantine.rmdir()
+    except OSError:
+        if moved and os.path.lexists(quarantine) and not os.path.lexists(path):
+            try:
+                os.rename(quarantine, path)
+            except OSError:
+                pass
+
+
+def _cleanup_reserved_directories(
+    reserved: list[tuple[Path, tuple[int, int]]],
+    *,
+    recursive: bool,
+    fault: Optional[FaultInjector] = None,
+) -> None:
+    for directory, identity in reversed(reserved):
+        try:
+            _remove_reserved_directory(
+                directory,
+                identity,
+                recursive=recursive,
+                fault=fault,
+            )
+        except BaseException:
+            pass
+
+
+def _atomic_write_release(
+    root: Path,
+    relative: Path,
+    payload: bytes,
+    *,
+    mode: int,
+) -> None:
+    if (
+        relative.is_absolute()
+        or not relative.parts
+        or any(part in {"", ".", ".."} for part in relative.parts)
+    ):
+        raise StorageRefusal(
+            "staged_parity_failed", "staged release path escapes its root"
+        )
+    directories: list[int] = []
+    temporary: Optional[str] = None
+    try:
+        flags = (
+            os.O_RDONLY
+            | os.O_DIRECTORY
+            | os.O_NOFOLLOW
+            | getattr(os, "O_CLOEXEC", 0)
+        )
+        current = os.open(root, flags)
+        directories.append(current)
+        for component in relative.parts[:-1]:
+            try:
+                os.mkdir(component, mode=0o700, dir_fd=current)
+            except FileExistsError:
+                pass
+            current = os.open(component, flags, dir_fd=current)
+            directories.append(current)
+        temporary = f".{relative.name}.tmp-{secrets.token_hex(16)}"
+        descriptor = os.open(
+            temporary,
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | os.O_NOFOLLOW
+            | getattr(os, "O_CLOEXEC", 0),
+            mode,
+            dir_fd=current,
+        )
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+                os.fchmod(handle.fileno(), mode)
+            os.link(
+                temporary,
+                relative.name,
+                src_dir_fd=current,
+                dst_dir_fd=current,
+                follow_symlinks=False,
+            )
+            os.unlink(temporary, dir_fd=current)
+            temporary = None
+            os.fsync(current)
+        except BaseException:
+            if temporary is not None:
+                try:
+                    os.unlink(temporary, dir_fd=current)
+                except OSError:
+                    pass
+            raise
+    except StorageRefusal:
+        raise
+    except OSError as exc:
+        raise StorageRefusal(
+            "staged_parity_failed",
+            "staged release write requires non-symlink directories",
+        ) from exc
+    finally:
+        for directory in reversed(directories):
+            os.close(directory)
+
+
+def _write_staging_reservation(
+    reserved: list[tuple[Path, tuple[int, int]]],
+    source_version_sha256: str,
+) -> dict[str, Any]:
+    if len(reserved) != 2:
+        raise AssertionError("bundle and release reservations are required")
+    marker = {
+        "schema": STAGING_RESERVATION_SCHEMA,
+        "version": __version__,
+        "token": secrets.token_hex(32),
+        "source_version_sha256": source_version_sha256,
+        "bundle_identity": list(reserved[0][1]),
+        "release_identity": list(reserved[1][1]),
+    }
+    for directory, _ in reserved:
+        _write_json(directory / STAGING_RESERVATION_FILENAME, marker)
+    return marker
+
+
+def _read_staging_reservation(directory: Path) -> dict[str, Any]:
+    payload = _read_regular_bytes(
+        directory / STAGING_RESERVATION_FILENAME,
+        root=directory,
+        refusal_code="staged_release_identity_exists",
+    )
+    try:
+        marker = json.loads(
+            payload.decode("utf-8"), object_pairs_hook=_reject_duplicate_pairs
+        )
+    except (UnicodeError, ValueError) as exc:
+        raise StorageRefusal(
+            "staged_release_identity_exists",
+            "partial staging reservation is malformed",
+        ) from exc
+    if (
+        not isinstance(marker, dict)
+        or set(marker)
+        != {
+            "schema",
+            "version",
+            "token",
+            "source_version_sha256",
+            "bundle_identity",
+            "release_identity",
+        }
+        or marker["schema"] != STAGING_RESERVATION_SCHEMA
+        or marker["version"] != __version__
+        or not isinstance(marker["token"], str)
+        or re.fullmatch(r"[0-9a-f]{64}", marker["token"]) is None
+        or not isinstance(marker["source_version_sha256"], str)
+        or re.fullmatch(r"[0-9a-f]{64}", marker["source_version_sha256"]) is None
+        or any(
+            not isinstance(value, list)
+            or len(value) != 2
+            or any(not isinstance(item, int) for item in value)
+            for value in (
+                marker["bundle_identity"],
+                marker["release_identity"],
+            )
+        )
+    ):
+        raise StorageRefusal(
+            "staged_release_identity_exists",
+            "partial staging reservation is unsupported",
+        )
+    return marker
+
+
+def _recover_version_only_staging(
+    release_bundle: Path,
+    release: Path,
+    source_root: Path,
+) -> None:
+    candidates = (release_bundle, release)
+    if not any(os.path.lexists(candidate) for candidate in candidates):
+        return
+    if not all(os.path.lexists(candidate) for candidate in candidates):
+        raise StorageRefusal(
+            "staged_release_identity_exists",
+            "the candidate release identity is only partially allocated",
+        )
+    bundle_marker = _read_staging_reservation(release_bundle)
+    release_marker = _read_staging_reservation(release)
+    if bundle_marker != release_marker:
+        raise StorageRefusal(
+            "staged_release_identity_exists",
+            "partial staging reservations disagree",
+        )
+    identities = [
+        tuple(bundle_marker["bundle_identity"]),
+        tuple(bundle_marker["release_identity"]),
+    ]
+    source_version_sha256 = _regular_file_digest(
+        source_root / "VERSION",
+        root=source_root,
+        refusal_code="release_incomplete",
+    )
+    if bundle_marker["source_version_sha256"] != source_version_sha256:
+        raise StorageRefusal(
+            "staged_release_identity_exists",
+            "partial staging source identity changed",
+        )
+    for directory, identity in zip(candidates, identities):
+        if _directory_identity(directory) != identity:
+            raise StorageRefusal(
+                "staged_release_identity_exists",
+                "partial staging directory identity changed",
+            )
+        entries = sorted(
+            path.relative_to(directory).as_posix()
+            for path in directory.rglob("*")
+        )
+        if entries != [STAGING_RESERVATION_FILENAME, "VERSION"]:
+            raise StorageRefusal(
+                "staged_release_identity_exists",
+                "partial staging contents are not safely recoverable",
+            )
+        if _regular_file_digest(
+            directory / "VERSION",
+            root=directory,
+            refusal_code="staged_release_identity_exists",
+        ) != source_version_sha256:
+            raise StorageRefusal(
+                "staged_release_identity_exists",
+                "partial staged VERSION differs from source",
+            )
+    _cleanup_reserved_directories(
+        list(zip(candidates, identities)), recursive=True
+    )
+    if any(os.path.lexists(candidate) for candidate in candidates):
+        raise StorageRefusal(
+            "staged_release_identity_exists",
+            "partial staging recovery did not complete",
+        )
+
+
+def _remove_staging_reservation(
+    reserved: list[tuple[Path, tuple[int, int]]],
+    marker: dict[str, Any],
+) -> None:
+    for directory, identity in reserved:
+        if _directory_identity(directory) != identity:
+            raise StorageRefusal(
+                "staged_parity_failed", "staging reservation identity changed"
+            )
+        if _read_staging_reservation(directory) != marker:
+            raise StorageRefusal(
+                "staged_parity_failed", "staging reservation marker changed"
+            )
+        (directory / STAGING_RESERVATION_FILENAME).unlink()
 
 
 def _switch_symlink(link: Path, target: str) -> None:
@@ -383,6 +910,8 @@ def _stage_release_bytes(
     release_bundle: Path,
     release: Path,
     forbidden_paths: tuple[bytes, ...],
+    *,
+    fault: Optional[FaultInjector] = None,
 ) -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
     source_hashes: dict[str, str] = {}
     release_hashes: dict[str, str] = {}
@@ -391,7 +920,9 @@ def _stage_release_bytes(
         relative = source.relative_to(source_root)
         name = relative.as_posix()
         mode = 0o755 if relative.parent == Path("bin") else 0o644
-        payload = source.read_bytes()
+        payload = _read_regular_bytes(
+            source, root=source_root, refusal_code="release_incomplete"
+        )
         if any(value in payload for value in forbidden_paths):
             raise StorageRefusal(
                 "staged_path_leak", "release source bytes contain a local path leak"
@@ -400,10 +931,20 @@ def _stage_release_bytes(
         source_hashes[name] = digest
         bundle_file = release_bundle / relative
         destination = release / relative
-        _atomic_write(bundle_file, payload, mode=mode)
-        _atomic_write(destination, payload, mode=mode)
-        release_hashes[name] = _sha256(bundle_file.read_bytes())
-        staged_hashes[name] = _sha256(destination.read_bytes())
+        _atomic_write_release(release_bundle, relative, payload, mode=mode)
+        _atomic_write_release(release, relative, payload, mode=mode)
+        release_hashes[name] = _regular_file_digest(
+            bundle_file,
+            root=release_bundle,
+            refusal_code="staged_parity_failed",
+        )
+        staged_hashes[name] = _regular_file_digest(
+            destination,
+            root=release,
+            refusal_code="staged_parity_failed",
+        )
+        if fault is not None:
+            fault(f"after_release_file:{name}")
     if not source_hashes == release_hashes == staged_hashes:
         raise StorageRefusal(
             "staged_parity_failed", "source, release bundle, and staged bytes differ"
@@ -619,15 +1160,29 @@ def _staged_install(
     source_root: Path,
     *,
     guidance_targets: tuple[str, ...] = (LEAGUE_TARGET,),
+    fault: Optional[FaultInjector] = None,
 ) -> dict[str, Any]:
     guidance_target = validate_guidance_manifest(guidance_targets)[0]
-    if (source_root / "VERSION").read_text(encoding="utf-8").strip() != __version__:
+    _release_files(source_root)
+    version_bytes = _read_regular_bytes(
+        source_root / "VERSION",
+        root=source_root,
+        refusal_code="release_incomplete",
+    )
+    try:
+        source_version = version_bytes.decode("utf-8").strip()
+    except UnicodeError as exc:
+        raise StorageRefusal(
+            "staged_version_failed", "source version declaration is malformed"
+        ) from exc
+    if source_version != __version__:
         raise StorageRefusal("staged_version_failed", "source version declarations disagree")
     prefix = home / "stage-prefix"
     release_bundle = home / "release-bundle" / __version__
     releases = prefix / "releases"
     release = releases / __version__
     legacy = releases / "0.0.0-legacy"
+    _recover_version_only_staging(release_bundle, release, source_root)
     if any(
         candidate.exists() or candidate.is_symlink()
         for candidate in (release_bundle, release)
@@ -643,22 +1198,32 @@ def _staged_install(
         prefix / "bin",
     ):
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-    reserved: list[Path] = []
+    reserved: list[tuple[Path, tuple[int, int]]] = []
     try:
         release_bundle.mkdir(mode=0o700)
-        reserved.append(release_bundle)
+        reserved.append((release_bundle, _directory_identity(release_bundle)))
         release.mkdir(mode=0o700)
-        reserved.append(release)
+        reserved.append((release, _directory_identity(release)))
     except FileExistsError as exc:
-        for directory in reversed(reserved):
-            try:
-                directory.rmdir()
-            except OSError:
-                pass
+        _cleanup_reserved_directories(reserved, recursive=False)
         raise StorageRefusal(
             "staged_release_identity_exists",
             "the candidate release identity was allocated concurrently",
         ) from exc
+    marker = _write_staging_reservation(reserved, _sha256(version_bytes))
+    forbidden = (str(source_root).encode(), str(prefix).encode())
+    try:
+        source_hashes, release_hashes, staged_hashes = _stage_release_bytes(
+            source_root, release_bundle, release, forbidden, fault=fault
+        )
+        if source_hashes["VERSION"] != _sha256(version_bytes):
+            raise StorageRefusal(
+                "staged_parity_failed", "source version changed during release staging"
+            )
+        _remove_staging_reservation(reserved, marker)
+    except BaseException:
+        _cleanup_reserved_directories(reserved, recursive=True, fault=fault)
+        raise
     legacy.mkdir(mode=0o700)
     (legacy / "bin").mkdir(mode=0o700)
     legacy_launcher = legacy / "bin/league"
@@ -666,10 +1231,6 @@ def _staged_install(
         legacy_launcher,
         b"#!/usr/bin/env python3\nprint('league 0.0.0-legacy')\n",
         mode=0o755,
-    )
-    forbidden = (str(source_root).encode(), str(prefix).encode())
-    source_hashes, release_hashes, staged_hashes = _stage_release_bytes(
-        source_root, release_bundle, release, forbidden
     )
     guidance = _stage_guidance_rehearsal(
         home, release, guidance_target, staged_hashes
@@ -679,18 +1240,33 @@ def _staged_install(
     stable = prefix / "bin/league"
     stable.symlink_to("../current/bin/league")
     previous_target = os.readlink(current)
-    _switch_symlink(current, f"releases/{__version__}")
     environment = _staged_environment()
-    schema_migration = _check_staged_launcher(stable, home, environment)
-    schema_count, hook_checks = _check_staged_schemas_and_hooks(
-        release, home, environment
-    )
-    _check_staged_permissions(
-        release_bundle, prefix, releases, release, legacy, staged_hashes
-    )
-    rollback = _rollback_staged_pointer(
-        current, stable, previous_target, home, environment
-    )
+    switched = False
+    try:
+        _switch_symlink(current, f"releases/{__version__}")
+        switched = True
+        if fault is not None:
+            fault("before_staged_launcher_validation")
+        schema_migration = _check_staged_launcher(stable, home, environment)
+        schema_count, hook_checks = _check_staged_schemas_and_hooks(
+            release, home, environment
+        )
+        _check_staged_permissions(
+            release_bundle, prefix, releases, release, legacy, staged_hashes
+        )
+        rollback = _rollback_staged_pointer(
+            current, stable, previous_target, home, environment
+        )
+        switched = False
+    except BaseException:
+        if switched:
+            try:
+                _rollback_staged_pointer(
+                    current, stable, previous_target, home, environment
+                )
+            except BaseException:
+                pass
+        raise
     source_manifest_digest = _sha256(_stable_bytes(source_hashes))
     release_manifest_digest = _sha256(_stable_bytes(release_hashes))
     staged_manifest_digest = _sha256(_stable_bytes(staged_hashes))

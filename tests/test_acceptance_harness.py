@@ -6,6 +6,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -22,9 +24,12 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from league import MAX_ACCEPTANCE_SENTINEL_PATHS  # noqa: E402
 from league.acceptance import (  # noqa: E402
+    MAX_RELEASE_FILE_BYTES,
     POINTER_STAGES,
     PROCESS_SENTINEL_SCHEMA,
+    STAGING_RESERVATION_FILENAME,
     SentinelSet,
+    _release_files,
     _staged_install,
     run_acceptance,
     validate_hook_fixture,
@@ -561,6 +566,375 @@ def test_existing_release_identity_precedes_install_mutation(root: Path) -> None
         assert tree_snapshot(collision) == before
 
 
+class InjectedStageCrash(RuntimeError):
+    pass
+
+
+def copy_release_source(destination: Path) -> None:
+    for source in _release_files(ROOT):
+        target = destination / source.relative_to(ROOT)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+
+
+def refusal_home(root: Path, name: str) -> tuple[Path, dict[str, tuple[str, bytes | str]]]:
+    home = root / name
+    home.mkdir()
+    (home / "AGENTS.md").write_bytes(b"toolkit-owned universal guide\n")
+    return home, tree_snapshot(home)
+
+
+def test_version_staging_is_regular_and_exact(root: Path) -> None:
+    root.mkdir()
+    source_version = ROOT / "VERSION"
+    assert stat.S_ISREG(source_version.lstat().st_mode)
+    normal = root / "normal"
+    receipt = _staged_install(normal, ROOT)
+    bundle_version = normal / "release-bundle/0.2.28/VERSION"
+    staged_version = normal / "stage-prefix/releases/0.2.28/VERSION"
+    for candidate in (bundle_version, staged_version):
+        assert stat.S_ISREG(candidate.lstat().st_mode)
+        assert candidate.read_bytes() == source_version.read_bytes()
+    assert receipt["source_release_staged_parity"] is True
+    assert receipt["guidance"]["universal_unchanged"] is True
+    assert receipt["guidance"]["rollback_completed"] is True
+
+
+def test_release_source_symlinks_and_oversize_refuse_before_mutation(
+    root: Path,
+) -> None:
+    root.mkdir()
+    source_version = ROOT / "VERSION"
+    linked_source = root / "linked-source"
+    copy_release_source(linked_source)
+    version_target = root / "untrusted-version-target"
+    version_target.write_bytes(source_version.read_bytes())
+    (linked_source / "VERSION").unlink()
+    (linked_source / "VERSION").symlink_to(version_target)
+    linked_home, linked_before = refusal_home(root, "symlink-refusal")
+    refused(
+        lambda: _staged_install(linked_home, linked_source),
+        "release_incomplete",
+    )
+    assert tree_snapshot(linked_home) == linked_before
+
+    ancestor_source = root / "ancestor-source"
+    copy_release_source(ancestor_source)
+    schema_target = root / "untrusted-schema-target"
+    (ancestor_source / "schema").rename(schema_target)
+    (ancestor_source / "schema").symlink_to(schema_target)
+    ancestor_home, ancestor_before = refusal_home(root, "ancestor-refusal")
+    refused(
+        lambda: _staged_install(ancestor_home, ancestor_source),
+        "release_incomplete",
+    )
+    assert tree_snapshot(ancestor_home) == ancestor_before
+
+    oversized_source = root / "oversized-source"
+    copy_release_source(oversized_source)
+    (oversized_source / "src/league/report_template.html").write_bytes(
+        b"x" * (MAX_RELEASE_FILE_BYTES + 1)
+    )
+    oversized_home, oversized_before = refusal_home(root, "oversized-refusal")
+    refused(
+        lambda: _staged_install(oversized_home, oversized_source),
+        "release_incomplete",
+    )
+    assert tree_snapshot(oversized_home) == oversized_before
+
+
+def test_staging_crash_cleanup_and_retry(root: Path) -> None:
+    root.mkdir()
+    source_version = ROOT / "VERSION"
+    retry_home = root / "crash-retry"
+    retry_home.mkdir()
+    retry_universal = retry_home / "AGENTS.md"
+    retry_universal.write_bytes(b"toolkit-owned universal guide\n")
+    universal_before = retry_universal.read_bytes()
+
+    def crash_after_version(event: str) -> None:
+        if event == "after_release_file:VERSION":
+            raise InjectedStageCrash(event)
+
+    try:
+        _staged_install(retry_home, ROOT, fault=crash_after_version)
+    except InjectedStageCrash:
+        pass
+    else:
+        raise AssertionError("expected injected staging crash")
+    assert not (retry_home / "release-bundle/0.2.28").exists()
+    assert not (retry_home / "stage-prefix/releases/0.2.28").exists()
+    assert retry_universal.read_bytes() == universal_before
+    retry = _staged_install(retry_home, ROOT)
+    retried_version = retry_home / "stage-prefix/releases/0.2.28/VERSION"
+    assert stat.S_ISREG(retried_version.lstat().st_mode)
+    assert retried_version.read_bytes() == source_version.read_bytes()
+    assert retry["source_release_staged_parity"] is True
+    assert retry["guidance"]["universal_unchanged"] is True
+    assert retry["guidance"]["rollback_completed"] is True
+    assert retry_universal.read_bytes() == universal_before
+
+
+def crash_staging_process(root: Path, name: str) -> Path:
+    crash_home = root / name
+    crash_script = """
+import os
+import sys
+from pathlib import Path
+
+sys.path.insert(0, sys.argv[1])
+from league.acceptance import _staged_install
+
+def crash(event):
+    if event == "after_release_file:VERSION":
+        os._exit(73)
+
+_staged_install(Path(sys.argv[2]), Path(sys.argv[3]), fault=crash)
+"""
+    environment = {
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "LC_ALL": "C",
+    }
+    crashed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            crash_script,
+            str(ROOT / "src"),
+            str(crash_home),
+            str(ROOT),
+        ],
+        cwd=root,
+        env=environment,
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    assert crashed.returncode == 73, crashed.stdout + crashed.stderr
+    for candidate in (
+        crash_home / "release-bundle/0.2.28",
+        crash_home / "stage-prefix/releases/0.2.28",
+    ):
+        assert (candidate / STAGING_RESERVATION_FILENAME).is_file()
+        assert (candidate / "VERSION").is_file()
+    return crash_home
+
+
+def test_separate_process_version_crash_recovers_and_retries(root: Path) -> None:
+    root.mkdir()
+    crash_home = crash_staging_process(root, "process-crash")
+    environment = {
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "LC_ALL": "C",
+    }
+
+    retry_script = """
+import sys
+from pathlib import Path
+
+sys.path.insert(0, sys.argv[1])
+from league.acceptance import _staged_install
+
+_staged_install(Path(sys.argv[2]), Path(sys.argv[3]))
+"""
+    retried = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            retry_script,
+            str(ROOT / "src"),
+            str(crash_home),
+            str(ROOT),
+        ],
+        cwd=root,
+        env=environment,
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    assert retried.returncode == 0, retried.stdout + retried.stderr
+    assert (
+        crash_home / "stage-prefix/releases/0.2.28/VERSION"
+    ).read_bytes() == (ROOT / "VERSION").read_bytes()
+
+
+def test_partial_stage_recovery_mismatches_refuse(root: Path) -> None:
+    root.mkdir()
+
+    marker_home = crash_staging_process(root, "marker-mismatch")
+    marker_path = (
+        marker_home
+        / "stage-prefix/releases/0.2.28"
+        / STAGING_RESERVATION_FILENAME
+    )
+    marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    marker["token"] = "0" * 64
+    write_json(marker_path, marker)
+    refused(
+        lambda: _staged_install(marker_home, ROOT),
+        "staged_release_identity_exists",
+    )
+
+    source_home = crash_staging_process(root, "source-mismatch")
+    for directory in (
+        source_home / "release-bundle/0.2.28",
+        source_home / "stage-prefix/releases/0.2.28",
+    ):
+        path = directory / STAGING_RESERVATION_FILENAME
+        marker = json.loads(path.read_text(encoding="utf-8"))
+        marker["source_version_sha256"] = "0" * 64
+        write_json(path, marker)
+    refused(
+        lambda: _staged_install(source_home, ROOT),
+        "staged_release_identity_exists",
+    )
+
+    inode_home = crash_staging_process(root, "inode-mismatch")
+    bundle = inode_home / "release-bundle/0.2.28"
+    displaced = root / "inode-mismatch-original"
+    bundle.rename(displaced)
+    shutil.copytree(displaced, bundle)
+    refused(
+        lambda: _staged_install(inode_home, ROOT),
+        "staged_release_identity_exists",
+    )
+
+    extra_home = crash_staging_process(root, "extra-content")
+    (extra_home / "release-bundle/0.2.28/extra-byte").write_bytes(b"unexpected\n")
+    refused(
+        lambda: _staged_install(extra_home, ROOT),
+        "staged_release_identity_exists",
+    )
+
+
+def test_staging_cleanup_preserves_replacements_and_original_refusal(
+    root: Path,
+) -> None:
+    root.mkdir()
+    source_version = ROOT / "VERSION"
+    swapped_home = root / "swapped-reservation"
+    moved_bundle = root / "original-reserved-bundle"
+
+    def swap_reserved_bundle(event: str) -> None:
+        if event != "after_release_file:VERSION":
+            return
+        bundle = swapped_home / "release-bundle/0.2.28"
+        bundle.rename(moved_bundle)
+        bundle.mkdir()
+        (bundle / "replacement-byte").write_bytes(b"must remain\n")
+        raise InjectedStageCrash(event)
+
+    try:
+        _staged_install(swapped_home, ROOT, fault=swap_reserved_bundle)
+    except InjectedStageCrash:
+        pass
+    else:
+        raise AssertionError("expected injected reservation swap")
+    assert (swapped_home / "release-bundle/0.2.28/replacement-byte").read_bytes() == (
+        b"must remain\n"
+    )
+    assert (moved_bundle / "VERSION").read_bytes() == source_version.read_bytes()
+    assert not (swapped_home / "stage-prefix/releases/0.2.28").exists()
+
+    symlink_home = root / "symlink-swap"
+    displaced_bundle = root / "symlink-displaced-bundle"
+    foreign_target = root / "foreign-replacement-target"
+    foreign_target.mkdir()
+    (foreign_target / "foreign-byte").write_bytes(b"must remain\n")
+
+    def swap_reserved_bundle_to_symlink(event: str) -> None:
+        if event != "after_release_file:VERSION":
+            return
+        bundle = symlink_home / "release-bundle/0.2.28"
+        bundle.rename(displaced_bundle)
+        bundle.symlink_to(foreign_target, target_is_directory=True)
+        raise InjectedStageCrash(event)
+
+    try:
+        _staged_install(symlink_home, ROOT, fault=swap_reserved_bundle_to_symlink)
+    except InjectedStageCrash:
+        pass
+    else:
+        raise AssertionError("expected injected symlink reservation swap")
+    restored_link = symlink_home / "release-bundle/0.2.28"
+    assert restored_link.is_symlink()
+    assert restored_link.readlink() == foreign_target
+    assert (foreign_target / "foreign-byte").read_bytes() == b"must remain\n"
+    assert (displaced_bundle / "VERSION").read_bytes() == source_version.read_bytes()
+
+    subdirectory_home = root / "subdirectory-swap"
+    foreign_bundle = root / "foreign-bundle-bin"
+    foreign_release = root / "foreign-release-bin"
+    foreign_bundle.mkdir()
+    foreign_release.mkdir()
+
+    def swap_staged_subdirectories(event: str) -> None:
+        if event != "after_release_file:VERSION":
+            return
+        (subdirectory_home / "release-bundle/0.2.28/bin").symlink_to(
+            foreign_bundle, target_is_directory=True
+        )
+        (subdirectory_home / "stage-prefix/releases/0.2.28/bin").symlink_to(
+            foreign_release, target_is_directory=True
+        )
+
+    refused(
+        lambda: _staged_install(
+            subdirectory_home, ROOT, fault=swap_staged_subdirectories
+        ),
+        "staged_parity_failed",
+    )
+    assert not any(foreign_bundle.iterdir())
+    assert not any(foreign_release.iterdir())
+
+    failure_home = root / "cleanup-failure"
+
+    def fail_stage_and_cleanup(event: str) -> None:
+        if event == "after_release_file:VERSION":
+            raise StorageRefusal(
+                "synthetic_staging_refusal", "synthetic staging refusal"
+            )
+        if event.startswith("before_reserved_cleanup:"):
+            raise PermissionError("synthetic cleanup failure")
+
+    refused(
+        lambda: _staged_install(failure_home, ROOT, fault=fail_stage_and_cleanup),
+        "synthetic_staging_refusal",
+    )
+
+
+def test_post_switch_validation_failure_restores_prior_pointer(root: Path) -> None:
+    root.mkdir()
+    home = root / "post-switch"
+
+    def fail_launcher_validation(event: str) -> None:
+        if event == "before_staged_launcher_validation":
+            raise StorageRefusal(
+                "synthetic_launcher_failure", "synthetic launcher failure"
+            )
+
+    refused(
+        lambda: _staged_install(home, ROOT, fault=fail_launcher_validation),
+        "synthetic_launcher_failure",
+    )
+    current = home / "stage-prefix/current"
+    stable = home / "stage-prefix/bin/league"
+    assert current.readlink().as_posix() == "releases/0.0.0-legacy"
+    version = subprocess.run(
+        [str(stable), "--version"],
+        cwd=home,
+        text=True,
+        capture_output=True,
+        timeout=10,
+        check=True,
+    )
+    assert version.stdout.strip() == "league 0.0.0-legacy"
+
+
 def test_issue_23_incident_artifacts_are_complete_and_public_safe() -> None:
     markdown = ROOT / "docs/incident-23-sqlite-hot-path-journal-mode-contention.md"
     html = ROOT / "docs/incident-23-sqlite-hot-path-journal-mode-contention.html"
@@ -607,12 +981,29 @@ def main() -> None:
         test_existing_release_identity_precedes_install_mutation(
             root / "release-identity-collision"
         )
+        test_version_staging_is_regular_and_exact(root / "version-regular-file")
+        test_release_source_symlinks_and_oversize_refuse_before_mutation(
+            root / "release-source-refusal"
+        )
+        test_staging_crash_cleanup_and_retry(root / "staging-crash-retry")
+        test_separate_process_version_crash_recovers_and_retries(
+            root / "separate-process-crash"
+        )
+        test_partial_stage_recovery_mismatches_refuse(
+            root / "partial-stage-refusals"
+        )
+        test_staging_cleanup_preserves_replacements_and_original_refusal(
+            root / "staging-cleanup"
+        )
+        test_post_switch_validation_failure_restores_prior_pointer(
+            root / "post-switch-rollback"
+        )
         test_schema_and_command_inventory()
         test_issue_23_incident_artifacts_are_complete_and_public_safe()
     print(
         "PASS: explicit-root sandbox, fake adapters, sentinels, migration parity, staged rollback, "
         "generation-fenced fault matrix, resumable receipts, exact canary cleanup, "
-        "and honest pending claims"
+        "regular-file staging with crash retry, and honest pending claims"
     )
 
 

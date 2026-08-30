@@ -417,6 +417,25 @@ rechecks them before apply. Inode-aware temporary-root tests also prove that
 refusal changes no node or tree and that a late rollback does not replace an
 unchanged universal guide or League supplement.
 
+The release-staging boundary now opens every manifest path component relative
+to one root descriptor without following symlinks, binds the opened file to one
+regular identity, and checks
+that both staged copies are regular files with exact source bytes. Release
+reads use bounded buffers and reject oversized sources before allocation. A
+staging
+crash atomically quarantines a candidate path, verifies its recorded
+device/inode identity, and removes only identities newly reserved by that
+attempt before retry. Cleanup failures cannot replace the original staging
+refusal. A matching marker pair lets a later process recover only an exact
+VERSION-only partial stage with unchanged source bytes and recorded directory
+identities; all other existing candidates still refuse. Focused temporary-root
+coverage proves process-death recovery, foreign directory and symlink
+preservation, marker/source/inode/extra-content refusal, post-switch pointer
+rollback, VERSION regular-file identity, and byte parity. Descriptor-relative
+writes cannot follow swapped staging subdirectories, and final source identity
+checks include size and timestamp. Guide-hash preservation and rollback remain
+verified without changing any retained release or live pointer.
+
 This branch was rebased onto canonical main
 `f015a5c34efca039accc911f8995a340eb067fc7`, whose merge tree is
 `8e18b33caca431b12a462da31610abdf5af318a1`, before assigning contiguous

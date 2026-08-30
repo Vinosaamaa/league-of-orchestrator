@@ -15,6 +15,7 @@ from .cleanup import (
     CleanupExecutor,
     cleanup_action_digest,
 )
+from .continuation import GitHubIssueAdapter
 from .real_cleanup import (
     CallsignAdapter,
     CommandRunner,
@@ -239,7 +240,7 @@ def production_cleanup_registry(
     if not isinstance(actions, list):
         raise StorageRefusal("cleanup_operation_invalid", "canonical action plan is malformed")
     declared = {str(action.get("adapter_kind")) for action in actions}
-    supported = {"archive", "harness", "backend", "git", "callsign", "process", "lease"}
+    supported = {"archive", "harness", "backend", "git", "callsign", "process", "lease", "issue"}
     unknown = declared - supported
     if unknown:
         raise StorageRefusal(
@@ -271,6 +272,8 @@ def production_cleanup_registry(
         registry.register(ExactProcessAdapter(process_port or SystemProcessPort(command_runner)))
     if "lease" in declared:
         registry.register(SharedLeaseAdapter(store))
+    if "issue" in declared:
+        registry.register(GitHubIssueAdapter())
     return registry
 
 

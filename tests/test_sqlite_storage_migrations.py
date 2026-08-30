@@ -217,6 +217,42 @@ def test_v6_to_v7_rolls_back_and_applies_privacy_defaults(root: Path) -> None:
         assert store.integrity()["ok"]
 
 
+def test_v15_to_v16_rolls_back_before_thread_lineage_cutover(root: Path) -> None:
+    state, _ = migrated_state(root, "v15-to-v16", target_version=15)
+    with SQLiteStorage.for_migration(state) as store:
+        assert store.connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='index' AND name='ux_runtime_session_identity'"
+        ).fetchone() is not None
+
+        def crash(point: str) -> None:
+            if point == "after_migration_16":
+                raise InjectedCrash(point)
+
+        try:
+            store.migrate(backup_name="backups/pre-v16.sqlite3", fault=crash)
+        except InjectedCrash:
+            pass
+        else:
+            raise AssertionError("v16 migration crash was not injected")
+        assert store.connection.execute("PRAGMA user_version").fetchone()[0] == 15
+        assert store.connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='index' AND name='ux_runtime_session_identity'"
+        ).fetchone() is not None
+        assert store.connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='thread_lineages'"
+        ).fetchone() is None
+
+        receipt = store.migrate(backup_name="backups/pre-v16-retry.sqlite3")
+        assert receipt["from_version"] == 15 and receipt["applied"] == [16]
+        assert store.connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='index' AND name='ux_live_runtime_session_identity'"
+        ).fetchone() is not None
+        assert store.connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='thread_lineages'"
+        ).fetchone() is not None
+        assert store.integrity()["ok"]
+
+
 def test_schema_refusals_without_test_sql(root: Path) -> None:
     future, _ = migrated_state(root, "future")
     database = future / "league.sqlite3"
@@ -482,6 +518,7 @@ def main() -> None:
         test_transactional_upgrade_backup_and_rollback(root)
         test_v5_to_v6_rebuild_rolls_back_and_initializes_shuffled_order(root)
         test_v6_to_v7_rolls_back_and_applies_privacy_defaults(root)
+        test_v15_to_v16_rolls_back_before_thread_lineage_cutover(root)
         test_schema_refusals_without_test_sql(root)
         test_v15_to_v16_rolls_back_before_thread_lineage_cutover(root)
         test_v17_active_assignment_requires_migration18_issue_reconciliation(root)

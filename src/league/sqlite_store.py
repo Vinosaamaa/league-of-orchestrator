@@ -19,6 +19,7 @@ from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
 from . import sqlite_runtime_ops
 from . import sqlite_mode_ops
 from . import sqlite_issue_ops
+from . import sqlite_continuation_ops
 from .sqlite_artifact_ops import declare as declare_repository_artifact_operation
 from .sqlite_artifact_ops import publish as record_repository_publication_operation
 from .sqlite_artifact_ops import status as task_artifacts_operation
@@ -3421,6 +3422,59 @@ class SQLiteStorage(SQLiteTransactionCore):
             endpoint_identity,
             runtime_generation,
             at,
+        )
+
+    def thread_archive(self, archive_id: str) -> Optional[dict[str, Any]]:
+        return sqlite_continuation_ops.thread_archive(self, archive_id)
+
+    def prepare_continuation(self, spec: dict[str, Any]) -> dict[str, Any]:
+        return sqlite_continuation_ops.prepare_continuation(self, spec)
+
+    def continuation_status(self, operation_id: str) -> Optional[dict[str, Any]]:
+        return sqlite_continuation_ops.continuation_status(self, operation_id)
+
+    def continuation_for_assignment(
+        self, assignment_id: str
+    ) -> Optional[dict[str, Any]]:
+        return sqlite_continuation_ops.continuation_for_assignment(self, assignment_id)
+
+    def claim_issue_reopen(
+        self,
+        operation_id: str,
+        expected_version: int,
+        expected_fence: int,
+        executor_id: str,
+        leased_until: str,
+        at: str,
+    ) -> dict[str, Any]:
+        return sqlite_continuation_ops.claim_issue_reopen(
+            self,
+            operation_id,
+            expected_version,
+            expected_fence,
+            executor_id,
+            leased_until,
+            at,
+        )
+
+    def record_issue_reopen(
+        self,
+        operation_id: str,
+        expected_version: int,
+        fence: int,
+        outcome: str,
+        receipt: dict[str, Any],
+        at: str,
+    ) -> dict[str, Any]:
+        return sqlite_continuation_ops.record_issue_reopen(
+            self, operation_id, expected_version, fence, outcome, receipt, at
+        )
+
+    def mark_continuation_launching(
+        self, operation_id: str, expected_version: int, at: str
+    ) -> dict[str, Any]:
+        return sqlite_continuation_ops.mark_continuation_launching(
+            self, operation_id, expected_version, at
         )
 
     def assignment_launch_context(self, assignment_id: str) -> dict[str, Any]:

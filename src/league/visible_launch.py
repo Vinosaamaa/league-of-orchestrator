@@ -331,11 +331,17 @@ class HerdrCodexLaunchAdapter:
         runner: CommandRunner | None = None,
         *,
         environment: Mapping[str, str] | None = None,
+        resume_thread_id: str | None = None,
     ) -> None:
         _validate_options(options)
         self.options = options
         self.runner = runner or SubprocessRunner()
         self.environment = dict(environment or os.environ)
+        if resume_thread_id is not None and THREAD_UUID.fullmatch(resume_thread_id) is None:
+            raise StorageRefusal(
+                "thread_identity_missing", "Codex resume requires one exact archived thread UUID"
+            )
+        self.resume_thread_id = resume_thread_id
         self._created: dict[str, str] | None = None
         self._receipt: dict[str, Any] | None = None
         if self.environment.get("HERDR_ENV") != "1":
@@ -449,6 +455,23 @@ class HerdrCodexLaunchAdapter:
             raise StorageRefusal(
                 "launch_identity_unverified",
                 "new Codex endpoint did not expose one exact pre-context session identity",
+            )
+        if self.resume_thread_id is not None:
+            for _ in range(120):
+                published = self._get_agent(str(spec.callsign).lower())
+                if _session_id(published) == self.resume_thread_id:
+                    return published
+                if (
+                    published.get("pane_id") != pane_id
+                    or published.get("terminal_id") != terminal_id
+                    or published.get("cwd") != expected_cwd
+                    or published.get("foreground_cwd") != expected_cwd
+                ):
+                    break
+                time.sleep(0.1)
+            raise StorageRefusal(
+                "thread_identity_ambiguous",
+                "Codex did not publish the exact archived thread after resume",
             )
         nonce = _sha256(spec.assignment_id.encode("utf-8"))[:12]
         self._command(
@@ -745,6 +768,22 @@ class HerdrCodexLaunchAdapter:
                 "routing_name": routing_name,
                 "worktree": str(worktree.resolve()),
             }
+            codex_arguments = [
+                "--model",
+                self.options.model,
+                "--config",
+                f'model_reasoning_effort="{self.options.effort}"',
+                "--add-dir",
+                self.options.state_root,
+            ]
+            if self.resume_thread_id is not None:
+                codex_arguments = [
+                    "resume",
+                    *codex_arguments,
+                    "--cd",
+                    str(worktree.resolve()),
+                    self.resume_thread_id,
+                ]
             self._command(
                 (
                     "herdr",
@@ -758,12 +797,7 @@ class HerdrCodexLaunchAdapter:
                     "--timeout",
                     str(self.options.startup_timeout_ms),
                     "--",
-                    "--model",
-                    self.options.model,
-                    "--config",
-                    f'model_reasoning_effort="{self.options.effort}"',
-                    "--add-dir",
-                    self.options.state_root,
+                    *codex_arguments,
                 ),
                 "Herdr Codex start",
                 timeout_seconds=(self.options.startup_timeout_ms // 1000) + 10,

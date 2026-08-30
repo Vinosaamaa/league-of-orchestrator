@@ -602,6 +602,9 @@ def plan_cleanup(store: Any, plan: Mapping[str, Any]) -> dict[str, Any]:
                      action["adapter_kind"], action["resource_id"], _json(action["expected_identity"]),
                      _json(action["intended_state"])),
                 )
+            from .sqlite_continuation_ops import record_thread_archive_for_cleanup
+
+            record_thread_archive_for_cleanup(store, plan)
     except StorageRefusal:
         raise
     except sqlite3.DatabaseError as exc:
@@ -1167,10 +1170,14 @@ def finalize_cleanup(store: Any, operation_id: str, fence: int, at: str) -> dict
                 "SELECT receipt_hash FROM cleanup_action_receipts WHERE operation_id=? ORDER BY action_id", (operation_id,)
             )]
             digest = hashlib.sha256(_json({"operation_id": operation_id, "receipts": receipts}).encode("utf-8")).hexdigest()
+            receipt_id = f"teardown:{operation_id}"
             store.connection.execute(
                 "INSERT INTO teardown_receipts(receipt_id,operation_id,task_id,policy_version,receipt_hash,completed_at) VALUES(?,?,?,?,?,?)",
-                (f"teardown:{operation_id}", operation_id, operation["task_id"], operation["plan_digest"], digest, at),
+                (receipt_id, operation_id, operation["task_id"], operation["plan_digest"], digest, at),
             )
+            from .sqlite_continuation_ops import finalize_thread_archive_for_cleanup
+
+            finalize_thread_archive_for_cleanup(store, operation_id, receipt_id, at)
             store.connection.execute(
                 "UPDATE cleanup_operations SET state='completed',updated_at=? WHERE operation_id=?", (at, operation_id)
             )

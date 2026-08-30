@@ -27,8 +27,8 @@ Nothing here installs files, changes hooks, or connects to live Roster state.
 - Synthetic examples, authoring schemas, and focused local regression tests.
 - One standard-library SQLite implementation behind a `Storage` protocol and
   stable `league` command facade.
-- Eighteen contiguous checksummed schema migrations, a loaded-runtime WAL gate, verified
-  backups, integrity checks, expected-version writes, and bounded contention.
+- Eighteen contiguous checksummed schema migrations, a loaded-runtime WAL gate,
+  verified backups, integrity checks, expected-version writes, and bounded contention.
 - A strict manifest importer covering every canonical issue-#18 artifact
   family, with dry-run digest confirmation before apply.
 - Deterministic bounded inspection and restricted rollback exports with
@@ -92,6 +92,10 @@ Nothing here installs files, changes hooks, or connects to live Roster state.
   closed GitHub issues, durable reuse/reopen/create selection receipts, and an
   exact binding before assignment or tab mutation; durable work kinds cannot
   route direct or hide implementation ownership.
+- Issue-coupled Champion cleanup that archives the exact provider thread and
+  owning task/repository/issue binding before release, closes the issue through
+  the recoverable cleanup executor, and permits an explicit successor to reopen
+  that same issue and resume only the uniquely archived healthy thread.
 
 The proven watcher remains one deep module. The new storage slice is a small
 modular monolith: one composite `Storage` interface with cohesive administrative,
@@ -122,7 +126,7 @@ make test-all
 `make test` runs the inherited baseline once, `make test-storage` runs the
 storage slice once, `make test-project-roster` runs the focused issues #9/#12
 contract, `make test-request-lifecycle` runs the grouped lifecycle
-suite, `make test-runtime-lifecycle` runs issues #7/#11/#14, and
+suite, `make test-runtime-lifecycle` runs issues #7/#11/#14/#83, and
 `make test-routing-policy` runs issue #36's deterministic owner/execution,
 Squad registration, parent-progress, and hidden-scientist contract, while
 `make test-skill-contracts` runs issue #10's synthetic provenance, privacy,
@@ -137,6 +141,27 @@ metadata, incident, renderer, pagination, and latency contracts.
 `make test-all` adds the inherited baseline once. Every
 target uses temporary fixtures only. It does not install files, contact GitHub,
 mutate global agent state, or operate live Herdr/tmux sessions.
+
+Issue #83 adds three stable continuation commands. `continuation prepare`
+verifies a new non-default Git worktree and atomically claims one available
+archive; `continuation reopen` performs the fenced, receipt-bearing owning-issue
+reopen; and `continuation status` returns the exact operation, archive, and
+thread lineage. The claimed assignment is then launched through the ordinary
+`assign run` command. A Codex continuation uses `codex resume` with the archived
+thread UUID, verifies that the new endpoint published that exact UUID, assigns
+a normal current callsign, and records a new runtime incarnation. Unsupported,
+unhealthy, reused, live, stale, conflicting, or instruction-drifted candidates
+refuse before a successful resume.
+
+The cleanup manifest opts into issue coupling with one
+`continuation_archive` object and a final `issue_close` action. It must contain
+the exact task, provider thread, runtime, repository, issue, branch, worktree,
+instruction/policy digests, completed acceptance, cleanup evidence, and declared
+resume capabilities. Planning stores that archive in the same transaction as
+the ordered cleanup actions, before any external resource release. The issue is
+closed last and the archive becomes available only after the exact close action
+and final teardown receipts exist. See [runtime lifecycle](docs/runtime-lifecycle.md)
+and the [issue #83 incident analysis](docs/incident-83-cleanup-reopen.md).
 
 The repository now proves a staged-inactive release, exact read-only shadow,
 backup/restore rehearsal, and deterministic proposed-mutation manifest through
@@ -286,6 +311,7 @@ fake adapters.
 - [Exact source provenance](docs/PROVENANCE.md)
 - [Repository-local request lifecycle](docs/REQUEST_LIFECYCLE.md)
 - [Repository-local runtime lifecycle](docs/runtime-lifecycle.md)
+- [Issue-coupled cleanup and exact-thread reopen incident analysis](docs/incident-83-cleanup-reopen.md)
 - [Skill provenance and runtime capability contract](docs/skill-capabilities.md)
 - [Advisory project catalog and project-grouped Roster](docs/PROJECT_CATALOG.md)
 - [Deterministic activity reports](docs/REPORTING.md)

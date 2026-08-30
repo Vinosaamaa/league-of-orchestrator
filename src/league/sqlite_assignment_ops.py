@@ -802,18 +802,20 @@ def activate_assignment(
                 raise StorageRefusal(
                     "receipt_mismatch", "launch receipt does not match the reserved role identity"
                 )
-            runtime_conflict = store.connection.execute(
-                """
-                SELECT 1 FROM runtime_instances
-                 WHERE runtime_instance_id=? OR (harness_kind=? AND session_ref=?)
-                """,
-                (
-                    receipt["runtime_instance_id"],
-                    receipt["harness_kind"],
-                    receipt["thread_id"],
-                ),
+            from .sqlite_continuation_ops import authorize_resumed_runtime
+
+            continuation = authorize_resumed_runtime(store, assignment_id, receipt)
+            runtime_id_conflict = store.connection.execute(
+                "SELECT 1 FROM runtime_instances WHERE runtime_instance_id=?",
+                (receipt["runtime_instance_id"],),
             ).fetchone()
-            if runtime_conflict is not None:
+            session_conflict = store.connection.execute(
+                "SELECT 1 FROM runtime_instances WHERE harness_kind=? AND session_ref=?",
+                (receipt["harness_kind"], receipt["thread_id"]),
+            ).fetchone()
+            if runtime_id_conflict is not None or (
+                session_conflict is not None and continuation is None
+            ):
                 raise StorageRefusal("runtime_conflict", "launch receipt runtime identity is already registered")
             agent_version = int(agent["version"]) + 1
             store.connection.execute(
@@ -971,6 +973,16 @@ def activate_assignment(
                 """,
                 (outbox_id, event_id, assignment["champion_agent_id"], at),
             )
+            if continuation is not None:
+                from .sqlite_continuation_ops import complete_resumed_runtime
+
+                complete_resumed_runtime(
+                    store,
+                    continuation,
+                    receipt["runtime_instance_id"],
+                    assignment["callsign"],
+                    at,
+                )
     except StorageRefusal:
         raise
     except sqlite3.DatabaseError as exc:

@@ -14,7 +14,7 @@ TASK_CLASSES = frozenset({"analysis", "local_git", "pr_ci", "deployed_service"})
 DISPOSITIONS = frozenset({"completed", "rejected", "cancelled", "failed"})
 RESOURCE_LIFETIMES = frozenset({"task_owned", "shared_lease", "persistent_retain"})
 CLEANUP_ADAPTER_KINDS = frozenset(
-    {"archive", "harness", "backend", "git", "callsign", "process", "lease", "retain"}
+    {"archive", "harness", "backend", "git", "callsign", "process", "lease", "retain", "issue"}
 )
 FINAL_ACTION_ADAPTERS = {
     "session_exit": "harness",
@@ -22,6 +22,7 @@ FINAL_ACTION_ADAPTERS = {
     "worktree_remove": "git",
     "branch_delete": "git",
     "callsign_release": "callsign",
+    "issue_close": "issue",
 }
 RECOVERABLE_EXECUTION_REFUSALS = frozenset(
     {"cleanup_adapter_failed", "cleanup_verification_failed"}
@@ -418,6 +419,26 @@ class CleanupPlanner:
                 }
             )
             ordinal += 1
+        continuation_archive = manifest.get("continuation_archive")
+        if continuation_archive is not None and (
+            owner.get("role") != "champion"
+            or policy["disposition"] != "completed"
+            or policy["task_class"] not in {"pr_ci", "deployed_service"}
+        ):
+            raise StorageRefusal(
+                "issue_close_ineligible",
+                "issue-coupled close requires one completed published Champion task",
+            )
+        if continuation_archive is not None and (
+            not isinstance(continuation_archive, Mapping)
+            or not isinstance(continuation_archive.get("acceptance"), Mapping)
+            or continuation_archive["acceptance"].get("required_gates_complete") is not True
+            or continuation_archive.get("cleanup_evidence") != proof
+        ):
+            raise StorageRefusal(
+                "thread_archive_invalid",
+                "issue-coupled close requires exact completed acceptance and cleanup evidence",
+            )
         final_actions = manifest.get("final_actions", [])
         if not isinstance(final_actions, list):
             raise StorageRefusal("cleanup_manifest_invalid", "cleanup final actions must be a list")
@@ -426,6 +447,8 @@ class CleanupPlanner:
         if policy["task_class"] != "analysis":
             required_final.extend(("worktree_remove", "branch_delete"))
         required_final.append("callsign_release")
+        if continuation_archive is not None:
+            required_final.append("issue_close")
         observed_final = [item.get("action_kind") for item in final_actions if isinstance(item, Mapping)]
         if observed_final != required_final:
             raise StorageRefusal(
@@ -487,6 +510,8 @@ class CleanupPlanner:
                 "plan_digest": digest,
                 "resources": [resource.as_record() for resource in resources],
                 "actions": actions,
+                "continuation_archive": continuation_archive,
+                "proof": proof,
                 "at": at,
             }
         )

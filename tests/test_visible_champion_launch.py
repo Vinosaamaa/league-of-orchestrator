@@ -7,6 +7,7 @@ import json
 import hashlib
 import subprocess
 import tempfile
+from dataclasses import replace
 from pathlib import Path
 import sys
 
@@ -486,6 +487,42 @@ def _adapter(options: VisibleLaunchOptions, runner: FakeHerdrRunner, store):
     )
     adapter.issue_verifier = FakeIssueVerifier(store=store)
     return adapter
+
+
+def test_exact_resume_uses_declared_thread_and_skips_fresh_handshake(root: Path) -> None:
+    store, _, worktree = _context(root, "exact-resume-command")
+    options = _options(root)
+    runner = FakeHerdrRunner(worktree)
+    adapter = HerdrCodexLaunchAdapter(
+        options,
+        runner,
+        environment={"HERDR_ENV": "1", "HERDR_WORKSPACE_ID": "w1"},
+        resume_thread_id=THREAD_ID,
+    )
+    receipt = adapter.launch(replace(_spec(worktree, "exact-resume-command"), callsign="Lux"))
+    assert receipt["thread_id"] == THREAD_ID
+    start = next(
+        call for call in runner.calls if call[:3] == ("herdr", "agent", "start")
+    )
+    separator = start.index("--")
+    assert start[separator + 1 :] == (
+        "resume",
+        "--model",
+        options.model,
+        "--config",
+        f'model_reasoning_effort="{options.effort}"',
+        "--add-dir",
+        options.state_root,
+        "--cd",
+        str(worktree.resolve()),
+        THREAD_ID,
+    )
+    assert not any(
+        call[:3] == ("herdr", "agent", "prompt")
+        and "identity handshake" in call[4]
+        for call in runner.calls
+    )
+    store.close()
 
 
 def test_real_adapter_one_command_success_and_retry(root: Path) -> None:
@@ -1896,6 +1933,7 @@ def main() -> None:
         test_generated_task_labels_are_deterministic_two_word_names()
         test_legacy_display_command_exposes_exact_owner_cas_inputs()
         test_task_label_defaults_and_explicit_labels_stay_two_words(root)
+        test_exact_resume_uses_declared_thread_and_skips_fresh_handshake(root)
         test_real_adapter_one_command_success_and_retry(root)
         test_active_retry_requires_migration18_issue_binding(root)
         test_active_retry_refuses_changed_owner_issue_before_title_read(root)

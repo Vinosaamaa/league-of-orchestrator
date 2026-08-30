@@ -120,7 +120,11 @@ from .sqlite_watcher_ops import register_watcher as register_watcher_operation
 from .sqlite_watcher_ops import set_allow_stop_once as set_allow_stop_once_operation
 from .sqlite_watcher_ops import stop_decision as stop_decision_operation
 from .storage import ConnectionPolicy, FaultInjector, ImportPlan, StorageRefusal
-from .storage_assignment import FinishHiddenAssignmentCommand, PrepareAssignmentCommand
+from .storage_assignment import (
+    FinishHiddenAssignmentCommand,
+    LegacyDisplayReconciliationCommand,
+    PrepareAssignmentCommand,
+)
 from .storage_outbox import OutboxDispatchIdentity
 from .storage_request import (
     AnswerRequestCommand,
@@ -3275,6 +3279,21 @@ class SQLiteStorage(SQLiteTransactionCore):
             display_receipt,
             event_id,
             at,
+        )
+
+    def begin_legacy_display_reconciliation(
+        self, command: LegacyDisplayReconciliationCommand
+    ) -> dict[str, Any]:
+        return sqlite_assignment_ops.begin_legacy_display_reconciliation(self, command)
+
+    def finalize_legacy_display_reconciliation(
+        self,
+        command: LegacyDisplayReconciliationCommand,
+        receipt: dict[str, Any],
+        at: str,
+    ) -> dict[str, Any]:
+        return sqlite_assignment_ops.finalize_legacy_display_reconciliation(
+            self, command, receipt, at
         )
 
     def fail_assignment_context_delivery(

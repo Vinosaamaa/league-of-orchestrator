@@ -14,13 +14,21 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / "src"), str(ROOT / "tests")]
 
 from league.request_services import AssignmentSpec, LaunchAdapterError  # noqa: E402
-from league.storage import StorageRefusal  # noqa: E402
+from league.storage import (  # noqa: E402
+    LegacyDisplayReconciliationCommand,
+    StorageRefusal,
+)
 import league.visible_launch as visible_launch  # noqa: E402
 from league.visible_launch import (  # noqa: E402
     HerdrCodexLaunchAdapter,
     VisibleChampionLaunchService,
     VisibleLaunchOptions,
     _codex_trust_root,
+)
+from league.legacy_display_reconciliation import (  # noqa: E402
+    HerdrLegacyDisplayAdapter,
+    LegacyDisplayReconciliationService,
+    LegacyDisplayReconciliationSpec,
 )
 from lifecycle_fakes import FakeLaunchAdapter  # noqa: E402
 from request_lifecycle_fixture import (  # noqa: E402
@@ -97,6 +105,31 @@ def test_generated_task_labels_are_deterministic_two_word_names() -> None:
         assert len(expected.split()) == 2
 
 
+def test_legacy_display_command_exposes_exact_owner_cas_inputs() -> None:
+    result = subprocess.run(
+        (str(ROOT / "bin/league"), "assign", "reconcile-legacy-display", "--help"),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    for option in (
+        "--assignment-id",
+        "--champion-agent-id",
+        "--runtime-instance-id",
+        "--callsign",
+        "--pane-id",
+        "--terminal-id",
+        "--thread-id",
+        "--worktree",
+        "--routing-name",
+        "--expected-presentation-json",
+        "--target-task-label",
+        "--owner-authorized",
+    ):
+        assert option in result.stdout
+
+
 def test_task_label_defaults_and_explicit_labels_stay_two_words(root: Path) -> None:
     help_result = subprocess.run(
         (str(ROOT / "bin/league"), "assign", "run", "--help"),
@@ -131,10 +164,12 @@ class FakeHerdrRunner:
         *,
         wrong_thread: bool = False,
         delayed_context_title_reads: int | None = None,
+        routing_name: str = "lux",
     ) -> None:
         self.worktree = str(worktree.resolve())
         self.wrong_thread = wrong_thread
         self.delayed_context_title_reads = delayed_context_title_reads
+        self.routing_name = routing_name
         self.started = False
         self.session_reported = False
         self.closed = False
@@ -142,6 +177,9 @@ class FakeHerdrRunner:
         self.tokens: dict[str, str] = {}
         self.metadata_source = "herdr:codex"
         self.source_sequences: dict[str, int] = {}
+        self.overlay_baselines: dict[
+            str, tuple[str | None, str, dict[str, str], str, dict[str, str]]
+        ] = {}
         self.state_change_seq = 99
         self.pending_title_reads: int | None = None
         self.contexts: list[str] = []
@@ -155,7 +193,7 @@ class FakeHerdrRunner:
             "interactive_ready": True,
             "cwd": self.worktree,
             "foreground_cwd": self.worktree,
-            "name": "lux",
+            "name": self.routing_name,
             "pane_id": "w1:p99",
             "metadata_source": self.metadata_source,
             "state_change_seq": self.state_change_seq,
@@ -194,12 +232,28 @@ class FakeHerdrRunner:
         )
 
     def active_copy(self) -> "FakeHerdrRunner":
-        copied = FakeHerdrRunner(Path(self.worktree))
+        copied = FakeHerdrRunner(Path(self.worktree), routing_name=self.routing_name)
         copied.started = True
         copied.title = self.title
         copied.tokens = dict(self.tokens)
         copied.metadata_source = self.metadata_source
         copied.source_sequences = dict(self.source_sequences)
+        copied.overlay_baselines = {
+            source: (
+                baseline_source,
+                baseline_title,
+                dict(baseline_tokens),
+                overlay_title,
+                dict(overlay_tokens),
+            )
+            for source, (
+                baseline_source,
+                baseline_title,
+                baseline_tokens,
+                overlay_title,
+                overlay_tokens,
+            ) in self.overlay_baselines.items()
+        }
         copied.state_change_seq = self.state_change_seq
         return copied
 
@@ -241,14 +295,46 @@ class FakeHerdrRunner:
                     command, 1, "", "metadata sequence conflict"
                 )
             self.source_sequences[source] = sequence
-            self.metadata_source = source
             self.state_change_seq += 1
+            if "--clear-title" in command and source in self.overlay_baselines:
+                (
+                    baseline_source,
+                    baseline_title,
+                    baseline_tokens,
+                    overlay_title,
+                    overlay_tokens,
+                ) = self.overlay_baselines.pop(source)
+                current_source = self.metadata_source
+                current_title = self.title
+                current_tokens = dict(self.tokens)
+                self.metadata_source = baseline_source
+                self.title = baseline_title
+                self.tokens = dict(baseline_tokens)
+                if current_source != source or current_title != overlay_title:
+                    self.metadata_source = current_source
+                    self.title = current_title
+                for key, value in current_tokens.items():
+                    if overlay_tokens.get(key) != value:
+                        self.tokens[key] = value
+                return subprocess.CompletedProcess(command, 0, "", "")
+            prior_source = self.metadata_source
+            prior_title = self.title
+            prior_tokens = dict(self.tokens)
+            self.metadata_source = source
             self.title = command[command.index("--title") + 1]
-            self.tokens = {}
             for index, value in enumerate(command):
                 if value == "--token":
                     key, token_value = command[index + 1].split("=", 1)
                     self.tokens[key] = token_value
+            if source.startswith("league-legacy-"):
+                baseline = self.overlay_baselines.get(source)
+                self.overlay_baselines[source] = (
+                    baseline[0] if baseline else prior_source,
+                    baseline[1] if baseline else prior_title,
+                    dict(baseline[2]) if baseline else prior_tokens,
+                    self.title,
+                    dict(self.tokens),
+                )
             return subprocess.CompletedProcess(command, 0, "", "")
         elif command[:3] == ("herdr", "agent", "prompt"):
             prompt = command[4]
@@ -348,6 +434,7 @@ def test_real_adapter_one_command_success_and_retry(root: Path) -> None:
     assert retry_runner.contexts == []
     assert len(runner.contexts) == contexts_before_retry == 1
 
+
     runner.metadata_source = "herdr:codex"
     runner.state_change_seq += 1
     runner.title = "League assignment context | codex"
@@ -424,6 +511,731 @@ def test_real_adapter_one_command_success_and_retry(root: Path) -> None:
         "assignment_context",
     )
     assert activation_delivery["effect_id"] == result["context_delivery"]["effect_sha256"]
+    store.close()
+
+
+def test_legacy_active_champion_display_is_reconciled_once_with_exact_receipt(
+    root: Path,
+) -> None:
+    store, clock, worktree = _context(root, "legacy-display")
+    store.connection.execute(
+        "INSERT INTO callsigns(callsign,pool_role,enabled,pool_position,last_released_at) VALUES('Shaco','champion',1,99,NULL)"
+    )
+    store.connection.execute(
+        "INSERT INTO callsign_queue(callsign,pool_role,queue_position,state,reservation_assignment_id,version,updated_at) VALUES('Shaco','champion',-1,'available',NULL,1,?)",
+        (clock.now(),),
+    )
+    options = _options(root)
+    launch_runner = FakeHerdrRunner(worktree, routing_name="shaco")
+    launch = VisibleChampionLaunchService(
+        store, _adapter(options, launch_runner), options, clock
+    ).launch(_spec(worktree, "legacy-display"))
+    assignment_id = launch["assignment_id"]
+    receipt = store.assignment_launch_context(assignment_id)["acceptance_receipt"]
+    event = store.connection.execute(
+        "SELECT event_id,detail_json FROM events WHERE aggregate_id=? AND event_type='assignment_context_delivered'",
+        (assignment_id,),
+    ).fetchone()
+    legacy_detail = json.loads(event["detail_json"])
+    legacy_detail.pop("display_receipt")
+    store.connection.execute(
+        "UPDATE events SET detail_json=? WHERE event_id=?",
+        (json.dumps(legacy_detail, sort_keys=True, separators=(",", ":")), event["event_id"]),
+    )
+
+    runner = launch_runner.active_copy()
+    runner.metadata_source = "herdr:codex"
+    runner.state_change_seq += 1
+    runner.title = "Prepare handshake only"
+    runner.tokens = {
+        "sidebar_name": "Prepare handshake only",
+        "thread_title": "Prepare handshake only",
+        "user_accent": "keep-me",
+    }
+    calls_before = len(runner.calls)
+    spec = LegacyDisplayReconciliationSpec(
+        assignment_id=assignment_id,
+        expected_version=launch["version"],
+        champion_agent_id=LUX_ID,
+        runtime_instance_id=launch["runtime_instance_id"],
+        callsign="Shaco",
+        pane_id=receipt["endpoint"],
+        terminal_id="term_test_99",
+        thread_id=receipt["thread_id"],
+        worktree=str(worktree.resolve()),
+        routing_name="shaco",
+        expected_presentation_source="herdr:codex",
+        expected_title="Prepare handshake only",
+        expected_state_change_seq=runner.state_change_seq,
+        target_task_label="Broker Repair",
+        owner_authorized=True,
+    )
+    service = LegacyDisplayReconciliationService(
+        store,
+        HerdrLegacyDisplayAdapter(
+            runner,
+            environment={"HERDR_ENV": "1", "HERDR_WORKSPACE_ID": "w1"},
+        ),
+        clock,
+    )
+
+    finalize = store.finalize_legacy_display_reconciliation
+
+    def interrupt_after_effect(*args, **kwargs):
+        del args, kwargs
+        raise StorageRefusal(
+            "synthetic_reconciliation_interrupt",
+            "synthetic interruption after Herdr metadata effect",
+        )
+
+    store.finalize_legacy_display_reconciliation = interrupt_after_effect  # type: ignore[method-assign]
+    try:
+        service.reconcile(spec)
+    except StorageRefusal as exc:
+        assert exc.code == "synthetic_reconciliation_interrupt"
+    else:
+        raise AssertionError("synthetic post-effect interruption did not stop finalization")
+    assert store.assignment_launch_context(assignment_id)[
+        "legacy_display_reconciliation"
+    ]["receipt"] is None
+    store.finalize_legacy_display_reconciliation = finalize  # type: ignore[method-assign]
+
+    result = service.reconcile(spec)
+    assert result["state"] == "reconciled"
+    assert result["receipt"]["terminal_title"] == "Shaco · Broker Repair"
+    assert runner.tokens["sidebar_name"] == "Shaco"
+    assert runner.tokens["task_label"] == "Broker Repair"
+    assert runner.tokens["thread_title"] == "Shaco · Broker Repair"
+    assert runner.tokens["user_accent"] == "keep-me"
+    assert len(
+        [
+            call
+            for call in runner.calls[calls_before:]
+            if call[:3] == ("herdr", "pane", "report-metadata")
+        ]
+    ) == 1
+
+    retry = service.reconcile(spec)
+    assert retry["receipt"] == result["receipt"]
+    assert len(
+        [call for call in runner.calls if call[:3] == ("herdr", "pane", "report-metadata")]
+    ) == 1
+    try:
+        service.reconcile(
+            LegacyDisplayReconciliationSpec(
+                **{**vars(spec), "target_task_label": "Different Repair"}
+            )
+        )
+    except StorageRefusal as exc:
+        assert exc.code == "legacy_display_conflict"
+    else:
+        raise AssertionError("legacy reconciliation retry changed its target")
+    assert len(
+        [call for call in runner.calls if call[:3] == ("herdr", "pane", "report-metadata")]
+    ) == 1
+    durable = store.assignment_launch_context(assignment_id)
+    assert durable["legacy_display_reconciliation"]["intent"]["owner_authorized"] is True
+    assert durable["legacy_display_reconciliation"]["receipt"] == result["receipt"]
+    store.connection.execute(
+        "UPDATE events SET detail_json=? WHERE aggregate_id=? AND event_type='assignment_legacy_display_reconciled'",
+        (json.dumps({"receipt": {"source": "malformed"}}), assignment_id),
+    )
+    try:
+        store.assignment_launch_context(assignment_id)
+    except StorageRefusal as exc:
+        assert exc.code == "legacy_display_ambiguous"
+    else:
+        raise AssertionError("malformed legacy final history escaped controlled refusal")
+    store.close()
+
+
+class UserTitleRaceLegacyRunner(FakeHerdrRunner):
+    def __init__(self, worktree: Path) -> None:
+        super().__init__(worktree)
+        self.legacy_get_reads = 0
+
+    def run(
+        self, arguments, *, timeout_seconds: int = 30
+    ) -> subprocess.CompletedProcess[str]:
+        command = tuple(arguments)
+        if command[:3] == ("herdr", "agent", "get"):
+            self.legacy_get_reads += 1
+            if self.legacy_get_reads == 2:
+                self.metadata_source = "user-selected"
+                self.state_change_seq += 1
+                self.title = "User selected title"
+                self.tokens["user_note"] = "preserve"
+        return super().run(arguments, timeout_seconds=timeout_seconds)
+
+
+class UserTitleAtCompareAndSetRunner(FakeHerdrRunner):
+    """A user title lands in the final read-to-write window."""
+
+    def __init__(self, worktree: Path) -> None:
+        super().__init__(worktree)
+        self.raced = False
+
+    def run(
+        self, arguments, *, timeout_seconds: int = 30
+    ) -> subprocess.CompletedProcess[str]:
+        command = tuple(arguments)
+        completed = super().run(arguments, timeout_seconds=timeout_seconds)
+        if (
+            command[:3] == ("herdr", "pane", "report-metadata")
+            and "--title" in command
+            and completed.returncode == 0
+            and not self.raced
+        ):
+            self.raced = True
+            self.metadata_source = "user-selected"
+            self.state_change_seq += 1
+            self.source_sequences["user-selected"] = self.state_change_seq
+            self.title = "User selected title"
+            self.tokens["user_note"] = "preserve"
+        return completed
+
+
+def _legacy_reconciliation_spec(
+    launch: dict[str, object],
+    receipt: dict[str, object],
+    worktree: Path,
+    runner: FakeHerdrRunner,
+) -> LegacyDisplayReconciliationSpec:
+    return LegacyDisplayReconciliationSpec(
+        assignment_id=str(launch["assignment_id"]),
+        expected_version=int(launch["version"]),
+        champion_agent_id=LUX_ID,
+        runtime_instance_id=str(launch["runtime_instance_id"]),
+        callsign="Lux",
+        pane_id=str(receipt["endpoint"]),
+        terminal_id="term_test_99",
+        thread_id=str(receipt["thread_id"]),
+        worktree=str(worktree.resolve()),
+        routing_name="lux",
+        expected_presentation_source=runner.metadata_source,
+        expected_title=runner.title,
+        expected_state_change_seq=runner.state_change_seq,
+        target_task_label="Broker Repair",
+        owner_authorized=True,
+    )
+
+
+def test_legacy_display_reconciliation_refuses_user_title_race_before_write(
+    root: Path,
+) -> None:
+    store, clock, worktree = _context(root, "legacy-user-race")
+    options = _options(root)
+    launched_runner = FakeHerdrRunner(worktree)
+    launch = VisibleChampionLaunchService(
+        store, _adapter(options, launched_runner), options, clock
+    ).launch(_spec(worktree, "legacy-user-race"))
+    assignment_id = str(launch["assignment_id"])
+    receipt = store.assignment_launch_context(assignment_id)["acceptance_receipt"]
+    event = store.connection.execute(
+        "SELECT event_id,detail_json FROM events WHERE aggregate_id=? AND event_type='assignment_context_delivered'",
+        (assignment_id,),
+    ).fetchone()
+    detail = json.loads(event["detail_json"])
+    detail.pop("display_receipt")
+    store.connection.execute(
+        "UPDATE events SET detail_json=? WHERE event_id=?",
+        (json.dumps(detail, sort_keys=True, separators=(",", ":")), event["event_id"]),
+    )
+    runner = UserTitleRaceLegacyRunner(worktree)
+    runner.started = True
+    runner.title = "Prepare handshake only"
+    runner.tokens = {
+        "sidebar_name": "Prepare handshake only",
+        "thread_title": "Prepare handshake only",
+    }
+    runner.state_change_seq = launched_runner.state_change_seq + 1
+    spec = _legacy_reconciliation_spec(launch, receipt, worktree, runner)
+    service = LegacyDisplayReconciliationService(
+        store,
+        HerdrLegacyDisplayAdapter(
+            runner,
+            environment={"HERDR_ENV": "1", "HERDR_WORKSPACE_ID": "w1"},
+        ),
+        clock,
+    )
+
+    try:
+        service.reconcile(spec)
+    except StorageRefusal as exc:
+        assert exc.code == "legacy_display_race"
+    else:
+        raise AssertionError("newer user title was overwritten by legacy reconciliation")
+    assert runner.title == "User selected title"
+    assert runner.metadata_source == "user-selected"
+    assert runner.tokens["user_note"] == "preserve"
+    assert not any(
+        call[:3] == ("herdr", "pane", "report-metadata") for call in runner.calls
+    )
+    durable = store.assignment_launch_context(assignment_id)
+    assert durable["legacy_display_reconciliation"]["receipt"] is None
+    store.close()
+
+
+def test_legacy_display_compare_and_set_does_not_overwrite_last_window_user_title(
+    root: Path,
+) -> None:
+    store, clock, worktree = _context(root, "legacy-cas-race")
+    options = _options(root)
+    launched_runner = FakeHerdrRunner(worktree)
+    launch = VisibleChampionLaunchService(
+        store, _adapter(options, launched_runner), options, clock
+    ).launch(_spec(worktree, "legacy-cas-race"))
+    assignment_id = str(launch["assignment_id"])
+    receipt = store.assignment_launch_context(assignment_id)["acceptance_receipt"]
+    event = store.connection.execute(
+        "SELECT event_id,detail_json FROM events WHERE aggregate_id=? AND event_type='assignment_context_delivered'",
+        (assignment_id,),
+    ).fetchone()
+    detail = json.loads(event["detail_json"])
+    detail.pop("display_receipt")
+    store.connection.execute(
+        "UPDATE events SET detail_json=? WHERE event_id=?",
+        (json.dumps(detail, sort_keys=True, separators=(",", ":")), event["event_id"]),
+    )
+    runner = UserTitleAtCompareAndSetRunner(worktree)
+    runner.started = True
+    runner.title = "Prepare handshake only"
+    runner.tokens = {
+        "sidebar_name": "Prepare handshake only",
+        "thread_title": "Prepare handshake only",
+    }
+    runner.state_change_seq = launched_runner.state_change_seq + 1
+    spec = _legacy_reconciliation_spec(launch, receipt, worktree, runner)
+    service = LegacyDisplayReconciliationService(
+        store,
+        HerdrLegacyDisplayAdapter(
+            runner,
+            environment={"HERDR_ENV": "1", "HERDR_WORKSPACE_ID": "w1"},
+        ),
+        clock,
+    )
+
+    try:
+        service.reconcile(spec)
+    except StorageRefusal as exc:
+        assert exc.code == "legacy_display_race"
+    else:
+        raise AssertionError("last-window user title race was overwritten")
+    assert runner.title == "User selected title"
+    assert runner.metadata_source == "user-selected"
+    assert runner.tokens["user_note"] == "preserve"
+    assert runner.tokens["sidebar_name"] == "Prepare handshake only"
+    assert "legacy_display_owner" not in runner.tokens
+    assert "legacy_display_assignment" not in runner.tokens
+    reports = [
+        call for call in runner.calls if call[:3] == ("herdr", "pane", "report-metadata")
+    ]
+    assert len(reports) == 2
+    assert "--clear-title" in reports[-1]
+    assert store.assignment_launch_context(assignment_id)[
+        "legacy_display_reconciliation"
+    ]["receipt"] is None
+    store.close()
+
+
+def test_legacy_display_reconciliation_refuses_modern_receipt_before_live_write(
+    root: Path,
+) -> None:
+    store, clock, worktree = _context(root, "modern-display")
+    options = _options(root)
+    runner = FakeHerdrRunner(worktree)
+    launch = VisibleChampionLaunchService(
+        store, _adapter(options, runner), options, clock
+    ).launch(_spec(worktree, "modern-display"))
+    receipt = store.assignment_launch_context(str(launch["assignment_id"]))[
+        "acceptance_receipt"
+    ]
+    active = runner.active_copy()
+    spec = _legacy_reconciliation_spec(launch, receipt, worktree, active)
+
+    try:
+        LegacyDisplayReconciliationService(
+            store,
+            HerdrLegacyDisplayAdapter(
+                active,
+                environment={"HERDR_ENV": "1", "HERDR_WORKSPACE_ID": "w1"},
+            ),
+            clock,
+        ).reconcile(spec)
+    except StorageRefusal as exc:
+        assert exc.code == "legacy_display_modern"
+    else:
+        raise AssertionError("modern display receipt entered legacy reconciliation")
+    assert active.calls == []
+    assert store.assignment_launch_context(str(launch["assignment_id"]))[
+        "legacy_display_reconciliation"
+    ] is None
+    store.close()
+
+
+def test_legacy_display_reconciliation_refuses_ambiguous_runtime_and_wrong_route(
+    root: Path,
+) -> None:
+    store, clock, worktree = _context(root, "legacy-ambiguous")
+    options = _options(root)
+    launched_runner = FakeHerdrRunner(worktree)
+    launch = VisibleChampionLaunchService(
+        store, _adapter(options, launched_runner), options, clock
+    ).launch(_spec(worktree, "legacy-ambiguous"))
+    assignment_id = str(launch["assignment_id"])
+    receipt = store.assignment_launch_context(assignment_id)["acceptance_receipt"]
+    event = store.connection.execute(
+        "SELECT event_id,detail_json FROM events WHERE aggregate_id=? AND event_type='assignment_context_delivered'",
+        (assignment_id,),
+    ).fetchone()
+    detail = json.loads(event["detail_json"])
+    detail.pop("display_receipt")
+    store.connection.execute(
+        "UPDATE events SET detail_json=? WHERE event_id=?",
+        (json.dumps(detail, sort_keys=True, separators=(",", ":")), event["event_id"]),
+    )
+    active = launched_runner.active_copy()
+    spec = _legacy_reconciliation_spec(launch, receipt, worktree, active)
+    unauthorized = LegacyDisplayReconciliationSpec(
+        **{**vars(spec), "owner_authorized": False}
+    )
+    unauthorized_service = LegacyDisplayReconciliationService(
+        store,
+        HerdrLegacyDisplayAdapter(
+            active,
+            environment={"HERDR_ENV": "1", "HERDR_WORKSPACE_ID": "w1"},
+        ),
+        clock,
+    )
+    try:
+        unauthorized_service.reconcile(unauthorized)
+    except StorageRefusal as exc:
+        assert exc.code == "legacy_display_invalid"
+    else:
+        raise AssertionError("legacy reconciliation accepted no owner authorization")
+    store.connection.execute(
+        """
+        INSERT INTO runtime_instances
+          (runtime_instance_id,actor_agent_id,harness_kind,backend_kind,session_ref,endpoint,
+           runtime_generation,status,verified,last_seen_at,capabilities_json)
+        VALUES('runtime:synthetic-duplicate',?,'codex-thread','herdr',
+               '44444444-4444-4444-8444-444444444444','w1:p100',
+               'herdr:synthetic-duplicate','active',1,?,'{}')
+        """,
+        (LUX_ID, clock.now()),
+    )
+    service = LegacyDisplayReconciliationService(
+        store,
+        HerdrLegacyDisplayAdapter(
+            active,
+            environment={"HERDR_ENV": "1", "HERDR_WORKSPACE_ID": "w1"},
+        ),
+        clock,
+    )
+    for changed in (
+        spec,
+        LegacyDisplayReconciliationSpec(
+            **{**vars(spec), "callsign": "Sona", "routing_name": "sona"}
+        ),
+    ):
+        try:
+            service.reconcile(changed)
+        except StorageRefusal as exc:
+            assert exc.code == "legacy_display_conflict"
+        else:
+            raise AssertionError("ambiguous runtime or wrong route was accepted")
+    assert active.calls == []
+    assert store.assignment_launch_context(assignment_id)[
+        "legacy_display_reconciliation"
+    ] is None
+    store.close()
+
+
+def _prepared_legacy_display(
+    root: Path, name: str
+) -> tuple[object, object, Path, dict[str, object], dict[str, object], FakeHerdrRunner]:
+    store, clock, worktree = _context(root, name)
+    options = _options(root)
+    launched_runner = FakeHerdrRunner(worktree)
+    launch = VisibleChampionLaunchService(
+        store, _adapter(options, launched_runner), options, clock
+    ).launch(_spec(worktree, name))
+    assignment_id = str(launch["assignment_id"])
+    receipt = store.assignment_launch_context(assignment_id)["acceptance_receipt"]
+    event = store.connection.execute(
+        "SELECT event_id,detail_json FROM events WHERE aggregate_id=? AND event_type='assignment_context_delivered'",
+        (assignment_id,),
+    ).fetchone()
+    detail = json.loads(event["detail_json"])
+    detail.pop("display_receipt")
+    store.connection.execute(
+        "UPDATE events SET detail_json=? WHERE event_id=?",
+        (json.dumps(detail, sort_keys=True, separators=(",", ":")), event["event_id"]),
+    )
+    runner = launched_runner.active_copy()
+    runner.title = "Prepare handshake only"
+    runner.tokens = {
+        "sidebar_name": "Prepare handshake only",
+        "thread_title": "Prepare handshake only",
+    }
+    runner.state_change_seq += 1
+    return store, clock, worktree, launch, receipt, runner
+
+
+def test_legacy_display_reconciliation_requires_live_owned_presentation_source(
+    root: Path,
+) -> None:
+    store, clock, worktree, launch, receipt, runner = _prepared_legacy_display(
+        root, "legacy-provider-guards"
+    )
+    spec = _legacy_reconciliation_spec(launch, receipt, worktree, runner)
+    service = LegacyDisplayReconciliationService(
+        store,
+        HerdrLegacyDisplayAdapter(
+            runner,
+            environment={"HERDR_ENV": "1", "HERDR_WORKSPACE_ID": "w1"},
+        ),
+        clock,
+    )
+
+    original_agent = runner._agent
+    for mutate in (
+        lambda agent: agent.update(agent_status="done"),
+        lambda agent: agent.pop("metadata_source"),
+    ):
+        runner._agent = lambda mutate=mutate: (  # type: ignore[method-assign]
+            lambda agent: (mutate(agent), agent)[1]
+        )(original_agent())
+        try:
+            service.reconcile(spec)
+        except StorageRefusal as exc:
+            assert exc.code == "legacy_display_identity_unverified"
+        else:
+            raise AssertionError("non-live or source-less legacy display was mutated")
+        assert not any(
+            call[:3] == ("herdr", "pane", "report-metadata") for call in runner.calls
+        )
+    runner._agent = original_agent  # type: ignore[method-assign]
+    store.close()
+
+
+def test_legacy_display_reconciliation_refuses_boolean_sequence(root: Path) -> None:
+    store, _clock, worktree, launch, receipt, runner = _prepared_legacy_display(
+        root, "legacy-boolean-sequence"
+    )
+    spec = _legacy_reconciliation_spec(launch, receipt, worktree, runner)
+    command = LegacyDisplayReconciliationCommand(
+        **{
+            **vars(spec),
+            "expected_state_change_seq": True,
+            "at": "2026-08-30T12:00:00Z",
+        }
+    )
+    try:
+        store.begin_legacy_display_reconciliation(command)
+    except StorageRefusal as exc:
+        assert exc.code == "legacy_display_invalid"
+    else:
+        raise AssertionError("boolean legacy display sequence was accepted as integer one")
+    assert store.assignment_launch_context(str(launch["assignment_id"]))[
+        "legacy_display_reconciliation"
+    ] is None
+    store.close()
+
+
+def test_legacy_display_reconciliation_refuses_orphaned_final_receipt(
+    root: Path,
+) -> None:
+    store, clock, worktree, launch, receipt, runner = _prepared_legacy_display(
+        root, "legacy-orphan-result"
+    )
+    spec = _legacy_reconciliation_spec(launch, receipt, worktree, runner)
+    service = LegacyDisplayReconciliationService(
+        store,
+        HerdrLegacyDisplayAdapter(
+            runner,
+            environment={"HERDR_ENV": "1", "HERDR_WORKSPACE_ID": "w1"},
+        ),
+        clock,
+    )
+    service.reconcile(spec)
+    store.connection.execute(
+        "DELETE FROM events WHERE aggregate_id=? AND event_type='assignment_legacy_display_reconciliation_intent'",
+        (launch["assignment_id"],),
+    )
+
+    try:
+        store.assignment_launch_context(str(launch["assignment_id"]))
+    except StorageRefusal as exc:
+        assert exc.code == "legacy_display_ambiguous"
+    else:
+        raise AssertionError("orphaned legacy display result was reported as no history")
+    reports_before = len(
+        [call for call in runner.calls if call[:3] == ("herdr", "pane", "report-metadata")]
+    )
+    try:
+        service.reconcile(spec)
+    except StorageRefusal as exc:
+        assert exc.code == "legacy_display_ambiguous"
+    else:
+        raise AssertionError("a new legacy display intent was created around an orphan result")
+    assert store.connection.execute(
+        "SELECT COUNT(*) FROM events WHERE aggregate_id=? AND event_type='assignment_legacy_display_reconciliation_intent'",
+        (launch["assignment_id"],),
+    ).fetchone()[0] == 0
+    assert len(
+        [call for call in runner.calls if call[:3] == ("herdr", "pane", "report-metadata")]
+    ) == reports_before
+    store.close()
+
+
+def test_legacy_display_readback_refuses_expected_plus_two_receipt(root: Path) -> None:
+    store, clock, worktree, launch, receipt, runner = _prepared_legacy_display(
+        root, "legacy-plus-two-receipt"
+    )
+    spec = _legacy_reconciliation_spec(launch, receipt, worktree, runner)
+    LegacyDisplayReconciliationService(
+        store,
+        HerdrLegacyDisplayAdapter(
+            runner,
+            environment={"HERDR_ENV": "1", "HERDR_WORKSPACE_ID": "w1"},
+        ),
+        clock,
+    ).reconcile(spec)
+    final = store.connection.execute(
+        "SELECT event_id,detail_json FROM events WHERE aggregate_id=? AND event_type='assignment_legacy_display_reconciled'",
+        (launch["assignment_id"],),
+    ).fetchone()
+    detail = json.loads(final["detail_json"])
+    detail["receipt"]["state_change_seq"] = spec.expected_state_change_seq + 2
+    store.connection.execute(
+        "UPDATE events SET detail_json=? WHERE event_id=?",
+        (json.dumps(detail, sort_keys=True, separators=(",", ":")), final["event_id"]),
+    )
+    try:
+        store.assignment_launch_context(str(launch["assignment_id"]))
+    except StorageRefusal as exc:
+        assert exc.code == "legacy_display_ambiguous"
+    else:
+        raise AssertionError("expected-plus-two legacy display receipt was accepted")
+    store.close()
+
+
+def test_legacy_display_interrupted_effect_refuses_newer_sequence(root: Path) -> None:
+    store, clock, worktree, launch, receipt, runner = _prepared_legacy_display(
+        root, "legacy-interrupted-race"
+    )
+    spec = _legacy_reconciliation_spec(launch, receipt, worktree, runner)
+    service = LegacyDisplayReconciliationService(
+        store,
+        HerdrLegacyDisplayAdapter(
+            runner,
+            environment={"HERDR_ENV": "1", "HERDR_WORKSPACE_ID": "w1"},
+        ),
+        clock,
+    )
+    finalize = store.finalize_legacy_display_reconciliation
+
+    def interrupt_after_effect(*args, **kwargs):
+        del args, kwargs
+        raise StorageRefusal(
+            "synthetic_reconciliation_interrupt",
+            "synthetic interruption after Herdr metadata effect",
+        )
+
+    store.finalize_legacy_display_reconciliation = interrupt_after_effect  # type: ignore[method-assign]
+    try:
+        service.reconcile(spec)
+    except StorageRefusal as exc:
+        assert exc.code == "synthetic_reconciliation_interrupt"
+    else:
+        raise AssertionError("synthetic post-effect interruption did not stop finalization")
+    store.finalize_legacy_display_reconciliation = finalize  # type: ignore[method-assign]
+    runner.state_change_seq += 1
+    runner.tokens["launch_title_owner"] = "new-owner"
+
+    try:
+        service.reconcile(spec)
+    except StorageRefusal as exc:
+        assert exc.code == "legacy_display_race"
+    else:
+        raise AssertionError("interrupted retry absorbed a newer endpoint sequence")
+    assert runner.metadata_source == spec.expected_presentation_source
+    assert "legacy_display_owner" not in runner.tokens
+    assert runner.tokens["launch_title_owner"] == "new-owner"
+    assert store.assignment_launch_context(str(launch["assignment_id"]))[
+        "legacy_display_reconciliation"
+    ]["receipt"] is None
+    store.close()
+
+
+def test_legacy_display_refuses_malformed_modern_receipt(root: Path) -> None:
+    store, clock, worktree, launch, receipt, runner = _prepared_legacy_display(
+        root, "legacy-malformed-modern"
+    )
+    event = store.connection.execute(
+        "SELECT event_id,detail_json FROM events WHERE aggregate_id=? AND event_type='assignment_context_delivered'",
+        (launch["assignment_id"],),
+    ).fetchone()
+    detail = json.loads(event["detail_json"])
+    detail["display_receipt"] = {
+        "source": "league-launch-malformed",
+        "state_change_seq": "not-an-integer",
+    }
+    store.connection.execute(
+        "UPDATE events SET detail_json=? WHERE event_id=?",
+        (json.dumps(detail, sort_keys=True, separators=(",", ":")), event["event_id"]),
+    )
+    spec = _legacy_reconciliation_spec(launch, receipt, worktree, runner)
+    try:
+        LegacyDisplayReconciliationService(
+            store,
+            HerdrLegacyDisplayAdapter(
+                runner,
+                environment={"HERDR_ENV": "1", "HERDR_WORKSPACE_ID": "w1"},
+            ),
+            clock,
+        ).reconcile(spec)
+    except StorageRefusal as exc:
+        assert exc.code == "legacy_display_ambiguous"
+    else:
+        raise AssertionError("malformed modern receipt was reclassified as legacy")
+    assert runner.calls == []
+    store.close()
+
+
+def test_legacy_display_refuses_missing_acceptance_worktree(root: Path) -> None:
+    store, clock, worktree, launch, receipt, runner = _prepared_legacy_display(
+        root, "legacy-missing-worktree"
+    )
+    spec = _legacy_reconciliation_spec(launch, receipt, worktree, runner)
+    stored_receipt = store.assignment_launch_context(str(launch["assignment_id"]))[
+        "acceptance_receipt"
+    ]
+    stored_receipt["worktree"] = ""
+    store.connection.execute(
+        "UPDATE agent_instances SET worktree=? WHERE agent_id=?",
+        (str(Path.cwd()), LUX_ID),
+    )
+    store.connection.execute(
+        "UPDATE task_assignments SET acceptance_receipt_json=? WHERE task_assignment_id=?",
+        (
+            json.dumps(stored_receipt, sort_keys=True, separators=(",", ":")),
+            launch["assignment_id"],
+        ),
+    )
+    command = LegacyDisplayReconciliationCommand(
+        **{**vars(spec), "worktree": str(Path.cwd()), "at": clock.now()}
+    )
+    try:
+        store.begin_legacy_display_reconciliation(command)
+    except StorageRefusal as exc:
+        assert exc.code == "legacy_display_conflict"
+    else:
+        raise AssertionError("missing acceptance worktree matched the process directory")
+    assert store.assignment_launch_context(str(launch["assignment_id"]))[
+        "legacy_display_reconciliation"
+    ] is None
     store.close()
 
 
@@ -772,8 +1584,21 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="league-visible-launch-") as temporary:
         root = Path(temporary)
         test_generated_task_labels_are_deterministic_two_word_names()
+        test_legacy_display_command_exposes_exact_owner_cas_inputs()
         test_task_label_defaults_and_explicit_labels_stay_two_words(root)
         test_real_adapter_one_command_success_and_retry(root)
+        test_legacy_active_champion_display_is_reconciled_once_with_exact_receipt(root)
+        test_legacy_display_reconciliation_refuses_user_title_race_before_write(root)
+        test_legacy_display_compare_and_set_does_not_overwrite_last_window_user_title(root)
+        test_legacy_display_reconciliation_refuses_modern_receipt_before_live_write(root)
+        test_legacy_display_reconciliation_refuses_ambiguous_runtime_and_wrong_route(root)
+        test_legacy_display_reconciliation_requires_live_owned_presentation_source(root)
+        test_legacy_display_reconciliation_refuses_boolean_sequence(root)
+        test_legacy_display_reconciliation_refuses_orphaned_final_receipt(root)
+        test_legacy_display_readback_refuses_expected_plus_two_receipt(root)
+        test_legacy_display_interrupted_effect_refuses_newer_sequence(root)
+        test_legacy_display_refuses_malformed_modern_receipt(root)
+        test_legacy_display_refuses_missing_acceptance_worktree(root)
         test_post_context_title_restoration_refuses_unowned_metadata(root)
         test_active_retry_refuses_newer_user_metadata(root)
         test_real_adapter_persists_exact_initial_codex_session(root)

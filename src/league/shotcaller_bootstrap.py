@@ -23,6 +23,13 @@ THREAD_UUID = re.compile(
 LIVE_STATUSES = {"active", "blocked", "idle", "waiting", "working"}
 
 
+class _MalformedHerdrResult(StorageRefusal):
+    def __init__(self, label: str) -> None:
+        super().__init__(
+            "shotcaller_identity_unverified", f"{label} returned malformed JSON"
+        )
+
+
 @dataclass(frozen=True)
 class ShotcallerBootstrapSpec:
     assignment_id: str
@@ -44,9 +51,7 @@ def _result(completed: subprocess.CompletedProcess[str], label: str) -> dict[str
     try:
         envelope = json.loads(completed.stdout)
     except (TypeError, json.JSONDecodeError) as exc:
-        raise StorageRefusal(
-            "shotcaller_identity_unverified", f"{label} returned malformed JSON"
-        ) from exc
+        raise _MalformedHerdrResult(label) from exc
     result = envelope.get("result") if isinstance(envelope, dict) else None
     if completed.returncode != 0 or not isinstance(result, dict):
         raise StorageRefusal(
@@ -106,12 +111,23 @@ class HerdrShotcallerBootstrapAdapter:
             return {}
         return _result(completed, label)
 
+    def _read(self, arguments: tuple[str, ...], label: str) -> dict[str, Any]:
+        """Retry only a transient malformed read; never replay a mutation."""
+
+        for attempt in range(3):
+            try:
+                return self._run(arguments, label)
+            except _MalformedHerdrResult:
+                if attempt == 2:
+                    raise
+        raise AssertionError("bounded Herdr identity read retry exhausted")
+
     def _current(self) -> tuple[dict[str, Any], dict[str, Any]]:
-        pane_result = self._run(
+        pane_result = self._read(
             ("herdr", "pane", "current", "--current"), "current Herdr pane"
         )
         pane = pane_result.get("pane")
-        inventory = self._run(("herdr", "agent", "list"), "Herdr agent inventory")
+        inventory = self._read(("herdr", "agent", "list"), "Herdr agent inventory")
         agents = inventory.get("agents")
         if not isinstance(pane, Mapping) or not isinstance(agents, list):
             raise StorageRefusal(

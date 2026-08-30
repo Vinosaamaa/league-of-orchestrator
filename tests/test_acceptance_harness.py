@@ -6,6 +6,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -25,6 +27,7 @@ from league.acceptance import (  # noqa: E402
     POINTER_STAGES,
     PROCESS_SENTINEL_SCHEMA,
     SentinelSet,
+    _release_files,
     _staged_install,
     run_acceptance,
     validate_hook_fixture,
@@ -561,6 +564,78 @@ def test_existing_release_identity_precedes_install_mutation(root: Path) -> None
         assert tree_snapshot(collision) == before
 
 
+class InjectedStageCrash(RuntimeError):
+    pass
+
+
+def copy_release_source(destination: Path) -> None:
+    for source in _release_files(ROOT):
+        target = destination / source.relative_to(ROOT)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+
+
+def test_version_staging_is_regular_symlink_safe_and_retryable(root: Path) -> None:
+    source_version = ROOT / "VERSION"
+    assert stat.S_ISREG(source_version.lstat().st_mode)
+
+    normal = root / "normal"
+    receipt = _staged_install(normal, ROOT)
+    bundle_version = normal / "release-bundle/0.2.28/VERSION"
+    staged_version = normal / "stage-prefix/releases/0.2.28/VERSION"
+    for candidate in (bundle_version, staged_version):
+        assert stat.S_ISREG(candidate.lstat().st_mode)
+        assert candidate.read_bytes() == source_version.read_bytes()
+    assert receipt["source_release_staged_parity"] is True
+    assert receipt["guidance"]["universal_unchanged"] is True
+    assert receipt["guidance"]["rollback_completed"] is True
+
+    linked_source = root / "linked-source"
+    copy_release_source(linked_source)
+    version_target = root / "untrusted-version-target"
+    version_target.write_bytes(source_version.read_bytes())
+    (linked_source / "VERSION").unlink()
+    (linked_source / "VERSION").symlink_to(version_target)
+    refused_home = root / "symlink-refusal"
+    refused_home.mkdir()
+    universal = refused_home / "AGENTS.md"
+    universal.write_bytes(b"toolkit-owned universal guide\n")
+    before = tree_snapshot(refused_home)
+    refused(
+        lambda: _staged_install(refused_home, linked_source),
+        "release_incomplete",
+    )
+    assert tree_snapshot(refused_home) == before
+
+    retry_home = root / "crash-retry"
+    retry_home.mkdir()
+    retry_universal = retry_home / "AGENTS.md"
+    retry_universal.write_bytes(b"toolkit-owned universal guide\n")
+    universal_before = retry_universal.read_bytes()
+
+    def crash_after_version(event: str) -> None:
+        if event == "after_release_file:VERSION":
+            raise InjectedStageCrash(event)
+
+    try:
+        _staged_install(retry_home, ROOT, fault=crash_after_version)
+    except InjectedStageCrash:
+        pass
+    else:
+        raise AssertionError("expected injected staging crash")
+    assert not (retry_home / "release-bundle/0.2.28").exists()
+    assert not (retry_home / "stage-prefix/releases/0.2.28").exists()
+    assert retry_universal.read_bytes() == universal_before
+    retry = _staged_install(retry_home, ROOT)
+    retried_version = retry_home / "stage-prefix/releases/0.2.28/VERSION"
+    assert stat.S_ISREG(retried_version.lstat().st_mode)
+    assert retried_version.read_bytes() == source_version.read_bytes()
+    assert retry["source_release_staged_parity"] is True
+    assert retry["guidance"]["universal_unchanged"] is True
+    assert retry["guidance"]["rollback_completed"] is True
+    assert retry_universal.read_bytes() == universal_before
+
+
 def test_issue_23_incident_artifacts_are_complete_and_public_safe() -> None:
     markdown = ROOT / "docs/incident-23-sqlite-hot-path-journal-mode-contention.md"
     html = ROOT / "docs/incident-23-sqlite-hot-path-journal-mode-contention.html"
@@ -607,12 +682,15 @@ def main() -> None:
         test_existing_release_identity_precedes_install_mutation(
             root / "release-identity-collision"
         )
+        test_version_staging_is_regular_symlink_safe_and_retryable(
+            root / "version-regular-file"
+        )
         test_schema_and_command_inventory()
         test_issue_23_incident_artifacts_are_complete_and_public_safe()
     print(
         "PASS: explicit-root sandbox, fake adapters, sentinels, migration parity, staged rollback, "
         "generation-fenced fault matrix, resumable receipts, exact canary cleanup, "
-        "and honest pending claims"
+        "regular-file staging with crash retry, and honest pending claims"
     )
 
 

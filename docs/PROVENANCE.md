@@ -417,6 +417,14 @@ rechecks them before apply. Inode-aware temporary-root tests also prove that
 refusal changes no node or tree and that a late rollback does not replace an
 unchanged universal guide or League supplement.
 
+The release-staging boundary now opens every manifest source without following
+symlinks, binds the opened descriptor to one regular-file identity, and checks
+that both staged copies are regular files with exact source bytes. A staging
+crash removes only the newly reserved partial release identities before retry;
+focused temporary-root coverage proves VERSION regular-file identity, symlink
+refusal before mutation, byte parity, retry, guide-hash preservation, and
+rollback without changing any retained release or live pointer.
+
 This branch was rebased onto canonical main
 `f015a5c34efca039accc911f8995a340eb067fc7`, whose merge tree is
 `8e18b33caca431b12a462da31610abdf5af318a1`, before assigning contiguous

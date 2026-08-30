@@ -13,7 +13,9 @@ import importlib.util
 import json
 import os
 import re
+import shutil
 import signal
+import stat
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -30,6 +32,7 @@ from .guidance import (
 from .importer import build_import_plan
 from .sqlite_store import CURRENT_SCHEMA_VERSION, SQLiteStorage
 from .storage import StorageRefusal
+from .storage_types import FaultInjector
 
 
 RECEIPT_SCHEMA = "league.acceptance-receipt.v1"
@@ -349,11 +352,67 @@ def _release_files(source_root: Path) -> list[Path]:
     ]
     files.extend(sorted((source_root / "src/league").glob("*.py")))
     files.extend(sorted((source_root / "schema").glob("*.json")))
-    if any(not path.is_file() or path.is_symlink() for path in files):
+    try:
+        if any(not stat.S_ISREG(path.lstat().st_mode) for path in files):
+            raise StorageRefusal(
+                "release_incomplete", "release manifest contains a missing source file"
+            )
+    except OSError as exc:
         raise StorageRefusal(
             "release_incomplete", "release manifest contains a missing source file"
-        )
+        ) from exc
     return files
+
+
+def _read_regular_bytes(path: Path, *, refusal_code: str) -> bytes:
+    descriptor: Optional[int] = None
+    try:
+        before = path.lstat()
+        if not stat.S_ISREG(before.st_mode):
+            raise StorageRefusal(
+                refusal_code, "release bytes must come from a regular file"
+            )
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+        )
+        opened = os.fstat(descriptor)
+        after_open = path.lstat()
+        identities = {
+            (before.st_dev, before.st_ino),
+            (opened.st_dev, opened.st_ino),
+            (after_open.st_dev, after_open.st_ino),
+        }
+        if not stat.S_ISREG(opened.st_mode) or len(identities) != 1:
+            raise StorageRefusal(
+                refusal_code, "release file identity changed while it was opened"
+            )
+        with os.fdopen(descriptor, "rb") as handle:
+            descriptor = None
+            payload = handle.read()
+            after_descriptor = os.fstat(handle.fileno())
+        after_read = path.lstat()
+        if (
+            not stat.S_ISREG(after_read.st_mode)
+            or (after_read.st_dev, after_read.st_ino) not in identities
+            or (after_descriptor.st_dev, after_descriptor.st_ino) not in identities
+            or after_descriptor.st_size != opened.st_size
+            or after_descriptor.st_mtime_ns != opened.st_mtime_ns
+            or len(payload) != opened.st_size
+        ):
+            raise StorageRefusal(
+                refusal_code, "release file identity changed while it was read"
+            )
+        return payload
+    except StorageRefusal:
+        raise
+    except OSError as exc:
+        raise StorageRefusal(
+            refusal_code, "release bytes require a stable regular file"
+        ) from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
 
 
 def _switch_symlink(link: Path, target: str) -> None:
@@ -383,6 +442,8 @@ def _stage_release_bytes(
     release_bundle: Path,
     release: Path,
     forbidden_paths: tuple[bytes, ...],
+    *,
+    fault: Optional[FaultInjector] = None,
 ) -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
     source_hashes: dict[str, str] = {}
     release_hashes: dict[str, str] = {}
@@ -391,7 +452,7 @@ def _stage_release_bytes(
         relative = source.relative_to(source_root)
         name = relative.as_posix()
         mode = 0o755 if relative.parent == Path("bin") else 0o644
-        payload = source.read_bytes()
+        payload = _read_regular_bytes(source, refusal_code="release_incomplete")
         if any(value in payload for value in forbidden_paths):
             raise StorageRefusal(
                 "staged_path_leak", "release source bytes contain a local path leak"
@@ -402,8 +463,14 @@ def _stage_release_bytes(
         destination = release / relative
         _atomic_write(bundle_file, payload, mode=mode)
         _atomic_write(destination, payload, mode=mode)
-        release_hashes[name] = _sha256(bundle_file.read_bytes())
-        staged_hashes[name] = _sha256(destination.read_bytes())
+        release_hashes[name] = _sha256(
+            _read_regular_bytes(bundle_file, refusal_code="staged_parity_failed")
+        )
+        staged_hashes[name] = _sha256(
+            _read_regular_bytes(destination, refusal_code="staged_parity_failed")
+        )
+        if fault is not None:
+            fault(f"after_release_file:{name}")
     if not source_hashes == release_hashes == staged_hashes:
         raise StorageRefusal(
             "staged_parity_failed", "source, release bundle, and staged bytes differ"
@@ -619,9 +686,20 @@ def _staged_install(
     source_root: Path,
     *,
     guidance_targets: tuple[str, ...] = (LEAGUE_TARGET,),
+    fault: Optional[FaultInjector] = None,
 ) -> dict[str, Any]:
     guidance_target = validate_guidance_manifest(guidance_targets)[0]
-    if (source_root / "VERSION").read_text(encoding="utf-8").strip() != __version__:
+    _release_files(source_root)
+    version_bytes = _read_regular_bytes(
+        source_root / "VERSION", refusal_code="release_incomplete"
+    )
+    try:
+        source_version = version_bytes.decode("utf-8").strip()
+    except UnicodeError as exc:
+        raise StorageRefusal(
+            "staged_version_failed", "source version declaration is malformed"
+        ) from exc
+    if source_version != __version__:
         raise StorageRefusal("staged_version_failed", "source version declarations disagree")
     prefix = home / "stage-prefix"
     release_bundle = home / "release-bundle" / __version__
@@ -659,6 +737,23 @@ def _staged_install(
             "staged_release_identity_exists",
             "the candidate release identity was allocated concurrently",
         ) from exc
+    forbidden = (str(source_root).encode(), str(prefix).encode())
+    try:
+        source_hashes, release_hashes, staged_hashes = _stage_release_bytes(
+            source_root, release_bundle, release, forbidden, fault=fault
+        )
+        if source_hashes["VERSION"] != _sha256(version_bytes):
+            raise StorageRefusal(
+                "staged_parity_failed", "source version changed during release staging"
+            )
+    except BaseException:
+        for directory in reversed((release_bundle, release)):
+            try:
+                if stat.S_ISDIR(directory.lstat().st_mode):
+                    shutil.rmtree(directory)
+            except FileNotFoundError:
+                pass
+        raise
     legacy.mkdir(mode=0o700)
     (legacy / "bin").mkdir(mode=0o700)
     legacy_launcher = legacy / "bin/league"
@@ -666,10 +761,6 @@ def _staged_install(
         legacy_launcher,
         b"#!/usr/bin/env python3\nprint('league 0.0.0-legacy')\n",
         mode=0o755,
-    )
-    forbidden = (str(source_root).encode(), str(prefix).encode())
-    source_hashes, release_hashes, staged_hashes = _stage_release_bytes(
-        source_root, release_bundle, release, forbidden
     )
     guidance = _stage_guidance_rehearsal(
         home, release, guidance_target, staged_hashes

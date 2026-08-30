@@ -91,20 +91,13 @@ class FakeHerdrRunner:
         self.renamed = False
         self.session_reported = False
         self.closed = False
+        self.title = ""
+        self.tokens: dict[str, str] = {}
         self.contexts: list[str] = []
         self.calls: list[tuple[str, ...]] = []
 
     def _agent(self) -> dict[str, object]:
         thread = "not-a-thread" if self.wrong_thread else THREAD_ID
-        tokens = (
-            {
-                "sidebar_name": "Lux",
-                "task_label": "Tiny Gate",
-                "thread_title": "Lux · Tiny Gate",
-            }
-            if self.renamed
-            else {}
-        )
         agent = {
             "agent": "codex",
             "agent_status": "idle",
@@ -116,7 +109,9 @@ class FakeHerdrRunner:
             "state_change_seq": 99,
             "tab_id": "w1:t99",
             "terminal_id": "term_test_99",
-            "tokens": tokens,
+            "terminal_title": self.title,
+            "terminal_title_stripped": self.title,
+            "tokens": dict(self.tokens),
             "workspace_id": "w1",
         }
         agent["agent_session"] = {"value": thread}
@@ -147,6 +142,12 @@ class FakeHerdrRunner:
             result = {"agent": self._agent()}
         elif command[:3] == ("herdr", "pane", "report-metadata"):
             self.renamed = True
+            self.title = command[command.index("--title") + 1]
+            self.tokens = {}
+            for index, value in enumerate(command):
+                if value == "--token":
+                    key, token_value = command[index + 1].split("=", 1)
+                    self.tokens[key] = token_value
             return subprocess.CompletedProcess(command, 0, "", "")
         elif command[:3] == ("herdr", "agent", "prompt"):
             prompt = command[4]
@@ -172,10 +173,25 @@ def _adapter(options: VisibleLaunchOptions, runner: FakeHerdrRunner):
     )
 
 
+class AutoTitleContextRunner(FakeHerdrRunner):
+    def run(
+        self, arguments, *, timeout_seconds: int = 30
+    ) -> subprocess.CompletedProcess[str]:
+        command = tuple(arguments)
+        completed = super().run(arguments, timeout_seconds=timeout_seconds)
+        if (
+            command[:3] == ("herdr", "agent", "prompt")
+            and command[4].startswith("League assignment:")
+        ):
+            self.title = "League assignment context"
+            self.tokens["thread_title"] = self.title
+        return completed
+
+
 def test_real_adapter_one_command_success_and_retry(root: Path) -> None:
     store, clock, worktree = _context(root, "success")
     options = _options(root)
-    runner = FakeHerdrRunner(worktree)
+    runner = AutoTitleContextRunner(worktree)
     service = VisibleChampionLaunchService(store, _adapter(options, runner), options, clock)
     spec = _spec(worktree, "success")
     result = service.launch(spec)
@@ -188,7 +204,16 @@ def test_real_adapter_one_command_success_and_retry(root: Path) -> None:
     tab_index = next(i for i, call in enumerate(runner.calls) if call[:3] == ("herdr", "tab", "create"))
     start_index = next(i for i, call in enumerate(runner.calls) if call[:3] == ("herdr", "agent", "start"))
     context_index = max(i for i, call in enumerate(runner.calls) if call[:3] == ("herdr", "agent", "prompt"))
+    metadata_indexes = [
+        i
+        for i, call in enumerate(runner.calls)
+        if call[:3] == ("herdr", "pane", "report-metadata")
+    ]
     assert tab_index < start_index < context_index
+    assert metadata_indexes[0] < context_index < metadata_indexes[1]
+    assert runner.title == "Lux · Tiny Gate"
+    assert runner.tokens["sidebar_name"] == "Lux"
+    assert runner.tokens["thread_title"] == "Lux · Tiny Gate"
     start = runner.calls[start_index]
     assert start[start.index("--pane") + 1] == "w1:p99"
     assert start[start.index("--pane") + 1] != SHOTCALLER_PANE_ID
@@ -233,6 +258,46 @@ def test_real_adapter_one_command_success_and_retry(root: Path) -> None:
         "assignment_context",
     )
     assert activation_delivery["effect_id"] == result["context_delivery"]["effect_sha256"]
+    store.close()
+
+
+class UnownedContextTitleRunner(AutoTitleContextRunner):
+    def run(
+        self, arguments, *, timeout_seconds: int = 30
+    ) -> subprocess.CompletedProcess[str]:
+        command = tuple(arguments)
+        completed = super().run(arguments, timeout_seconds=timeout_seconds)
+        if (
+            command[:3] == ("herdr", "agent", "prompt")
+            and command[4].startswith("League assignment:")
+        ):
+            self.title = "User selected title"
+            self.tokens["launch_title_owner"] = "unowned"
+        return completed
+
+
+def test_post_context_title_restoration_refuses_unowned_metadata(root: Path) -> None:
+    store, clock, worktree = _context(root, "unowned-title")
+    options = _options(root)
+    runner = UnownedContextTitleRunner(worktree)
+    result = VisibleChampionLaunchService(
+        store, _adapter(options, runner), options, clock
+    ).launch(_spec(worktree, "unowned-title"))
+    assert result["state"] == "blocked" and result["version"] == 5
+    assert store.connection.execute(
+        "SELECT failure_class FROM task_assignments WHERE task_assignment_id='assignment:unowned-title'"
+    ).fetchone()[0] == "launch_title_restore_refused"
+    assert len(
+        [
+            call
+            for call in runner.calls
+            if call[:3] == ("herdr", "pane", "report-metadata")
+        ]
+    ) == 1
+    assert runner.closed is True
+    assert store.connection.execute(
+        "SELECT state FROM callsign_queue WHERE callsign='Lux'"
+    ).fetchone()[0] == "available"
     store.close()
 
 
@@ -502,6 +567,7 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="league-visible-launch-") as temporary:
         root = Path(temporary)
         test_real_adapter_one_command_success_and_retry(root)
+        test_post_context_title_restoration_refuses_unowned_metadata(root)
         test_real_adapter_persists_exact_initial_codex_session(root)
         test_pre_session_launch_failure_closes_exact_pending_pane(root)
         test_metadata_silent_success_is_exact_and_failure_stays_closed(root)

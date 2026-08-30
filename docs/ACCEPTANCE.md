@@ -373,9 +373,15 @@ existing assignment service and real Herdr/Codex adapter: reserve, mark
 launching, create one unfocused exact-worktree endpoint, start workspace-write
 Codex with only the canonical League root added, observe the generated thread
 UUID, verify routing/display/backend/workspace/pane/terminal/cwd/title identity,
-activate, and deliver one bounded SQLite-only context. External-effect failures
-settle blocked only after exact endpoint and reservation cleanup; otherwise the
-assignment and cleanup obligation remain `cleanup_pending`.
+activate, and deliver one bounded SQLite-only context. Because handshake and
+context prompts may trigger provider auto-title behavior, the adapter then
+restores and verifies the exact `<Callsign> · <Task>` sidebar, thread, and
+terminal title before recording context delivery. Restoration requires the
+same launch-owned endpoint, thread, routing name, task metadata, and ownership
+token; changed or unowned metadata refuses instead of being overwritten.
+External-effect failures settle blocked only after exact endpoint and
+reservation cleanup; otherwise the assignment and cleanup obligation remain
+`cleanup_pending`.
 
 The release gate is one installed disposable flow: exact capture, one-process
 semantic begin, Champion `assign run`, Champion working and terminal

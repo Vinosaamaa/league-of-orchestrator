@@ -437,3 +437,15 @@ only explicit temporary roots and fake Herdr/process state. This successor does
 not read or mutate the installed watcher, live SQLite state, a real terminal,
 the global resource registry, an active callsign, or any user worktree, and it
 performs no install, cutover, live teardown, or merge.
+
+## Champion launch title provenance
+
+Issue #85 deliberately changes visible Champion launch finalization. The
+pre-context metadata write remains an initial display seed, but successful
+context delivery is no longer sufficient by itself: the same launch-owned
+adapter must restore and verify the exact callsign/task sidebar, thread, and
+terminal title after the context prompt. A retry after the recorded delivery is
+still read-only and idempotent. Changed ownership metadata refuses restoration
+and retains the existing cleanup-gated failure behavior. Focused fake-Herdr
+coverage exercises context auto-title overwrite, post-context restoration,
+retry deduplication, and unowned-metadata refusal without a live runtime.

@@ -94,12 +94,67 @@ def _legacy_result_receipt(row: Any) -> dict[str, Any]:
         "legacy display reconciliation history is malformed",
     )
     receipt = detail.get("receipt")
-    if not isinstance(receipt, dict):
+    receipt_keys = {
+        "schema",
+        "reconciliation_id",
+        "assignment_id",
+        "champion_agent_id",
+        "runtime_instance_id",
+        "source",
+        "applies_to_source",
+        "state_change_seq",
+        "sidebar_name",
+        "task_label",
+        "thread_title",
+        "terminal_title",
+        "observation_digest",
+    }
+    string_keys = receipt_keys - {"state_change_seq"}
+    exact = bool(
+        set(detail) == {"schema", "intent_digest", "receipt"}
+        and detail.get("schema")
+        == "league.legacy-display-reconciliation-result.v1"
+        and isinstance(detail.get("intent_digest"), str)
+        and bool(re.fullmatch(r"[0-9a-f]{64}", detail["intent_digest"]))
+        and isinstance(receipt, dict)
+        and set(receipt) == receipt_keys
+        and all(
+            isinstance(receipt.get(key), str) and receipt[key]
+            for key in string_keys
+        )
+        and receipt.get("schema") == "league.legacy-display-reconciliation.v1"
+        and type(receipt.get("state_change_seq")) is int
+        and receipt["state_change_seq"] >= 0
+        and bool(re.fullmatch(r"[0-9a-f]{64}", receipt["observation_digest"]))
+    )
+    if not exact:
         raise StorageRefusal(
             "legacy_display_ambiguous",
             "legacy display reconciliation history has no exact final receipt",
         )
     return receipt
+
+
+def _physical_worktree_exact(stored: Any, expected: Any) -> bool:
+    if (
+        not isinstance(stored, str)
+        or not stored
+        or not isinstance(expected, str)
+        or not expected
+    ):
+        return False
+    stored_path = Path(stored)
+    expected_path = Path(expected)
+    if not stored_path.is_absolute() or not expected_path.is_absolute():
+        return False
+    try:
+        return (
+            stored_path.resolve(strict=True) == expected_path.resolve(strict=True)
+            and stored_path.is_dir()
+            and expected_path.is_dir()
+        )
+    except OSError:
+        return False
 
 
 def _validate_assignment_command(command: PrepareAssignmentCommand) -> None:
@@ -1276,6 +1331,60 @@ def assignment_launch_context(store: Any, assignment_id: str) -> dict[str, Any]:
             delivered["display_receipt"] = dict(
                 revalidated["display_receipt"]
             )
+    legacy_reconciliation = None
+    if legacy_intents:
+        legacy_intent = _stored_object(
+            legacy_intents[0]["detail_json"],
+            "legacy_display_ambiguous",
+            "legacy display reconciliation history is malformed",
+        )
+        legacy_receipt = (
+            _legacy_result_receipt(legacy_results[0]) if legacy_results else None
+        )
+        if legacy_receipt is not None:
+            result_detail = _stored_object(
+                legacy_results[0]["detail_json"],
+                "legacy_display_ambiguous",
+                "legacy display reconciliation history is malformed",
+            )
+            intent_digest = hashlib.sha256(
+                _json(legacy_intent).encode("utf-8")
+            ).hexdigest()
+            reconciliation_id = f"legacy-display:{intent_digest[:24]}"
+            expected_source = f"league-legacy-{intent_digest[:24]}"
+            expected_sequence = legacy_intent.get("expected_state_change_seq")
+            exact_result = bool(
+                legacy_intent.get("schema")
+                == "league.legacy-display-reconciliation-intent.v1"
+                and type(expected_sequence) is int
+                and expected_sequence >= 0
+                and result_detail["intent_digest"] == intent_digest
+                and legacy_receipt["reconciliation_id"] == reconciliation_id
+                and legacy_receipt["assignment_id"]
+                == legacy_intent.get("assignment_id")
+                and legacy_receipt["champion_agent_id"]
+                == legacy_intent.get("champion_agent_id")
+                and legacy_receipt["runtime_instance_id"]
+                == legacy_intent.get("runtime_instance_id")
+                and legacy_receipt["source"] == expected_source
+                and legacy_receipt["sidebar_name"] == legacy_intent.get("callsign")
+                and legacy_receipt["task_label"]
+                == legacy_intent.get("target_task_label")
+                and legacy_receipt["thread_title"]
+                == legacy_intent.get("target_title")
+                and legacy_receipt["terminal_title"]
+                == legacy_intent.get("target_title")
+                and legacy_receipt["state_change_seq"] > expected_sequence
+            )
+            if not exact_result:
+                raise StorageRefusal(
+                    "legacy_display_ambiguous",
+                    "legacy display reconciliation result does not bind its exact intent",
+                )
+        legacy_reconciliation = {
+            "intent": legacy_intent,
+            "receipt": legacy_receipt,
+        }
     return {
         "assignment_id": assignment_id,
         "state": assignment["state"],
@@ -1285,22 +1394,7 @@ def assignment_launch_context(store: Any, assignment_id: str) -> dict[str, Any]:
         "failure_class": assignment["failure_class"],
         "acceptance_receipt": receipt,
         "context_delivery": delivered,
-        "legacy_display_reconciliation": (
-            {
-                "intent": _stored_object(
-                    legacy_intents[0]["detail_json"],
-                    "legacy_display_ambiguous",
-                    "legacy display reconciliation history is malformed",
-                ),
-                "receipt": (
-                    _legacy_result_receipt(legacy_results[0])
-                    if legacy_results
-                    else None
-                ),
-            }
-            if legacy_intents
-            else None
-        ),
+        "legacy_display_reconciliation": legacy_reconciliation,
     }
 
 
@@ -1356,6 +1450,7 @@ def _validate_legacy_display_command(
     if (
         command.owner_authorized is not True
         or not all(identity)
+        or not _physical_worktree_exact(command.worktree, command.worktree)
         or command.expected_version < 1
         or not tuple_supplied
         or len(command.target_task_label.split()) != 2
@@ -1379,6 +1474,7 @@ def _validate_legacy_display_command(
         or assignment["champion_agent_id"] != command.champion_agent_id
         or assignment["runtime_instance_id"] != command.runtime_instance_id
         or assignment["callsign"] != command.callsign
+        or not _physical_worktree_exact(assignment["worktree"], command.worktree)
     ):
         raise StorageRefusal(
             "legacy_display_conflict",
@@ -1417,7 +1513,7 @@ def _validate_legacy_display_command(
         and agent["callsign"] == command.callsign
         and agent["address"] == command.pane_id
         and agent["thread_id"] == command.thread_id
-        and Path(str(agent["worktree"])).resolve() == Path(command.worktree).resolve()
+        and _physical_worktree_exact(agent["worktree"], command.worktree)
         and agent["routing_name"] == command.routing_name
         and agent["backend"] == "herdr"
         and runtime["runtime_instance_id"] == command.runtime_instance_id
@@ -1430,8 +1526,7 @@ def _validate_legacy_display_command(
         and receipt.get("callsign") == command.callsign
         and receipt.get("endpoint") == command.pane_id
         and receipt.get("thread_id") == command.thread_id
-        and Path(str(receipt.get("worktree", ""))).resolve()
-        == Path(command.worktree).resolve()
+        and _physical_worktree_exact(receipt.get("worktree"), command.worktree)
         and receipt.get("routing_name") == command.routing_name
         and receipt.get("runtime_generation") == expected_generation
         and receipt.get("backend_kind") == "herdr"

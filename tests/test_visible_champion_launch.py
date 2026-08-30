@@ -637,8 +637,8 @@ def test_legacy_active_champion_display_is_reconciled_once_with_exact_receipt(
     assert durable["legacy_display_reconciliation"]["intent"]["owner_authorized"] is True
     assert durable["legacy_display_reconciliation"]["receipt"] == result["receipt"]
     store.connection.execute(
-        "UPDATE events SET detail_json='{}' WHERE aggregate_id=? AND event_type='assignment_legacy_display_reconciled'",
-        (assignment_id,),
+        "UPDATE events SET detail_json=? WHERE aggregate_id=? AND event_type='assignment_legacy_display_reconciled'",
+        (json.dumps({"receipt": {"source": "malformed"}}), assignment_id),
     )
     try:
         store.assignment_launch_context(assignment_id)
@@ -1089,6 +1089,122 @@ def test_legacy_display_reconciliation_refuses_orphaned_final_receipt(
     store.close()
 
 
+def test_legacy_display_interrupted_effect_refuses_newer_sequence(root: Path) -> None:
+    store, clock, worktree, launch, receipt, runner = _prepared_legacy_display(
+        root, "legacy-interrupted-race"
+    )
+    spec = _legacy_reconciliation_spec(launch, receipt, worktree, runner)
+    service = LegacyDisplayReconciliationService(
+        store,
+        HerdrLegacyDisplayAdapter(
+            runner,
+            environment={"HERDR_ENV": "1", "HERDR_WORKSPACE_ID": "w1"},
+        ),
+        clock,
+    )
+    finalize = store.finalize_legacy_display_reconciliation
+
+    def interrupt_after_effect(*args, **kwargs):
+        del args, kwargs
+        raise StorageRefusal(
+            "synthetic_reconciliation_interrupt",
+            "synthetic interruption after Herdr metadata effect",
+        )
+
+    store.finalize_legacy_display_reconciliation = interrupt_after_effect  # type: ignore[method-assign]
+    try:
+        service.reconcile(spec)
+    except StorageRefusal as exc:
+        assert exc.code == "synthetic_reconciliation_interrupt"
+    else:
+        raise AssertionError("synthetic post-effect interruption did not stop finalization")
+    store.finalize_legacy_display_reconciliation = finalize  # type: ignore[method-assign]
+    runner.state_change_seq += 1
+
+    try:
+        service.reconcile(spec)
+    except StorageRefusal as exc:
+        assert exc.code == "legacy_display_race"
+    else:
+        raise AssertionError("interrupted retry absorbed a newer endpoint sequence")
+    assert runner.metadata_source == "herdr:codex"
+    assert "legacy_display_owner" not in runner.tokens
+    assert store.assignment_launch_context(str(launch["assignment_id"]))[
+        "legacy_display_reconciliation"
+    ]["receipt"] is None
+    store.close()
+
+
+def test_legacy_display_refuses_malformed_modern_receipt(root: Path) -> None:
+    store, clock, worktree, launch, receipt, runner = _prepared_legacy_display(
+        root, "legacy-malformed-modern"
+    )
+    event = store.connection.execute(
+        "SELECT event_id,detail_json FROM events WHERE aggregate_id=? AND event_type='assignment_context_delivered'",
+        (launch["assignment_id"],),
+    ).fetchone()
+    detail = json.loads(event["detail_json"])
+    detail["display_receipt"] = {
+        "source": "league-launch-malformed",
+        "state_change_seq": "not-an-integer",
+    }
+    store.connection.execute(
+        "UPDATE events SET detail_json=? WHERE event_id=?",
+        (json.dumps(detail, sort_keys=True, separators=(",", ":")), event["event_id"]),
+    )
+    spec = _legacy_reconciliation_spec(launch, receipt, worktree, runner)
+    try:
+        LegacyDisplayReconciliationService(
+            store,
+            HerdrLegacyDisplayAdapter(
+                runner,
+                environment={"HERDR_ENV": "1", "HERDR_WORKSPACE_ID": "w1"},
+            ),
+            clock,
+        ).reconcile(spec)
+    except StorageRefusal as exc:
+        assert exc.code == "legacy_display_ambiguous"
+    else:
+        raise AssertionError("malformed modern receipt was reclassified as legacy")
+    assert runner.calls == []
+    store.close()
+
+
+def test_legacy_display_refuses_missing_persisted_worktree(root: Path) -> None:
+    store, clock, worktree, launch, receipt, runner = _prepared_legacy_display(
+        root, "legacy-missing-worktree"
+    )
+    spec = _legacy_reconciliation_spec(launch, receipt, worktree, runner)
+    stored_receipt = store.assignment_launch_context(str(launch["assignment_id"]))[
+        "acceptance_receipt"
+    ]
+    stored_receipt["worktree"] = ""
+    store.connection.execute(
+        "UPDATE agent_instances SET worktree='' WHERE agent_id=?",
+        (LUX_ID,),
+    )
+    store.connection.execute(
+        "UPDATE task_assignments SET acceptance_receipt_json=? WHERE task_assignment_id=?",
+        (
+            json.dumps(stored_receipt, sort_keys=True, separators=(",", ":")),
+            launch["assignment_id"],
+        ),
+    )
+    command = LegacyDisplayReconciliationCommand(
+        **{**vars(spec), "worktree": str(Path.cwd()), "at": clock.now()}
+    )
+    try:
+        store.begin_legacy_display_reconciliation(command)
+    except StorageRefusal as exc:
+        assert exc.code == "legacy_display_conflict"
+    else:
+        raise AssertionError("missing persisted worktree matched the process directory")
+    assert store.assignment_launch_context(str(launch["assignment_id"]))[
+        "legacy_display_reconciliation"
+    ] is None
+    store.close()
+
+
 class UnownedContextTitleRunner(FakeHerdrRunner):
     def run(
         self, arguments, *, timeout_seconds: int = 30
@@ -1445,6 +1561,9 @@ def main() -> None:
         test_legacy_display_reconciliation_requires_live_owned_presentation_source(root)
         test_legacy_display_reconciliation_refuses_boolean_sequence(root)
         test_legacy_display_reconciliation_refuses_orphaned_final_receipt(root)
+        test_legacy_display_interrupted_effect_refuses_newer_sequence(root)
+        test_legacy_display_refuses_malformed_modern_receipt(root)
+        test_legacy_display_refuses_missing_persisted_worktree(root)
         test_post_context_title_restoration_refuses_unowned_metadata(root)
         test_active_retry_refuses_newer_user_metadata(root)
         test_real_adapter_persists_exact_initial_codex_session(root)

@@ -15,6 +15,7 @@ from .storage_request import (
     MAX_TASK_RESULT_SOURCES,
     AnswerRequestCommand,
     DispatchRequestCommand,
+    ReconcileDuplicateRequestCommand,
     RequestResultCommand,
     TurnDispatchPlan,
 )
@@ -595,6 +596,7 @@ def _normalize_triage_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]
             "summary": str(raw.get("summary", "")),
             "disposition": str(raw.get("disposition", "")),
             "request_id": raw.get("request_id"),
+            "expected_request_version": raw.get("expected_request_version"),
             "next_attention_at": raw.get("next_attention_at"),
         }
         if (
@@ -610,6 +612,14 @@ def _normalize_triage_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]
                 raise StorageRefusal("invalid_triage", "actionable prompt items require a request ID")
         elif item["request_id"] is not None:
             raise StorageRefusal("invalid_triage", "context and acknowledgement items cannot create requests")
+        if item["expected_request_version"] is not None and (
+            item["disposition"] not in {"follow_up", "duplicate", "deferred"}
+            or type(item["expected_request_version"]) is not int
+            or item["expected_request_version"] < 1
+        ):
+            raise StorageRefusal(
+                "invalid_triage", "only an existing-request item accepts a positive expected version"
+            )
         if item["disposition"] == "deferred":
             if not isinstance(item["next_attention_at"], str) or not item["next_attention_at"]:
                 raise StorageRefusal("invalid_triage", "deferred prompt item requires next attention time")
@@ -657,6 +667,13 @@ def _persist_triage_item(
         )
     elif disposition in {"follow_up", "duplicate", "deferred"}:
         request = _request_row(store, str(request_id))
+        expected_version = item["expected_request_version"]
+        if expected_version is not None and int(request["version"]) != expected_version:
+            raise StorageRefusal(
+                "version_conflict",
+                "semantic candidate request changed after intake",
+                retryable=True,
+            )
         if disposition == "deferred":
             if request["owner_agent_id"] != owner_agent_id:
                 raise StorageRefusal(
@@ -900,6 +917,10 @@ def begin_request_turn(
     decisions: list[dict[str, Any]],
     plans: tuple[TurnDispatchPlan, ...],
     at: str,
+    *,
+    expected_candidate_digest: str | None = None,
+    candidate_limit: int = 12,
+    candidate_max_bytes: int = 24_576,
 ) -> dict[str, Any]:
     """Triage, claim, and record each new request's routing plan atomically."""
 
@@ -920,8 +941,35 @@ def begin_request_turn(
         )
     if any(plan.command.at != at for plan in plans):
         raise StorageRefusal("invalid_turn_plan", "turn routing plan timestamps must be exact")
+    external_plans = tuple(
+        plan for plan in plans if _dispatch_classification(plan.command)[0] != "direct"
+    )
+    if external_plans and not expected_candidate_digest:
+        raise StorageRefusal(
+            "candidate_inventory_required",
+            "new request dispatch requires the exact same-owner candidate inventory digest",
+        )
     try:
         with store._transaction():
+            if external_plans:
+                current_candidates = _candidate_request_inventory(
+                    store,
+                    owner_agent_id,
+                    limit=candidate_limit,
+                    max_bytes=candidate_max_bytes,
+                )
+                if current_candidates["truncated"]:
+                    raise StorageRefusal(
+                        "candidate_inventory_truncated",
+                        "same-owner duplicate check is incomplete; external dispatch is refused",
+                        retryable=True,
+                    )
+                if current_candidates["snapshot_digest"] != expected_candidate_digest:
+                    raise StorageRefusal(
+                        "version_conflict",
+                        "same-owner candidate inventory changed before dispatch",
+                        retryable=True,
+                    )
             batch = triage_prompt_batch(
                 store,
                 owner_agent_id,
@@ -996,6 +1044,186 @@ def request_turn_boundary(store: Any, owner_agent_id: str) -> dict[str, Any]:
         **requests,
         "obligations": obligations,
         "safe_to_finish": sum(obligations.values()) == 0,
+    }
+
+
+def reconcile_duplicate_request(
+    store: Any, command: ReconcileDuplicateRequestCommand
+) -> dict[str, Any]:
+    """Supersede one same-owner duplicate without erasing either request's provenance."""
+
+    _time(command.at, "request reconciliation time")
+    if command.duplicate_request_id == command.canonical_request_id:
+        raise StorageRefusal("invalid_reconciliation", "a request cannot supersede itself")
+    if command.expected_duplicate_version < 1 or command.expected_canonical_version < 1:
+        raise StorageRefusal("invalid_reconciliation", "expected request versions must be positive")
+    try:
+        with store._transaction():
+            existing = store.connection.execute(
+                "SELECT * FROM request_reconciliations WHERE duplicate_request_id=?",
+                (command.duplicate_request_id,),
+            ).fetchone()
+            if existing is not None:
+                exact = (
+                    existing["canonical_request_id"] == command.canonical_request_id
+                    and existing["actor_agent_id"] == command.owner_agent_id
+                    and int(existing["duplicate_version_before"])
+                    == command.expected_duplicate_version
+                    and int(existing["canonical_version_at_link"])
+                    == command.expected_canonical_version
+                )
+                if not exact:
+                    raise StorageRefusal(
+                        "reconciliation_conflict",
+                        "duplicate request already has a different reconciliation",
+                    )
+                duplicate = _request_row(store, command.duplicate_request_id)
+                return {
+                    "schema": "league.request-reconciliation.v1",
+                    "duplicate_request_id": command.duplicate_request_id,
+                    "canonical_request_id": command.canonical_request_id,
+                    "duplicate_state": duplicate["state"],
+                    "duplicate_version": int(duplicate["version"]),
+                    "canonical_version": int(existing["canonical_version_at_link"]),
+                    "idempotent": True,
+                }
+            duplicate = _request_row(store, command.duplicate_request_id)
+            canonical = _request_row(store, command.canonical_request_id)
+            if (
+                duplicate["owner_agent_id"] != command.owner_agent_id
+                or canonical["owner_agent_id"] != command.owner_agent_id
+                or duplicate["owner_agent_id"] != canonical["owner_agent_id"]
+                or duplicate["owner_squad_id"] != canonical["owner_squad_id"]
+            ):
+                raise StorageRefusal(
+                    "owner_mismatch",
+                    "duplicate reconciliation requires the same current owner and Squad",
+                )
+            if (
+                int(duplicate["version"]) != command.expected_duplicate_version
+                or int(canonical["version"]) != command.expected_canonical_version
+            ):
+                raise StorageRefusal(
+                    "version_conflict", "request changed before reconciliation", retryable=True
+                )
+            if duplicate["state"] in TERMINAL_REQUEST_STATES or canonical["state"] in TERMINAL_REQUEST_STATES:
+                raise StorageRefusal(
+                    "reconciliation_conflict",
+                    "terminal requests refuse duplicate reconciliation",
+                )
+            chain = store.connection.execute(
+                """
+                SELECT 1 FROM request_reconciliations
+                 WHERE duplicate_request_id=? OR canonical_request_id=?
+                 LIMIT 1
+                """,
+                (command.canonical_request_id, command.duplicate_request_id),
+            ).fetchone()
+            if chain is not None:
+                raise StorageRefusal(
+                    "reconciliation_cycle",
+                    "duplicate reconciliation chains and cycles are refused",
+                )
+            external = store.connection.execute(
+                """
+                SELECT 1 FROM request_dispatches
+                 WHERE request_id=? AND execution_mode<>'direct' LIMIT 1
+                """,
+                (command.duplicate_request_id,),
+            ).fetchone()
+            created_work = store.connection.execute(
+                "SELECT 1 FROM tasks WHERE request_id=? LIMIT 1",
+                (command.duplicate_request_id,),
+            ).fetchone()
+            produced_result = store.connection.execute(
+                "SELECT 1 FROM request_results WHERE request_id=? LIMIT 1",
+                (command.duplicate_request_id,),
+            ).fetchone()
+            if external is not None or created_work is not None or produced_result is not None:
+                raise StorageRefusal(
+                    "irreversible_execution_started",
+                    "duplicate request has execution or result evidence and requires separate resolution",
+                )
+            next_version = int(duplicate["version"]) + 1
+            changed = store.connection.execute(
+                """
+                UPDATE requests
+                   SET state='cancelled',resolution_summary=?,version=?,updated_at=?
+                 WHERE request_id=? AND owner_agent_id=? AND version=?
+                """,
+                (
+                    "Superseded by the canonical same-owner request.",
+                    next_version,
+                    command.at,
+                    command.duplicate_request_id,
+                    command.owner_agent_id,
+                    command.expected_duplicate_version,
+                ),
+            )
+            if changed.rowcount != 1:
+                raise StorageRefusal(
+                    "version_conflict", "duplicate request changed", retryable=True
+                )
+            store.connection.execute(
+                "UPDATE request_claims SET released_at=? WHERE request_id=? AND released_at IS NULL",
+                (command.at, command.duplicate_request_id),
+            )
+            event_id = (
+                "request-reconciliation:"
+                + _digest(
+                    _json(
+                        {
+                            "duplicate": command.duplicate_request_id,
+                            "canonical": command.canonical_request_id,
+                            "duplicate_version": command.expected_duplicate_version,
+                            "canonical_version": command.expected_canonical_version,
+                        }
+                    )
+                )
+            )
+            _insert_request_event(
+                store,
+                event_id=event_id,
+                request_id=command.duplicate_request_id,
+                actor_id=command.owner_agent_id,
+                request_version=next_version,
+                event_type="request_superseded",
+                state="cancelled",
+                update="Duplicate request superseded by a canonical same-owner request.",
+                at=command.at,
+                detail={"canonical_request_id": command.canonical_request_id},
+            )
+            store.connection.execute(
+                """
+                INSERT INTO request_reconciliations
+                  (duplicate_request_id,canonical_request_id,actor_agent_id,
+                   duplicate_version_before,canonical_version_at_link,event_id,reconciled_at)
+                VALUES(?,?,?,?,?,?,?)
+                """,
+                (
+                    command.duplicate_request_id,
+                    command.canonical_request_id,
+                    command.owner_agent_id,
+                    command.expected_duplicate_version,
+                    command.expected_canonical_version,
+                    event_id,
+                    command.at,
+                ),
+            )
+    except StorageRefusal:
+        raise
+    except sqlite3.DatabaseError as exc:
+        raise store._translate_database_error(
+            exc, "request reconciliation conflicted with canonical state"
+        ) from exc
+    return {
+        "schema": "league.request-reconciliation.v1",
+        "duplicate_request_id": command.duplicate_request_id,
+        "canonical_request_id": command.canonical_request_id,
+        "duplicate_state": "cancelled",
+        "duplicate_version": next_version,
+        "canonical_version": command.expected_canonical_version,
+        "idempotent": False,
     }
 
 
@@ -1339,6 +1567,21 @@ def _validate_hidden_scientist(
     return subtask
 
 
+def _dispatch_classification(
+    command: DispatchRequestCommand,
+) -> tuple[str, str, str]:
+    signal_value = command.orchestration.as_record()
+    signal_value["hidden_advisory"] = command.requested_mode == "hidden"
+    return classify_dispatch(
+        work_kind=command.work_kind,
+        requested_mode=command.requested_mode,
+        hidden_supported=command.hidden_supported,
+        signals=OrchestrationSignals(**signal_value),
+        explicit_squad_id=command.explicit_route,
+        continuation_squad_id=command.continuation_target,
+    )
+
+
 def dispatch_request(
     store: Any,
     command: DispatchRequestCommand,
@@ -1360,14 +1603,7 @@ def dispatch_request(
         "hidden_subtask": command.hidden_subtask,
         "hidden_scope_budget": command.hidden_scope_budget,
     }
-    mode, reason_code, reason = classify_dispatch(
-        work_kind=work_kind,
-        requested_mode=requested_mode,
-        hidden_supported=hidden_supported,
-        signals=OrchestrationSignals(**signal_value),
-        explicit_squad_id=explicit_route,
-        continuation_squad_id=command.continuation_target,
-    )
+    mode, reason_code, reason = _dispatch_classification(command)
     try:
         with store._transaction():
             request = _request_row(store, request_id)
@@ -2100,16 +2336,132 @@ def unresolved_requests(
     }
 
 
+def _candidate_request_inventory(
+    store: Any,
+    owner_agent_id: str,
+    *,
+    limit: int,
+    max_bytes: int,
+    after: str | None = None,
+    prompt_texts: tuple[str, ...] = (),
+    page: bool = False,
+) -> dict[str, Any]:
+    rows = store.connection.execute(
+        """
+        SELECT r.request_id,r.summary,r.state,r.version,r.updated_at,
+               (SELECT t.project_id FROM tasks t
+                 WHERE t.request_id=r.request_id AND t.project_id IS NOT NULL
+                 ORDER BY t.task_id LIMIT 1) project_id,
+               (SELECT p.repository FROM tasks t JOIN projects p ON p.project_id=t.project_id
+                 WHERE t.request_id=r.request_id ORDER BY t.task_id LIMIT 1) repository
+          FROM requests r
+         WHERE r.owner_agent_id=? AND r.state NOT IN ('answered','cancelled')
+         ORDER BY r.request_id
+        """,
+        (owner_agent_id,),
+    ).fetchall()
+    total = len(rows)
+    prompt_terms = {
+        term
+        for text in prompt_texts
+        for term in re.findall(r"[a-z0-9]+", text.lower())
+        if len(term) > 2
+    }
+    prepared: list[dict[str, Any]] = []
+    for row in rows:
+        summary = " ".join(str(row["summary"]).split())[:240]
+        candidate: dict[str, Any] = {
+            "request_id": row["request_id"],
+            "summary": summary,
+            "state": row["state"],
+            "version": int(row["version"]),
+        }
+        routing_key = {
+            key: row[key]
+            for key in ("project_id", "repository")
+            if row[key] is not None
+        }
+        if routing_key:
+            candidate["routing_key"] = routing_key
+        searchable = " ".join(
+            (summary, *(str(value) for value in routing_key.values()))
+        ).lower()
+        terms = {term for term in re.findall(r"[a-z0-9]+", searchable) if len(term) > 2}
+        candidate["_overlap"] = len(prompt_terms & terms)
+        candidate["_routing_overlap"] = int(
+            any(str(value).lower() in " ".join(prompt_texts).lower() for value in routing_key.values())
+        )
+        candidate["_updated_at"] = str(row["updated_at"])
+        prepared.append(candidate)
+    snapshot_rows = [
+        {key: value for key, value in row.items() if not key.startswith("_")}
+        for row in prepared
+    ]
+    snapshot_digest = _digest(_json(snapshot_rows))
+    if page:
+        prepared = [row for row in prepared if str(row["request_id"]) > (after or "")]
+    else:
+        prepared.sort(key=lambda row: str(row["request_id"]))
+        prepared.sort(key=lambda row: row["_updated_at"], reverse=True)
+        prepared.sort(key=lambda row: row["_overlap"], reverse=True)
+        prepared.sort(key=lambda row: row["_routing_overlap"], reverse=True)
+    candidates: list[dict[str, Any]] = []
+    returned_bytes = 0
+    more = len(prepared) > limit
+    for row in prepared[:limit]:
+        candidate = {key: value for key, value in row.items() if not key.startswith("_")}
+        encoded = _json(candidate).encode("utf-8")
+        if returned_bytes + len(encoded) > max_bytes:
+            more = True
+            break
+        candidates.append(candidate)
+        returned_bytes += len(encoded)
+    digest = _digest(
+        _json(
+            {
+                "owner_agent_id": owner_agent_id,
+                "after": after,
+                "ranking": "request-id-page" if page else "routing-lexical-recency",
+                "truncated": more,
+                "requests": candidates,
+            }
+        )
+    )
+    return {
+        "owner_agent_id": owner_agent_id,
+        "total_count": total,
+        "returned_count": len(candidates),
+        "returned_bytes": returned_bytes,
+        "truncated": more,
+        "after": after if page else None,
+        "ranking": "request-id-page" if page else "routing-lexical-recency",
+        "next_cursor": candidates[-1]["request_id"] if page and more and candidates else None,
+        "digest": digest,
+        "snapshot_digest": snapshot_digest,
+        "requests": candidates,
+    }
+
+
 def untriaged_intake(
     store: Any,
     owner_agent_id: str,
     *,
     limit: int = 20,
     max_bytes: int = 1_000_000,
+    candidate_limit: int = 12,
+    candidate_max_bytes: int = 24_576,
+    candidate_after: str | None = None,
+    candidate_page: bool = False,
 ) -> dict[str, Any]:
-    """Return exact retained prompt bytes only to their live Shotcaller owner."""
+    """Return exact prompts plus bounded canonical semantic-dedup candidates."""
 
-    if not 1 <= limit <= 100 or not MAX_PROMPT_BYTES <= max_bytes <= 4_000_000:
+    if (
+        not 1 <= limit <= 100
+        or not MAX_PROMPT_BYTES <= max_bytes <= 4_000_000
+        or not 1 <= candidate_limit <= 500
+        or not 1_024 <= candidate_max_bytes <= 1_000_000
+        or (candidate_after is not None and not candidate_page)
+    ):
         raise StorageRefusal(
             "invalid_limit", "untriaged intake bounds are outside the supported range"
         )
@@ -2173,6 +2525,15 @@ def untriaged_intake(
             }
         )
         returned_bytes += len(encoded)
+    candidate_inventory = _candidate_request_inventory(
+        store,
+        owner_agent_id,
+        limit=candidate_limit,
+        max_bytes=candidate_max_bytes,
+        after=candidate_after,
+        prompt_texts=tuple(str(prompt["body"]) for prompt in prompts),
+        page=candidate_page,
+    )
     return {
         "owner_agent_id": owner_agent_id,
         "untriaged_prompt_count": total,
@@ -2180,4 +2541,34 @@ def untriaged_intake(
         "returned_bytes": returned_bytes,
         "truncated": total > len(prompts),
         "prompts": prompts,
+        "candidate_inventory": candidate_inventory,
+    }
+
+
+def semantic_recovery_backlog(store: Any, *, limit: int = 20) -> dict[str, Any]:
+    """Return only prompts that lack a verified live owner runtime."""
+
+    if not 1 <= limit <= 100:
+        raise StorageRefusal("invalid_limit", "semantic recovery backlog limit is invalid")
+    rows = store.connection.execute(
+        """
+        SELECT prompt_id,created_at FROM prompt_quarantine
+         WHERE state='quarantined'
+        UNION ALL
+        SELECT p.prompt_id,p.created_at FROM prompts p
+         WHERE p.triage_state='untriaged'
+           AND NOT EXISTS (
+             SELECT 1 FROM runtime_instances r
+              WHERE r.actor_agent_id=p.current_owner_agent_id
+                AND r.status IN ('active','idle') AND r.verified=1
+           )
+         ORDER BY created_at,prompt_id
+         LIMIT ?
+        """,
+        (limit + 1,),
+    ).fetchall()
+    return {
+        "returned_count": min(len(rows), limit),
+        "truncated": len(rows) > limit,
+        "prompt_ids": [str(row["prompt_id"]) for row in rows[:limit]],
     }

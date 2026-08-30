@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://league-of-orchestrator.invalid/schema/league-supervisor-status.schema.json",
+  "title": "League persistent supervisor status",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "callsign", "event_driven", "live"],
+  "properties": {
+    "schema": {"const": "league.supervisor-status.v1"},
+    "callsign": {"type": "string", "minLength": 1},
+    "event_driven": {"const": true},
+    "live": {"type": "boolean"},
+    "lease_valid": {"type": "boolean"},
+    "identity_valid": {"type": "boolean"},
+    "fence": {"type": "integer", "minimum": 1},
+    "lease_seconds": {"type": "number", "exclusiveMinimum": 0},
+    "reason": {"enum": ["registration_missing", "process_unreachable"]},
+    "stopped": {"type": "boolean"}
+  }
+}

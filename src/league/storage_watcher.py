@@ -37,6 +37,20 @@ class WatcherStorage(Protocol):
         block_on_obligations: bool = True,
     ) -> dict[str, Any]: ...
 
+    def supervisor_binding(self, callsign: Optional[str] = None) -> dict[str, Any]: ...
+
+    def watcher_registration(
+        self, actor_agent_id: str
+    ) -> Optional[dict[str, Any]]: ...
+
+    def release_watcher(
+        self,
+        watcher_id: str,
+        actor_agent_id: str,
+        fence: int,
+        at: str,
+    ) -> dict[str, Any]: ...
+
     def note_user_message(
         self, scope_id: str, actor_agent_id: str, at: str
     ) -> dict[str, Any]: ...

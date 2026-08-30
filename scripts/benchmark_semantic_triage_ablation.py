@@ -682,6 +682,9 @@ def _turn(
         _validate_model_payload(semantic, cases)
         accuracy = _accuracy(semantic, cases)
         league_semantic = _league_payload(semantic)
+        league_semantic["candidate_inventory_digest"] = intake["result"][
+            "candidate_inventory"
+        ]["digest"]
         encode_started_ns = time.perf_counter_ns()
         begin_encoded = (_stable_json(league_semantic) + "\n").encode("utf-8")
         encode_completed_ns = time.perf_counter_ns()

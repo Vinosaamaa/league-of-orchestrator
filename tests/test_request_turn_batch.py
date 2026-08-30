@@ -19,6 +19,7 @@ sys.path[:0] = [str(ROOT / "src"), str(ROOT / "tests")]
 from request_lifecycle_fixture import GAREN_RUNTIME, create_context  # noqa: E402
 from storage_fixture import SHOTCALLER_ID  # noqa: E402
 from league.cli import main as league_main  # noqa: E402
+from league.sqlite_store import SQLiteStorage  # noqa: E402
 
 
 def _capture(store, clock, prompt_id: str, body: str) -> None:
@@ -67,6 +68,31 @@ def _semantic_plan() -> dict[str, object]:
     }
 
 
+def _external_semantic_plan() -> dict[str, object]:
+    return {
+        "work_kind": "repository-write",
+        "requested_mode": "champion",
+        "signals": {
+            "pre_bounded": False,
+            "read_only": False,
+            "answer_or_routing_only": False,
+            "expected_minutes": 20,
+            "expected_task_action_calls": 5,
+        },
+    }
+
+
+def _seed_request(store, clock, ordinal: int, summary: str | None = None) -> None:
+    prompt_id = f"prompt:seed:{ordinal:03d}"
+    request_id = f"request:seed:{ordinal:03d}"
+    _capture(store, clock, prompt_id, summary or f"Seed request {ordinal}")
+    store.triage_prompt(
+        prompt_id,
+        [_decision(prompt_id, request_id, summary or f"Seed request {ordinal}")["items"][0]],
+        clock.now(),
+    )
+
+
 def _start_turn(state: Path, at: str) -> subprocess.Popen[str]:
     return subprocess.Popen(
         [
@@ -106,6 +132,7 @@ def test_interactive_turn_uses_one_process_and_one_ordered_batch(root: Path) -> 
         "Second distinct exact owner prompt",
     ]
     decisions = {
+        "candidate_inventory_digest": intake["result"]["candidate_inventory"]["digest"],
         "decisions": [
             _semantic_decision("Handle the first request"),
             _semantic_decision("Handle the second request"),
@@ -173,9 +200,11 @@ def test_interactive_turn_uses_one_process_and_one_ordered_batch(root: Path) -> 
 def test_turn_handler_never_spawns_a_second_process(root: Path) -> None:
     state, store, clock = create_context(root, "turn-no-child")
     _capture(store, clock, "prompt:G", "Seventh exact owner prompt")
+    candidate_digest = store.untriaged_intake(SHOTCALLER_ID)["candidate_inventory"]["digest"]
     store.close()
     response = "One direct response"
     begin = {
+        "candidate_inventory_digest": candidate_digest,
         "decisions": [_semantic_decision("Handle the seventh request")],
         "plans": [_semantic_plan()],
     }
@@ -309,6 +338,7 @@ def test_one_process_persists_all_dispositions_without_minting_deferred_requests
     process.stdin.write(
         json.dumps(
             {
+                "candidate_inventory_digest": intake["result"]["candidate_inventory"]["digest"],
                 "decisions": [
                     {
                         "items": [
@@ -317,21 +347,21 @@ def test_one_process_persists_all_dispositions_without_minting_deferred_requests
                                 "summary": "Follow existing work",
                                 "disposition": "follow_up",
                                 "related_request_id": "request:existing",
+                                "related_request_version": 1,
                             },
                             {"summary": "Context only", "disposition": "context"},
-                            {
-                                "summary": "Acknowledged only",
-                                "disposition": "acknowledgement",
-                            },
+                            {"summary": "Acknowledged only", "disposition": "acknowledgement"},
                             {
                                 "summary": "Duplicate of existing work",
                                 "disposition": "duplicate",
                                 "related_request_id": "request:existing",
+                                "related_request_version": 1,
                             },
                             {
                                 "summary": "Defer existing work",
                                 "disposition": "deferred",
                                 "related_request_id": "request:existing",
+                                "related_request_version": 1,
                                 "defer_seconds": 60,
                             },
                         ]
@@ -369,8 +399,6 @@ def test_one_process_persists_all_dispositions_without_minting_deferred_requests
     assert committed["result"]["phase"] == "committed"
     assert process.wait(timeout=10) == 0 and process.pid == turn_pid
 
-    from league.sqlite_store import SQLiteStorage
-
     with SQLiteStorage(state) as observer:
         rows = observer.connection.execute(
             "SELECT request_id,state FROM requests ORDER BY request_id"
@@ -390,6 +418,118 @@ def test_one_process_persists_all_dispositions_without_minting_deferred_requests
         ]
 
 
+def test_small_shortlist_does_not_block_direct_and_pages_off_path(root: Path) -> None:
+    state, store, clock = create_context(root, "turn-shortlist-direct")
+    for ordinal in range(13):
+        _seed_request(store, clock, ordinal, f"Historical request {ordinal}")
+    _capture(store, clock, "prompt:shortlist", "Answer this new bounded owner question")
+    ranked = store.untriaged_intake(SHOTCALLER_ID)
+    inventory = ranked["candidate_inventory"]
+    assert inventory["returned_count"] == 12 and inventory["truncated"]
+    assert inventory["ranking"] == "routing-lexical-recency"
+    page_one = store.untriaged_intake(
+        SHOTCALLER_ID, candidate_limit=12, candidate_page=True
+    )["candidate_inventory"]
+    assert page_one["ranking"] == "request-id-page" and page_one["next_cursor"]
+    page_two = store.untriaged_intake(
+        SHOTCALLER_ID,
+        candidate_limit=12,
+        candidate_after=page_one["next_cursor"],
+        candidate_page=True,
+    )["candidate_inventory"]
+    assert page_two["returned_count"] == 1 and not page_two["truncated"]
+    store.close()
+
+    process = _start_turn(state, clock.now())
+    assert process.stdin is not None and process.stdout is not None
+    intake = json.loads(process.stdout.readline())
+    assert intake["result"]["candidate_inventory"]["truncated"]
+    process.stdin.write(
+        json.dumps(
+            {
+                "candidate_inventory_digest": intake["result"]["candidate_inventory"]["digest"],
+                "decisions": [_semantic_decision("Answer the bounded owner question")],
+                "plans": [_semantic_plan()],
+            },
+            separators=(",", ":"),
+        )
+        + "\n"
+    )
+    process.stdin.flush()
+    begun = json.loads(process.stdout.readline())
+    assert begun["result"]["phase"] == "begun", begun
+    process.stdin.write(
+        json.dumps(
+            {
+                "actions": [
+                    {
+                        "kind": "answer",
+                        "request_index": 1,
+                        "content": "Direct synthetic answer",
+                        "resolution_summary": "Answered without external work",
+                    }
+                ]
+            },
+            separators=(",", ":"),
+        )
+        + "\n"
+    )
+    process.stdin.flush()
+    committed = json.loads(process.stdout.readline())
+    assert process.wait(timeout=10) == 0 and committed["result"]["phase"] == "committed"
+
+
+def test_truncated_or_changed_candidates_fence_only_external_dispatch(root: Path) -> None:
+    state, store, clock = create_context(root, "turn-shortlist-external")
+    for ordinal in range(13):
+        _seed_request(store, clock, ordinal)
+    _capture(store, clock, "prompt:external", "Delegate a repository change")
+    store.close()
+    process = _start_turn(state, clock.now())
+    assert process.stdin is not None and process.stdout is not None
+    intake = json.loads(process.stdout.readline())
+    process.stdin.write(
+        json.dumps(
+            {
+                "candidate_inventory_digest": intake["result"]["candidate_inventory"]["digest"],
+                "decisions": [_semantic_decision("Delegate repository work")],
+                "plans": [_external_semantic_plan()],
+            },
+            separators=(",", ":"),
+        )
+        + "\n"
+    )
+    process.stdin.flush()
+    refused = json.loads(process.stdout.readline())
+    assert process.wait(timeout=10) == 3
+    assert refused["error"]["code"] == "candidate_inventory_truncated", refused
+
+    changed_state, changed_store, changed_clock = create_context(root, "turn-candidate-cas")
+    _seed_request(changed_store, changed_clock, 1, "Existing candidate")
+    _capture(changed_store, changed_clock, "prompt:cas", "Delegate changed candidate work")
+    changed_store.close()
+    changed = _start_turn(changed_state, changed_clock.now())
+    assert changed.stdin is not None and changed.stdout is not None
+    changed_intake = json.loads(changed.stdout.readline())
+    with SQLiteStorage(changed_state) as writer:
+        _seed_request(writer, changed_clock, 2, "Concurrent candidate")
+    changed.stdin.write(
+        json.dumps(
+            {
+                "candidate_inventory_digest": changed_intake["result"]["candidate_inventory"]["digest"],
+                "decisions": [_semantic_decision("Delegate changed candidate work")],
+                "plans": [_external_semantic_plan()],
+            },
+            separators=(",", ":"),
+        )
+        + "\n"
+    )
+    changed.stdin.flush()
+    changed_refused = json.loads(changed.stdout.readline())
+    assert changed.wait(timeout=10) == 3
+    assert changed_refused["error"]["code"] == "version_conflict", changed_refused
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="league-request-turn-") as temporary:
         root = Path(temporary)
@@ -398,6 +538,8 @@ def main() -> None:
         test_batch_failure_is_atomic_and_exact_retry_is_idempotent(root)
         test_partial_duplicate_or_reordered_decisions_refuse(root)
         test_one_process_persists_all_dispositions_without_minting_deferred_requests(root)
+        test_small_shortlist_does_not_block_direct_and_pages_off_path(root)
+        test_truncated_or_changed_candidates_fence_only_external_dispatch(root)
     print(
         "PASS: one request-turn process emits exact intake, atomically begins ordered model "
         "triage/routing, commits answers, and returns the final unresolved boundary"

@@ -675,7 +675,14 @@ def test_queued_prompts_reusing_turn_id_are_unique_and_conflicts_quarantine(
             }
         )
     turn.stdin.write(
-        json.dumps({"decisions": decisions, "plans": []}, separators=(",", ":"))
+        json.dumps(
+            {
+                "candidate_inventory_digest": intake["candidate_inventory"]["digest"],
+                "decisions": decisions,
+                "plans": [],
+            },
+            separators=(",", ":"),
+        )
         + "\n"
     )
     turn.stdin.flush()

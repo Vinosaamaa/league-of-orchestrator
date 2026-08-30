@@ -1,0 +1,176 @@
+#!/usr/bin/env python3
+"""Focused omission-only Stop and agent-authored duplicate reconciliation proof."""
+
+from __future__ import annotations
+
+from io import BytesIO
+import json
+from pathlib import Path
+import sys
+import tempfile
+
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path[:0] = [str(ROOT / "src"), str(ROOT / "tests")]
+
+from league.cli import main as league_main  # noqa: E402
+from league.sqlite_store import SQLiteStorage  # noqa: E402
+from request_lifecycle_fixture import GAREN_RUNTIME, create_context  # noqa: E402
+from storage_fixture import SHOTCALLER_ID  # noqa: E402
+
+
+def _request(store, clock, suffix: str, summary: str) -> None:
+    prompt_id = f"prompt:reconcile:{suffix}"
+    request_id = f"request:reconcile:{suffix}"
+    store.intake_prompt(
+        prompt_id,
+        SHOTCALLER_ID,
+        GAREN_RUNTIME,
+        "codex",
+        f"session:{GAREN_RUNTIME}",
+        f"turn:{suffix}",
+        summary,
+        clock.now(),
+    )
+    store.triage_prompt(
+        prompt_id,
+        [
+            {
+                "prompt_item_id": f"item:reconcile:{suffix}",
+                "ordinal": 1,
+                "summary": summary,
+                "disposition": "new_request",
+                "request_id": request_id,
+                "next_attention_at": None,
+            }
+        ],
+        clock.now(),
+    )
+
+
+def _command(state: Path, clock, *extra: str) -> tuple[int, dict]:
+    sink = BytesIO()
+    code = league_main(
+        [
+            "--state-root",
+            str(state),
+            "request",
+            "reconcile-duplicate",
+            "--duplicate-request-id",
+            "request:reconcile:B",
+            "--canonical-request-id",
+            "request:reconcile:A",
+            "--owner-agent-id",
+            SHOTCALLER_ID,
+            "--expected-duplicate-version",
+            "1",
+            "--expected-canonical-version",
+            "1",
+            "--at",
+            clock.now(),
+            *extra,
+        ],
+        output=sink,
+    )
+    return code, json.loads(sink.getvalue())
+
+
+def test_stop_is_read_only_and_reconciliation_is_exact(root: Path) -> None:
+    state, store, clock = create_context(root, "reconcile")
+    _request(store, clock, "A", "Canonical owner request")
+    _request(store, clock, "B", "Paraphrased duplicate owner request")
+    before = store.unresolved_requests(SHOTCALLER_ID)
+    before_ids = [row["request_id"] for row in before["requests"]]
+    stop = store.stop_decision(
+        "watcher:Garen",
+        SHOTCALLER_ID,
+        "terminal:reconciliation-proof",
+        clock.now(),
+        block_on_fresh_terminal=True,
+    )
+    after_stop = store.unresolved_requests(SHOTCALLER_ID)
+    assert stop["decision"] == "block"
+    assert stop["unresolved_summaries"] == [
+        "Canonical owner request",
+        "Paraphrased duplicate owner request",
+    ]
+    assert [row["request_id"] for row in after_stop["requests"]] == before_ids
+    store.close()
+
+    code, first = _command(state, clock)
+    assert code == 0 and first["result"]["idempotent"] is False, first
+    assert first["result"]["duplicate_state"] == "cancelled"
+    code, repeated = _command(state, clock)
+    assert code == 0 and repeated["result"]["idempotent"] is True, repeated
+
+    with SQLiteStorage(state) as observer:
+        boundary = observer.request_turn_boundary(SHOTCALLER_ID)
+        assert [row["request_id"] for row in boundary["requests"]] == [
+            "request:reconcile:A"
+        ]
+        assert boundary["obligations"]["unresolved_requests"] == 1
+        exported = json.loads(
+            observer.export_bytes(
+                format_name="json", purpose="inspection", max_records=10_000
+            )
+        )
+    sources = exported["tables"]["request_sources"]
+    assert {row["request_id"] for row in sources} == {
+        "request:reconcile:A",
+        "request:reconcile:B",
+    }
+    links = exported["tables"]["request_reconciliations"]
+    assert len(links) == 1
+    assert links[0]["duplicate_request_id"] == "request:reconcile:B"
+    assert links[0]["canonical_request_id"] == "request:reconcile:A"
+    assert exported["tables"]["request_results"] == []
+
+
+def test_reconciliation_refuses_self_and_stale_versions(root: Path) -> None:
+    state, store, clock = create_context(root, "refusals")
+    _request(store, clock, "A", "Canonical owner request")
+    _request(store, clock, "B", "Duplicate owner request")
+    store.close()
+    sink = BytesIO()
+    self_code = league_main(
+        [
+            "--state-root", str(state), "request", "reconcile-duplicate",
+            "--duplicate-request-id", "request:reconcile:A",
+            "--canonical-request-id", "request:reconcile:A",
+            "--owner-agent-id", SHOTCALLER_ID,
+            "--expected-duplicate-version", "1",
+            "--expected-canonical-version", "1",
+            "--at", clock.now(),
+        ],
+        output=sink,
+    )
+    assert self_code == 2 and json.loads(sink.getvalue())["error"]["code"] == "invalid_reconciliation"
+    stale_sink = BytesIO()
+    stale_code = league_main(
+        [
+            "--state-root", str(state), "request", "reconcile-duplicate",
+            "--duplicate-request-id", "request:reconcile:B",
+            "--canonical-request-id", "request:reconcile:A",
+            "--owner-agent-id", SHOTCALLER_ID,
+            "--expected-duplicate-version", "2",
+            "--expected-canonical-version", "1",
+            "--at", clock.now(),
+        ],
+        output=stale_sink,
+    )
+    assert stale_code == 3 and json.loads(stale_sink.getvalue())["error"]["code"] == "version_conflict"
+
+
+def main() -> None:
+    with tempfile.TemporaryDirectory(prefix="league-request-reconciliation-") as temporary:
+        root = Path(temporary)
+        test_stop_is_read_only_and_reconciliation_is_exact(root / "success")
+        test_reconciliation_refuses_self_and_stale_versions(root / "refusal")
+    print(
+        "PASS: Stop is omission-only; exact same-owner reconciliation supersedes only the duplicate, "
+        "preserves sources, is idempotent, and refuses self/stale links"
+    )
+
+
+if __name__ == "__main__":
+    main()

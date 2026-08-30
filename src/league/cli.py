@@ -47,6 +47,7 @@ from .storage_request import (
     MAX_TRIAGE_JSON_BYTES,
     MAX_TRIAGE_TURN_BYTES,
     AnswerRequestCommand,
+    ReconcileDuplicateRequestCommand,
     RequestProgressCommand,
     RequestResultCommand,
     TurnDispatchPlan,
@@ -850,6 +851,21 @@ def _add_request_commands(groups: argparse._SubParsersAction) -> None:
     turn.add_argument("--at", help=argparse.SUPPRESS)
     turn.add_argument("--limit", type=int, default=20)
     turn.add_argument("--max-bytes", type=int, default=1_000_000)
+    turn.add_argument("--candidate-limit", type=int, default=12)
+    turn.add_argument("--candidate-max-bytes", type=int, default=24_576)
+    reconcile_duplicate = commands.add_parser(
+        "reconcile-duplicate",
+        help="Supersede one same-owner duplicate request under exact request versions.",
+    )
+    for name in (
+        "duplicate-request-id",
+        "canonical-request-id",
+        "owner-agent-id",
+        "at",
+    ):
+        reconcile_duplicate.add_argument(f"--{name}", required=True)
+    reconcile_duplicate.add_argument("--expected-duplicate-version", type=int, required=True)
+    reconcile_duplicate.add_argument("--expected-canonical-version", type=int, required=True)
     bind_prompt = commands.add_parser(
         "bind-prompt", help="Bind one quarantined prompt to an exact verified runtime."
     )
@@ -1021,6 +1037,10 @@ def _add_request_commands(groups: argparse._SubParsersAction) -> None:
     untriaged.add_argument("--owner-agent-id", required=True)
     untriaged.add_argument("--limit", type=int, default=20)
     untriaged.add_argument("--max-bytes", type=int, default=1_000_000)
+    untriaged.add_argument("--candidate-limit", type=int, default=12)
+    untriaged.add_argument("--candidate-max-bytes", type=int, default=24_576)
+    untriaged.add_argument("--candidate-page", action="store_true")
+    untriaged.add_argument("--candidate-after")
 
 
 def _add_assignment_commands(groups: argparse._SubParsersAction) -> None:
@@ -2194,6 +2214,12 @@ def _mechanize_turn_decisions(
     intake: dict[str, Any], value: Any, at: str
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     prompts = intake["prompts"]
+    candidate_inventory = intake.get("candidate_inventory", {})
+    candidates = {
+        row["request_id"]: row
+        for row in candidate_inventory.get("requests", [])
+        if isinstance(row, dict) and isinstance(row.get("request_id"), str)
+    }
     if not isinstance(value, list) or len(value) != len(prompts):
         raise StorageRefusal(
             "incomplete_triage_batch", "turn must decide every fetched prompt exactly once"
@@ -2215,7 +2241,7 @@ def _mechanize_turn_decisions(
             disposition = raw.get("disposition")
             allowed = {"summary", "disposition"}
             if disposition in {"follow_up", "duplicate", "deferred"}:
-                allowed.add("related_request_id")
+                allowed.update(("related_request_id", "related_request_version"))
             if disposition == "deferred":
                 allowed.add("defer_seconds")
             if set(raw) != allowed:
@@ -2229,6 +2255,7 @@ def _mechanize_turn_decisions(
                 "prompt-item", str(prompt["prompt_id"]), str(ordinal)
             )
             request_id: Optional[str] = None
+            expected_request_version: Optional[int] = None
             next_attention_at: Optional[str] = None
             if disposition == "new_request":
                 request_id = _turn_mechanical_id("request", item_id)
@@ -2239,6 +2266,24 @@ def _mechanize_turn_decisions(
                         "invalid_triage", "related request identity is required"
                     )
                 request_id = related
+                related_version = raw.get("related_request_version")
+                candidate = candidates.get(related)
+                if candidate is None:
+                    raise StorageRefusal(
+                        "candidate_request_unknown",
+                        "semantic decision references a request outside the supplied candidate inventory",
+                        retryable=True,
+                    )
+                if (
+                    type(related_version) is not int
+                    or related_version != candidate.get("version")
+                ):
+                    raise StorageRefusal(
+                        "version_conflict",
+                        "semantic decision candidate version differs from intake",
+                        retryable=True,
+                    )
+                expected_request_version = related_version
             if disposition == "deferred":
                 seconds = raw.get("defer_seconds")
                 if type(seconds) is not int or not 1 <= seconds <= 31_536_000:
@@ -2255,6 +2300,7 @@ def _mechanize_turn_decisions(
                 "summary": summary,
                 "disposition": disposition,
                 "request_id": request_id,
+                "expected_request_version": expected_request_version,
                 "next_attention_at": next_attention_at,
             }
             items.append(item)
@@ -2644,7 +2690,28 @@ def _request_unresolved(store: Storage, args: argparse.Namespace) -> CommandResu
 
 def _request_untriaged(store: Storage, args: argparse.Namespace) -> CommandResult:
     return store.untriaged_intake(
-        args.owner_agent_id, limit=args.limit, max_bytes=args.max_bytes
+        args.owner_agent_id,
+        limit=args.limit,
+        max_bytes=args.max_bytes,
+        candidate_limit=args.candidate_limit,
+        candidate_max_bytes=args.candidate_max_bytes,
+        candidate_after=args.candidate_after,
+        candidate_page=args.candidate_page,
+    ), None
+
+
+def _request_reconcile_duplicate(
+    store: Storage, args: argparse.Namespace
+) -> CommandResult:
+    return store.reconcile_duplicate_request(
+        ReconcileDuplicateRequestCommand(
+            duplicate_request_id=args.duplicate_request_id,
+            canonical_request_id=args.canonical_request_id,
+            owner_agent_id=args.owner_agent_id,
+            expected_duplicate_version=args.expected_duplicate_version,
+            expected_canonical_version=args.expected_canonical_version,
+            at=args.at,
+        )
     ), None
 
 
@@ -3092,6 +3159,7 @@ HANDLERS: dict[str, CommandHandler] = {
     "request.answer": _request_answer,
     "request.unresolved": _request_unresolved,
     "request.untriaged": _request_untriaged,
+    "request.reconcile-duplicate": _request_reconcile_duplicate,
     "assign.prepare": _assign_prepare,
     "assign.run": _assign_launch,
     "assign.launching": _assign_launching,
@@ -3313,6 +3381,8 @@ def main(
                     args.owner_agent_id,
                     limit=args.limit,
                     max_bytes=args.max_bytes,
+                    candidate_limit=args.candidate_limit,
+                    candidate_max_bytes=args.candidate_max_bytes,
                 )
                 sink.write(
                     _envelope_bytes(command, result={"phase": "intake", **intake})
@@ -3324,14 +3394,32 @@ def main(
                 begin_payload = (
                     _read_turn_payload(source)
                     if expected_prompt_ids
-                    else {"decisions": [], "plans": []}
+                    else {
+                        "candidate_inventory_digest": intake["candidate_inventory"]["digest"],
+                        "decisions": [],
+                        "plans": [],
+                    }
                 )
-                if set(begin_payload) != {"decisions", "plans"} or not isinstance(
+                if set(begin_payload) != {
+                    "candidate_inventory_digest",
+                    "decisions",
+                    "plans",
+                } or not isinstance(
                     begin_payload["decisions"], list
                 ):
                     raise StorageRefusal(
                         "invalid_turn_payload",
-                        "turn begin input must contain only decisions and plans arrays",
+                        "turn begin input must contain the candidate digest, decisions, and plans",
+                    )
+                if (
+                    not isinstance(begin_payload["candidate_inventory_digest"], str)
+                    or begin_payload["candidate_inventory_digest"]
+                    != intake["candidate_inventory"]["digest"]
+                ):
+                    raise StorageRefusal(
+                        "version_conflict",
+                        "turn begin candidate digest differs from exact intake",
+                        retryable=True,
                     )
                 decisions, new_requests = _mechanize_turn_decisions(
                     intake, begin_payload["decisions"], begin_at
@@ -3342,6 +3430,9 @@ def main(
                     decisions,
                     _turn_dispatch_plans(begin_payload["plans"], begin_at, new_requests),
                     begin_at,
+                    expected_candidate_digest=intake["candidate_inventory"]["snapshot_digest"],
+                    candidate_limit=args.candidate_limit,
+                    candidate_max_bytes=args.candidate_max_bytes,
                 )
                 for request, route in zip(new_requests, begun["routing"]):
                     route["mechanical"] = {

@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 from typing import Any, Callable
 
 from .request_services import DeliveryReceipt, DeliveryService, DeliveryUnavailable
+from .persistent_supervisor import SupervisorUnavailable, send_supervisor_message
 
 
 class _Clock:
@@ -75,6 +76,24 @@ class InstalledDeliveryAdapter:
             except (OSError, subprocess.SubprocessError) as exc:
                 raise DeliveryUnavailable("receiver_unavailable") from exc
             if completed.returncode != 0:
+                raise DeliveryUnavailable("receiver_unavailable")
+        elif channel == "watcher":
+            locator = str(target.get("locator", ""))
+            if locator.startswith("unix:"):
+                try:
+                    send_supervisor_message(
+                        locator,
+                        {
+                            "kind": "champion-event",
+                            "fence": target["fence"],
+                            "runtime_generation": target["generation"],
+                            "envelope": envelope,
+                        },
+                        timeout_seconds=15,
+                    )
+                except SupervisorUnavailable as exc:
+                    raise DeliveryUnavailable("receiver_unavailable") from exc
+            elif not locator.startswith("sqlite-supervise:"):
                 raise DeliveryUnavailable("receiver_unavailable")
         return DeliveryReceipt(
             outbox_id=str(envelope["outbox_id"]),

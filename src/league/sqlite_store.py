@@ -68,6 +68,9 @@ from .sqlite_outbox_ops import delivery_target as delivery_target_operation
 from .sqlite_outbox_ops import fail_outbox as fail_outbox_operation
 from .sqlite_outbox_ops import outbox_envelope as outbox_envelope_operation
 from .sqlite_outbox_ops import pending_backlog as pending_backlog_operation
+from .sqlite_watcher_ops import release_watcher as release_watcher_operation
+from .sqlite_watcher_ops import supervisor_binding as supervisor_binding_operation
+from .sqlite_watcher_ops import watcher_registration as watcher_registration_operation
 from .sqlite_request_ops import answer_request as answer_request_operation
 from .sqlite_request_ops import claim_request as claim_request_operation
 from .sqlite_request_ops import dispatch_request as dispatch_request_operation
@@ -169,10 +172,16 @@ from .sqlite_autonomous_schema import MIGRATION_NAME as AUTONOMOUS_MIGRATION_NAM
 from .sqlite_autonomous_schema import STATEMENTS as AUTONOMOUS_MIGRATION_STATEMENTS
 from .storage_issue import BeginIssueSelectionCommand, CompleteIssueSelectionCommand
 from .storage_mode import SettleModeActionCommand
+from .sqlite_request_reconciliation_schema import (
+    MIGRATION_NAME as REQUEST_RECONCILIATION_MIGRATION_NAME,
+)
+from .sqlite_request_reconciliation_schema import (
+    STATEMENTS as REQUEST_RECONCILIATION_MIGRATION_STATEMENTS,
+)
 
 
 WAL_MINIMUM = (3, 51, 3)
-CURRENT_SCHEMA_VERSION = 18
+CURRENT_SCHEMA_VERSION = 19
 DATABASE_NAME = "league.sqlite3"
 DEFAULT_BUSY_TIMEOUT_MS = 500
 MAX_BUSY_TIMEOUT_MS = 10_000
@@ -1188,6 +1197,11 @@ MIGRATIONS = (
         rebuilds_foreign_keys=True,
     ),
     Migration(18, AUTONOMOUS_MIGRATION_NAME, AUTONOMOUS_MIGRATION_STATEMENTS),
+    Migration(
+        19,
+        REQUEST_RECONCILIATION_MIGRATION_NAME,
+        REQUEST_RECONCILIATION_MIGRATION_STATEMENTS,
+    ),
 )
 
 
@@ -1428,6 +1442,7 @@ _EXPORT_TABLES = (
     "prompt_items",
     "requests",
     "request_sources",
+    "request_reconciliations",
     "request_claims",
     "request_dispatches",
     "request_results",
@@ -1506,6 +1521,7 @@ _EXPORT_ORDER = {
     "prompt_items": "prompt_id,ordinal,prompt_item_id",
     "requests": "created_at,request_id",
     "request_sources": "request_id,prompt_item_id",
+    "request_reconciliations": "reconciled_at,duplicate_request_id",
     "request_claims": "request_id",
     "request_dispatches": "decided_at,dispatch_id",
     "request_results": "created_at,result_id",
@@ -2870,11 +2886,23 @@ class SQLiteStorage(SQLiteTransactionCore):
         decisions: list[dict[str, Any]],
         plans: tuple[Any, ...],
         at: str,
+        *,
+        expected_candidate_digest: Optional[str] = None,
+        candidate_limit: int = 12,
+        candidate_max_bytes: int = 24_576,
     ) -> dict[str, Any]:
         from .sqlite_request_ops import begin_request_turn
 
         return begin_request_turn(
-            self, owner_agent_id, expected_prompt_ids, decisions, plans, at
+            self,
+            owner_agent_id,
+            expected_prompt_ids,
+            decisions,
+            plans,
+            at,
+            expected_candidate_digest=expected_candidate_digest,
+            candidate_limit=candidate_limit,
+            candidate_max_bytes=candidate_max_bytes,
         )
 
     def commit_request_turn(
@@ -2891,6 +2919,11 @@ class SQLiteStorage(SQLiteTransactionCore):
         from .sqlite_request_ops import request_turn_boundary
 
         return request_turn_boundary(self, owner_agent_id)
+
+    def reconcile_duplicate_request(self, command: Any) -> dict[str, Any]:
+        from .sqlite_request_ops import reconcile_duplicate_request
+
+        return reconcile_duplicate_request(self, command)
 
     def quarantine_prompt(
         self,
@@ -3049,10 +3082,26 @@ class SQLiteStorage(SQLiteTransactionCore):
         *,
         limit: int = 20,
         max_bytes: int = 1_000_000,
+        candidate_limit: int = 12,
+        candidate_max_bytes: int = 24_576,
+        candidate_after: Optional[str] = None,
+        candidate_page: bool = False,
     ) -> dict[str, Any]:
         return untriaged_intake_operation(
-            self, owner_agent_id, limit=limit, max_bytes=max_bytes
+            self,
+            owner_agent_id,
+            limit=limit,
+            max_bytes=max_bytes,
+            candidate_limit=candidate_limit,
+            candidate_max_bytes=candidate_max_bytes,
+            candidate_after=candidate_after,
+            candidate_page=candidate_page,
         )
+
+    def semantic_recovery_backlog(self, *, limit: int = 20) -> dict[str, Any]:
+        from .sqlite_request_ops import semantic_recovery_backlog
+
+        return semantic_recovery_backlog(self, limit=limit)
 
     def prepare_assignment(self, command: PrepareAssignmentCommand) -> dict[str, Any]:
         return prepare_assignment_operation(self, command)
@@ -3240,6 +3289,25 @@ class SQLiteStorage(SQLiteTransactionCore):
             fence,
             at,
             block_on_obligations=block_on_obligations,
+        )
+
+    def supervisor_binding(self, callsign: Optional[str] = None) -> dict[str, Any]:
+        return supervisor_binding_operation(self, callsign)
+
+    def watcher_registration(
+        self, actor_agent_id: str
+    ) -> Optional[dict[str, Any]]:
+        return watcher_registration_operation(self, actor_agent_id)
+
+    def release_watcher(
+        self,
+        watcher_id: str,
+        actor_agent_id: str,
+        fence: int,
+        at: str,
+    ) -> dict[str, Any]:
+        return release_watcher_operation(
+            self, watcher_id, actor_agent_id, fence, at
         )
 
     def note_user_message(

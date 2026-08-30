@@ -12,11 +12,16 @@ from .storage_watcher import RuntimeRegistrationCommand
 from .storage_types import StorageRefusal
 
 
-def stop_feedback_reason(callsign: str, wait_generation: int) -> str:
-    return (
+def stop_feedback_reason(
+    callsign: str, wait_generation: int, summaries: tuple[str, ...] = ()
+) -> str:
+    base = (
         f"League has unresolved obligations for {callsign} "
         f"at wait generation {wait_generation}."
     )
+    if not summaries:
+        return base
+    return base + " Unresolved requests: " + " | ".join(summaries)
 
 
 def consume_stop_feedback(
@@ -300,6 +305,118 @@ def register_watcher(
     }
 
 
+def supervisor_binding(store: Any, callsign: Optional[str] = None) -> dict[str, Any]:
+    rows = store.connection.execute(
+        """
+        SELECT a.agent_id,a.callsign,a.routing_name,r.runtime_instance_id,
+               r.runtime_generation,r.backend_kind,r.endpoint,r.session_ref
+          FROM agent_instances a
+          JOIN runtime_instances r ON r.actor_agent_id=a.agent_id
+         WHERE a.role='shotcaller' AND a.retired_at IS NULL
+           AND (? IS NULL OR a.callsign=?)
+           AND r.status IN ('active','idle') AND r.verified=1
+         ORDER BY a.agent_id,r.runtime_instance_id
+        """,
+        (callsign, callsign),
+    ).fetchall()
+    if len(rows) != 1:
+        raise StorageRefusal(
+            "supervisor_binding_invalid",
+            "persistent supervision requires one exact verified Shotcaller runtime",
+        )
+    row = rows[0]
+    scope = store.connection.execute(
+        "SELECT scope_id FROM watcher_scopes WHERE actor_agent_id=? ORDER BY scope_id",
+        (row["agent_id"],),
+    ).fetchall()
+    if len(scope) > 1:
+        raise StorageRefusal(
+            "supervisor_binding_invalid",
+            "persistent supervision requires one exact Shotcaller watcher scope",
+        )
+    return {
+        "actor_agent_id": str(row["agent_id"]),
+        "callsign": str(row["callsign"]),
+        "routing_name": row["routing_name"],
+        "runtime_instance_id": str(row["runtime_instance_id"]),
+        "runtime_generation": str(row["runtime_generation"]),
+        "backend_kind": str(row["backend_kind"]),
+        "endpoint": str(row["endpoint"]),
+        "session_ref": str(row["session_ref"]),
+        "scope_id": (
+            str(scope[0]["scope_id"])
+            if scope
+            else f"watcher:{row['callsign']}"
+        ),
+    }
+
+
+def watcher_registration(
+    store: Any, actor_agent_id: str
+) -> Optional[dict[str, Any]]:
+    row = store.connection.execute(
+        """
+        SELECT watcher_id,actor_agent_id,runtime_instance_id,wake_locator,
+               leased_until,fence,registered_at
+          FROM watcher_registrations
+         WHERE actor_agent_id=?
+        """,
+        (actor_agent_id,),
+    ).fetchone()
+    return None if row is None else dict(row)
+
+
+def release_watcher(
+    store: Any,
+    watcher_id: str,
+    actor_agent_id: str,
+    fence: int,
+    at: str,
+) -> dict[str, Any]:
+    _time(at, "watcher release time")
+    if not watcher_id or not actor_agent_id or fence < 1:
+        raise StorageRefusal("invalid_watcher", "watcher release identity is incomplete")
+    try:
+        with store._transaction():
+            row = store.connection.execute(
+                "SELECT watcher_id,fence FROM watcher_registrations WHERE actor_agent_id=?",
+                (actor_agent_id,),
+            ).fetchone()
+            if row is None:
+                return {
+                    "watcher_id": watcher_id,
+                    "actor_agent_id": actor_agent_id,
+                    "fence": fence,
+                    "supervision_status": "stopped",
+                    "idempotent": True,
+                }
+            if row["watcher_id"] != watcher_id or int(row["fence"]) != fence:
+                raise StorageRefusal(
+                    "watcher_fenced", "watcher release identity is stale"
+                )
+            store.connection.execute(
+                "DELETE FROM watcher_registrations WHERE actor_agent_id=?",
+                (actor_agent_id,),
+            )
+            store.connection.execute(
+                "UPDATE watcher_scopes SET wait_active=0 WHERE actor_agent_id=?",
+                (actor_agent_id,),
+            )
+    except StorageRefusal:
+        raise
+    except sqlite3.DatabaseError as exc:
+        raise store._translate_database_error(
+            exc, "watcher release conflicted with canonical state"
+        ) from exc
+    return {
+        "watcher_id": watcher_id,
+        "actor_agent_id": actor_agent_id,
+        "fence": fence,
+        "supervision_status": "stopped",
+        "idempotent": False,
+    }
+
+
 def note_user_message(store: Any, scope_id: str, actor_agent_id: str, at: str) -> dict[str, Any]:
     _time(at, "user message time")
     try:
@@ -458,12 +575,25 @@ def stop_decision(
             ).fetchone()
             terminal_fresh = scope["last_terminal_generation"] != terminal_generation
             counts = _obligation_counts(store, actor_agent_id)
+            summary_rows = store.connection.execute(
+                """
+                SELECT summary FROM requests
+                 WHERE owner_agent_id=? AND state NOT IN ('answered','cancelled')
+                 ORDER BY updated_at DESC,request_id LIMIT 10
+                """,
+                (actor_agent_id,),
+            ).fetchall()
+            summaries = tuple(
+                " ".join(str(row["summary"]).split())[:160]
+                for row in summary_rows
+            )
             total = sum(counts.values())
             common = {
                 "scope_id": scope_id,
                 "wait_generation": int(scope["wait_generation"]),
                 "terminal_fresh": terminal_fresh,
                 "obligations": counts,
+                "unresolved_summaries": list(summaries),
             }
             store.connection.execute(
                 "UPDATE watcher_scopes SET last_terminal_generation=? WHERE scope_id=?",
@@ -515,7 +645,9 @@ def stop_decision(
             )
             if should_block:
                 reason_digest = hashlib.sha256(
-                    stop_feedback_reason(actor["callsign"], wait_generation).encode("utf-8")
+                    stop_feedback_reason(
+                        actor["callsign"], wait_generation, summaries
+                    ).encode("utf-8")
                 ).hexdigest()
                 store.connection.execute(
                     """

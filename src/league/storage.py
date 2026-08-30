@@ -21,6 +21,7 @@ from .storage_reporting import ReportingStorage
 from .storage_request import (
     AnswerRequestCommand,
     DispatchRequestCommand,
+    ReconcileDuplicateRequestCommand,
     RequestResultCommand,
     RequestStorage,
 )
@@ -74,6 +75,7 @@ __all__ = [
     "LegacyDisplayReconciliationCommand",
     "AnswerRequestCommand",
     "DispatchRequestCommand",
+    "ReconcileDuplicateRequestCommand",
     "OutboxDispatchIdentity",
     "PrepareAssignmentCommand",
     "RequestResultCommand",

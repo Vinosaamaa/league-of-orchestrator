@@ -16,6 +16,14 @@ from typing import Any
 from .sqlite_store import DEFAULT_BUSY_TIMEOUT_MS, SQLiteStorage
 from .sqlite_watcher_ops import _obligation_counts, stop_feedback_reason
 from .storage import RuntimeRegistrationCommand, StorageRefusal
+from .persistent_supervisor import (
+    PersistentSupervisor,
+    notify_user_message,
+    send_supervisor_message,
+    SupervisorUnavailable,
+    stop_supervisor,
+    supervisor_status,
+)
 
 
 STOP_BUSY_TIMEOUT_MS = 250
@@ -49,6 +57,11 @@ def _parser() -> argparse.ArgumentParser:
     commands.add_parser("cursor-stop-hook")
     commands.add_parser("cursor-before-submit-hook")
     commands.add_parser("status")
+    service_run = commands.add_parser("service-run")
+    service_run.add_argument("--lease-seconds", type=float, default=60)
+    service_run.add_argument("--renew-seconds", type=float, default=20)
+    commands.add_parser("service-status")
+    commands.add_parser("service-stop")
     supervise = commands.add_parser("supervise")
     supervise.add_argument("--poll-seconds", type=float, default=1.0)
     deliver = commands.add_parser("deliver")
@@ -171,10 +184,12 @@ def _busy_stop_result(
     }
 
 
-def _codex_stop_reason(callsign: str, wait_generation: int) -> str:
+def _codex_stop_reason(
+    callsign: str, wait_generation: int, summaries: tuple[str, ...] = ()
+) -> str:
     """Render only the resolved callsign; Codex turn identity stays internal."""
 
-    return stop_feedback_reason(callsign, wait_generation)
+    return stop_feedback_reason(callsign, wait_generation, summaries)
 
 
 def _hook_busy_timeout(command: str) -> int:
@@ -410,6 +425,94 @@ def _capture_prompt(
         )
 
 
+def handle_brokered_hook(
+    store: SQLiteStorage, hook: dict[str, Any]
+) -> dict[str, Any]:
+    """Execute one validated hook inside the persistent canonical-state owner."""
+
+    command = hook.get("command")
+    payload = hook.get("payload")
+    shotcaller = hook.get("shotcaller")
+    session_id = hook.get("session_id")
+    if (
+        command not in {
+            "codex-stop-hook",
+            "codex-user-prompt-hook",
+            "cursor-before-submit-hook",
+        }
+        or not isinstance(payload, dict)
+        or (shotcaller is not None and not isinstance(shotcaller, str))
+        or (session_id is not None and not isinstance(session_id, str))
+    ):
+        raise StorageRefusal("prompt_hook_invalid", "brokered hook request is invalid")
+    args = argparse.Namespace(shotcaller=shotcaller, session_id=session_id)
+    actor = _actor(store, args, payload)
+    actor_id = None if actor is None else str(actor[0])
+    callsign = None if actor is None else str(actor[1])
+    actor_role = None if actor is None else str(actor[2])
+    scope = None if actor is None else _scope(store, actor_id, str(callsign))
+    if command == "codex-stop-hook":
+        if actor is None:
+            return {"hook_output": {}, "capture": None}
+        assert actor_id is not None and callsign is not None and scope is not None
+        terminal, _ = _codex_stop_generation(args, payload)
+        result = store.stop_decision(
+            scope,
+            actor_id,
+            terminal,
+            datetime.now().astimezone().isoformat(timespec="seconds"),
+            block_on_fresh_terminal=True,
+        )
+        output = (
+            {
+                "decision": "block",
+                "reason": _codex_stop_reason(
+                    callsign,
+                    result["wait_generation"],
+                    tuple(result.get("unresolved_summaries", ())),
+                ),
+            }
+            if result["decision"] == "block"
+            else {}
+        )
+        return {"hook_output": output, "capture": None}
+    captured = _capture_prompt(
+        store,
+        scope,
+        actor_id,
+        actor_role,
+        payload,
+        adapter_kind="codex" if command == "codex-user-prompt-hook" else "cursor",
+    )
+    return {
+        "hook_output": {},
+        "capture": {
+            "prompt_id": captured.get("prompt_id"),
+            "idempotent": bool(captured.get("idempotent", False)),
+            "owned_by_shotcaller": actor_role == "shotcaller",
+            "suppressed": captured.get("suppressed"),
+            "state": captured.get("triage_state") or captured.get("state"),
+        },
+    }
+
+
+def _broker_hook(args: argparse.Namespace, payload: dict[str, Any]) -> dict[str, Any]:
+    locator = f"unix:{PersistentSupervisor(_state_root()).socket_path}"
+    return send_supervisor_message(
+        locator,
+        {
+            "kind": "hook",
+            "hook": {
+                "command": args.command,
+                "shotcaller": args.shotcaller,
+                "session_id": args.session_id,
+                "payload": payload,
+            },
+        },
+        timeout_seconds=1.0,
+    )
+
+
 def _supervision_snapshot(
     store: SQLiteStorage, scope: str, actor_id: str
 ) -> dict[str, Any]:
@@ -626,13 +729,41 @@ def main(argv: list[str] | None = None) -> int:
         "cursor-before-submit-hook",
         "deliver",
         "supervise",
+        "service-run",
+        "service-status",
+        "service-stop",
         "status",
     }:
         raise StorageRefusal(
             "legacy_writer_fenced",
             "SQLite is canonical; this legacy writer command is fenced",
         )
+    if args.command == "service-run":
+        return PersistentSupervisor(
+            _state_root(),
+            callsign=args.shotcaller,
+            lease_seconds=args.lease_seconds,
+            renew_seconds=args.renew_seconds,
+        ).run()
+    if args.command == "service-status":
+        _emit(supervisor_status(_state_root(), args.shotcaller))
+        return 0
+    if args.command == "service-stop":
+        _emit(stop_supervisor(_state_root(), args.shotcaller))
+        return 0
     payload = _payload() if args.command.endswith("-hook") else {}
+    if args.command in {
+        "codex-stop-hook",
+        "codex-user-prompt-hook",
+        "cursor-before-submit-hook",
+    }:
+        try:
+            response = _broker_hook(args, payload)
+        except (SupervisorUnavailable, StorageRefusal):
+            pass
+        else:
+            _emit(response["hook_output"])
+            return 0
     try:
         store_context = SQLiteStorage(
             _state_root(),
@@ -653,7 +784,7 @@ def main(argv: list[str] | None = None) -> int:
         actor_role = None if actor is None else str(actor[2])
         scope = None if actor is None else _scope(store, actor_id, callsign)
         if args.command in {"codex-user-prompt-hook", "cursor-before-submit-hook"}:
-            _capture_prompt(
+            captured = _capture_prompt(
                 store,
                 scope,
                 actor_id,
@@ -663,6 +794,13 @@ def main(argv: list[str] | None = None) -> int:
                     "codex" if args.command == "codex-user-prompt-hook" else "cursor"
                 ),
             )
+            if (
+                actor_role == "shotcaller"
+                and actor_id is not None
+                and captured.get("prompt_id")
+                and not captured.get("idempotent", False)
+            ):
+                notify_user_message(store, actor_id, str(captured["prompt_id"]))
             _emit({})
             return 0
         if actor is None:
@@ -722,7 +860,11 @@ def main(argv: list[str] | None = None) -> int:
             if args.command == "cursor-stop-hook":
                 _emit({"followup_message": "League has unresolved obligations."} if blocked else {})
             else:
-                reason = _codex_stop_reason(callsign, result["wait_generation"])
+                reason = _codex_stop_reason(
+                    callsign,
+                    result["wait_generation"],
+                    tuple(result.get("unresolved_summaries", ())),
+                )
                 _emit(
                     {"decision": "block", "reason": reason}
                     if blocked

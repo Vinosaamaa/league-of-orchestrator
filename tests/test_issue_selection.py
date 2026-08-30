@@ -19,10 +19,12 @@ from league.issue_first import (  # noqa: E402
     GitHubIssueSelectionService,
     IssueSelectionSpec,
     build_issue_receipt,
+    validate_issue_receipt,
 )
 from league.request_services import AssignmentService, AssignmentSpec  # noqa: E402
 from league.sqlite_store import SQLiteStorage  # noqa: E402
 from league.storage import StorageRefusal  # noqa: E402
+from league.storage_mode import SettleModeActionCommand  # noqa: E402
 from lifecycle_fakes import FakeIds, FakeLaunchAdapter  # noqa: E402
 from request_lifecycle_fixture import (  # noqa: E402
     GAREN_RUNTIME,
@@ -104,7 +106,7 @@ class FakeGitHubRunner:
         return subprocess.CompletedProcess(command, 0, json.dumps(payload), "")
 
 
-def _spec(task_id: str, *, task_summary: str = "Fix duplicate issue selection") -> IssueSelectionSpec:
+def _spec(task_id: str, *, task_summary: str = TITLE) -> IssueSelectionSpec:
     return IssueSelectionSpec(
         task_id=task_id,
         task_summary=task_summary,
@@ -178,21 +180,23 @@ def _authorize_reopen(
     runner.reopened.append(issue)
     result_digest = "e" * 64
     settled = store.settle_mode_action(
-        action["action_use_id"],
-        action["goal_id"],
-        2,
-        used["use_receipt_digest"],
-        "succeeded",
-        result_digest,
-        None,
-        "2026-01-01T00:11:00Z",
+        SettleModeActionCommand(
+            action_use_id=action["action_use_id"],
+            goal_id=action["goal_id"],
+            expected_goal_version=2,
+            use_receipt_digest=used["use_receipt_digest"],
+            outcome="succeeded",
+            result_receipt_digest=result_digest,
+            failure_class=None,
+            at="2026-01-01T00:11:00Z",
+        )
     )
     assert settled["state"] == "succeeded"
     return result_digest
 
 
 def test_open_match_reuse_and_distinct_scope_creation(root: Path) -> None:
-    state, store, _ = create_context(root, "open-distinct")
+    state, store, clock = create_context(root, "open-distinct")
     runner = FakeGitHubRunner(
         [
             _issue(216, state="open", title="  PREVENT duplicate implementation issues!!  "),
@@ -211,6 +215,36 @@ def test_open_match_reuse_and_distinct_scope_creation(root: Path) -> None:
     assert exact_retry["idempotent"] is True
     assert exact_retry["receipt_digest"] == reused["receipt_digest"]
     assert len(runner.calls) == calls_after_selection
+
+    capture_p100(store, clock)
+    store.claim_request("R3", GAREN_RUNTIME, "claim-r3", clock.after(120), clock.now())
+    dispatch_request(
+        store, clock, "R3", "claim-r3", "dispatch-r3", "repository-write", "champion"
+    )
+    assignment_spec = AssignmentSpec(
+        assignment_id="assignment:reuse",
+        request_id="R3",
+        claim_token="claim-r3",
+        task_id="task:reuse",
+        task_summary=TITLE,
+        coordinator_agent_id=SHOTCALLER_ID,
+        champion_agent_id=LUX_ID,
+        repository=REPOSITORY,
+        issue=216,
+        branch="agent/synthetic/216-reuse",
+        worktree="/synthetic/worktrees/216-reuse",
+        issue_receipt=None,
+    )
+    issue_receipt = build_issue_receipt(
+        assignment_spec,
+        runner.issues[0],
+        AT,
+        selection_receipt_digest=reused["receipt_digest"],
+    )
+    active = AssignmentService(store, FakeLaunchAdapter(), clock, FakeIds()).assign(
+        replace(assignment_spec, issue_receipt=issue_receipt)
+    )
+    assert active["state"] == "active"
 
     distinct_body = BODY.replace(
         "Prevent duplicate implementation issues before Champion assignment.",
@@ -264,6 +298,26 @@ def test_issue_creation_validates_final_public_bytes_before_search(root: Path) -
     store.close()
 
 
+def test_selection_refuses_title_different_from_task_before_github_or_lease(root: Path) -> None:
+    _, store, _ = create_context(root, "title-mismatch")
+    runner = FakeGitHubRunner([])
+    try:
+        GitHubIssueSelectionService(store, runner).select(
+            _spec("task:title-mismatch", task_summary="Different task title"),
+            "attempt:title-mismatch",
+            AT,
+        )
+    except StorageRefusal as exc:
+        assert exc.code == "issue_title_mismatch"
+    else:
+        raise AssertionError("issue selection accepted a title different from the task")
+    assert runner.calls == []
+    assert store.connection.execute(
+        "SELECT COUNT(*) FROM repository_issue_selection_leases"
+    ).fetchone()[0] == 0
+    store.close()
+
+
 def test_closed_match_reopen_preserves_prior_champion_linkage(root: Path) -> None:
     state, store, clock = create_context(root, "closed-reopen")
     capture_p100(store, clock)
@@ -279,7 +333,7 @@ def test_closed_match_reopen_preserves_prior_champion_linkage(root: Path) -> Non
         request_id="R3",
         claim_token="claim-r3",
         task_id="task:prior",
-        task_summary="Fix duplicate issue selection",
+        task_summary=TITLE,
         coordinator_agent_id=SHOTCALLER_ID,
         champion_agent_id=LUX_ID,
         callsign="Lux",
@@ -287,6 +341,7 @@ def test_closed_match_reopen_preserves_prior_champion_linkage(root: Path) -> Non
         issue=216,
         branch="agent/synthetic/216",
         worktree="/synthetic/worktrees/216",
+        issue_receipt=None,
     )
     issue_receipt = build_issue_receipt(
         assignment_spec,
@@ -294,6 +349,34 @@ def test_closed_match_reopen_preserves_prior_champion_linkage(root: Path) -> Non
         AT,
         selection_receipt_digest=prior_selection["receipt_digest"],
     )
+    tampered_url = dict(issue_receipt)
+    tampered_url["issue_url"] = "https://github.com/example/job-journey/issues/999"
+    unsigned = dict(tampered_url)
+    unsigned.pop("receipt_digest")
+    tampered_url["receipt_digest"] = __import__("hashlib").sha256(
+        json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    try:
+        validate_issue_receipt(tampered_url)
+    except StorageRefusal as exc:
+        assert exc.code == "issue_receipt_invalid"
+    else:
+        raise AssertionError("issue receipt accepted a changed canonical URL")
+    tampered_title = dict(issue_receipt)
+    tampered_title["issue_title"] = issue_receipt["issue_title"].upper()
+    unsigned = dict(tampered_title)
+    unsigned.pop("receipt_digest")
+    tampered_title["receipt_digest"] = __import__("hashlib").sha256(
+        json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    try:
+        AssignmentService(store, FakeLaunchAdapter(), clock, FakeIds()).assign(
+            replace(assignment_spec, issue_receipt=tampered_title)
+        )
+    except StorageRefusal as exc:
+        assert exc.code == "issue_selection_unproven"
+    else:
+        raise AssertionError("assignment accepted a title differing from its selection receipt")
     active = AssignmentService(store, FakeLaunchAdapter(), clock, FakeIds()).assign(
         replace(assignment_spec, issue_receipt=issue_receipt)
     )
@@ -371,13 +454,50 @@ def test_concurrent_distinct_selection_creates_exactly_one_issue(root: Path) -> 
     assert retried["issue"] == first[0]["issue"] and runner.created == 1
 
 
+def test_read_only_exact_issue_selection_never_creates(root: Path) -> None:
+    _, store, _ = create_context(root, "read-only-selection")
+    runner = FakeGitHubRunner([_issue(216, state="open")])
+    selected = GitHubIssueSelectionService(store, runner).select(
+        _spec("task:read-only"),
+        "attempt:read-only",
+        AT,
+        allow_create=False,
+        expected_issue=216,
+    )
+    assert selected["decision"] == "reuse_open"
+    assert selected["issue"] == 216 and runner.created == 0
+    store.close()
+
+    _, missing_store, _ = create_context(root, "read-only-missing")
+    missing_runner = FakeGitHubRunner([])
+    try:
+        GitHubIssueSelectionService(missing_store, missing_runner).select(
+            _spec("task:read-only-missing"),
+            "attempt:read-only-missing",
+            AT,
+            allow_create=False,
+            expected_issue=216,
+        )
+    except StorageRefusal as exc:
+        assert exc.code == "issue_selection_no_match"
+    else:
+        raise AssertionError("read-only issue selection created a missing issue")
+    assert missing_runner.created == 0
+    assert missing_store.connection.execute(
+        "SELECT state FROM repository_issue_selection_leases"
+    ).fetchone()[0] == "available"
+    missing_store.close()
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="league-issue-selection-") as temporary:
         root = Path(temporary)
         test_open_match_reuse_and_distinct_scope_creation(root)
         test_issue_creation_validates_final_public_bytes_before_search(root)
+        test_selection_refuses_title_different_from_task_before_github_or_lease(root)
         test_closed_match_reopen_preserves_prior_champion_linkage(root)
         test_concurrent_distinct_selection_creates_exactly_one_issue(root)
+        test_read_only_exact_issue_selection_never_creates(root)
     print("PASS: duplicate preflight reuses, reopens with linkage, creates only distinct scope, and serializes concurrency")
 
 

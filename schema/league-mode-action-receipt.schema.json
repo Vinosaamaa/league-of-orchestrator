@@ -18,7 +18,17 @@
     "goal_state": {"type": "string", "minLength": 1},
     "goal_version": {"type": "integer", "minimum": 1},
     "idempotent": {"type": "boolean"},
-    "repair": {"type": ["object", "null"]}
+    "repair": {
+      "type": ["object", "null"],
+      "required": ["repair_id", "state", "attempts_used", "max_attempts"],
+      "properties": {
+        "repair_id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "state": {"enum": ["pending", "in_progress", "completed", "blocked"]},
+        "attempts_used": {"type": "integer", "minimum": 0},
+        "max_attempts": {"type": "integer", "minimum": 1}
+      },
+      "additionalProperties": false
+    }
   },
   "additionalProperties": false
 }

@@ -19,7 +19,7 @@ from league.request_services import (  # noqa: E402
     LaunchAdapterError,
 )
 from league.storage import PrepareAssignmentCommand, StorageRefusal  # noqa: E402
-from lifecycle_fakes import FakeIds, FakeLaunchAdapter  # noqa: E402
+from lifecycle_fakes import FakeIds, FakeLaunchAdapter, issue_bound_spec  # noqa: E402
 from request_lifecycle_fixture import (  # noqa: E402
     GAREN_RUNTIME,
     LUX_ID,
@@ -45,6 +45,7 @@ def spec(claim: str, *, suffix: str = "one") -> AssignmentSpec:
         issue=17,
         branch=f"agent/synthetic/{suffix}",
         worktree=f"/synthetic/worktrees/{suffix}",
+        issue_receipt=None,
     )
 
 
@@ -137,7 +138,17 @@ def test_durable_work_kinds_cannot_hide_implementation_ownership(root: Path) -> 
 
 
 def test_cli_prepare_cannot_bypass_owner_issue_verification(root: Path) -> None:
-    state, store, _ = create_context(root, "prepare-issue-bypass")
+    state, store, clock = create_context(root, "prepare-issue-bypass")
+    adapter = FakeLaunchAdapter()
+    try:
+        AssignmentService(store, adapter, clock, FakeIds()).assign(
+            spec("claim:missing", suffix="service-bypass")
+        )
+    except StorageRefusal as exc:
+        assert exc.code == "issue_verification_required"
+    else:
+        raise AssertionError("AssignmentService accepted missing issue evidence")
+    assert adapter.calls == []
     store.close()
     refusal = invoke_cli(
         state,
@@ -186,7 +197,8 @@ def test_exact_receipt_activation_and_atomic_rollback(root: Path) -> None:
     store, clock = champion_context(root, "exact-receipt")
     ids = FakeIds()
     adapter = FakeLaunchAdapter()
-    active = AssignmentService(store, adapter, clock, ids).assign(spec("claim-r3"))
+    bound = issue_bound_spec(store, spec("claim-r3"), clock.now())
+    active = AssignmentService(store, adapter, clock, ids).assign(bound)
     assert active["state"] == "active" and len(adapter.calls) == 1
     assignment = store.connection.execute(
         "SELECT state,acceptance_receipt_json,runtime_instance_id FROM task_assignments WHERE task_assignment_id=?",
@@ -197,7 +209,7 @@ def test_exact_receipt_activation_and_atomic_rollback(root: Path) -> None:
     committed_retry = store.activate_assignment(
         active["assignment_id"],
         active["version"],
-        adapter.launch(spec("claim-r3")),
+        adapter.launch(bound),
         "ignored-event-retry",
         "ignored-outbox-retry",
         clock.now(),
@@ -246,9 +258,8 @@ def test_receipt_mismatch_creates_cleanup_pending(root: Path) -> None:
             receipt["worktree"] = "/synthetic/wrong-worktree"
             return receipt
 
-    outcome = AssignmentService(store, MismatchAdapter(), clock, FakeIds()).assign(
-        spec("claim-r3", suffix="mismatch")
-    )
+    bound = issue_bound_spec(store, spec("claim-r3", suffix="mismatch"), clock.now())
+    outcome = AssignmentService(store, MismatchAdapter(), clock, FakeIds()).assign(bound)
     assert outcome["state"] == "cleanup_pending"
     assignment = store.connection.execute(
         "SELECT state,failure_class FROM task_assignments WHERE task_assignment_id='assignment:mismatch'"
@@ -267,9 +278,8 @@ def test_partial_launch_preserves_cleanup_pending(root: Path) -> None:
             "synthetic_partial_launch", cleanup_required=True, cleanup_proven=False
         )
     )
-    pending = AssignmentService(store, failure, clock, FakeIds()).assign(
-        spec("claim-r3", suffix="cleanup")
-    )
+    bound = issue_bound_spec(store, spec("claim-r3", suffix="cleanup"), clock.now())
+    pending = AssignmentService(store, failure, clock, FakeIds()).assign(bound)
     assert pending["state"] == "cleanup_pending"
     assert store.connection.execute(
         "SELECT cleanup_state FROM cleanup_obligations WHERE task_id='task:cleanup'"
@@ -287,9 +297,10 @@ def test_unwrapped_adapter_failure_cannot_strand_launching(root: Path) -> None:
         def launch(self, assignment_spec):
             raise RuntimeError("synthetic adapter failure")
 
+    bound = issue_bound_spec(store, spec("claim-r3", suffix="operational"), clock.now())
     outcome = AssignmentService(
         store, OperationalFailureAdapter(), clock, FakeIds()
-    ).assign(spec("claim-r3", suffix="operational"))
+    ).assign(bound)
     assert outcome["state"] == "cleanup_pending"
     assignment = store.connection.execute(
         "SELECT state,failure_class FROM task_assignments WHERE task_assignment_id='assignment:operational'"
@@ -300,7 +311,7 @@ def test_unwrapped_adapter_failure_cannot_strand_launching(root: Path) -> None:
 
 def test_assignment_retry_compares_complete_launch_identity(root: Path) -> None:
     store, clock = champion_context(root, "assignment-retry-identity")
-    base = spec("claim-r3", suffix="identity")
+    base = issue_bound_spec(store, spec("claim-r3", suffix="identity"), clock.now())
     command = PrepareAssignmentCommand(
         **{key: value for key, value in vars(base).items() if key != "callsign"},
         at=clock.now(),
@@ -327,9 +338,8 @@ def test_assignment_retry_compares_complete_launch_identity(root: Path) -> None:
 
 def test_task_transition_matrix_refuses_illegal_and_terminal_progression(root: Path) -> None:
     store, clock = champion_context(root, "task-transition-matrix")
-    active = AssignmentService(store, FakeLaunchAdapter(), clock, FakeIds()).assign(
-        spec("claim-r3", suffix="matrix")
-    )
+    bound = issue_bound_spec(store, spec("claim-r3", suffix="matrix"), clock.now())
+    active = AssignmentService(store, FakeLaunchAdapter(), clock, FakeIds()).assign(bound)
     try:
         store.transition_task(
             active["task_id"],

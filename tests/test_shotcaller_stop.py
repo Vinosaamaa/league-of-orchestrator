@@ -19,6 +19,8 @@ from request_lifecycle_fixture import (  # noqa: E402
     dispatch_request,
 )
 from league.storage import OutboxDispatchIdentity, PrepareAssignmentCommand  # noqa: E402
+from league.request_services import AssignmentSpec  # noqa: E402
+from lifecycle_fakes import issue_bound_spec  # noqa: E402
 from storage_fixture import CHAMPION_ID, REPOSITORY, SHOTCALLER_ID  # noqa: E402
 
 
@@ -47,8 +49,9 @@ def add_combined_obligations(store, clock) -> None:
         "repository-write",
         "champion",
     )
-    store.prepare_assignment(
-        PrepareAssignmentCommand(
+    bound = issue_bound_spec(
+        store,
+        AssignmentSpec(
             assignment_id="assignment:pending",
             request_id="R3",
             claim_token="claim-r3",
@@ -60,6 +63,13 @@ def add_combined_obligations(store, clock) -> None:
             issue=17,
             branch="agent/synthetic/pending",
             worktree="/synthetic/worktrees/pending",
+            issue_receipt=None,
+        ),
+        clock.now(),
+    )
+    store.prepare_assignment(
+        PrepareAssignmentCommand(
+            **{key: value for key, value in vars(bound).items() if key != "callsign"},
             at=clock.now(),
         )
     )

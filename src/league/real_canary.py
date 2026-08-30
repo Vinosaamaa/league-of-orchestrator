@@ -14,16 +14,21 @@ import os
 import re
 import subprocess
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from .acceptance import NAMESPACE_PATTERN, _atomic_write, _sha256, _stable_bytes, _write_json
 from .orchestration import OrchestrationSignals
+from .issue_first import (
+    GitHubIssueSelectionService,
+    GitHubIssueVerifier,
+    IssueSelectionSpec,
+)
 from .precutover import (
     CHAMPION_ID,
     LIFECYCLE_TASK_ID,
     SHOTCALLER_ID,
-    SYNTHETIC_REPOSITORY,
     _Clock,
     _DeliveryDouble,
     _Ids,
@@ -62,6 +67,7 @@ REPORT_MERGE_COMMIT = "3c517535b6cf4423bd6704b06d30f2e3cc299784"
 REPORT_MERGED_AT = "2026-08-29T02:49:40Z"
 REPORT_BRANCH = "agent/braum/39-overnight-report"
 REPORT_PATH = "docs/reports/2026-08-28-overnight-delivery-report.md"
+CANARY_ISSUE_REPOSITORY = "https://github.com/Vinosaamaa/league-of-orchestrator.git"
 CODEX_SESSION_TITLE = re.compile(
     r"^(?P<session>[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}) \| codex$"
 )
@@ -103,6 +109,83 @@ def _run(
             "real_canary_command_failed", "a bounded real-canary command refused or failed"
         )
     return result
+
+
+class _OwnerApiRunner:
+    def __init__(self, cwd: Path) -> None:
+        self.cwd = cwd
+
+    def run(
+        self, arguments: Sequence[str], *, timeout_seconds: int = 30
+    ) -> subprocess.CompletedProcess[str]:
+        return _run(
+            arguments,
+            cwd=self.cwd,
+            timeout=timeout_seconds,
+            allowed=frozenset(range(256)),
+        )
+
+
+def _owner_verified_issue_spec(
+    store: SQLiteStorage, cwd: Path, spec: AssignmentSpec, at: str
+) -> AssignmentSpec:
+    runner = _OwnerApiRunner(cwd)
+    observed = runner.run(
+        (
+            "gh",
+            "api",
+            "--method",
+            "GET",
+            "repos/Vinosaamaa/league-of-orchestrator/issues/23",
+        ),
+        timeout_seconds=30,
+    )
+    if observed.returncode != 0:
+        raise StorageRefusal(
+            "real_canary_issue_unverified",
+            "the owner API did not return canary issue 23",
+        )
+    try:
+        issue = json.loads(observed.stdout)
+    except json.JSONDecodeError as exc:
+        raise StorageRefusal(
+            "real_canary_issue_unverified",
+            "the owner API returned malformed issue evidence",
+        ) from exc
+    if (
+        not isinstance(issue, dict)
+        or not isinstance(issue.get("title"), str)
+        or not isinstance(issue.get("body"), str)
+    ):
+        raise StorageRefusal(
+            "real_canary_issue_unverified",
+            "the owner API returned incomplete issue evidence",
+        )
+    exact_spec = replace(spec, task_summary=issue["title"])
+    selected = GitHubIssueSelectionService(store, runner).select(
+        IssueSelectionSpec(
+            task_id=exact_spec.task_id,
+            task_summary=exact_spec.task_summary,
+            coordinator_agent_id=exact_spec.coordinator_agent_id,
+            repository=exact_spec.repository,
+            issue_title=issue["title"],
+            issue_body=issue["body"],
+        ),
+        f"attempt:{exact_spec.task_id}",
+        at,
+        allow_create=False,
+        expected_issue=exact_spec.issue,
+    )
+    if int(selected["issue"]) != exact_spec.issue:
+        raise StorageRefusal(
+            "real_canary_issue_unverified",
+            "duplicate preflight selected a different issue",
+        )
+    receipt = GitHubIssueVerifier(
+        runner,
+        selection_receipt_digest=selected["receipt_digest"],
+    ).verify(exact_spec, at)
+    return replace(exact_spec, issue_receipt=receipt)
 
 
 def _json_result(result: subprocess.CompletedProcess[str], label: str) -> dict[str, Any]:
@@ -654,8 +737,7 @@ def _setup_sqlite(
                 orchestration=OrchestrationSignals(False, False, False, 0, 0),
             )
         )
-        assignment = AssignmentService(store, _RealLaunchReceipt(herdr), clock, ids).assign(
-            AssignmentSpec(
+        assignment_spec = AssignmentSpec(
                 assignment_id="assignment:real-cleanup-canary",
                 request_id="request:real-cleanup-canary",
                 claim_token="claim:real-cleanup-canary",
@@ -664,11 +746,14 @@ def _setup_sqlite(
                 coordinator_agent_id=SHOTCALLER_ID,
                 champion_agent_id=CHAMPION_ID,
                 callsign="Lux",
-                repository=SYNTHETIC_REPOSITORY,
+                repository=CANARY_ISSUE_REPOSITORY,
                 issue=23,
                 branch=git["branch"],
                 worktree=git["worktree"],
+                issue_receipt=None,
             )
+        assignment = AssignmentService(store, _RealLaunchReceipt(herdr), clock, ids).assign(
+            _owner_verified_issue_spec(store, worktree, assignment_spec, clock.now())
         )
         if assignment.get("state") != "active":
             raise StorageRefusal("real_canary_assignment_failed", "real Codex assignment did not activate")

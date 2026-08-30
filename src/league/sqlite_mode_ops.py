@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from typing import Any, Mapping, Sequence
 
 from .sqlite_project_ops import canonical_repository
+from .storage_mode import SettleModeActionCommand
 from .storage_types import StorageRefusal
 
 
@@ -196,16 +197,19 @@ def _grant_record(row: sqlite3.Row) -> dict[str, Any]:
 
 def _usage(store: Any, goal_id: str) -> dict[str, int]:
     row = store.connection.execute(
-        """
-        SELECT COALESCE(SUM(attempt_count),0),
-               COALESCE(SUM(cost_microunits),0),
-               COALESCE(SUM(changed_files),0),
-               COALESCE(SUM(duration_seconds),0),
-               COALESCE(SUM(CASE WHEN state='in_progress' THEN 1 ELSE 0 END),0)
-          FROM autonomous_action_uses WHERE goal_id=?
-        """,
+        """SELECT attempts_used,cost_microunits_used,changed_files_used,
+                  duration_seconds_used,in_progress_actions
+             FROM delivery_goals WHERE goal_id=?""",
         (goal_id,),
     ).fetchone()
+    if row is None:
+        return {
+            "attempts": 0,
+            "cost_microunits": 0,
+            "changed_files": 0,
+            "duration_seconds": 0,
+            "concurrency": 0,
+        }
     return {
         "attempts": int(row[0]),
         "cost_microunits": int(row[1]),
@@ -334,8 +338,10 @@ def authorize_mode(
                 store.connection.execute(
                     """
                     INSERT INTO delivery_goals
-                      (goal_id,active_grant_id,state,next_irreversible_action,version,created_at,updated_at)
-                    VALUES(?,?,?, ?,1,?,?)
+                      (goal_id,active_grant_id,state,next_irreversible_action,
+                       attempts_used,cost_microunits_used,changed_files_used,
+                       duration_seconds_used,in_progress_actions,version,created_at,updated_at)
+                    VALUES(?,?,?, ?,0,0,0,0,0,1,?,?)
                     """,
                     (
                         grant["goal_id"], grant["grant_id"],
@@ -630,14 +636,9 @@ def use_mode_action(
             _assert_limits(store, action["goal_id"], grant, action)
             repair = None
             if action["action_kind"] == "repair":
-                repair = store.connection.execute(
-                    """
-                    SELECT * FROM autonomous_repair_obligations
-                     WHERE goal_id=? AND state IN ('pending','blocked')
-                     ORDER BY created_at DESC LIMIT 1
-                    """,
-                    (action["goal_id"],),
-                ).fetchone()
+                repair = _latest_repair(
+                    store, action["goal_id"], ("pending", "blocked")
+                )
                 if repair is None or repair["state"] != "pending" or int(repair["attempts_used"]) >= int(repair["max_attempts"]):
                     raise StorageRefusal("repair_limit_exceeded", "no bounded repair attempt remains")
             next_state = ACTION_GOAL_STATES.get(action["action_kind"], goal["state"])
@@ -645,12 +646,22 @@ def use_mode_action(
             updated = store.connection.execute(
                 """
                 UPDATE delivery_goals
-                   SET state=?,next_irreversible_action=?,version=?,updated_at=?
+                   SET state=?,next_irreversible_action=?,
+                       attempts_used=attempts_used+?,
+                       cost_microunits_used=cost_microunits_used+?,
+                       changed_files_used=changed_files_used+?,
+                       duration_seconds_used=duration_seconds_used+?,
+                       in_progress_actions=in_progress_actions+1,
+                       version=?,updated_at=?
                  WHERE goal_id=? AND version=?
                 """,
                 (
                     next_state,
                     f"settle:{action['action_use_id']}",
+                    action["usage"]["attempts"],
+                    action["usage"]["cost_microunits"],
+                    action["usage"]["changed_files"],
+                    action["usage"]["duration_seconds"],
                     next_version,
                     at,
                     action["goal_id"],
@@ -713,17 +724,33 @@ def _repair_record(row: sqlite3.Row | None) -> dict[str, Any] | None:
     }
 
 
-def settle_mode_action(
-    store: Any,
-    action_use_id: str,
-    goal_id: str,
-    expected_goal_version: int,
-    use_receipt_digest: str,
-    outcome: str,
-    result_receipt_digest: str,
-    failure_class: str | None,
-    at: str,
-) -> dict[str, Any]:
+def _latest_repair(
+    store: Any, goal_id: str, states: Sequence[str] = ()
+) -> sqlite3.Row | None:
+    if states:
+        placeholders = ",".join("?" for _ in states)
+        return store.connection.execute(
+            f"""SELECT * FROM autonomous_repair_obligations
+                  WHERE goal_id=? AND state IN ({placeholders})
+                  ORDER BY created_at DESC LIMIT 1""",
+            (goal_id, *states),
+        ).fetchone()
+    return store.connection.execute(
+        """SELECT * FROM autonomous_repair_obligations
+              WHERE goal_id=? ORDER BY created_at DESC LIMIT 1""",
+        (goal_id,),
+    ).fetchone()
+
+
+def settle_mode_action(store: Any, command: SettleModeActionCommand) -> dict[str, Any]:
+    action_use_id = command.action_use_id
+    goal_id = command.goal_id
+    expected_goal_version = command.expected_goal_version
+    use_receipt_digest = command.use_receipt_digest
+    outcome = command.outcome
+    result_receipt_digest = command.result_receipt_digest
+    failure_class = command.failure_class
+    at = command.at
     _token(action_use_id, "action use id")
     _token(goal_id, "goal id")
     _time(at, "action settlement time")
@@ -769,13 +796,7 @@ def settle_mode_action(
             repair = None
             if outcome == "failed":
                 if action["action_kind"] == "repair":
-                    repair = store.connection.execute(
-                        """
-                        SELECT * FROM autonomous_repair_obligations
-                         WHERE goal_id=? AND state='in_progress' ORDER BY created_at DESC LIMIT 1
-                        """,
-                        (goal_id,),
-                    ).fetchone()
+                    repair = _latest_repair(store, goal_id, ("in_progress",))
                     if repair is None:
                         raise StorageRefusal("repair_state_conflict", "repair action has no in-progress obligation")
                     repair_state = (
@@ -827,13 +848,7 @@ def settle_mode_action(
                 elif action["action_kind"] == "cleanup":
                     next_state, next_action = "cleaned", "none"
                 elif action["action_kind"] == "repair":
-                    repair = store.connection.execute(
-                        """
-                        SELECT * FROM autonomous_repair_obligations
-                         WHERE goal_id=? AND state='in_progress' ORDER BY created_at DESC LIMIT 1
-                        """,
-                        (goal_id,),
-                    ).fetchone()
+                    repair = _latest_repair(store, goal_id, ("in_progress",))
                     if repair is None:
                         raise StorageRefusal("repair_state_conflict", "repair action has no in-progress obligation")
                     store.connection.execute(
@@ -861,7 +876,9 @@ def settle_mode_action(
             updated = store.connection.execute(
                 """
                 UPDATE delivery_goals
-                   SET state=?,next_irreversible_action=?,version=?,updated_at=?
+                   SET state=?,next_irreversible_action=?,
+                       in_progress_actions=in_progress_actions-1,
+                       version=?,updated_at=?
                  WHERE goal_id=? AND version=?
                 """,
                 (next_state, next_action, next_version, at, goal_id, expected_goal_version),
@@ -874,13 +891,7 @@ def settle_mode_action(
             goal = store.connection.execute(
                 "SELECT * FROM delivery_goals WHERE goal_id=?", (goal_id,)
             ).fetchone()
-            repair = store.connection.execute(
-                """
-                SELECT * FROM autonomous_repair_obligations
-                 WHERE goal_id=? ORDER BY created_at DESC LIMIT 1
-                """,
-                (goal_id,),
-            ).fetchone()
+            repair = _latest_repair(store, goal_id)
             assert action is not None and goal is not None
             result = _action_result(action, goal, idempotent=False)
             result["repair"] = _repair_record(repair)
@@ -967,6 +978,11 @@ def revoke_mode_grant(
             ).fetchone()
             if grant is None:
                 raise StorageRefusal("grant_unknown", "grant does not exist")
+            if revoked_by != grant["issuer_id"]:
+                raise StorageRefusal(
+                    "grant_revoker_refused",
+                    "only the Summoner identity recorded by the grant may revoke it",
+                )
             if existing is not None:
                 if existing["receipt_digest"] != receipt_digest:
                     raise StorageRefusal("grant_revocation_conflict", "grant was revoked differently")

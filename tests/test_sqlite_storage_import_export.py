@@ -164,6 +164,18 @@ def test_complete_dry_run_apply_and_round_trip(root: Path) -> None:
             source, fixture["manifest"], target_counts=store.import_target_counts()
         )
         report = plan["report"]
+        autonomous_tables = {
+            "authorization_grants",
+            "delivery_goals",
+            "authorization_revocations",
+            "autonomous_action_uses",
+            "autonomous_repair_obligations",
+            "repository_issue_selection_leases",
+            "repository_issue_selection_receipts",
+            "repository_issue_bindings",
+        }
+        assert autonomous_tables <= set(plan["rows"])
+        assert all(plan["rows"][table] == [] for table in autonomous_tables)
         assert report["schema"] == "league.import-report.v1"
         assert report["target_schema_version"] == CURRENT_SCHEMA_VERSION
         assert plan["target_schema_version"] == CURRENT_SCHEMA_VERSION

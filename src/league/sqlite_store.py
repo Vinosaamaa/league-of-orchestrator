@@ -167,6 +167,7 @@ from .sqlite_rollover_snapshot_schema import (
 from .sqlite_autonomous_schema import MIGRATION_NAME as AUTONOMOUS_MIGRATION_NAME
 from .sqlite_autonomous_schema import STATEMENTS as AUTONOMOUS_MIGRATION_STATEMENTS
 from .storage_issue import BeginIssueSelectionCommand, CompleteIssueSelectionCommand
+from .storage_mode import SettleModeActionCommand
 
 
 WAL_MINIMUM = (3, 51, 3)
@@ -1335,6 +1336,57 @@ _IMPORT_COLUMNS: dict[str, tuple[str, ...]] = {
         "from_inclusive", "scope_kind", "scope_id", "event_watermark", "source_watermark", "created_at",
         "spec_hash", "content_hash", "fact_count",
     ),
+    "authorization_grants": (
+        "grant_id", "goal_id", "revision", "issuer_kind", "issuer_id",
+        "shotcaller_agent_id", "exact_goal", "scope_json", "allowed_actions_json",
+        "exclusions_json", "sensitive_inclusions_json", "resource_boundary_json",
+        "starts_at", "expires_at", "limits_json", "canonical_digest", "version",
+        "created_at",
+    ),
+    "delivery_goals": (
+        "goal_id", "active_grant_id", "state", "next_irreversible_action",
+        "attempts_used", "cost_microunits_used", "changed_files_used",
+        "duration_seconds_used", "in_progress_actions", "version", "created_at",
+        "updated_at",
+    ),
+    "authorization_revocations": (
+        "grant_id", "revoked_by", "reason", "revoked_at", "receipt_digest",
+    ),
+    "autonomous_action_uses": (
+        "action_use_id", "idempotency_key", "goal_id", "grant_id",
+        "grant_revision", "external_owner_agent_id", "action_kind",
+        "action_scope_json", "risk_categories_json", "sensitive_categories_json",
+        "resource_use_json", "attempt_count", "cost_microunits", "changed_files",
+        "duration_seconds", "state", "use_receipt_digest", "result_receipt_digest",
+        "failure_class", "started_at", "settled_at",
+    ),
+    "autonomous_repair_obligations": (
+        "repair_id", "goal_id", "failed_action_use_id", "state", "attempts_used",
+        "max_attempts", "failure_class", "version", "created_at", "updated_at",
+    ),
+    "repository_issue_selection_leases": (
+        "selection_key", "repository", "repository_key", "normalized_title",
+        "semantic_scope_digest", "state", "owner_attempt_id", "current_task_id",
+        "current_task_summary", "current_coordinator_agent_id", "lease_expires_at",
+        "version", "created_at", "updated_at",
+    ),
+    "repository_issue_selection_receipts": (
+        "selection_receipt_id", "selection_key", "selection_version", "task_id",
+        "task_summary", "coordinator_agent_id", "repository", "repository_key",
+        "normalized_title", "semantic_scope_digest", "decision", "issue",
+        "issue_url", "issue_state", "issue_title", "issue_body_digest",
+        "duplicate_matches", "prior_task_id", "prior_assignment_id",
+        "prior_champion_agent_id", "prior_runtime_instance_id", "prior_session_ref",
+        "reopen_action_receipt_digest", "task_scope_digest", "receipt_digest",
+        "created_at",
+    ),
+    "repository_issue_bindings": (
+        "task_id", "assignment_id", "request_id", "repository", "issue",
+        "issue_url", "issue_state", "issue_title", "issue_body_digest",
+        "task_scope_digest", "issue_selection_receipt_digest",
+        "reopen_action_receipt_digest", "verifier_kind", "verified_at",
+        "receipt_digest",
+    ),
 }
 
 _IMPORT_ORDER = tuple(_IMPORT_COLUMNS)
@@ -2041,28 +2093,8 @@ class SQLiteStorage(SQLiteTransactionCore):
             self, action, expected_goal_version, at
         )
 
-    def settle_mode_action(
-        self,
-        action_use_id: str,
-        goal_id: str,
-        expected_goal_version: int,
-        use_receipt_digest: str,
-        outcome: str,
-        result_receipt_digest: str,
-        failure_class: Optional[str],
-        at: str,
-    ) -> dict[str, Any]:
-        return sqlite_mode_ops.settle_mode_action(
-            self,
-            action_use_id,
-            goal_id,
-            expected_goal_version,
-            use_receipt_digest,
-            outcome,
-            result_receipt_digest,
-            failure_class,
-            at,
-        )
+    def settle_mode_action(self, command: SettleModeActionCommand) -> dict[str, Any]:
+        return sqlite_mode_ops.settle_mode_action(self, command)
 
     def transition_mode_goal(
         self, goal_id: str, expected_goal_version: int, state: str, at: str

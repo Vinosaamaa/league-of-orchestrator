@@ -107,8 +107,8 @@ def test_transactional_upgrade_backup_and_rollback(root: Path) -> None:
             "ix_thread_archives_issue",
             "ix_thread_incarnations_lineage",
             "ix_continuation_state",
-            "ix_grants_goal_revision",
             "ix_mode_actions_goal_state",
+            "ix_mode_actions_reopen_receipt",
             "ix_mode_repairs_goal_state",
             "ix_issue_selection_receipts_repository_issue",
             "ix_issue_bindings_repository_issue",
@@ -130,7 +130,7 @@ def test_transactional_upgrade_backup_and_rollback(root: Path) -> None:
             (15, "exact-stop-feedback-suppression", "5c7fed923ba5684c209350dab248d813fa313647229be2d373ff8cef78e91574"),
             (16, "issue-coupled-cleanup-and-exact-thread-continuation", "a7fee02de43dbbde897b67e44c00e37805bf82790917d2f5392be70e4143ef3f"),
             (17, "immutable-switched-rollover-snapshot-revisions", "69dabdd22e3a4d099eb574ff11833681188e53ccf0d6ac9d787d7ed1e9764b26"),
-            (18, "scoped-autonomous-delivery-and-issue-first-assignment", "11712fe17a52effa9ad34de1a0e40a43152b91e6ab53cde6ccad6e626f9dba60"),
+            (18, "scoped-autonomous-delivery-and-issue-first-assignment", "c27a13cfdd76f3548872cfaebe78bfe8e4a74b46a913b87ae70f4758a54230ab"),
         ]
         assert store.connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
 

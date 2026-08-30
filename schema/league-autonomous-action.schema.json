@@ -15,17 +15,21 @@
     "scope": {
       "type": "object",
       "required": ["project_id", "repository", "environment", "deployment_target"],
+      "anyOf": [
+        {"properties": {"project_id": {"type": "string", "minLength": 1}}},
+        {"properties": {"repository": {"type": "string", "minLength": 1}}}
+      ],
       "properties": {
-        "project_id": {"type": ["string", "null"]},
-        "repository": {"type": ["string", "null"]},
-        "environment": {"type": ["string", "null"]},
-        "deployment_target": {"type": ["string", "null"]}
+        "project_id": {"type": ["string", "null"], "maxLength": 256},
+        "repository": {"type": ["string", "null"], "maxLength": 256},
+        "environment": {"type": ["string", "null"], "maxLength": 256},
+        "deployment_target": {"type": ["string", "null"], "maxLength": 256}
       },
       "additionalProperties": false
     },
-    "risk_categories": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
-    "sensitive_categories": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
-    "resources": {"type": "object"},
+    "risk_categories": {"type": "array", "maxItems": 128, "items": {"type": "string", "minLength": 1, "maxLength": 256}, "uniqueItems": true},
+    "sensitive_categories": {"type": "array", "maxItems": 128, "items": {"type": "string", "minLength": 1, "maxLength": 256}, "uniqueItems": true},
+    "resources": {"$ref": "#/$defs/resourceObject"},
     "usage": {
       "type": "object",
       "required": ["attempts", "cost_microunits", "changed_files", "duration_seconds"],
@@ -36,6 +40,24 @@
         "duration_seconds": {"type": "integer", "minimum": 0}
       },
       "additionalProperties": false
+    }
+  },
+  "$defs": {
+    "resourceObject": {
+      "type": "object",
+      "maxProperties": 128,
+      "propertyNames": {"minLength": 1, "maxLength": 256},
+      "additionalProperties": {"$ref": "#/$defs/resourceValue"}
+    },
+    "resourceValue": {
+      "anyOf": [
+        {"type": "string", "maxLength": 4096},
+        {"type": "number"},
+        {"type": "boolean"},
+        {"type": "null"},
+        {"type": "array", "maxItems": 128, "items": {"$ref": "#/$defs/resourceValue"}},
+        {"$ref": "#/$defs/resourceObject"}
+      ]
     }
   },
   "additionalProperties": false

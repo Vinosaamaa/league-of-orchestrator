@@ -34,7 +34,7 @@ work as bounded direct or hidden work and rely on inconsistent signal input.
 
 ## Decisions
 
-Migration v16 adds immutable authorization grants, one exact delivery goal per
+Migration v18 adds immutable authorization grants, one exact delivery goal per
 active grant revision, separate revocation receipts, bounded external-action
 uses, repair obligations, and immutable repository-issue bindings. Scope changes
 create the next grant revision; an old grant remains evidence but cannot
@@ -51,14 +51,18 @@ assignment, Champion, runtime, and session linkage. A create that
 crashes before settlement is recovered by searching again after the lease,
 rather than issuing another create.
 
-`league mode authorize` accepts a strict `league.autonomous-grant.v1` document.
+`league mode authorize` accepts a strict
+[`league.autonomous-grant.v1`](../../schema/league-autonomous-grant.schema.json)
+document.
 It records issuer and Shotcaller identities, exact goal, project/repository,
 environment and deployment-target scope, allowed actions, exclusions,
 sensitive inclusions, resource boundary, start/expiry, limits, revision,
 version, and a canonical digest. Missing authority remains `manual` with goal
 state `awaiting_authority`.
 
-`league mode use` is the only autonomous external-action entrance. It validates
+`league mode use` accepts the strict
+[`league.autonomous-action.v1`](../../schema/league-autonomous-action.schema.json)
+document and is the only autonomous external-action entrance. It validates
 the active revision, Shotcaller owner, time window, exact scope, action list,
 exclusions, sensitive categories, nested resource boundary, and configured
 attempt, concurrency, cost, changed-file, and duration totals in one
@@ -69,8 +73,11 @@ deployment, verification, issue-reopen, or cleanup receipts.
 delivery success: it moves the goal to `repair_pending` and creates or advances
 one bounded repair obligation. Successful verification reaches `delivered`;
 successful cleanup reaches `cleaned`. `league mode transition` permits only
-checked non-external edges, and `league mode revoke` prevents every new use
-while retaining already-started action evidence.
+checked non-external edges, and `league mode revoke` accepts only the exact
+Summoner identity recorded by the immutable grant. Revocation prevents every
+new use while retaining already-started action evidence. Durable per-goal usage
+counters make limit checks constant-size while each action receipt remains the
+immutable audit source.
 
 Before the production `league assign run` path reserves a callsign, it proves
 the supplied selection digest from canonical SQLite and reads the
@@ -78,9 +85,17 @@ exact GitHub issue from the repository owner API. The issue must match the
 repository and number and record scope, acceptance, and authority boundaries.
 Only a public issue locator, title, body digest, canonical task-scope digest,
 state, verifier kind, and receipt digest enter SQLite; issue body bytes do not.
-The issue body, normalized title, semantic-scope digest, and canonical task
-scope must match the durable selection. Missing, unproven, wrong-repository,
-scope-mismatched, changed, and closed issues refuse.
+The storage boundary requires the receipt for every visible Champion caller and
+matches its exact repository, URL, title, task, selection receipt, and semantic
+scope before reservation. Isolated acceptance may use the explicit
+`synthetic-fixture` verifier only for reserved `.invalid` repositories; it is
+never owner-API or live-runtime proof.
+The canonical task summary and issue title must normalize to the same duplicate
+identity. The exact title bytes returned by the owner API must still equal the
+title stored by the durable selection receipt. The issue body,
+semantic-scope digest, and canonical task scope must also match. Missing,
+unproven, wrong-repository, title-mismatched, scope-mismatched, changed, and
+closed issues refuse.
 
 Direct answers and acknowledgements remain issue-free. A read-only check may be
 direct only when it is pre-bounded, answer-or-routing-only, at most five minutes
@@ -130,12 +145,15 @@ inside the same bounded read-only perimeter.
 
 ## Migration, rollback, and evidence
 
-Migration v16 is contiguous after v15 and uses the existing checksummed,
+Migration v18 is contiguous after v17 and uses the existing checksummed,
 transactional migration ledger. Upgrading an existing store still requires the
 normal verified pre-migration SQLite backup. The existing online-backup path
-copies and verifies v16 rows, and rollback exports include them as non-canonical
+copies and verifies v18 rows, and rollback exports include them as non-canonical
 records. Inspection exports redact exact goals, issuer identity, scope/resource
 details, action scope/risk/resource data, repair failures, and issue titles.
+The import registry includes every v18 authority, action, repair, selection, and
+binding table, so collision checks and atomic import table coverage cannot omit
+the autonomous-delivery slice.
 
 Focused synthetic tests use temporary SQLite roots and fake GitHub/Herdr
 adapters. They cover default manual status, grant retry/CAS, expiry, revocation,

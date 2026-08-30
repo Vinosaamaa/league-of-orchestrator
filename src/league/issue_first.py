@@ -183,6 +183,11 @@ def build_issue_receipt(
         r"[0-9a-f]{64}", selection_receipt_digest
     ):
         raise StorageRefusal("issue_selection_unproven", "issue selection receipt is invalid")
+    if normalize_issue_title(title) != normalize_issue_title(spec.task_summary):
+        raise StorageRefusal(
+            "issue_title_mismatch",
+            "repository issue title does not match the assigned task title",
+        )
     receipt = {
         "schema": ISSUE_RECEIPT_SCHEMA,
         "repository": spec.repository,
@@ -234,8 +239,21 @@ def validate_issue_receipt(receipt: Mapping[str, Any]) -> dict[str, Any]:
     issue = value.get("issue")
     if isinstance(issue, bool) or not isinstance(issue, int) or issue < 1:
         raise StorageRefusal("issue_receipt_invalid", "issue receipt number is invalid")
-    if value.get("issue_state") != "open" or value.get("verifier_kind") != "github-api":
+    verifier_kind = value.get("verifier_kind")
+    if value.get("issue_state") != "open" or verifier_kind not in {
+        "github-api",
+        "synthetic-fixture",
+    }:
         raise StorageRefusal("issue_receipt_invalid", "issue receipt state or verifier is invalid")
+    host = str(value["repository_key"]).partition("/")[0]
+    if verifier_kind == "synthetic-fixture" and not host.endswith(".invalid"):
+        raise StorageRefusal(
+            "issue_receipt_invalid",
+            "synthetic issue evidence is restricted to reserved invalid repositories",
+        )
+    expected_url = f"https://{value['repository_key']}/issues/{issue}"
+    if value.get("issue_url") != expected_url:
+        raise StorageRefusal("issue_receipt_invalid", "issue receipt URL is invalid")
     if not isinstance(value.get("issue_title"), str) or not value["issue_title"].strip():
         raise StorageRefusal("issue_receipt_invalid", "issue receipt title is invalid")
     if value.get("normalized_title") != normalize_issue_title(value["issue_title"]):
@@ -409,10 +427,25 @@ class GitHubIssueSelectionService:
         at: str,
         *,
         reopen_action_receipt_digest: str | None = None,
+        allow_create: bool = True,
+        expected_issue: int | None = None,
     ) -> dict[str, Any]:
+        if expected_issue is not None and (
+            isinstance(expected_issue, bool)
+            or not isinstance(expected_issue, int)
+            or expected_issue < 1
+        ):
+            raise StorageRefusal(
+                "issue_selection_invalid", "expected issue identity is invalid"
+            )
         owner, repository_name = _github_repository(spec.repository)
         repository_key = canonical_repository(spec.repository)[1]
         normalized_title = normalize_issue_title(spec.issue_title)
+        if normalized_title != normalize_issue_title(spec.task_summary):
+            raise StorageRefusal(
+                "issue_title_mismatch",
+                "issue selection title must match the assigned task title",
+            )
         _, scope_digest = _issue_body_contract(spec.issue_body)
         approved_urls = tuple(match.group(0).rstrip(".,);]") for match in URL.finditer(spec.issue_body))
         validate_final_rendered_payload(
@@ -476,6 +509,17 @@ class GitHubIssueSelectionService:
                 (candidate for candidate in equivalents if candidate["state"] == "closed"),
                 key=lambda candidate: candidate["number"],
             )
+            if expected_issue is not None:
+                open_matches = [
+                    candidate
+                    for candidate in open_matches
+                    if int(candidate["number"]) == expected_issue
+                ]
+                closed_matches = [
+                    candidate
+                    for candidate in closed_matches
+                    if int(candidate["number"]) == expected_issue
+                ]
             reopen_digest = None
             if open_matches:
                 selected = open_matches[0]
@@ -508,6 +552,11 @@ class GitHubIssueSelectionService:
                     "reopen receipt exists but the owner API still reports the issue closed",
                 )
             else:
+                if not allow_create:
+                    raise StorageRefusal(
+                        "issue_selection_no_match",
+                        "read-only issue selection found no exact open issue",
+                    )
                 raw = self._run_json(
                     (
                         self.command,

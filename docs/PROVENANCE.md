@@ -556,7 +556,7 @@ malformation still refusing before reservation or publication.
 
 ## Scoped autonomous-delivery provenance
 
-Issue #81 adds original League-only migration v17, `ModeStorage`, the six
+Issue #81 adds original League-only migration v18, `ModeStorage`, the six
 `league mode` commands, strict grant/action/receipt schemas, issue-first GitHub
 verification, source-managed guidance, and focused synthetic tests. It derives
 no authority from prompt text and imports no external implementation.
@@ -575,11 +575,13 @@ selection receipts. Open equivalents are reused, genuine closed recurrence
 requires the existing settled Shotcaller reopen authority and preserves prior
 Champion/runtime session linkage, distinct work creates once, and concurrent
 creators fail closed behind the SQLite owner fence. `assign run` now requires
-that receipt in addition to the fresh owner-API issue verification.
+that receipt in addition to the fresh owner-API issue verification. The task
+summary and issue title share one normalized duplicate identity while the
+selection and owner-API receipt retain exact title-byte equality.
 
-Migration v17 is named
+Migration v18 is named
 `scoped-autonomous-delivery-and-issue-first-assignment`, checksum
-`11712fe17a52effa9ad34de1a0e40a43152b91e6ab53cde6ccad6e626f9dba60`.
+`c27a13cfdd76f3548872cfaebe78bfe8e4a74b46a913b87ae70f4758a54230ab`.
 Existing migrations remain byte-for-byte unchanged. Focused tests use only
 temporary roots and fake GitHub/Herdr boundaries; they perform no live grant,
 merge, release, installation, deployment, production action, or teardown.

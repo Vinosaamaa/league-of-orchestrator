@@ -17,7 +17,7 @@
     "semantic_scope_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "task_scope_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "issue_selection_receipt_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-    "verifier_kind": {"const": "github-api"},
+    "verifier_kind": {"enum": ["github-api", "synthetic-fixture"]},
     "verified_at": {"type": "string", "format": "date-time"},
     "receipt_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
   },

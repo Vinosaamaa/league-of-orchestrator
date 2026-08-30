@@ -18,7 +18,7 @@ import stat
 import tempfile
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
@@ -58,6 +58,7 @@ from .cleanup import (
 )
 from .guidance import is_universal_guidance_target
 from .importer import build_import_plan
+from .issue_first import issue_scope_digest, normalize_issue_title, semantic_scope_digest
 from .orchestration import OrchestrationSignals
 from .request_services import (
     AssignmentService,
@@ -66,6 +67,7 @@ from .request_services import (
     DeliveryService,
 )
 from .runtime import RuntimeCreateSpec, RuntimeLifecycle
+from .sqlite_project_ops import canonical_repository
 from .sqlite_store import CURRENT_SCHEMA_VERSION, SQLiteStorage
 from .supervision_policy import (
     CONSECUTIVE_OBSERVATIONS,
@@ -78,6 +80,7 @@ from .storage import (
     RuntimeRegistrationCommand,
     StorageRefusal,
 )
+from .storage_issue import BeginIssueSelectionCommand, CompleteIssueSelectionCommand
 
 
 PLAN_SCHEMA = "league.pre-cutover-plan.v1"
@@ -122,6 +125,16 @@ CHAMPION_ID = "55555555-5555-4555-8555-555555555555"
 BASE_TASK_ID = "synthetic-task-19"
 LIFECYCLE_TASK_ID = "synthetic-precutover-task"
 SYNTHETIC_REPOSITORY = "https://example.invalid/league.git"
+SYNTHETIC_ISSUE_TITLE = "Synthetic pre-cutover task"
+SYNTHETIC_ISSUE_BODY = """## Objective
+Exercise the deterministic pre-cutover lifecycle.
+
+## Verification
+Prove assignment, delivery, transition, and cleanup using isolated doubles.
+
+## Hard boundaries
+Do not represent synthetic evidence as a live-runtime receipt.
+"""
 
 
 def _decode_json_object(path: Path, *, label: str) -> dict[str, Any]:
@@ -1092,6 +1105,87 @@ class _Ids:
         return f"synthetic-{kind}-{self.sequence:04d}"
 
 
+def _synthetic_issue_bound_spec(
+    store: SQLiteStorage, spec: AssignmentSpec, at: str
+) -> AssignmentSpec:
+    """Persist explicitly synthetic issue evidence for isolated acceptance."""
+    repository_key = canonical_repository(spec.repository)[1]
+    normalized_title = normalize_issue_title(SYNTHETIC_ISSUE_TITLE)
+    scope_digest = semantic_scope_digest(SYNTHETIC_ISSUE_BODY)
+    selection_identity = "\0".join(
+        (repository_key, normalized_title, scope_digest)
+    ).encode("utf-8")
+    selection_key = f"issue-scope:{hashlib.sha256(selection_identity).hexdigest()}"
+    attempt_id = f"attempt:{spec.task_id}"
+    acquired = store.begin_issue_selection(
+        BeginIssueSelectionCommand(
+            selection_key=selection_key,
+            task_id=spec.task_id,
+            task_summary=spec.task_summary,
+            coordinator_agent_id=spec.coordinator_agent_id,
+            repository=spec.repository,
+            repository_key=repository_key,
+            normalized_title=normalized_title,
+            semantic_scope_digest=scope_digest,
+            owner_attempt_id=attempt_id,
+            lease_expires_at="2099-01-01T00:00:00Z",
+            at=at,
+        )
+    )
+    if acquired["state"] == "completed":
+        selected = acquired["receipt"]
+    else:
+        selected = store.complete_issue_selection(
+            CompleteIssueSelectionCommand(
+                selection_key=selection_key,
+                expected_version=acquired["version"],
+                owner_attempt_id=attempt_id,
+                task_id=spec.task_id,
+                task_summary=spec.task_summary,
+                coordinator_agent_id=spec.coordinator_agent_id,
+                repository=spec.repository,
+                repository_key=repository_key,
+                normalized_title=normalized_title,
+                semantic_scope_digest=scope_digest,
+                decision="reuse_open",
+                issue=spec.issue,
+                issue_url=f"https://{repository_key}/issues/{spec.issue}",
+                issue_title=SYNTHETIC_ISSUE_TITLE,
+                issue_body_digest=hashlib.sha256(
+                    SYNTHETIC_ISSUE_BODY.encode("utf-8")
+                ).hexdigest(),
+                duplicate_matches=1,
+                reopen_action_receipt_digest=None,
+                at=at,
+            )
+        )
+    receipt: dict[str, Any] = {
+        "schema": "league.repository-issue.v1",
+        "repository": spec.repository,
+        "repository_key": repository_key,
+        "issue": spec.issue,
+        "issue_url": f"https://{repository_key}/issues/{spec.issue}",
+        "issue_state": "open",
+        "issue_title": SYNTHETIC_ISSUE_TITLE,
+        "normalized_title": normalized_title,
+        "issue_body_digest": hashlib.sha256(
+            SYNTHETIC_ISSUE_BODY.encode("utf-8")
+        ).hexdigest(),
+        "semantic_scope_digest": scope_digest,
+        "task_scope_digest": issue_scope_digest(
+            spec.repository, spec.issue, spec.task_id, spec.task_summary
+        ),
+        "issue_selection_receipt_digest": selected["receipt_digest"],
+        "verifier_kind": "synthetic-fixture",
+        "verified_at": at,
+    }
+    canonical = json.dumps(receipt, sort_keys=True, separators=(",", ":")).encode(
+        "utf-8"
+    )
+    receipt["receipt_digest"] = hashlib.sha256(canonical).hexdigest()
+    return replace(spec, issue_receipt=receipt)
+
+
 class _LaunchDouble:
     def launch(self, specification: AssignmentSpec) -> dict[str, Any]:
         return {
@@ -1311,8 +1405,7 @@ def _integrated_lifecycle(home: Path, source_root: Path) -> dict[str, Any]:
                 orchestration=OrchestrationSignals(False, False, False, 0, 0),
             )
         )
-        assignment = AssignmentService(store, _LaunchDouble(), clock, ids).assign(
-            AssignmentSpec(
+        assignment_spec = AssignmentSpec(
                 assignment_id="assignment:synthetic-precutover",
                 request_id="synthetic-precutover-request",
                 claim_token="claim:synthetic-precutover",
@@ -1325,7 +1418,10 @@ def _integrated_lifecycle(home: Path, source_root: Path) -> dict[str, Any]:
                 issue=23,
                 branch="agent/synthetic/23-precutover",
                 worktree="/synthetic/worktrees/23-precutover",
+                issue_receipt=None,
             )
+        assignment = AssignmentService(store, _LaunchDouble(), clock, ids).assign(
+            _synthetic_issue_bound_spec(store, assignment_spec, clock.now())
         )
         DeliveryService(
             store,

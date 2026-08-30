@@ -38,6 +38,11 @@ STATEMENTS = (
         'verifying','repair_pending','delivered','cleanup_pending','cleaned'
       )),
       next_irreversible_action TEXT NOT NULL,
+      attempts_used INTEGER NOT NULL CHECK (attempts_used >= 0),
+      cost_microunits_used INTEGER NOT NULL CHECK (cost_microunits_used >= 0),
+      changed_files_used INTEGER NOT NULL CHECK (changed_files_used >= 0),
+      duration_seconds_used INTEGER NOT NULL CHECK (duration_seconds_used >= 0),
+      in_progress_actions INTEGER NOT NULL CHECK (in_progress_actions >= 0),
       version INTEGER NOT NULL CHECK (version > 0),
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
@@ -164,15 +169,15 @@ STATEMENTS = (
       issue_selection_receipt_digest TEXT NOT NULL
         REFERENCES repository_issue_selection_receipts(receipt_digest),
       reopen_action_receipt_digest TEXT,
-      verifier_kind TEXT NOT NULL CHECK (verifier_kind='github-api'),
+      verifier_kind TEXT NOT NULL CHECK (verifier_kind IN ('github-api','synthetic-fixture')),
       verified_at TEXT NOT NULL,
       receipt_digest TEXT NOT NULL UNIQUE CHECK (length(receipt_digest)=64),
       CHECK (reopen_action_receipt_digest IS NULL OR length(reopen_action_receipt_digest)=64)
     )
     """,
-    "CREATE INDEX ix_grants_goal_revision ON authorization_grants(goal_id,revision)",
     "CREATE INDEX ix_mode_actions_goal_state ON autonomous_action_uses(goal_id,state,started_at)",
-    "CREATE INDEX ix_mode_repairs_goal_state ON autonomous_repair_obligations(goal_id,state,updated_at)",
+    "CREATE INDEX ix_mode_actions_reopen_receipt ON autonomous_action_uses(result_receipt_digest,action_kind,state)",
+    "CREATE INDEX ix_mode_repairs_goal_state ON autonomous_repair_obligations(goal_id,state,created_at)",
     "CREATE INDEX ix_issue_selection_receipts_repository_issue ON repository_issue_selection_receipts(repository_key,issue,created_at)",
     "CREATE INDEX ix_issue_bindings_repository_issue ON repository_issue_bindings(repository,issue)",
     """

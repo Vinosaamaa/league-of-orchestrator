@@ -19,7 +19,7 @@ sys.path[:0] = [str(ROOT / "src"), str(ROOT / "tests")]
 
 from storage_fixture import AT2, CHAMPION_ID, SHOTCALLER_ID, TASK_ID  # noqa: E402
 from storage_test_support import seeded_state  # noqa: E402
-from lifecycle_fakes import FakeIds, FakeLaunchAdapter  # noqa: E402
+from lifecycle_fakes import FakeIds, FakeLaunchAdapter, issue_bound_spec  # noqa: E402
 from request_lifecycle_fixture import (  # noqa: E402
     GAREN_RUNTIME_TWO,
     LUX_ID,
@@ -1425,8 +1425,7 @@ def test_task_transition_cli_dispatches_exact_watcher_receipt(root: Path) -> Non
     capture_p100(store, clock)
     store.claim_request("R3", "runtime:garen:one", "claim-r3", clock.after(120), clock.now())
     dispatch_request(store, clock, "R3", "claim-r3", "dispatch-r3", "repository-write", "champion")
-    active = AssignmentService(store, FakeLaunchAdapter(), clock, FakeIds()).assign(
-        AssignmentSpec(
+    spec = AssignmentSpec(
             assignment_id="assignment:task-transition-cli",
             request_id="R3",
             claim_token="claim-r3",
@@ -1439,7 +1438,10 @@ def test_task_transition_cli_dispatches_exact_watcher_receipt(root: Path) -> Non
             issue=23,
             branch="agent/synthetic/task-transition-cli",
             worktree="/synthetic/worktrees/task-transition-cli",
+            issue_receipt=None,
         )
+    active = AssignmentService(store, FakeLaunchAdapter(), clock, FakeIds()).assign(
+        issue_bound_spec(store, spec, clock.now())
     )
     store.register_runtime(
         RuntimeRegistrationCommand(

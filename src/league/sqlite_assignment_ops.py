@@ -23,7 +23,7 @@ from .storage_assignment import (
     PrepareAssignmentCommand,
 )
 from .storage_types import LIFECYCLE_STATES, StorageRefusal
-from .issue_first import issue_scope_digest, validate_issue_receipt
+from .issue_first import issue_scope_digest, normalize_issue_title, validate_issue_receipt
 
 
 ASSIGNMENT_STATES = {
@@ -176,6 +176,11 @@ def _validate_assignment_command(command: PrepareAssignmentCommand) -> None:
     ):
         raise StorageRefusal(
             "invalid_assignment", "visible Champion assignment requires issue and worktree identity"
+        )
+    if command.assignment_role == "champion" and command.issue_receipt is None:
+        raise StorageRefusal(
+            "issue_verification_required",
+            "visible Champion assignment requires exact owner-API issue evidence",
         )
     if command.assignment_role == "hidden-worker" and (
         not command.dispatch_id
@@ -424,10 +429,15 @@ def _insert_issue_binding(store: Any, command: PrepareAssignmentCommand) -> None
     selection_exact = selection is not None and (
         selection["task_id"] == command.task_id
         and selection["task_summary"] == command.task_summary
+        and normalize_issue_title(selection["issue_title"])
+        == normalize_issue_title(command.task_summary)
         and selection["coordinator_agent_id"] == command.coordinator_agent_id
+        and selection["repository"] == receipt["repository"]
         and selection["repository_key"] == canonical_repository(command.repository)[1]
         and int(selection["issue"]) == command.issue
+        and selection["issue_url"] == receipt["issue_url"]
         and selection["issue_state"] == "open"
+        and selection["issue_title"] == receipt["issue_title"]
         and selection["normalized_title"] == receipt["normalized_title"]
         and selection["semantic_scope_digest"] == receipt["semantic_scope_digest"]
         and selection["issue_body_digest"] == receipt["issue_body_digest"]
@@ -439,6 +449,14 @@ def _insert_issue_binding(store: Any, command: PrepareAssignmentCommand) -> None
             "assignment has no exact durable duplicate-preflight selection receipt",
         )
     assert selection is not None
+    if (
+        receipt["verifier_kind"] == "synthetic-fixture"
+        and not receipt["repository_key"].partition("/")[0].endswith(".invalid")
+    ):
+        raise StorageRefusal(
+            "issue_selection_unproven",
+            "synthetic issue evidence cannot bind a live repository",
+        )
     reopen_digest = selection["reopen_action_receipt_digest"]
     store.connection.execute(
         """

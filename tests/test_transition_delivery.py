@@ -24,7 +24,7 @@ from league.storage import (  # noqa: E402
     RuntimeRegistrationCommand,
     StorageRefusal,
 )
-from lifecycle_fakes import FakeDeliveryAdapter, FakeIds, FakeLaunchAdapter  # noqa: E402
+from lifecycle_fakes import FakeDeliveryAdapter, FakeIds, FakeLaunchAdapter, issue_bound_spec  # noqa: E402
 from request_lifecycle_fixture import (  # noqa: E402
     GAREN_RUNTIME,
     JARVAN_ID,
@@ -63,8 +63,7 @@ def test_heimerdinger_source_binding_and_fair_drain(root: Path) -> None:
         store, clock, "R3", "claim-r3", "dispatch-r3", "repository-write", "champion"
     )
     ids = FakeIds()
-    active = AssignmentService(store, FakeLaunchAdapter(), clock, ids).assign(
-        AssignmentSpec(
+    spec = AssignmentSpec(
             assignment_id="assignment:heimerdinger",
             request_id="R3",
             claim_token="claim-r3",
@@ -77,7 +76,10 @@ def test_heimerdinger_source_binding_and_fair_drain(root: Path) -> None:
             issue=3,
             branch="agent/synthetic/heimerdinger",
             worktree="/synthetic/worktrees/heimerdinger",
+            issue_receipt=None,
         )
+    active = AssignmentService(store, FakeLaunchAdapter(), clock, ids).assign(
+        issue_bound_spec(store, spec, clock.now())
     )
     DeliveryService(
         store,
@@ -275,8 +277,7 @@ def test_concurrent_source_transitions_commit_once(root: Path) -> None:
     dispatch_request(
         setup, clock, "R3", "claim-r3", "dispatch-r3", "repository-write", "champion"
     )
-    active = AssignmentService(setup, FakeLaunchAdapter(), clock, FakeIds()).assign(
-        AssignmentSpec(
+    spec = AssignmentSpec(
             assignment_id="assignment:concurrent",
             request_id="R3",
             claim_token="claim-r3",
@@ -289,7 +290,10 @@ def test_concurrent_source_transitions_commit_once(root: Path) -> None:
             issue=3,
             branch="agent/synthetic/concurrent-transition",
             worktree="/synthetic/worktrees/concurrent-transition",
+            issue_receipt=None,
         )
+    active = AssignmentService(setup, FakeLaunchAdapter(), clock, FakeIds()).assign(
+        issue_bound_spec(setup, spec, clock.now())
     )
     setup.close()
     first = SQLiteStorage(state, busy_timeout_ms=1000)

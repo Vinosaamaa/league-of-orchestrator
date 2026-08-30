@@ -2575,6 +2575,7 @@ def _assign_prepare(store: Storage, args: argparse.Namespace) -> CommandResult:
             branch=args.branch,
             worktree=args.worktree,
             at=args.at,
+            issue_receipt=None,
             required_capabilities=tuple(args.requires),
             assignment_role=args.role,
             dispatch_id=args.dispatch_id,
@@ -2619,6 +2620,7 @@ def _assign_launch(store: Storage, args: argparse.Namespace) -> CommandResult:
         issue=args.issue,
         branch=args.branch,
         worktree=str(Path(args.worktree).resolve()),
+        issue_receipt=None,
         required_capabilities=tuple(args.requires),
     )
     runner = SubprocessRunner()
@@ -2852,15 +2854,19 @@ def _mode_use(store: Storage, args: argparse.Namespace) -> CommandResult:
 
 
 def _mode_settle(store: Storage, args: argparse.Namespace) -> CommandResult:
+    from .storage_mode import SettleModeActionCommand
+
     return store.settle_mode_action(
-        args.action_use_id,
-        args.goal_id,
-        args.expected_goal_version,
-        args.use_receipt_digest,
-        args.outcome,
-        args.result_receipt_digest,
-        args.failure_class,
-        args.at,
+        SettleModeActionCommand(
+            action_use_id=args.action_use_id,
+            goal_id=args.goal_id,
+            expected_goal_version=args.expected_goal_version,
+            use_receipt_digest=args.use_receipt_digest,
+            outcome=args.outcome,
+            result_receipt_digest=args.result_receipt_digest,
+            failure_class=args.failure_class,
+            at=args.at,
+        )
     ), None
 
 

@@ -37,9 +37,9 @@ class AssignmentSpec:
     issue: int
     branch: str
     worktree: str
+    issue_receipt: Optional[dict[str, Any]]
     required_capabilities: tuple[str, ...] = ()
     callsign: Optional[str] = None
-    issue_receipt: Optional[dict[str, Any]] = None
 
 
 class LaunchAdapterError(RuntimeError):
@@ -76,6 +76,11 @@ class AssignmentService:
         self.ids = ids
 
     def assign(self, spec: AssignmentSpec) -> dict[str, Any]:
+        if spec.issue_receipt is None:
+            raise StorageRefusal(
+                "issue_verification_required",
+                "visible Champion assignment requires exact owner-API issue evidence",
+            )
         prepared = self.store.prepare_assignment(
             PrepareAssignmentCommand(
                 assignment_id=spec.assignment_id,

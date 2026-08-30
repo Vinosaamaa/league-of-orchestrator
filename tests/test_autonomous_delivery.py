@@ -534,6 +534,28 @@ def test_scope_limits_revocation_expiry_and_two_writer_cas(root: Path) -> None:
     status = invoke_cli(
         state, "mode", "status", "--goal-id", "goal:synthetic-delivery", "--at", AT
     )["result"]
+    refused_revoker = invoke_cli(
+        state,
+        "mode",
+        "revoke",
+        "--grant-id",
+        "grant:synthetic:1",
+        "--revoked-by",
+        "shotcaller:synthetic-owner",
+        "--reason",
+        "Unproven revoker",
+        "--expected-goal-version",
+        str(status["goal_version"]),
+        "--at",
+        "2026-01-01T00:11:00Z",
+        expected=2,
+    )
+    assert refused_revoker["error"]["code"] == "grant_revoker_refused"
+    unchanged = invoke_cli(
+        state, "mode", "status", "--goal-id", "goal:synthetic-delivery", "--at", AT
+    )["result"]
+    assert unchanged["goal_version"] == status["goal_version"]
+    assert unchanged["grant"]["status"] == "active"
     revoked = invoke_cli(
         state,
         "mode",
@@ -709,7 +731,7 @@ def test_mode_records_survive_verified_backup_and_bounded_export(root: Path) -> 
     authorized = _authorize(state, root)
     with SQLiteStorage(state) as source:
         backup = source.backup("backups/mode.sqlite3")
-        assert backup["database_schema_version"] == 16
+        assert backup["database_schema_version"] == 18
         inspection = json.loads(
             source.export_bytes(
                 format_name="json", purpose="inspection", max_records=10_000

@@ -98,6 +98,7 @@ def _spec(worktree: Path, suffix: str) -> AssignmentSpec:
         issue=23,
         branch=f"agent/synthetic/{suffix}",
         worktree=str(worktree),
+        issue_receipt=None,
     )
 
 
@@ -403,7 +404,7 @@ class FakeIssueVerifier:
         repository = self.repository or spec.repository
         repository_key = canonical_repository(repository)[1]
         issue_url = f"https://{repository_key}/issues/{spec.issue}"
-        issue_title = "Synthetic issue-first assignment"
+        issue_title = spec.task_summary
         normalized_title = normalize_issue_title(issue_title)
         scope_digest = semantic_scope_digest(ISSUE_BODY)
         selection_identity = "\0".join(
@@ -468,7 +469,7 @@ class FakeIssueVerifier:
                 repository, spec.issue, spec.task_id, spec.task_summary
             ),
             "issue_selection_receipt_digest": selection_digest,
-            "verifier_kind": "github-api",
+            "verifier_kind": "synthetic-fixture",
             "verified_at": at,
         }
         receipt["receipt_digest"] = hashlib.sha256(
@@ -1525,6 +1526,7 @@ def test_github_issue_verifier_refuses_missing_wrong_repository_and_closed_issue
         issue=81,
         branch="agent/example/81",
         worktree="/synthetic/worktree",
+        issue_receipt=None,
     )
     try:
         GitHubIssueVerifier(

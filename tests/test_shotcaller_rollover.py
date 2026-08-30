@@ -1344,16 +1344,64 @@ def test_snapshot_refresh_adapter_requires_one_exact_live_identity(root: Path) -
     assert observed[0]["runtime_generation"] == "herdr:" + hashlib.sha256(
         f"terminal:refresh\0{thread_id}".encode("utf-8")
     ).hexdigest()[:24]
+    for settled in ("done", "idle"):
+        legacy_settled = {
+            key: value
+            for key, value in {**exact, "agent_status": settled}.items()
+            if key != "interactive_ready"
+        }
+        legacy_observed = HerdrRolloverSnapshotAdapter(
+            Inventory([legacy_settled])
+        ).observe([target])
+        assert legacy_observed[0]["status"] == "idle"
+    for active in ("active", "working", "blocked"):
+        affirmative = HerdrRolloverSnapshotAdapter(
+            Inventory([{**exact, "agent_status": active}])
+        ).observe([target])
+        assert affirmative[0]["status"] == "active"
     cases = (
         ([], "snapshot_refresh_live_missing"),
         ([{**exact, "interactive_ready": False}], "snapshot_refresh_live_mismatch"),
-        ([exact, {**exact, "pane_id": "pane:other"}], "snapshot_refresh_live_ambiguous"),
+        (
+            [
+                {
+                    key: value
+                    for key, value in exact.items()
+                    if key != "interactive_ready"
+                },
+                {
+                    **{
+                        key: value
+                        for key, value in exact.items()
+                        if key != "interactive_ready"
+                    },
+                    "pane_id": "pane:other",
+                },
+            ],
+            "snapshot_refresh_live_ambiguous",
+        ),
+    )
+    cases += tuple(
+        (
+            [
+                {
+                    key: value
+                    for key, value in {**exact, "agent_status": status}.items()
+                    if key != "interactive_ready"
+                }
+            ],
+            "snapshot_refresh_live_mismatch",
+        )
+        for status in ("active", "working", "blocked", "unknown")
     )
     for agents, code in cases:
         try:
             HerdrRolloverSnapshotAdapter(Inventory(agents)).observe([target])
         except StorageRefusal as exc:
             assert exc.code == code
+            assert "Annie" in str(exc)
+            assert thread_id not in str(exc)
+            assert str(worktree) not in str(exc)
         else:
             raise AssertionError(f"Herdr refusal {code} was not enforced")
     for changed, malformed_agent in (
@@ -1368,6 +1416,63 @@ def test_snapshot_refresh_adapter_requires_one_exact_live_identity(root: Path) -
             assert exc.code == "snapshot_refresh_live_mismatch"
         else:
             raise AssertionError("missing canonical Herdr locator passed refresh")
+
+
+def test_snapshot_refresh_settled_legacy_readiness_live_drift_rolls_back(
+    root: Path,
+) -> None:
+    state, _ = migrated_state(root, "refresh-settled-readiness-live-drift")
+    with SQLiteStorage(state) as store:
+        seed = _seed_legacy_null_route_refresh(
+            store, root, "settled-readiness-live-drift"
+        )
+        first = dict(seed["agents"][0])
+        first.pop("interactive_ready")
+        first["agent_status"] = "done"
+        second = json.loads(json.dumps(first))
+        second["state_change_seq"] += 1
+
+        class SequencedInventory:
+            def __init__(self) -> None:
+                self.inventories = [[first], [second]]
+
+            def run(
+                self, argv: tuple[str, ...], *, timeout_seconds: int
+            ) -> subprocess.CompletedProcess[str]:
+                assert argv == ("herdr", "agent", "list")
+                assert timeout_seconds == 30
+                agents = self.inventories.pop(0)
+                return subprocess.CompletedProcess(
+                    argv, 0, json.dumps({"result": {"agents": agents}}), ""
+                )
+
+        champion_id = seed["context"]["champion_ids"][0]
+        before_agent = store.agent_status(champion_id)
+        before_rollover = store.rollover_status(seed["prepared"]["operation_id"])
+        before_events = store.connection.execute(
+            "SELECT COUNT(*) FROM events"
+        ).fetchone()[0]
+        try:
+            RolloverSnapshotRefreshService(
+                store, HerdrRolloverSnapshotAdapter(SequencedInventory())
+            ).refresh(
+                **_legacy_null_route_inputs(seed, "settled-readiness-live-drift")
+            )
+        except StorageRefusal as exc:
+            assert exc.code == "snapshot_refresh_live_changed"
+            assert store.agent_status(champion_id)["callsign"] in str(exc)
+            assert first["agent_session"]["value"] not in str(exc)
+            assert first["cwd"] not in str(exc)
+        else:
+            raise AssertionError("settled legacy endpoint drift advanced refresh")
+        assert store.agent_status(champion_id) == before_agent
+        assert (
+            store.rollover_status(seed["prepared"]["operation_id"])
+            == before_rollover
+        )
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM events"
+        ).fetchone()[0] == before_events
 
 
 def test_snapshot_refresh_refuses_a_mismatched_canonical_runtime(root: Path) -> None:
@@ -4389,10 +4494,13 @@ def test_descendant_runtime_adapter_normalizes_exact_done_to_idle_only_after_ide
         target, "runtime:synthetic:done"
     )
     assert receipt["status"] == "idle"
-    for unready in (
-        {**exact, "interactive_ready": False},
-        {key: value for key, value in exact.items() if key != "interactive_ready"},
-    ):
+    legacy_settled = {
+        key: value for key, value in exact.items() if key != "interactive_ready"
+    }
+    assert HerdrDescendantRuntimeAdapter(Inventory(legacy_settled)).verify(
+        target, "runtime:synthetic:done"
+    )["status"] == "idle"
+    for unready in ({**exact, "interactive_ready": False},):
         try:
             HerdrDescendantRuntimeAdapter(Inventory(unready)).verify(
                 target, "runtime:synthetic:done"
@@ -4783,6 +4891,7 @@ def main() -> None:
         test_snapshot_refresh_materialized_runtime_refusals(root)
         test_snapshot_refresh_null_route_cas_and_fault_restore_exact_state(root)
         test_snapshot_refresh_adapter_requires_one_exact_live_identity(root)
+        test_snapshot_refresh_settled_legacy_readiness_live_drift_rolls_back(root)
         test_snapshot_refresh_refuses_a_mismatched_canonical_runtime(root)
         test_runtime_capability_superset_refreshes_and_reconciles_without_downgrade(root)
         test_runtime_capability_contract_refuses_missing_and_unverified(root)

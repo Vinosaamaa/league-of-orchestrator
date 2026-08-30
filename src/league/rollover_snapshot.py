@@ -11,6 +11,8 @@ from .rollover_descendant import (
     LIVE_STATUSES,
     THREAD_UUID,
     _herdr_runtime_generation,
+    _herdr_interactive_ready,
+    _public_descendant_locator,
     _session,
 )
 from .storage import Storage, StorageRefusal
@@ -24,7 +26,7 @@ class RolloverSnapshotAdapter(Protocol):
 _EXPLICIT_ROUTE_FIELDS = ("name", "routing_name", "routing_alias")
 
 
-def _explicit_routes(agent: Mapping[str, Any]) -> set[str]:
+def _explicit_routes(agent: Mapping[str, Any], locator: str) -> set[str]:
     """Return non-empty explicit routes; absent, null, and empty mean unset."""
 
     routes: set[str] = set()
@@ -35,7 +37,7 @@ def _explicit_routes(agent: Mapping[str, Any]) -> set[str]:
         if not isinstance(value, str):
             raise StorageRefusal(
                 "snapshot_refresh_live_mismatch",
-                "Herdr explicit route evidence is malformed",
+                f"{locator}: Herdr explicit route evidence is malformed",
             )
         routes.add(value)
     return routes
@@ -83,6 +85,7 @@ class HerdrRolloverSnapshotAdapter:
         used_routes: set[str] = set()
         used_sessions: set[str] = set()
         for target in descendants:
+            locator = _public_descendant_locator(target)
             pane = target.get("address")
             route = target.get("routing_name")
             adoption = target.get("route_adoption")
@@ -102,7 +105,7 @@ class HerdrRolloverSnapshotAdapter:
             ):
                 raise StorageRefusal(
                     "snapshot_refresh_live_mismatch",
-                    "canonical Herdr pane, route, or thread identity is missing",
+                    f"{locator}: canonical Herdr identity is incomplete",
                 )
             related_indexes = (
                 by_pane.get(pane, set())
@@ -113,29 +116,30 @@ class HerdrRolloverSnapshotAdapter:
             if len(related) > 1:
                 raise StorageRefusal(
                     "snapshot_refresh_live_ambiguous",
-                    "multiple Herdr endpoints overlap one descendant identity",
+                    f"{locator}: multiple Herdr endpoints overlap one descendant "
+                    "identity",
                 )
             if not related:
                 raise StorageRefusal(
                     "snapshot_refresh_live_missing",
-                    "a frozen descendant is absent from Herdr inventory",
+                    f"{locator}: frozen descendant is absent from Herdr inventory",
                 )
             agent = related[0]
             status = agent.get("agent_status")
             if status in CLOSED_STATUSES:
                 raise StorageRefusal(
                     "snapshot_refresh_live_closed",
-                    "a frozen descendant Herdr endpoint is closed",
+                    f"{locator}: frozen descendant Herdr endpoint is closed",
                 )
             worktree = Path(str(target.get("worktree", "")))
             terminal_id = agent.get("terminal_id")
             state_change_seq = agent.get("state_change_seq")
-            explicit_routes = _explicit_routes(agent)
+            explicit_routes = _explicit_routes(agent, locator)
             exact = (
                 target.get("kind") == "codex-thread"
                 and target.get("backend") == "herdr"
                 and agent.get("agent") == "codex"
-                and agent.get("interactive_ready") is True
+                and _herdr_interactive_ready(agent)
                 and agent.get("pane_id") == pane
                 and agent.get("name") == route
                 and explicit_routes == {route}
@@ -154,12 +158,13 @@ class HerdrRolloverSnapshotAdapter:
             if not exact:
                 raise StorageRefusal(
                     "snapshot_refresh_live_mismatch",
-                    "Herdr endpoint, route, thread, terminal, or worktree differs",
+                    f"{locator}: live Herdr identity or readiness differs",
                 )
             if pane in used_panes or route in used_routes or thread in used_sessions:
                 raise StorageRefusal(
                     "snapshot_refresh_live_ambiguous",
-                    "one Herdr endpoint, route, or session overlaps multiple descendants",
+                    f"{locator}: one Herdr endpoint, route, or session overlaps "
+                    "descendants",
                 )
             used_panes.add(str(pane))
             used_routes.add(str(route))

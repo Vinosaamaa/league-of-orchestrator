@@ -26,7 +26,7 @@ from .visible_launch import (
 THREAD_UUID = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
 )
-LIVE_STATUSES = {"active", "blocked", "done", "idle", "waiting", "working"}
+LIVE_STATUSES = {"active", "blocked", "idle", "waiting", "working"}
 OWNERSHIP_TOKENS = {
     "launch_title_owner",
     "launch_title_source",
@@ -114,7 +114,6 @@ class HerdrLegacyDisplayAdapter:
         tokens = agent.get("tokens")
         source = agent.get("metadata_source")
         authority = _session_source(agent)
-        source = source if isinstance(source, str) and source else authority
         sequence = agent.get("state_change_seq")
         worktree = str(Path(spec.worktree).resolve())
         exact = bool(
@@ -132,6 +131,7 @@ class HerdrLegacyDisplayAdapter:
             and isinstance(authority, str)
             and bool(authority)
             and isinstance(sequence, int)
+            and not isinstance(sequence, bool)
             and sequence >= 0
             and isinstance(tokens, Mapping)
         )

@@ -1334,6 +1334,7 @@ def _validate_legacy_display_command(
             and bool(command.expected_presentation_source),
             isinstance(command.expected_title, str) and bool(command.expected_title),
             isinstance(command.expected_state_change_seq, int)
+            and not isinstance(command.expected_state_change_seq, bool)
             and command.expected_state_change_seq >= 0,
         )
     )
@@ -1470,6 +1471,7 @@ def _validate_legacy_display_command(
         and isinstance(modern.get("source"), str)
         and modern["source"].startswith("league-launch-")
         and isinstance(modern.get("state_change_seq"), int)
+        and not isinstance(modern.get("state_change_seq"), bool)
     ):
         raise StorageRefusal(
             "legacy_display_modern",

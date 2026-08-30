@@ -87,7 +87,11 @@ Only a public issue locator, title, body digest, canonical task-scope digest,
 state, verifier kind, and receipt digest enter SQLite; issue body bytes do not.
 The storage boundary requires the receipt for every visible Champion caller and
 matches its exact repository, URL, title, task, selection receipt, and semantic
-scope before reservation. Isolated acceptance may use the explicit
+scope before reservation. The immutable assignment binding also records one
+canonical digest over the task identity, normalized task/issue title, exact
+repository issue, and semantic issue scope. Active retries repeat the owner-API
+read and revalidate that migration-18 binding; an older active assignment with
+no binding refuses for explicit reconciliation. Isolated acceptance may use the explicit
 `synthetic-fixture` verifier only for reserved `.invalid` repositories; it is
 never owner-API or live-runtime proof.
 The canonical task summary and issue title must normalize to the same duplicate

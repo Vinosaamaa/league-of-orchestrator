@@ -85,6 +85,39 @@ def normalize_issue_title(value: str) -> str:
     return _normalized_words(value, "issue title", maximum=512)
 
 
+def task_issue_semantic_binding_digest(
+    repository: str,
+    issue: int,
+    task_id: str,
+    task_summary: str,
+    issue_title: str,
+    semantic_scope: str,
+) -> str:
+    normalized_task = normalize_issue_title(task_summary)
+    normalized_issue = normalize_issue_title(issue_title)
+    if normalized_task != normalized_issue:
+        raise StorageRefusal(
+            "issue_semantic_binding_mismatch",
+            "canonical task title does not match the selected issue title",
+        )
+    if not isinstance(semantic_scope, str) or not re.fullmatch(
+        r"[0-9a-f]{64}", semantic_scope
+    ):
+        raise StorageRefusal(
+            "issue_semantic_binding_mismatch",
+            "canonical task-to-issue semantic scope is invalid",
+        )
+    return _digest(
+        {
+            "repository_key": canonical_repository(repository)[1],
+            "issue": issue,
+            "task_id": task_id,
+            "normalized_title": normalized_task,
+            "semantic_scope_digest": semantic_scope,
+        }
+    )
+
+
 def _issue_body_contract(body: str) -> tuple[str, str]:
     if not isinstance(body, str) or not body.strip() or len(body.encode("utf-8")) > MAX_ISSUE_BODY_BYTES:
         raise StorageRefusal("issue_scope_incomplete", "issue body is empty or exceeds its bound")
@@ -510,6 +543,14 @@ class GitHubIssueSelectionService:
                 key=lambda candidate: candidate["number"],
             )
             if expected_issue is not None:
+                if equivalents and not any(
+                    int(candidate["number"]) == expected_issue
+                    for candidate in equivalents
+                ):
+                    raise StorageRefusal(
+                        "issue_selection_expected_mismatch",
+                        "an equivalent issue exists under a different exact issue identity",
+                    )
                 open_matches = [
                     candidate
                     for candidate in open_matches

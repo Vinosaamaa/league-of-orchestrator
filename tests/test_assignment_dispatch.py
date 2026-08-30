@@ -250,6 +250,47 @@ def test_exact_receipt_activation_and_atomic_rollback(root: Path) -> None:
     store.close()
 
 
+def test_canonical_task_semantics_refuse_self_matching_unrelated_issue(root: Path) -> None:
+    store, clock = champion_context(root, "semantic-binding")
+    release_spec = replace(
+        spec("claim-r3", suffix="semantic-binding"),
+        task_summary="Publish release notes",
+    )
+    bound = issue_bound_spec(store, release_spec, clock.now())
+    active = AssignmentService(store, FakeLaunchAdapter(), clock, FakeIds()).assign(bound)
+    assert active["state"] == "active"
+
+    store.connection.execute(
+        "UPDATE tasks SET summary='Implement authentication' WHERE task_id=?",
+        (bound.task_id,),
+    )
+    retry = PrepareAssignmentCommand(
+        assignment_id=bound.assignment_id,
+        request_id=bound.request_id,
+        claim_token=bound.claim_token,
+        task_id=bound.task_id,
+        task_summary="Implement authentication",
+        coordinator_agent_id=bound.coordinator_agent_id,
+        champion_agent_id=bound.champion_agent_id,
+        repository=bound.repository,
+        issue=bound.issue,
+        branch=bound.branch,
+        worktree=bound.worktree,
+        at=clock.now(),
+        required_capabilities=bound.required_capabilities,
+        issue_receipt=bound.issue_receipt,
+    )
+    try:
+        store.prepare_assignment(retry)
+    except StorageRefusal as exc:
+        assert exc.code == "issue_semantic_binding_mismatch"
+    else:
+        raise AssertionError(
+            "an authentication task accepted a self-matching release-notes issue"
+        )
+    store.close()
+
+
 def test_receipt_mismatch_creates_cleanup_pending(root: Path) -> None:
     store, clock = champion_context(root, "mismatch-receipt")
     class MismatchAdapter(FakeLaunchAdapter):
@@ -412,6 +453,7 @@ def main() -> None:
         test_durable_work_kinds_cannot_hide_implementation_ownership(root)
         test_cli_prepare_cannot_bypass_owner_issue_verification(root)
         test_exact_receipt_activation_and_atomic_rollback(root)
+        test_canonical_task_semantics_refuse_self_matching_unrelated_issue(root)
         test_receipt_mismatch_creates_cleanup_pending(root)
         test_partial_launch_preserves_cleanup_pending(root)
         test_unwrapped_adapter_failure_cannot_strand_launching(root)

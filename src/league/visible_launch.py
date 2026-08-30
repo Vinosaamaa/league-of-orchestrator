@@ -1028,6 +1028,13 @@ class VisibleChampionLaunchService:
         self.issue_verifier = issue_verifier or getattr(adapter, "issue_verifier", None)
 
     def launch(self, spec: AssignmentSpec) -> dict[str, Any]:
+        if self.issue_verifier is None:
+            raise StorageRefusal(
+                "issue_verification_required",
+                "visible repository work requires issue verification before launch",
+            )
+        issue_receipt = self.issue_verifier.verify(spec, self.clock.now())
+        spec = replace(spec, issue_receipt=issue_receipt)
         prior = None
         try:
             prior = self.store.assignment_launch_context(spec.assignment_id)
@@ -1035,6 +1042,17 @@ class VisibleChampionLaunchService:
             if exc.code != "assignment_unknown":
                 raise
         if prior is not None and prior["context_delivery"] is not None:
+            prepared = AssignmentService(
+                self.store,
+                self.adapter,
+                self.clock,
+                _AssignmentIds(spec.assignment_id),
+            ).assign(spec)
+            if prepared["state"] != "active":
+                raise StorageRefusal(
+                    "assignment_conflict",
+                    "delivered assignment retry is no longer active",
+                )
             receipt = prior["acceptance_receipt"]
             if receipt is None:
                 raise StorageRefusal(
@@ -1086,13 +1104,6 @@ class VisibleChampionLaunchService:
                 },
                 "idempotent": True,
             }
-        if self.issue_verifier is None:
-            raise StorageRefusal(
-                "issue_verification_required",
-                "visible repository work requires issue verification before launch",
-            )
-        issue_receipt = self.issue_verifier.verify(spec, self.clock.now())
-        spec = replace(spec, issue_receipt=issue_receipt)
         try:
             outcome = AssignmentService(
                 self.store,

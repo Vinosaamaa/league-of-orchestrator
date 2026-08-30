@@ -1383,7 +1383,7 @@ _IMPORT_COLUMNS: dict[str, tuple[str, ...]] = {
     "repository_issue_bindings": (
         "task_id", "assignment_id", "request_id", "repository", "issue",
         "issue_url", "issue_state", "issue_title", "issue_body_digest",
-        "task_scope_digest", "issue_selection_receipt_digest",
+        "semantic_binding_digest", "task_scope_digest", "issue_selection_receipt_digest",
         "reopen_action_receipt_digest", "verifier_kind", "verified_at",
         "receipt_digest",
     ),

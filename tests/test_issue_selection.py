@@ -489,6 +489,28 @@ def test_read_only_exact_issue_selection_never_creates(root: Path) -> None:
     missing_store.close()
 
 
+def test_expected_issue_mismatch_refuses_before_create(root: Path) -> None:
+    _, store, _ = create_context(root, "expected-mismatch")
+    runner = FakeGitHubRunner([_issue(216, state="open")])
+    try:
+        GitHubIssueSelectionService(store, runner).select(
+            _spec("task:expected-mismatch"),
+            "attempt:expected-mismatch",
+            AT,
+            expected_issue=217,
+        )
+    except StorageRefusal as exc:
+        assert exc.code == "issue_selection_expected_mismatch"
+    else:
+        raise AssertionError("a distinct issue was created around an existing equivalent")
+    assert runner.created == 0
+    assert not any(
+        "--method" in call and call[call.index("--method") + 1] == "POST"
+        for call in runner.calls
+    )
+    store.close()
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="league-issue-selection-") as temporary:
         root = Path(temporary)
@@ -498,6 +520,7 @@ def main() -> None:
         test_closed_match_reopen_preserves_prior_champion_linkage(root)
         test_concurrent_distinct_selection_creates_exactly_one_issue(root)
         test_read_only_exact_issue_selection_never_creates(root)
+        test_expected_issue_mismatch_refuses_before_create(root)
     print("PASS: duplicate preflight reuses, reopens with linkage, creates only distinct scope, and serializes concurrency")
 
 

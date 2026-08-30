@@ -492,7 +492,9 @@ def test_real_adapter_one_command_success_and_retry(root: Path) -> None:
     store, clock, worktree = _context(root, "success")
     options = _options(root)
     runner = FakeHerdrRunner(worktree, delayed_context_title_reads=2)
-    service = VisibleChampionLaunchService(store, _adapter(options, runner, store), options, clock)
+    adapter = _adapter(options, runner, store)
+    verifier = adapter.issue_verifier
+    service = VisibleChampionLaunchService(store, adapter, options, clock)
     spec = _spec(worktree, "success")
     result = service.launch(spec)
     assert result["state"] == "active" and result["version"] == 4
@@ -542,12 +544,16 @@ def test_real_adapter_one_command_success_and_retry(root: Path) -> None:
         (spec.assignment_id,),
     ).fetchone()
     assert tuple(row) == ("active", 4, f"runtime:{LUX_ID}")
+    assert verifier.calls == 1
     retry_runner = runner.active_copy()
     contexts_before_retry = len(runner.contexts)
+    retry_adapter = _adapter(options, retry_runner, store)
+    retry_verifier = retry_adapter.issue_verifier
     retry = VisibleChampionLaunchService(
-        store, _adapter(options, retry_runner, store), options, clock
+        store, retry_adapter, options, clock
     ).launch(spec)
     assert retry["idempotent"] is True
+    assert retry_verifier.calls == 1
     retry_calls = retry_runner.calls
     assert retry_calls
     assert all(call[:3] == ("herdr", "agent", "get") for call in retry_calls)
@@ -577,6 +583,7 @@ def test_real_adapter_one_command_success_and_retry(root: Path) -> None:
             if call[:3] == ("herdr", "pane", "report-metadata")
         ]
     ) == 1
+
     assert not any(
         call[:3] == ("herdr", "agent", "prompt") for call in restore_retry_calls
     )
@@ -631,6 +638,61 @@ def test_real_adapter_one_command_success_and_retry(root: Path) -> None:
         "assignment_context",
     )
     assert activation_delivery["effect_id"] == result["context_delivery"]["effect_sha256"]
+    store.close()
+
+
+def test_active_retry_requires_migration18_issue_binding(root: Path) -> None:
+    store, clock, worktree = _context(root, "active-missing-issue-binding")
+    options = _options(root)
+    runner = FakeHerdrRunner(worktree, delayed_context_title_reads=2)
+    adapter = _adapter(options, runner, store)
+    verifier = adapter.issue_verifier
+    service = VisibleChampionLaunchService(store, adapter, options, clock)
+    spec = _spec(worktree, "active-missing-issue-binding")
+    assert service.launch(spec)["state"] == "active"
+    assert verifier.calls == 1
+
+    store.connection.execute("DROP TRIGGER repository_issue_bindings_immutable_delete")
+    store.connection.execute(
+        "DELETE FROM repository_issue_bindings WHERE assignment_id=?",
+        (spec.assignment_id,),
+    )
+    try:
+        service.launch(spec)
+    except StorageRefusal as exc:
+        assert exc.code == "assignment_issue_reconciliation_required"
+    else:
+        raise AssertionError("a migrated schema-17 active assignment bypassed issue binding")
+    assert verifier.calls == 2
+    store.close()
+
+
+def test_active_retry_refuses_changed_owner_issue_before_title_read(root: Path) -> None:
+    store, clock, worktree = _context(root, "active-changed-owner-issue")
+    options = _options(root)
+    runner = FakeHerdrRunner(worktree, delayed_context_title_reads=2)
+    service = VisibleChampionLaunchService(
+        store, _adapter(options, runner, store), options, clock
+    )
+    spec = _spec(worktree, "active-changed-owner-issue")
+    assert service.launch(spec)["state"] == "active"
+
+    retry_runner = runner.active_copy()
+    changed = FakeIssueVerifier(store=store, receipt_scope_digest="a" * 64)
+    try:
+        VisibleChampionLaunchService(
+            store,
+            _adapter(options, retry_runner, store),
+            options,
+            clock,
+            issue_verifier=changed,
+        ).launch(spec)
+    except StorageRefusal as exc:
+        assert exc.code == "assignment_issue_reverification_failed"
+    else:
+        raise AssertionError("active retry accepted a changed owner issue")
+    assert changed.calls == 1
+    assert retry_runner.calls == []
     store.close()
 
 
@@ -1835,6 +1897,8 @@ def main() -> None:
         test_legacy_display_command_exposes_exact_owner_cas_inputs()
         test_task_label_defaults_and_explicit_labels_stay_two_words(root)
         test_real_adapter_one_command_success_and_retry(root)
+        test_active_retry_requires_migration18_issue_binding(root)
+        test_active_retry_refuses_changed_owner_issue_before_title_read(root)
         test_legacy_active_champion_display_is_reconciled_once_with_exact_receipt(root)
         test_legacy_display_reconciliation_refuses_user_title_race_before_write(root)
         test_legacy_display_compare_and_set_does_not_overwrite_last_window_user_title(root)

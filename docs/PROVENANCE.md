@@ -581,7 +581,7 @@ selection and owner-API receipt retain exact title-byte equality.
 
 Migration v18 is named
 `scoped-autonomous-delivery-and-issue-first-assignment`, checksum
-`c27a13cfdd76f3548872cfaebe78bfe8e4a74b46a913b87ae70f4758a54230ab`.
+`b517b9103fedcc0db8a1f0dd7d06d475f309f3a135d87356209ab34dbd957631`.
 Existing migrations remain byte-for-byte unchanged. Focused tests use only
 temporary roots and fake GitHub/Herdr boundaries; they perform no live grant,
 merge, release, installation, deployment, production action, or teardown.

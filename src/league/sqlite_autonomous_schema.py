@@ -165,6 +165,7 @@ STATEMENTS = (
       issue_state TEXT NOT NULL CHECK (issue_state IN ('open','closed')),
       issue_title TEXT NOT NULL,
       issue_body_digest TEXT NOT NULL CHECK (length(issue_body_digest)=64),
+      semantic_binding_digest TEXT NOT NULL CHECK (length(semantic_binding_digest)=64),
       task_scope_digest TEXT NOT NULL CHECK (length(task_scope_digest)=64),
       issue_selection_receipt_digest TEXT NOT NULL
         REFERENCES repository_issue_selection_receipts(receipt_digest),

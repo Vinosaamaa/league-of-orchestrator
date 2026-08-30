@@ -280,6 +280,8 @@ class HerdrShotcallerBootstrapAdapter:
             and isinstance(tokens, Mapping)
             and tokens.get("sidebar_name") == callsign
             and tokens.get("thread_title") == callsign
+            and agent.get("terminal_title") == callsign
+            and agent.get("terminal_title_stripped") == callsign
         )
 
     def current_receipt(
@@ -423,11 +425,10 @@ class ShotcallerBootstrapService:
         elif (
             existing is not None
             and existing["state"] == "reserved"
-            and observed["routing_name"] is not None
         ):
             raise StorageRefusal(
                 "shotcaller_creation_cleanup_unproven",
-                "published Shotcaller metadata has no durable pre-publication baseline",
+                "pre-existing Shotcaller reservation has no durable pre-publication baseline",
             )
         if completed is not None:
             receipt = self.adapter.current_receipt(spec, str(completed["callsign"]))

@@ -44,6 +44,8 @@ class RecordingHerdr:
         self.name: str | None = None
         self.tokens: dict[str, str] = {}
         self.title = ""
+        self.terminal_title_override: str | None = None
+        self.terminal_title_stripped_override: str | None = None
         self.state_change_seq = 7
         self.calls: list[tuple[str, ...]] = []
 
@@ -60,7 +62,16 @@ class RecordingHerdr:
             "terminal_id": "terminal:1",
             "workspace_id": "w1",
             "tokens": dict(self.tokens),
-            "terminal_title_stripped": self.title,
+            "terminal_title": (
+                self.title
+                if self.terminal_title_override is None
+                else self.terminal_title_override
+            ),
+            "terminal_title_stripped": (
+                self.title
+                if self.terminal_title_stripped_override is None
+                else self.terminal_title_stripped_override
+            ),
         }
         if self.name is not None:
             value["name"] = self.name
@@ -492,6 +503,86 @@ def test_bootstrap_identity_mismatch_makes_no_canonical_mutation(root: Path) -> 
         ).fetchone()[0] == 0
 
 
+def _assert_preexisting_reserved_bootstrap_requires_baseline(
+    root: Path, label: str, *, tokens: dict[str, str], title: str
+) -> None:
+    state, _ = migrated_state(root, label)
+    worktree = root / label / "worktree"
+    worktree.mkdir()
+    clock = FakeClock()
+    runner = RecordingHerdr(worktree)
+    runner.tokens = dict(tokens)
+    runner.title = title
+    with SQLiteStorage(state) as store:
+        _seed_available_ashe(store, clock)
+        reserved = store.allocate_callsign(
+            _spec().assignment_id,
+            _spec().agent_id,
+            "shotcaller",
+            "shotcaller",
+            _spec().agent_id,
+            _spec().capabilities,
+            clock.now(),
+        )
+        assert reserved["state"] == "reserved"
+        service = ShotcallerBootstrapService(
+            store,
+            HerdrShotcallerBootstrapAdapter(
+                _options(worktree),
+                runner,
+                environment={
+                    "HERDR_ENV": "1",
+                    "HERDR_WORKSPACE_ID": "w1",
+                    "HERDR_TAB_ID": "w1:t1",
+                    "HERDR_PANE_ID": "w1:p1",
+                },
+            ),
+            clock,
+        )
+        try:
+            service.bootstrap(_spec())
+        except StorageRefusal as exc:
+            assert exc.code == "shotcaller_creation_cleanup_unproven"
+        else:
+            raise AssertionError(
+                "pre-existing reservation manufactured a missing restoration baseline"
+            )
+        assert store.callsign_assignment_status(_spec().assignment_id)["state"] == "reserved"
+        assert store.shotcaller_bootstrap_baseline(_spec().assignment_id) is None
+        assert runner.name is None
+        assert runner.tokens == tokens
+        assert runner.title == title
+        assert not any(
+            call[:3] in {
+                ("herdr", "agent", "rename"),
+                ("herdr", "pane", "report-metadata"),
+            }
+            for call in runner.calls
+        )
+
+
+def test_preexisting_reserved_bootstrap_requires_durable_baseline_when_alias_empty(
+    root: Path,
+) -> None:
+    _assert_preexisting_reserved_bootstrap_requires_baseline(
+        root,
+        "shotcaller-reserved-missing-baseline-clean",
+        tokens={},
+        title="",
+    )
+
+
+def test_preexisting_reserved_bootstrap_rejects_residual_metadata_without_baseline(
+    root: Path,
+) -> None:
+    _assert_preexisting_reserved_bootstrap_requires_baseline(
+        root,
+        "shotcaller-reserved-missing-baseline-residual",
+        tokens={"sidebar_name": "Partial", "thread_title": "Partial"},
+        title="Partial",
+    )
+
+
 def test_completed_bootstrap_retry_refuses_changed_spec_or_metadata(root: Path) -> None:
     state, _ = migrated_state(root, "shotcaller-completed-retry")
     worktree = root / "shotcaller-completed-retry" / "worktree"
@@ -557,6 +648,17 @@ def test_completed_bootstrap_retry_refuses_changed_spec_or_metadata(root: Path) 
                     "completed bootstrap retry accepted changed display metadata"
                 )
             runner.tokens[token] = original
+        for field in ("terminal_title_override", "terminal_title_stripped_override"):
+            setattr(runner, field, "Tampered")
+            try:
+                service.bootstrap(_spec())
+            except StorageRefusal as exc:
+                assert exc.code == "shotcaller_metadata_unverified"
+            else:
+                raise AssertionError(
+                    f"completed bootstrap retry accepted changed {field}"
+                )
+            setattr(runner, field, None)
         assert store.shotcaller_bootstrap_status(_spec().assignment_id) == {
             **created,
             "idempotent": True,
@@ -738,6 +840,8 @@ def main() -> None:
         root = Path(temporary)
         test_in_place_bootstrap_creates_shotcaller_without_layout_or_squad_registration(root)
         test_bootstrap_identity_mismatch_makes_no_canonical_mutation(root)
+        test_preexisting_reserved_bootstrap_requires_durable_baseline_when_alias_empty(root)
+        test_preexisting_reserved_bootstrap_rejects_residual_metadata_without_baseline(root)
         test_completed_bootstrap_retry_refuses_changed_spec_or_metadata(root)
         test_bootstrap_metadata_and_atomic_finalization_failures_restore_exact_state(root)
         test_publish_crash_then_retry_fault_restores_original_unbound_metadata(root)

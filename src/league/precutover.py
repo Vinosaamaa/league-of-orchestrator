@@ -56,6 +56,7 @@ from .cleanup import (
     CleanupExecutor,
     CleanupPlanner,
 )
+from .guidance import is_universal_guidance_target
 from .importer import build_import_plan
 from .orchestration import OrchestrationSignals
 from .request_services import (
@@ -407,6 +408,13 @@ def _validate_plan(path: Path) -> dict[str, Any]:
         if kind not in TARGET_KINDS or not isinstance(required, bool):
             raise StorageRefusal("plan_invalid", "current target kind or requirement is invalid")
         target_path = _absolute_path(item["path"], "current target path")
+        if is_universal_guidance_target(
+            target_path
+        ) or is_universal_guidance_target(target_path.resolve(strict=False)):
+            raise StorageRefusal(
+                "universal_guidance_forbidden",
+                "League cannot target the universal agent guide",
+            )
         if target_id in target_ids or target_path in target_paths:
             raise StorageRefusal("plan_invalid", "current target identity is duplicated")
         if required and not os.path.lexists(target_path):

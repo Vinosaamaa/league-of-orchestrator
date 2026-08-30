@@ -54,10 +54,14 @@ failure prints only the commit hash and identity category. This prevents the
 metadata class that affected PR #34 without embedding the exposed value in the
 repository or failure output.
 
-`global-agent-instructions/shared-AGENTS.md` is the bounded source-managed
-cross-harness SQLite runtime guide. `src/league/guidance.py` can stage exact bytes only beneath
-an explicit isolated Codex, Cursor, or Pi root with backup, atomic replacement,
-parity proof, and rollback. It has no home-directory default and no CLI. Issue
-#23 owns exact-merged installation of that guide and must emit a restricted
-backup/parity/rollback receipt; repository publication contains no installed
-path, hook payload, runtime identity, raw prompt, or machine state.
+`global-agent-instructions/league/AGENTS.md` is the bounded source-managed
+League orchestration supplement. The universal `~/.agents/AGENTS.md` remains
+owned and installed solely by terminal-environment-toolkit. `src/league/guidance.py`
+accepts only the relative `league/AGENTS.md` target beneath an explicit isolated
+Codex, Cursor, or Pi agent root. It rejects universal or alternate targets
+before mutation, backs up and atomically stages only the supplement, and proves
+the universal hash unchanged before and after install and rollback. It has no
+home-directory default and no CLI. Toolkit issue #45 owns universal-guide
+reconciliation; League issue #90 owns this refusal boundary. Repository
+publication contains no installed path, hook payload, runtime identity, raw
+prompt, or machine state.

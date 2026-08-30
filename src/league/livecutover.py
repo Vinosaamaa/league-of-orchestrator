@@ -13,7 +13,12 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__
-from .acceptance import _atomic_write, _stage_release_bytes, _switch_symlink
+from .acceptance import (
+    NAMESPACE_PATTERN,
+    _atomic_write,
+    _stage_release_bytes,
+    _switch_symlink,
+)
 from .precutover import _integrated_lifecycle, _read_only_shadow, _snapshot, _validate_plan
 from .sqlite_store import SQLiteStorage
 from .storage import StorageRefusal
@@ -79,11 +84,85 @@ def _backup(plan: dict[str, Any], backup_root: Path) -> list[dict[str, Any]]:
 def _restore(receipts: list[dict[str, Any]], backup_root: Path) -> None:
     for item in reversed(receipts):
         target = Path(item["path"])
+        if _snapshot(target) == item["before"]:
+            continue
         _remove_node(target)
         if item["before"]["exists"]:
             _copy_node(backup_root / "targets" / item["target_id"], target)
-            if _snapshot(target)["sha256"] != item["before"]["sha256"]:
-                raise StorageRefusal("cutover_rollback_failed", "restored target hash differs")
+        if _snapshot(target) != item["before"]:
+            raise StorageRefusal("cutover_rollback_failed", "restored target differs")
+
+
+def _lexists(path: Path) -> bool:
+    return os.path.lexists(path)
+
+
+def _preflight_live_cutover(
+    temporary_root: Path, namespace: str, plan: dict[str, Any]
+) -> tuple[Path, Path, Path]:
+    supplied_root = Path(temporary_root)
+    if (
+        not supplied_root.is_absolute()
+        or not supplied_root.is_dir()
+        or supplied_root.is_symlink()
+    ):
+        raise StorageRefusal(
+            "invalid_temporary_root",
+            "temporary root must be an explicit directory",
+        )
+    temporary = supplied_root.resolve(strict=True)
+    if temporary == Path("/"):
+        raise StorageRefusal(
+            "invalid_temporary_root",
+            "temporary root must be an explicit directory",
+        )
+    if not NAMESPACE_PATTERN.fullmatch(namespace):
+        raise StorageRefusal("invalid_namespace", "live cutover namespace is invalid")
+
+    proposed = plan["proposed"]
+    root = temporary / f"league-{namespace}-cutover"
+    release = Path(proposed["release_prefix"]) / "releases" / __version__
+    release_bundle = root / "release-bundle" / __version__
+    if _lexists(release) or _lexists(release_bundle):
+        raise StorageRefusal(
+            "cutover_release_identity_exists",
+            "the candidate release identity is already allocated",
+        )
+    if _lexists(root):
+        raise StorageRefusal(
+            "cutover_attempt_exists",
+            "the live cutover attempt namespace is already allocated",
+        )
+    if _lexists(Path(proposed["backup_root"])):
+        raise StorageRefusal("cutover_backup_exists", "cutover backup root must be absent")
+    if _lexists(Path(proposed["state_root"])):
+        raise StorageRefusal(
+            "cutover_target_exists", "canonical SQLite state already exists"
+        )
+    if _lexists(Path(proposed["archive_root"])):
+        raise StorageRefusal("legacy_archive_exists", "legacy archive root must be absent")
+    return root, release, release_bundle
+
+
+def _reserve_release_identity(release: Path, release_bundle: Path) -> None:
+    reserved: list[Path] = []
+    try:
+        release_bundle.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        release_bundle.mkdir(mode=0o700)
+        reserved.append(release_bundle)
+        release.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        release.mkdir(mode=0o700)
+        reserved.append(release)
+    except FileExistsError as exc:
+        for candidate in reversed(reserved):
+            try:
+                candidate.rmdir()
+            except OSError:
+                pass
+        raise StorageRefusal(
+            "cutover_release_identity_exists",
+            "the candidate release identity was allocated concurrently",
+        ) from exc
 
 
 def _install_hook_routes(plan: dict[str, Any]) -> list[dict[str, Any]]:
@@ -381,8 +460,9 @@ def run_live_cutover(
         or mutation.get("applied") is not False
     ):
         raise StorageRefusal("cutover_authority_invalid", "cutover authority digest or state differs")
-    root = temporary_root.resolve(strict=True) / f"league-{namespace}-cutover"
-    root.mkdir(mode=0o700)
+    root, release, release_bundle = _preflight_live_cutover(
+        temporary_root, namespace, plan
+    )
     proposed = plan["proposed"]
     lock_path = Path(proposed["writer_pointer"]).with_name("league-cutover.lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -394,12 +474,17 @@ def run_live_cutover(
         except BlockingIOError as exc:
             raise StorageRefusal("cutover_locked", "another live cutover holds the global lock") from exc
         try:
+            # Recheck under the global lock before creating any cutover target,
+            # backup, or attempt directory.
+            locked_paths = _preflight_live_cutover(temporary_root, namespace, plan)
+            if locked_paths != (root, release, release_bundle):
+                raise StorageRefusal(
+                    "cutover_preflight_changed", "live cutover candidate paths changed"
+                )
+            root.mkdir(mode=0o700)
             receipts = _backup(plan, backup_root)
             shadow = _read_only_shadow(root, plan)
-            release = Path(proposed["release_prefix"]) / "releases" / __version__
-            release_bundle = root / "release-bundle" / __version__
-            release_bundle.mkdir(parents=True, mode=0o700)
-            release.mkdir(parents=True, mode=0o700)
+            _reserve_release_identity(release, release_bundle)
             source_hashes, release_hashes, installed_hashes = _stage_release_bytes(
                 source_root, release_bundle, release, (str(source_root).encode(), str(root).encode())
             )

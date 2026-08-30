@@ -100,6 +100,7 @@
         "hook_fixtures",
         "permissions_checked",
         "path_leaks",
+        "guidance",
         "rollback"
       ],
       "properties": {
@@ -131,6 +132,36 @@
         },
         "permissions_checked": {"const": true},
         "path_leaks": {"const": false},
+        "guidance": {
+          "type": "object",
+          "required": [
+            "source",
+            "target",
+            "source_sha256",
+            "installed_sha256",
+            "prior_sha256",
+            "restored_sha256",
+            "universal_before_sha256",
+            "universal_after_install_sha256",
+            "universal_after_rollback_sha256",
+            "universal_unchanged",
+            "rollback_completed"
+          ],
+          "properties": {
+            "source": {"const": "global-agent-instructions/league/AGENTS.md"},
+            "target": {"const": "league/AGENTS.md"},
+            "source_sha256": {"$ref": "#/$defs/sha256"},
+            "installed_sha256": {"$ref": "#/$defs/sha256"},
+            "prior_sha256": {"$ref": "#/$defs/sha256"},
+            "restored_sha256": {"$ref": "#/$defs/sha256"},
+            "universal_before_sha256": {"$ref": "#/$defs/sha256"},
+            "universal_after_install_sha256": {"$ref": "#/$defs/sha256"},
+            "universal_after_rollback_sha256": {"$ref": "#/$defs/sha256"},
+            "universal_unchanged": {"const": true},
+            "rollback_completed": {"const": true}
+          },
+          "additionalProperties": false
+        },
         "rollback": {
           "type": "object",
           "required": ["completed", "restored_target", "observed_version"],

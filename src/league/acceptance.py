@@ -21,6 +21,12 @@ from pathlib import Path
 from typing import Any, Optional
 
 from . import MAX_ACCEPTANCE_SENTINEL_PATHS, __version__
+from .guidance import (
+    LEAGUE_TARGET,
+    rollback_guidance,
+    stage_guidance,
+    validate_guidance_manifest,
+)
 from .importer import build_import_plan
 from .sqlite_store import CURRENT_SCHEMA_VERSION, SQLiteStorage
 from .storage import StorageRefusal
@@ -339,7 +345,7 @@ def _release_files(source_root: Path) -> list[Path]:
         source_root / "tests/storage_fixture.py",
         source_root / "src/league/report_template.html",
         source_root / "skills/league-report/SKILL.md",
-        source_root / "global-agent-instructions/shared-AGENTS.md",
+        source_root / "global-agent-instructions/league/AGENTS.md",
     ]
     files.extend(sorted((source_root / "src/league").glob("*.py")))
     files.extend(sorted((source_root / "schema").glob("*.json")))
@@ -550,7 +556,71 @@ def _rollback_staged_pointer(
     }
 
 
-def _staged_install(home: Path, source_root: Path) -> dict[str, Any]:
+def _stage_guidance_rehearsal(
+    home: Path,
+    release: Path,
+    guidance_target: str,
+    staged_hashes: dict[str, str],
+) -> dict[str, Any]:
+    agents_root = home / "synthetic-agents"
+    agents_root.mkdir(mode=0o700)
+    universal = b"synthetic toolkit-owned universal guide\n"
+    prior_league = b"synthetic prior League supplement\n"
+    _atomic_write(agents_root / "AGENTS.md", universal)
+    _atomic_write(agents_root / guidance_target, prior_league)
+    universal_before = _sha256((agents_root / "AGENTS.md").read_bytes())
+    guidance_stage = stage_guidance(
+        (release / "global-agent-instructions/league/AGENTS.md").resolve(),
+        "codex",
+        agents_root.resolve(),
+        target=guidance_target,
+    )
+    if guidance_stage["installed_sha256"] != staged_hashes[
+        "global-agent-instructions/league/AGENTS.md"
+    ]:
+        raise StorageRefusal(
+            "staged_parity_failed",
+            "packaged and installed League guidance bytes differ",
+        )
+    guidance_rollback = rollback_guidance(
+        agents_root.resolve(),
+        "codex",
+        guidance_stage,
+        target=guidance_target,
+    )
+    universal_after_rollback = _sha256((agents_root / "AGENTS.md").read_bytes())
+    restored_league = _sha256((agents_root / guidance_target).read_bytes())
+    if (
+        universal_before != guidance_stage["universal_after_sha256"]
+        or universal_before != universal_after_rollback
+        or restored_league != _sha256(prior_league)
+    ):
+        raise StorageRefusal(
+            "staged_rollback_failed",
+            "guide ownership or League supplement rollback did not verify",
+        )
+    return {
+        "source": "global-agent-instructions/league/AGENTS.md",
+        "target": guidance_target,
+        "source_sha256": guidance_stage["source_sha256"],
+        "installed_sha256": guidance_stage["installed_sha256"],
+        "prior_sha256": guidance_stage["prior_sha256"],
+        "restored_sha256": guidance_rollback["restored_sha256"],
+        "universal_before_sha256": universal_before,
+        "universal_after_install_sha256": guidance_stage["universal_after_sha256"],
+        "universal_after_rollback_sha256": universal_after_rollback,
+        "universal_unchanged": True,
+        "rollback_completed": guidance_rollback["completed"],
+    }
+
+
+def _staged_install(
+    home: Path,
+    source_root: Path,
+    *,
+    guidance_targets: tuple[str, ...] = (LEAGUE_TARGET,),
+) -> dict[str, Any]:
+    guidance_target = validate_guidance_manifest(guidance_targets)[0]
     if (source_root / "VERSION").read_text(encoding="utf-8").strip() != __version__:
         raise StorageRefusal("staged_version_failed", "source version declarations disagree")
     prefix = home / "stage-prefix"
@@ -558,15 +628,38 @@ def _staged_install(home: Path, source_root: Path) -> dict[str, Any]:
     releases = prefix / "releases"
     release = releases / __version__
     legacy = releases / "0.0.0-legacy"
+    if any(
+        candidate.exists() or candidate.is_symlink()
+        for candidate in (release_bundle, release)
+    ):
+        raise StorageRefusal(
+            "staged_release_identity_exists",
+            "the candidate release identity is already allocated",
+        )
     for directory in (
-        release_bundle,
+        release_bundle.parent,
         prefix,
         releases,
-        release,
-        legacy,
         prefix / "bin",
     ):
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    reserved: list[Path] = []
+    try:
+        release_bundle.mkdir(mode=0o700)
+        reserved.append(release_bundle)
+        release.mkdir(mode=0o700)
+        reserved.append(release)
+    except FileExistsError as exc:
+        for directory in reversed(reserved):
+            try:
+                directory.rmdir()
+            except OSError:
+                pass
+        raise StorageRefusal(
+            "staged_release_identity_exists",
+            "the candidate release identity was allocated concurrently",
+        ) from exc
+    legacy.mkdir(mode=0o700)
     (legacy / "bin").mkdir(mode=0o700)
     legacy_launcher = legacy / "bin/league"
     _atomic_write(
@@ -577,6 +670,9 @@ def _staged_install(home: Path, source_root: Path) -> dict[str, Any]:
     forbidden = (str(source_root).encode(), str(prefix).encode())
     source_hashes, release_hashes, staged_hashes = _stage_release_bytes(
         source_root, release_bundle, release, forbidden
+    )
+    guidance = _stage_guidance_rehearsal(
+        home, release, guidance_target, staged_hashes
     )
     current = prefix / "current"
     current.symlink_to("releases/0.0.0-legacy")
@@ -613,6 +709,7 @@ def _staged_install(home: Path, source_root: Path) -> dict[str, Any]:
         "hook_fixtures": hook_checks,
         "permissions_checked": True,
         "path_leaks": False,
+        "guidance": guidance,
         "rollback": rollback,
     }
 

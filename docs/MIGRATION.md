@@ -123,6 +123,9 @@ row replay and must be regenerated from its retained source artifacts.
 
 An existing explicit-root database still requires the ordinary verified
 pre-upgrade backup. Issue #23 retains installed-state, live migration, rollback
-rehearsal, guidance installation, and cutover ownership. The source-managed
-shared guidance and explicit-root adapter are release inputs only; this
-migration does not mutate a home directory or global harness state.
+rehearsal, League-supplement installation, and cutover ownership. The
+source-managed `global-agent-instructions/league/AGENTS.md` and explicit-root
+adapter are release inputs only. League never owns or targets the universal
+`~/.agents/AGENTS.md`; terminal-environment-toolkit issue #45 owns that guide
+and its trigger. This migration does not mutate a home directory or global
+harness state.

@@ -77,6 +77,31 @@ def _json(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
 
 
+def _stored_object(value: Any, code: str, message: str) -> dict[str, Any]:
+    try:
+        parsed = json.loads(value)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise StorageRefusal(code, message) from exc
+    if not isinstance(parsed, dict):
+        raise StorageRefusal(code, message)
+    return parsed
+
+
+def _legacy_result_receipt(row: Any) -> dict[str, Any]:
+    detail = _stored_object(
+        row["detail_json"],
+        "legacy_display_ambiguous",
+        "legacy display reconciliation history is malformed",
+    )
+    receipt = detail.get("receipt")
+    if not isinstance(receipt, dict):
+        raise StorageRefusal(
+            "legacy_display_ambiguous",
+            "legacy display reconciliation history has no exact final receipt",
+        )
+    return receipt
+
+
 def _validate_assignment_command(command: PrepareAssignmentCommand) -> None:
     _time(command.at, "assignment preparation time")
     if command.assignment_role not in {"champion", "hidden-worker"} or not all(
@@ -1258,9 +1283,13 @@ def assignment_launch_context(store: Any, assignment_id: str) -> dict[str, Any]:
         "context_delivery": delivered,
         "legacy_display_reconciliation": (
             {
-                "intent": json.loads(legacy_intents[0]["detail_json"]),
+                "intent": _stored_object(
+                    legacy_intents[0]["detail_json"],
+                    "legacy_display_ambiguous",
+                    "legacy display reconciliation history is malformed",
+                ),
                 "receipt": (
-                    json.loads(legacy_results[0]["detail_json"])["receipt"]
+                    _legacy_result_receipt(legacy_results[0])
                     if legacy_results
                     else None
                 ),
@@ -1363,7 +1392,11 @@ def _validate_legacy_display_command(
         (command.champion_agent_id,),
     ).fetchall()
     receipt = (
-        json.loads(assignment["acceptance_receipt_json"])
+        _stored_object(
+            assignment["acceptance_receipt_json"],
+            "legacy_display_ambiguous",
+            "legacy display reconciliation acceptance receipt is malformed",
+        )
         if assignment["acceptance_receipt_json"] is not None
         else None
     )
@@ -1426,7 +1459,11 @@ def _validate_legacy_display_command(
             "legacy_display_ambiguous",
             "legacy display reconciliation requires one exact context history",
         )
-    context_detail = json.loads(contexts[0]["detail_json"])
+    context_detail = _stored_object(
+        contexts[0]["detail_json"],
+        "legacy_display_ambiguous",
+        "legacy display reconciliation context history is malformed",
+    )
     modern = context_detail.get("display_receipt")
     if revalidations or (
         isinstance(modern, dict)
@@ -1458,7 +1495,11 @@ def begin_legacy_display_reconciliation(
                 (command.assignment_id,),
             ).fetchall()
             if intents:
-                if len(intents) != 1 or json.loads(intents[0]["detail_json"]) != detail:
+                if len(intents) != 1 or _stored_object(
+                    intents[0]["detail_json"],
+                    "legacy_display_ambiguous",
+                    "legacy display reconciliation intent is malformed",
+                ) != detail:
                     raise StorageRefusal(
                         "legacy_display_conflict",
                         "legacy display reconciliation retry changed its exact intent",
@@ -1492,7 +1533,7 @@ def begin_legacy_display_reconciliation(
                     "legacy display reconciliation has ambiguous final receipts",
                 )
             final_receipt = (
-                json.loads(results[0]["detail_json"])["receipt"] if results else None
+                _legacy_result_receipt(results[0]) if results else None
             )
     except StorageRefusal:
         raise
@@ -1525,7 +1566,11 @@ def finalize_legacy_display_reconciliation(
                 "SELECT detail_json FROM events WHERE aggregate_kind='assignment' AND aggregate_id=? AND event_type='assignment_legacy_display_reconciliation_intent' LIMIT 2",
                 (command.assignment_id,),
             ).fetchall()
-            if len(intents) != 1 or json.loads(intents[0]["detail_json"]) != detail:
+            if len(intents) != 1 or _stored_object(
+                intents[0]["detail_json"],
+                "legacy_display_ambiguous",
+                "legacy display reconciliation intent is malformed",
+            ) != detail:
                 raise StorageRefusal(
                     "legacy_display_conflict",
                     "legacy display reconciliation has no exact durable intent",
@@ -1584,7 +1629,11 @@ def finalize_legacy_display_reconciliation(
                 (command.assignment_id,),
             ).fetchall()
             if results:
-                if len(results) != 1 or json.loads(results[0]["detail_json"]) != final_detail:
+                if len(results) != 1 or _stored_object(
+                    results[0]["detail_json"],
+                    "legacy_display_ambiguous",
+                    "legacy display reconciliation result is malformed",
+                ) != final_detail:
                     raise StorageRefusal(
                         "legacy_display_conflict",
                         "legacy display reconciliation final receipt conflicts with history",

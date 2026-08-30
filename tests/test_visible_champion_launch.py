@@ -584,6 +584,16 @@ def test_legacy_active_champion_display_is_reconciled_once_with_exact_receipt(
     durable = store.assignment_launch_context(assignment_id)
     assert durable["legacy_display_reconciliation"]["intent"]["owner_authorized"] is True
     assert durable["legacy_display_reconciliation"]["receipt"] == result["receipt"]
+    store.connection.execute(
+        "UPDATE events SET detail_json='{}' WHERE aggregate_id=? AND event_type='assignment_legacy_display_reconciled'",
+        (assignment_id,),
+    )
+    try:
+        store.assignment_launch_context(assignment_id)
+    except StorageRefusal as exc:
+        assert exc.code == "legacy_display_ambiguous"
+    else:
+        raise AssertionError("malformed legacy final history escaped controlled refusal")
     store.close()
 
 

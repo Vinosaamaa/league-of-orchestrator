@@ -57,9 +57,17 @@ class HerdrRolloverSnapshotAdapter:
                     lookup.setdefault(value, set()).add(index)
         observations: list[dict[str, Any]] = []
         used_panes: set[str] = set()
+        used_routes: set[str] = set()
+        used_sessions: set[str] = set()
         for target in descendants:
             pane = target.get("address")
             route = target.get("routing_name")
+            adoption = target.get("route_adoption")
+            if (
+                (not isinstance(route, str) or not route)
+                and isinstance(adoption, Mapping)
+            ):
+                route = adoption.get("routing_name")
             thread = target.get("thread_id")
             if (
                 not isinstance(pane, str)
@@ -123,12 +131,14 @@ class HerdrRolloverSnapshotAdapter:
                     "snapshot_refresh_live_mismatch",
                     "Herdr endpoint, route, thread, terminal, or worktree differs",
                 )
-            if pane in used_panes:
+            if pane in used_panes or route in used_routes or thread in used_sessions:
                 raise StorageRefusal(
                     "snapshot_refresh_live_ambiguous",
-                    "one Herdr endpoint overlaps multiple descendants",
+                    "one Herdr endpoint, route, or session overlaps multiple descendants",
                 )
             used_panes.add(str(pane))
+            used_routes.add(str(route))
+            used_sessions.add(str(thread))
             observations.append(
                 {
                     "schema": "league.rollover-snapshot-observation.v1",

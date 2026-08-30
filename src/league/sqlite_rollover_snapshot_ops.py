@@ -10,6 +10,7 @@ from typing import Any, Callable, Mapping, Optional, Sequence
 from .rollover_descendant import _herdr_runtime_generation
 from .sqlite_callsign_ops import capabilities, digest, stable_json, timestamp
 from .sqlite_rollover_ops import (
+    _descendant_source_shape,
     _descendant_reconciliation_receipt_exact,
     _historical_imported_descendant_reconciliation_receipt_exact,
     _operation,
@@ -328,6 +329,7 @@ def _descendant_context(
     store: Any,
     operation: Mapping[str, Any],
     current_rows: Sequence[Mapping[str, Any]],
+    source_rows: Sequence[Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
     squad_id = operation["squad_id"]
     predecessor_agent_id = operation["predecessor_agent_id"]
@@ -363,6 +365,7 @@ def _descendant_context(
         (squad_id,),
     ).fetchall()
     identity_by_agent = {row["agent_id"]: row for row in identities}
+    source_by_agent = {row["champion_agent_id"]: row for row in source_rows}
     runtimes_by_agent: dict[str, list[Any]] = {}
     callsigns_by_agent: dict[str, list[Any]] = {}
     for row in runtime_rows:
@@ -375,6 +378,7 @@ def _descendant_context(
         champion_agent_id = current_row["champion_agent_id"]
         task_id = current_row["task_id"]
         champion = identity_by_agent.get(champion_agent_id)
+        source_row = source_by_agent.get(champion_agent_id)
         runtimes = runtimes_by_agent.get(champion_agent_id, [])
         callsigns = callsigns_by_agent.get(champion_agent_id, [])
         if len(runtimes) > 1:
@@ -389,6 +393,7 @@ def _descendant_context(
             )
         if (
             champion is None
+            or source_row is None
             or champion["retired_at"] is not None
             or champion["role"] != "champion"
             or champion["task_id"] != task_id
@@ -434,6 +439,86 @@ def _descendant_context(
                     "snapshot_refresh_runtime_mismatch",
                     "canonical descendant runtime differs from the exact agent binding",
                 )
+        route_adoption = None
+        if champion["routing_name"] is None:
+            if (
+                champion["display_agent"] is not None
+                or champion["shotcaller_agent_id"] != predecessor_agent_id
+                or champion["kind"] != "codex-thread"
+                or champion["backend"] != "herdr"
+                or not isinstance(champion["address"], str)
+                or not champion["address"]
+                or not isinstance(champion["thread_id"], str)
+                or not champion["thread_id"]
+                or not isinstance(champion["worktree"], str)
+                or not champion["worktree"]
+            ):
+                raise StorageRefusal(
+                    "snapshot_refresh_identity_changed",
+                    "null descendant route is not an exact predecessor Herdr binding",
+                )
+            task = store.connection.execute(
+                "SELECT * FROM tasks WHERE task_id=?", (task_id,)
+            ).fetchone()
+            assignments = store.connection.execute(
+                "SELECT * FROM task_assignments WHERE task_id=? ORDER BY task_assignment_id",
+                (task_id,),
+            ).fetchall()
+            if task is None or len(assignments) > 1:
+                raise StorageRefusal(
+                    "snapshot_refresh_identity_changed",
+                    "null-route descendant task binding is missing or ambiguous",
+                )
+            source_shape, import_provenance_digest = _descendant_source_shape(
+                store,
+                task,
+                champion_agent_id,
+                predecessor_agent_id,
+                callsigns[0],
+                None if not assignments else assignments[0],
+            )
+            if source_shape != "imported_legacy_partial":
+                raise StorageRefusal(
+                    "snapshot_refresh_identity_changed",
+                    "only an exact imported legacy predecessor may adopt a null route",
+                )
+            if source_row["binding_digest"] != current_row["binding_digest"]:
+                raise StorageRefusal(
+                    "snapshot_refresh_identity_changed",
+                    "null-route descendant no longer matches its frozen binding",
+                )
+            route_adoption = {
+                "routing_name": str(champion["callsign"]).lower(),
+                "display_agent": "codex",
+                "expected_agent_version": int(champion["version"]),
+                "expected_callsign_assignment_version": int(callsigns[0]["version"]),
+                "callsign_assignment_id": callsigns[0]["callsign_assignment_id"],
+                "expected_callsign_runtime_instance_id": callsigns[0][
+                    "runtime_instance_id"
+                ],
+                "expected_callsign_requirements": list(required_capabilities),
+                "source_shape": source_shape,
+                "import_provenance_digest": import_provenance_digest,
+                "snapshot_row_digest": source_row["row_digest"],
+                "runtime_instance_id": (
+                    None if runtime is None else runtime["runtime_instance_id"]
+                ),
+                "runtime_generation": (
+                    None if runtime is None else runtime["runtime_generation"]
+                ),
+                "runtime_count": len(runtimes),
+                "runtime_status": None if runtime is None else runtime["status"],
+                "runtime_capabilities": (
+                    None if runtime is None else list(runtime_capabilities)
+                ),
+            }
+        elif not isinstance(champion["display_agent"], str) or not champion[
+            "display_agent"
+        ]:
+            raise StorageRefusal(
+                "snapshot_refresh_identity_changed",
+                "canonical descendant route lacks its display identity",
+            )
         if champion["shotcaller_agent_id"] == predecessor_agent_id:
             progress = {
                 "champion_agent_id": champion_agent_id,
@@ -467,6 +552,7 @@ def _descendant_context(
                 "thread_id": champion["thread_id"],
                 "backend": champion["backend"],
                 "routing_name": champion["routing_name"],
+                "agent_version": int(champion["version"]),
                 "display_agent": champion["display_agent"],
                 "address": champion["address"],
                 "worktree": champion["worktree"],
@@ -488,6 +574,7 @@ def _descendant_context(
                     }
                 ),
                 "progress": progress,
+                "route_adoption": route_adoption,
             }
         )
     return descendants
@@ -679,7 +766,7 @@ def _context(
             "snapshot_refresh_set_changed",
             "current active descendants differ from the expired frozen set",
         )
-    descendants = _descendant_context(store, operation, current_rows)
+    descendants = _descendant_context(store, operation, current_rows, old_rows)
     canonical_digest = digest(
         {
             "operation_id": operation_id,
@@ -692,6 +779,7 @@ def _context(
         }
     )
     return {
+        "operation": operation,
         "snapshot": snapshot,
         "source_snapshot": _snapshot_value(snapshot),
         "current_rows": current_rows,
@@ -774,6 +862,14 @@ def _observations(
         terminal_id = observation.get("terminal_id")
         thread_id = observation.get("thread_id")
         runtime_generation = observation.get("runtime_generation")
+        expected_route = target.get("routing_name")
+        if not isinstance(expected_route, str) or not expected_route:
+            adoption = target.get("route_adoption")
+            expected_route = (
+                adoption.get("routing_name")
+                if isinstance(adoption, Mapping)
+                else None
+            )
         derived_generation = (
             _herdr_runtime_generation(terminal_id, thread_id)
             if isinstance(terminal_id, str)
@@ -791,7 +887,7 @@ def _observations(
             or observation.get("callsign") != target["callsign"]
             or observation.get("thread_id") != target["thread_id"]
             or observation.get("endpoint") != target["address"]
-            or observation.get("routing_name") != target["routing_name"]
+            or observation.get("routing_name") != expected_route
             or observation.get("worktree") != target["worktree"]
             or observation.get("canonical_row_digest") != target["canonical_row_digest"]
             or not isinstance(runtime_generation, str)
@@ -814,6 +910,222 @@ def _observations(
                 "live descendant observation differs from canonical identity",
             )
     return ordered, digest(ordered)
+
+
+def _adopt_legacy_null_routes(
+    store: Any,
+    context: Mapping[str, Any],
+    observations: Sequence[Mapping[str, Any]],
+    *,
+    refresh_id: str,
+    at: str,
+    fault: Optional[FaultInjector],
+) -> list[dict[str, Any]]:
+    """CAS-persist only exact live routes missing from imported predecessor rows."""
+
+    operation = context["operation"]
+    observed_by_agent = {
+        item["champion_agent_id"]: item for item in observations
+    }
+    results: list[dict[str, Any]] = []
+    for descendant in context["descendants"]:
+        adoption = descendant.get("route_adoption")
+        if not isinstance(adoption, Mapping):
+            continue
+        observation = observed_by_agent.get(descendant["champion_agent_id"])
+        if observation is None:
+            raise StorageRefusal(
+                "snapshot_refresh_live_proof_missing",
+                "legacy route adoption lacks its exact live observation",
+            )
+        callsign_assignment = store.connection.execute(
+            """
+            SELECT callsign_assignment_id,agent_id,callsign,role,scope_kind,scope_id,
+                   state,runtime_instance_id,requirements_json,version
+              FROM callsign_assignments WHERE callsign_assignment_id=?
+            """,
+            (adoption["callsign_assignment_id"],),
+        ).fetchone()
+        runtimes = store.connection.execute(
+            "SELECT * FROM runtime_instances WHERE actor_agent_id=? ORDER BY runtime_instance_id",
+            (descendant["champion_agent_id"],),
+        ).fetchall()
+        try:
+            requirements = (
+                None
+                if callsign_assignment is None
+                else json.loads(callsign_assignment["requirements_json"])
+            )
+            runtime_capabilities = (
+                None
+                if len(runtimes) != 1
+                else json.loads(runtimes[0]["capabilities_json"])
+            )
+        except (json.JSONDecodeError, TypeError) as exc:
+            raise StorageRefusal(
+                "snapshot_refresh_concurrent_mutation",
+                "legacy route adoption capability evidence changed",
+            ) from exc
+        if (
+            callsign_assignment is None
+            or callsign_assignment["agent_id"] != descendant["champion_agent_id"]
+            or callsign_assignment["callsign"] != descendant["callsign"]
+            or callsign_assignment["role"] != "champion"
+            or callsign_assignment["scope_kind"] != "task"
+            or callsign_assignment["scope_id"] != descendant["task_id"]
+            or callsign_assignment["state"] != "active"
+            or callsign_assignment["runtime_instance_id"]
+            != adoption["expected_callsign_runtime_instance_id"]
+            or int(callsign_assignment["version"])
+            != adoption["expected_callsign_assignment_version"]
+            or requirements != adoption["expected_callsign_requirements"]
+            or len(runtimes) != adoption["runtime_count"]
+            or (
+                len(runtimes) == 1
+                and (
+                    not bool(runtimes[0]["verified"])
+                    or runtimes[0]["harness_kind"] != descendant["kind"]
+                    or runtimes[0]["backend_kind"] != descendant["backend"]
+                    or runtimes[0]["session_ref"] != descendant["thread_id"]
+                    or runtimes[0]["endpoint"] != descendant["address"]
+                    or runtimes[0]["runtime_instance_id"]
+                    != adoption["runtime_instance_id"]
+                    or runtimes[0]["runtime_generation"]
+                    != adoption["runtime_generation"]
+                    or runtimes[0]["status"] != adoption["runtime_status"]
+                    or runtime_capabilities != adoption["runtime_capabilities"]
+                )
+            )
+        ):
+            raise StorageRefusal(
+                "snapshot_refresh_concurrent_mutation",
+                "legacy route adoption callsign or runtime evidence changed",
+            )
+        expected_agent_version = adoption["expected_agent_version"]
+        next_agent_version = expected_agent_version + 1
+        event_id = "rollover-route-adoption:" + digest(
+            {
+                "operation_id": operation["operation_id"],
+                "refresh_id": refresh_id,
+                "champion_agent_id": descendant["champion_agent_id"],
+                "task_id": descendant["task_id"],
+            }
+        )[:40]
+        receipt = {
+            "schema": "league.rollover-descendant-route-adoption.v1",
+            "operation_id": operation["operation_id"],
+            "refresh_id": refresh_id,
+            "event_id": event_id,
+            "source_snapshot_id": context["source_snapshot"]["snapshot_id"],
+            "source_snapshot_version": context["source_snapshot"]["version"],
+            "source_snapshot_digest": context["source_snapshot"]["digest"],
+            "source_snapshot_row_digest": adoption["snapshot_row_digest"],
+            "squad_id": operation["squad_id"],
+            "predecessor_agent_id": operation["predecessor_agent_id"],
+            "successor_agent_id": operation["successor_agent_id"],
+            "champion_agent_id": descendant["champion_agent_id"],
+            "task_id": descendant["task_id"],
+            "callsign": descendant["callsign"],
+            "routing_name": adoption["routing_name"],
+            "display_agent": adoption["display_agent"],
+            "expected_agent_version": expected_agent_version,
+            "agent_version": next_agent_version,
+            "callsign_assignment_id": adoption["callsign_assignment_id"],
+            "expected_callsign_assignment_version": adoption[
+                "expected_callsign_assignment_version"
+            ],
+            "expected_callsign_runtime_instance_id": adoption[
+                "expected_callsign_runtime_instance_id"
+            ],
+            "expected_callsign_requirements": adoption[
+                "expected_callsign_requirements"
+            ],
+            "runtime_count": adoption["runtime_count"],
+            "runtime_instance_id": adoption["runtime_instance_id"],
+            "runtime_generation": adoption["runtime_generation"],
+            "runtime_status": adoption["runtime_status"],
+            "runtime_capabilities": adoption["runtime_capabilities"],
+            "endpoint_digest": digest({"endpoint": descendant["address"]}),
+            "thread_digest": digest({"thread_id": descendant["thread_id"]}),
+            "worktree_digest": digest({"worktree": descendant["worktree"]}),
+            "terminal_digest": digest({"terminal_id": observation["terminal_id"]}),
+            "state_change_seq": observation["state_change_seq"],
+            "observed_status": observation["status"],
+            "observation_digest": digest(dict(observation)),
+            "source_shape": adoption["source_shape"],
+            "import_provenance_digest": adoption["import_provenance_digest"],
+            "reason": "switched_rollover_imported_legacy_null_route_adoption",
+            "result": "adopted",
+            "at": at,
+        }
+        changed = store.connection.execute(
+            """
+            UPDATE agent_instances
+               SET routing_name=?,display_agent=?,version=version+1,updated_at=?
+             WHERE agent_id=? AND role='champion' AND shotcaller_agent_id=?
+               AND task_id=? AND retired_at IS NULL AND routing_name IS NULL
+               AND display_agent IS NULL AND kind='codex-thread' AND backend='herdr'
+               AND address=? AND thread_id=? AND worktree=? AND version=?
+            """,
+            (
+                adoption["routing_name"],
+                adoption["display_agent"],
+                at,
+                descendant["champion_agent_id"],
+                operation["predecessor_agent_id"],
+                descendant["task_id"],
+                descendant["address"],
+                descendant["thread_id"],
+                descendant["worktree"],
+                expected_agent_version,
+            ),
+        )
+        if changed.rowcount != 1:
+            raise StorageRefusal(
+                "snapshot_refresh_concurrent_mutation",
+                "legacy descendant route adoption CAS changed",
+            )
+        if fault:
+            fault("after_refresh_route_adoption_agent")
+        receipt_digest = digest(receipt)
+        store.connection.execute(
+            """
+            INSERT INTO events
+              (event_id,agent_id,task_id,squad_id,entity_version,event_type,status,
+               update_text,occurred_at,detail_json,aggregate_kind,aggregate_id,
+               source_event_id)
+            VALUES(?,?,NULL,NULL,?,'rollover_descendant_route_adopted',?,
+                   'imported legacy descendant route adopted',?,?,'agent',?,?)
+            """,
+            (
+                event_id,
+                descendant["champion_agent_id"],
+                next_agent_version,
+                observation["status"],
+                at,
+                stable_json(
+                    {"receipt": receipt, "receipt_digest": receipt_digest}
+                ),
+                descendant["champion_agent_id"],
+                operation["owner_event_id"],
+            ),
+        )
+        if fault:
+            fault("after_refresh_route_adoption_event")
+        results.append(
+            {
+                "champion_agent_id": descendant["champion_agent_id"],
+                "task_id": descendant["task_id"],
+                "event_id": event_id,
+                "receipt_digest": receipt_digest,
+                "routing_name": adoption["routing_name"],
+                "expected_agent_version": expected_agent_version,
+                "agent_version": next_agent_version,
+            }
+        )
+    if results and fault:
+        fault("after_refresh_route_adoptions")
+    return results
 
 
 def refresh(
@@ -875,22 +1187,6 @@ def refresh(
             normalized, observation_digest = _observations(
                 context["descendants"], observations
             )
-            next_snapshot_version = expected_snapshot_version + 1
-            next_rollover_version = expected_rollover_version + 1
-            snapshot_id = f"snapshot:{operation_id}:v{next_snapshot_version}"
-            refreshed_rows = []
-            for current_row in context["current_rows"]:
-                row = {
-                    "champion_agent_id": current_row["champion_agent_id"],
-                    "task_id": current_row["task_id"],
-                    "callsign": current_row["callsign"],
-                    "binding_digest": current_row["binding_digest"],
-                }
-                row["row_digest"] = _snapshot_row_digest(
-                    snapshot_id, next_snapshot_version, row
-                )
-                refreshed_rows.append(row)
-            snapshot_digest = _snapshot_digest(refreshed_rows)
             final_candidate = sorted(
                 (
                     dict(item)
@@ -908,6 +1204,65 @@ def refresh(
             final_normalized, final_observation_digest = _observations(
                 context["descendants"], final_candidate
             )
+            route_adoptions = _adopt_legacy_null_routes(
+                store,
+                context,
+                final_normalized,
+                refresh_id=refresh_id,
+                at=at,
+                fault=fault,
+            )
+            post_context = _context(
+                store,
+                operation_id,
+                squad_id,
+                predecessor_agent_id,
+                successor_agent_id,
+                expected_rollover_version,
+                expected_snapshot_version,
+                expected_snapshot_digest,
+                expires_at,
+                at,
+            )
+            adopted_agents = {
+                item["champion_agent_id"] for item in route_adoptions
+            }
+            before_rows = {
+                row["champion_agent_id"]: row for row in context["current_rows"]
+            }
+            after_rows = {
+                row["champion_agent_id"]: row
+                for row in post_context["current_rows"]
+            }
+            if set(before_rows) != set(after_rows) or any(
+                (
+                    after_rows[agent_id]["binding_digest"]
+                    == before_rows[agent_id]["binding_digest"]
+                )
+                if agent_id in adopted_agents
+                else after_rows[agent_id] != before_rows[agent_id]
+                for agent_id in before_rows
+            ):
+                raise StorageRefusal(
+                    "snapshot_refresh_concurrent_mutation",
+                    "canonical descendants changed beyond exact route adoption",
+                )
+            next_snapshot_version = expected_snapshot_version + 1
+            next_rollover_version = expected_rollover_version + 1
+            snapshot_id = f"snapshot:{operation_id}:v{next_snapshot_version}"
+            refreshed_rows = []
+            for current_row in post_context["current_rows"]:
+                row = {
+                    "champion_agent_id": current_row["champion_agent_id"],
+                    "task_id": current_row["task_id"],
+                    "callsign": current_row["callsign"],
+                    "binding_digest": current_row["binding_digest"],
+                }
+                row["row_digest"] = _snapshot_row_digest(
+                    snapshot_id, next_snapshot_version, row
+                )
+                refreshed_rows.append(row)
+            snapshot_digest = _snapshot_digest(refreshed_rows)
             changed = store.connection.execute(
                 """
                 UPDATE rollover_operations SET snapshot_id=?,version=?,updated_at=?
@@ -988,12 +1343,15 @@ def refresh(
                             else descendant["runtime"]["capabilities"]
                         ),
                     }
-                    for descendant in context["descendants"]
+                    for descendant in post_context["descendants"]
                 ],
                 "progress_bindings": [
-                    descendant["progress"] for descendant in context["descendants"]
+                    descendant["progress"]
+                    for descendant in post_context["descendants"]
                 ],
+                "route_adoptions": route_adoptions,
                 "canonical_digest": canonical_digest,
+                "refreshed_canonical_digest": post_context["canonical_digest"],
                 "observation_digest": observation_digest,
                 "final_observation_digest": final_observation_digest,
                 "expires_at": expires_at,

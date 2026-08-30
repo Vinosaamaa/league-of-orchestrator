@@ -799,3 +799,32 @@ the historical profile, `pending_delivery_count` must equal the sorted unique
 `retargeted_outbox_ids` count. Older receipts that counted unenumerated
 successor-pending deliveries remain unverifiable and refuse instead of being
 guessed from current state.
+
+### Imported legacy null-route adoption
+
+Issue #23 permits one additional mutation inside the existing switched,
+expired-snapshot refresh transaction. A predecessor-owned descendant with both
+canonical route and display identity null may adopt a route only when its task,
+callsign assignment, and import run/artifact/legacy-event linkage still match
+the exact `imported_legacy_partial` production shape. A modern task whose route
+was cleared, a successor-owned row, or any non-null partial identity refuses.
+
+The Herdr adapter must find exactly one live interactive Codex endpoint by the
+combined canonical pane, exact thread/session, and normalized callsign. The
+top-level Herdr name must equal the lowercase callsign; terminal titles,
+sidebar tokens, and other display metadata are not routing evidence. Exact
+pane, route, session, cwd, foreground cwd, terminal, state sequence, live
+status, and deterministic runtime generation are observed twice. Any missing,
+mismatched, closed, unready, or overlapping endpoint refuses before mutation.
+
+After the final stable observation, League rechecks the frozen source binding,
+agent version, callsign assignment/version/requirements, and zero-or-one exact
+runtime identity/generation/status/capabilities. It then CAS-updates only the
+null route plus `display_agent=codex`, increments that agent version, and emits
+one immutable hash-bound adoption event/receipt. The refreshed snapshot rows
+are constructed from the post-adoption canonical bindings, and the enclosing
+refresh receipt binds every adopted descendant's prior and resulting agent
+version. Route events,
+agent updates, snapshot rows, and the rollover pointer share one transaction;
+fault or CAS failure rolls all of them back. No schema, live rollover, hook,
+installation, layout, process, task owner, or successor row changes here.

@@ -36,6 +36,17 @@ RUNTIME_RECEIPT_KEYS = {
     "display_agent",
     "capabilities",
 }
+SHOTCALLER_BASELINE_KEY = "shotcaller_bootstrap_baseline"
+SHOTCALLER_BASELINE_KEYS = {
+    "schema",
+    "terminal_id",
+    "endpoint_generation",
+    "state_change_seq",
+    "routing_name",
+    "sidebar_name",
+    "thread_title",
+    "title",
+}
 
 
 def stable_json(value: Any) -> str:
@@ -70,6 +81,34 @@ def capabilities(values: Sequence[str]) -> tuple[str, ...]:
             "invalid_capabilities", "capabilities must be unique normalized tokens"
         )
     return result
+
+
+def _shotcaller_baseline(value: Mapping[str, Any]) -> dict[str, Any]:
+    if (
+        not isinstance(value, Mapping)
+        or set(value) != SHOTCALLER_BASELINE_KEYS
+        or value.get("schema") != "league.shotcaller-bootstrap-baseline.v1"
+        or value.get("routing_name") is not None
+        or type(value.get("state_change_seq")) is not int
+        or value["state_change_seq"] < 0
+    ):
+        raise StorageRefusal(
+            "bootstrap_baseline_unverified",
+            "Shotcaller bootstrap baseline is not an exact unbound identity",
+        )
+    for key in ("terminal_id", "endpoint_generation", "sidebar_name", "thread_title", "title"):
+        item = value.get(key)
+        if not isinstance(item, str) or len(item.encode("utf-8")) > 1024:
+            raise StorageRefusal(
+                "bootstrap_baseline_unverified",
+                "Shotcaller bootstrap baseline metadata is invalid",
+            )
+    if not value["terminal_id"] or not value["endpoint_generation"]:
+        raise StorageRefusal(
+            "bootstrap_baseline_unverified",
+            "Shotcaller bootstrap baseline endpoint is incomplete",
+        )
+    return dict(value)
 
 
 def shuffle_key(seed: str, role: str, callsign: str) -> str:
@@ -842,6 +881,117 @@ def activate_callsign(
         raise store._translate_database_error(
             exc, "callsign activation conflicted with canonical state"
         ) from exc
+
+
+def record_shotcaller_bootstrap_baseline(
+    store: Any,
+    assignment_id: str,
+    expected_version: int,
+    baseline: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Persist the immutable pre-publication metadata used by crash rollback."""
+
+    normalized = _shotcaller_baseline(baseline)
+    try:
+        with store._transaction():
+            assignment = store.connection.execute(
+                "SELECT * FROM callsign_assignments WHERE callsign_assignment_id=?",
+                (assignment_id,),
+            ).fetchone()
+            if (
+                assignment is None
+                or assignment["role"] != "shotcaller"
+                or assignment["scope_kind"] != "shotcaller"
+                or assignment["scope_id"] != assignment["agent_id"]
+                or assignment["state"] != "reserved"
+                or int(assignment["version"]) != expected_version
+            ):
+                raise StorageRefusal(
+                    "assignment_conflict",
+                    "Shotcaller bootstrap baseline requires the exact reservation",
+                )
+            agent = store.connection.execute(
+                "SELECT metadata_json FROM agent_instances WHERE agent_id=? AND retired_at IS NULL",
+                (assignment["agent_id"],),
+            ).fetchone()
+            if agent is None:
+                raise StorageRefusal(
+                    "agent_conflict", "Shotcaller bootstrap reservation agent is not live"
+                )
+            try:
+                metadata = json.loads(agent["metadata_json"])
+            except (TypeError, json.JSONDecodeError) as exc:
+                raise StorageRefusal(
+                    "receipt_conflict", "Shotcaller reservation metadata is malformed"
+                ) from exc
+            if not isinstance(metadata, dict):
+                raise StorageRefusal(
+                    "receipt_conflict", "Shotcaller reservation metadata is not an object"
+                )
+            existing = metadata.get(SHOTCALLER_BASELINE_KEY)
+            if existing is not None:
+                if _shotcaller_baseline(existing) != normalized:
+                    raise StorageRefusal(
+                        "receipt_conflict",
+                        "Shotcaller bootstrap retry changed the original metadata baseline",
+                    )
+                return {"baseline": normalized, "idempotent": True}
+            metadata[SHOTCALLER_BASELINE_KEY] = normalized
+            changed = store.connection.execute(
+                "UPDATE agent_instances SET metadata_json=? WHERE agent_id=? AND metadata_json=?",
+                (stable_json(metadata), assignment["agent_id"], agent["metadata_json"]),
+            )
+            if changed.rowcount != 1:
+                raise StorageRefusal(
+                    "version_conflict", "Shotcaller bootstrap baseline changed concurrently"
+                )
+            return {"baseline": normalized, "idempotent": False}
+    except StorageRefusal:
+        raise
+    except sqlite3.DatabaseError as exc:
+        raise store._translate_database_error(
+            exc, "Shotcaller bootstrap baseline conflicted with canonical state"
+        ) from exc
+
+
+def shotcaller_bootstrap_baseline(
+    store: Any, assignment_id: str
+) -> Optional[dict[str, Any]]:
+    assignment = store.connection.execute(
+        "SELECT agent_id,role,scope_kind,scope_id FROM callsign_assignments "
+        "WHERE callsign_assignment_id=?",
+        (assignment_id,),
+    ).fetchone()
+    if assignment is None:
+        return None
+    if (
+        assignment["role"] != "shotcaller"
+        or assignment["scope_kind"] != "shotcaller"
+        or assignment["scope_id"] != assignment["agent_id"]
+    ):
+        raise StorageRefusal(
+            "assignment_conflict", "Shotcaller bootstrap baseline assignment is not exact"
+        )
+    agent = store.connection.execute(
+        "SELECT metadata_json FROM agent_instances WHERE agent_id=?",
+        (assignment["agent_id"],),
+    ).fetchone()
+    if agent is None:
+        raise StorageRefusal(
+            "agent_conflict", "Shotcaller bootstrap baseline agent is missing"
+        )
+    try:
+        metadata = json.loads(agent["metadata_json"])
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise StorageRefusal(
+            "receipt_conflict", "Shotcaller reservation metadata is malformed"
+        ) from exc
+    if not isinstance(metadata, dict):
+        raise StorageRefusal(
+            "receipt_conflict", "Shotcaller reservation metadata is not an object"
+        )
+    baseline = metadata.get(SHOTCALLER_BASELINE_KEY)
+    return None if baseline is None else _shotcaller_baseline(baseline)
 
 
 def record_shotcaller_bootstrap(

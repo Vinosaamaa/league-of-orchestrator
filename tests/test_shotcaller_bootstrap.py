@@ -103,6 +103,52 @@ class RecordingHerdr:
         )
 
 
+class PersistentRecordingHerdr(RecordingHerdr):
+    """A fake Herdr endpoint whose metadata survives test process boundaries."""
+
+    def __init__(self, worktree: Path, state_path: Path) -> None:
+        self.state_path = state_path
+        super().__init__(worktree)
+        if state_path.exists():
+            self._load()
+        else:
+            self._save()
+
+    def _load(self) -> None:
+        value = json.loads(self.state_path.read_text(encoding="utf-8"))
+        self.thread_id = value["thread_id"]
+        self.name = value["name"]
+        self.tokens = dict(value["tokens"])
+        self.title = value["title"]
+        self.state_change_seq = int(value["state_change_seq"])
+
+    def _save(self) -> None:
+        self.state_path.write_text(
+            json.dumps(
+                {
+                    "thread_id": self.thread_id,
+                    "name": self.name,
+                    "tokens": self.tokens,
+                    "title": self.title,
+                    "state_change_seq": self.state_change_seq,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+    def run(
+        self, arguments, *, timeout_seconds: int = 30
+    ) -> subprocess.CompletedProcess[str]:
+        self._load()
+        try:
+            return super().run(arguments, timeout_seconds=timeout_seconds)
+        finally:
+            self._save()
+
+
 class InjectedBootstrapFault(RuntimeError):
     pass
 
@@ -446,6 +492,77 @@ def test_bootstrap_identity_mismatch_makes_no_canonical_mutation(root: Path) -> 
         ).fetchone()[0] == 0
 
 
+def test_completed_bootstrap_retry_refuses_changed_spec_or_metadata(root: Path) -> None:
+    state, _ = migrated_state(root, "shotcaller-completed-retry")
+    worktree = root / "shotcaller-completed-retry" / "worktree"
+    worktree.mkdir()
+    clock = FakeClock()
+    runner = RecordingHerdr(worktree)
+    with SQLiteStorage(state) as store:
+        _seed_available_ashe(store, clock)
+        service = ShotcallerBootstrapService(
+            store,
+            HerdrShotcallerBootstrapAdapter(
+                _options(worktree),
+                runner,
+                environment={
+                    "HERDR_ENV": "1",
+                    "HERDR_WORKSPACE_ID": "w1",
+                    "HERDR_TAB_ID": "w1:t1",
+                    "HERDR_PANE_ID": "w1:p1",
+                },
+            ),
+            clock,
+        )
+        created = service.bootstrap(_spec())
+        changed_specs = (
+            ShotcallerBootstrapSpec(
+                assignment_id=_spec().assignment_id,
+                agent_id="agent:shotcaller:changed",
+                runtime_instance_id=_spec().runtime_instance_id,
+                thread_id=_spec().thread_id,
+                capabilities=_spec().capabilities,
+            ),
+            ShotcallerBootstrapSpec(
+                assignment_id=_spec().assignment_id,
+                agent_id=_spec().agent_id,
+                runtime_instance_id="runtime:shotcaller:changed",
+                thread_id=_spec().thread_id,
+                capabilities=_spec().capabilities,
+            ),
+            ShotcallerBootstrapSpec(
+                assignment_id=_spec().assignment_id,
+                agent_id=_spec().agent_id,
+                runtime_instance_id=_spec().runtime_instance_id,
+                thread_id=_spec().thread_id,
+                capabilities=("request.triage", "rollover.accept", "artifact.publish"),
+            ),
+        )
+        for changed in changed_specs:
+            try:
+                service.bootstrap(changed)
+            except StorageRefusal as exc:
+                assert exc.code in {"receipt_conflict", "receipt_mismatch"}
+            else:
+                raise AssertionError("completed bootstrap retry accepted changed identity")
+        for token in ("sidebar_name", "thread_title"):
+            original = runner.tokens[token]
+            runner.tokens[token] = "Tampered"
+            try:
+                service.bootstrap(_spec())
+            except StorageRefusal as exc:
+                assert exc.code == "shotcaller_metadata_unverified"
+            else:
+                raise AssertionError(
+                    "completed bootstrap retry accepted changed display metadata"
+                )
+            runner.tokens[token] = original
+        assert store.shotcaller_bootstrap_status(_spec().assignment_id) == {
+            **created,
+            "idempotent": True,
+        }
+
+
 def test_bootstrap_metadata_and_atomic_finalization_failures_restore_exact_state(
     root: Path,
 ) -> None:
@@ -513,12 +630,117 @@ def test_bootstrap_metadata_and_atomic_finalization_failures_restore_exact_state
         )
 
 
+def _bootstrap_process_child(
+    state: Path, worktree: Path, herdr_state: Path, phase: str
+) -> int:
+    clock = FakeClock()
+    runner = PersistentRecordingHerdr(worktree, herdr_state)
+    with SQLiteStorage(state) as store:
+        service = ShotcallerBootstrapService(
+            store,
+            HerdrShotcallerBootstrapAdapter(
+                _options(worktree),
+                runner,
+                environment={
+                    "HERDR_ENV": "1",
+                    "HERDR_WORKSPACE_ID": "w1",
+                    "HERDR_TAB_ID": "w1:t1",
+                    "HERDR_PANE_ID": "w1:p1",
+                },
+            ),
+            clock,
+        )
+        if phase == "publish-crash":
+            def crash(point: str) -> None:
+                if point == "after_shotcaller_publish":
+                    os._exit(86)
+
+            service.bootstrap(_spec(), fault=crash)
+            return 90
+        if phase == "retry-fault":
+            def fail_finalization(point: str) -> None:
+                if point == "after_shotcaller_activation":
+                    raise InjectedBootstrapFault(point)
+
+            try:
+                service.bootstrap(_spec(), fault=fail_finalization)
+            except InjectedBootstrapFault:
+                return 0
+            return 91
+    return 92
+
+
+def test_publish_crash_then_retry_fault_restores_original_unbound_metadata(
+    root: Path,
+) -> None:
+    state, _ = migrated_state(root, "shotcaller-publish-crash")
+    worktree = root / "shotcaller-publish-crash" / "worktree"
+    worktree.mkdir()
+    herdr_state = root / "shotcaller-publish-crash" / "herdr-state.json"
+    runner = PersistentRecordingHerdr(worktree, herdr_state)
+    runner.tokens = {
+        "sidebar_name": "Original sidebar",
+        "thread_title": "Original thread",
+    }
+    runner.title = "Original title"
+    runner._save()
+    with SQLiteStorage(state) as store:
+        _seed_available_ashe(store, FakeClock())
+
+    child = [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "--bootstrap-process-child",
+        str(state),
+        str(worktree),
+        str(herdr_state),
+    ]
+    crashed = subprocess.run([*child, "publish-crash"], check=False, timeout=10)
+    assert crashed.returncode == 86
+    published = PersistentRecordingHerdr(worktree, herdr_state)
+    assert published.name == "ashe"
+    assert published.tokens == {"sidebar_name": "Ashe", "thread_title": "Ashe"}
+    assert published.title == "Ashe"
+    with SQLiteStorage(state) as store:
+        assignment = store.callsign_assignment_status(_spec().assignment_id)
+        assert assignment is not None and assignment["state"] == "reserved"
+        assert store.shotcaller_bootstrap_status(_spec().assignment_id) is None
+        baseline = store.shotcaller_bootstrap_baseline(_spec().assignment_id)
+        assert baseline is not None
+        assert baseline["routing_name"] is None
+        assert baseline["sidebar_name"] == "Original sidebar"
+        assert baseline["thread_title"] == "Original thread"
+        assert baseline["title"] == "Original title"
+
+    retried = subprocess.run([*child, "retry-fault"], check=False, timeout=10)
+    assert retried.returncode == 0
+    restored = PersistentRecordingHerdr(worktree, herdr_state)
+    assert restored.name is None
+    assert restored.tokens == {
+        "sidebar_name": "Original sidebar",
+        "thread_title": "Original thread",
+    }
+    assert restored.title == "Original title"
+    with SQLiteStorage(state) as store:
+        assignment = store.callsign_assignment_status(_spec().assignment_id)
+        assert assignment is not None and assignment["state"] == "rolled_back"
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM runtime_instances WHERE actor_agent_id=?", (AGENT_ID,)
+        ).fetchone()[0] == 0
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM events WHERE agent_id=? AND event_type='shotcaller_created'",
+            (AGENT_ID,),
+        ).fetchone()[0] == 0
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="league-shotcaller-bootstrap-") as temporary:
         root = Path(temporary)
         test_in_place_bootstrap_creates_shotcaller_without_layout_or_squad_registration(root)
         test_bootstrap_identity_mismatch_makes_no_canonical_mutation(root)
+        test_completed_bootstrap_retry_refuses_changed_spec_or_metadata(root)
         test_bootstrap_metadata_and_atomic_finalization_failures_restore_exact_state(root)
+        test_publish_crash_then_retry_fault_restores_original_unbound_metadata(root)
     print(
         "PASS: Shotcaller bootstrap stays in-place, Squad registration stays separate, "
         "and Champion launch owns a new tab root"
@@ -526,4 +748,10 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    if len(sys.argv) == 6 and sys.argv[1] == "--bootstrap-process-child":
+        raise SystemExit(
+            _bootstrap_process_child(
+                Path(sys.argv[2]), Path(sys.argv[3]), Path(sys.argv[4]), sys.argv[5]
+            )
+        )
     main()

@@ -74,6 +74,7 @@ class HerdrShotcallerBootstrapAdapter:
         self.runner = runner or SubprocessRunner()
         self.environment = dict(environment or os.environ)
         self._observed: dict[str, Any] | None = None
+        self._restore_baseline: dict[str, Any] | None = None
         worktree = Path(options.worktree)
         if (
             self.environment.get("HERDR_ENV") != "1"
@@ -153,7 +154,11 @@ class HerdrShotcallerBootstrapAdapter:
         )
 
     def inspect(
-        self, spec: ShotcallerBootstrapSpec, *, expected_alias: str | None = None
+        self,
+        spec: ShotcallerBootstrapSpec,
+        *,
+        expected_alias: str | None = None,
+        allow_unpublished: bool = False,
     ) -> dict[str, Any]:
         if not THREAD_UUID.fullmatch(spec.thread_id):
             raise StorageRefusal(
@@ -165,6 +170,7 @@ class HerdrShotcallerBootstrapAdapter:
             agent.get("name") in {None, ""}
             if expected_alias is None
             else agent.get("name") == expected_alias
+            or (allow_unpublished and agent.get("name") in {None, ""})
         )
         if not self._exact(spec, pane, agent) or not routing_exact:
             raise StorageRefusal(
@@ -176,12 +182,46 @@ class HerdrShotcallerBootstrapAdapter:
             "state_change_seq": int(agent["state_change_seq"]),
             "tokens": dict(tokens) if isinstance(tokens, Mapping) else {},
             "title": agent.get("terminal_title_stripped", agent.get("terminal_title", "")),
+            "routing_name": agent.get("name") or None,
             "endpoint_generation": "herdr:"
             + hashlib.sha256(
                 f"{agent['terminal_id']}\0{spec.thread_id}".encode("utf-8")
             ).hexdigest()[:24],
         }
+        if self._observed["routing_name"] is None:
+            self._restore_baseline = self.restoration_baseline()
         return dict(self._observed)
+
+    def restoration_baseline(self) -> dict[str, Any]:
+        if self._observed is None:
+            raise StorageRefusal(
+                "shotcaller_identity_unverified", "calling identity was not inspected"
+            )
+        tokens = self._observed["tokens"]
+        return {
+            "schema": "league.shotcaller-bootstrap-baseline.v1",
+            "terminal_id": self._observed["terminal_id"],
+            "endpoint_generation": self._observed["endpoint_generation"],
+            "state_change_seq": self._observed["state_change_seq"],
+            "routing_name": self._observed["routing_name"],
+            "sidebar_name": str(tokens.get("sidebar_name", "")),
+            "thread_title": str(tokens.get("thread_title", "")),
+            "title": str(self._observed["title"] or ""),
+        }
+
+    def use_restoration_baseline(self, baseline: Mapping[str, Any]) -> None:
+        if (
+            self._observed is None
+            or baseline.get("schema") != "league.shotcaller-bootstrap-baseline.v1"
+            or baseline.get("routing_name") is not None
+            or baseline.get("terminal_id") != self._observed["terminal_id"]
+            or baseline.get("endpoint_generation") != self._observed["endpoint_generation"]
+        ):
+            raise StorageRefusal(
+                "bootstrap_baseline_unverified",
+                "stored Shotcaller bootstrap baseline does not match the current endpoint",
+            )
+        self._restore_baseline = dict(baseline)
 
     def publish(self, spec: ShotcallerBootstrapSpec, callsign: str) -> dict[str, Any]:
         if self._observed is None:
@@ -275,9 +315,11 @@ class HerdrShotcallerBootstrapAdapter:
     def restore(self) -> bool:
         if self._observed is None:
             return True
-        previous_sidebar = self._observed["tokens"].get("sidebar_name", "")
-        previous_thread_title = self._observed["tokens"].get("thread_title", "")
-        previous_title = self._observed["title"] or ""
+        if self._restore_baseline is None:
+            return False
+        previous_sidebar = self._restore_baseline["sidebar_name"]
+        previous_thread_title = self._restore_baseline["thread_title"]
+        previous_title = self._restore_baseline["title"]
         try:
             self._run(
                 ("herdr", "agent", "rename", self.options.pane_id, "--clear"),
@@ -361,14 +403,37 @@ class ShotcallerBootstrapService:
     def bootstrap(self, spec: ShotcallerBootstrapSpec, *, fault: Any = None) -> dict[str, Any]:
         existing = self.store.callsign_assignment_status(spec.assignment_id)
         completed = self.store.shotcaller_bootstrap_status(spec.assignment_id)
+        baseline = (
+            self.store.shotcaller_bootstrap_baseline(spec.assignment_id)
+            if existing is not None
+            else None
+        )
         expected_alias = (
             str(existing["callsign"]).lower()
             if existing is not None and existing["state"] in {"reserved", "active"}
             else None
         )
-        observed = self.adapter.inspect(spec, expected_alias=expected_alias)
+        observed = self.adapter.inspect(
+            spec,
+            expected_alias=expected_alias,
+            allow_unpublished=existing is not None and existing["state"] == "reserved",
+        )
+        if baseline is not None:
+            self.adapter.use_restoration_baseline(baseline)
+        elif (
+            existing is not None
+            and existing["state"] == "reserved"
+            and observed["routing_name"] is not None
+        ):
+            raise StorageRefusal(
+                "shotcaller_creation_cleanup_unproven",
+                "published Shotcaller metadata has no durable pre-publication baseline",
+            )
         if completed is not None:
-            return completed
+            receipt = self.adapter.current_receipt(spec, str(completed["callsign"]))
+            return self.store.record_shotcaller_bootstrap(
+                spec.assignment_id, 1, receipt, self.clock.now()
+            )
         at = self.clock.now()
         reserved = self.store.allocate_callsign(
             spec.assignment_id,
@@ -381,11 +446,18 @@ class ShotcallerBootstrapService:
         )
         published = False
         try:
+            if baseline is None:
+                baseline = self.store.record_shotcaller_bootstrap_baseline(
+                    spec.assignment_id, 1, self.adapter.restoration_baseline()
+                )["baseline"]
+                self.adapter.use_restoration_baseline(baseline)
             if existing is not None and existing["state"] == "active":
                 receipt = self.adapter.current_receipt(spec, str(reserved["callsign"]))
             else:
                 published = True
                 receipt = self.adapter.publish(spec, str(reserved["callsign"]))
+                if fault:
+                    fault("after_shotcaller_publish")
             return self.store.record_shotcaller_bootstrap(
                 spec.assignment_id, 1, receipt, at, fault=fault
             )

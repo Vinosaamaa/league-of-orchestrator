@@ -15,8 +15,8 @@ from .visible_launch import CommandRunner, SubprocessRunner
 THREAD_UUID = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
 )
-LIVE_STATUSES = {"active", "blocked", "idle", "waiting", "working"}
-CLOSED_STATUSES = {"closed", "completed", "done", "failed", "stopped"}
+LIVE_STATUSES = {"active", "blocked", "done", "idle", "waiting", "working"}
+CLOSED_STATUSES = {"closed", "completed", "failed", "stopped"}
 
 
 class DescendantRuntimeAdapter(Protocol):
@@ -88,6 +88,7 @@ class HerdrDescendantRuntimeAdapter:
             target.get("kind") == "codex-thread"
             and target.get("backend") == "herdr"
             and agent.get("agent") == "codex"
+            and agent.get("interactive_ready") is True
             and agent.get("pane_id") == expected_pane
             and agent.get("name") == expected_route
             and _session(agent) == expected_thread
@@ -109,7 +110,7 @@ class HerdrDescendantRuntimeAdapter:
                 "descendant_runtime_mismatch",
                 "Herdr endpoint, route, thread, terminal, or worktree differs from the frozen Champion",
             )
-        runtime_status = "idle" if status == "idle" else "active"
+        runtime_status = "idle" if status in {"done", "idle"} else "active"
         generation = "herdr:" + hashlib.sha256(
             f"{terminal_id}\0{expected_thread}".encode("utf-8")
         ).hexdigest()[:24]

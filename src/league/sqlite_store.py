@@ -2188,6 +2188,8 @@ class SQLiteStorage(SQLiteTransactionCore):
         runtime_receipt: Optional[dict[str, Any]],
         pending_outbox_ids: Sequence[str],
         at: str,
+        *,
+        fault: Optional[FaultInjector] = None,
     ) -> dict[str, Any]:
         return reconcile_rollover_descendant_operation(
             self,
@@ -2206,6 +2208,7 @@ class SQLiteStorage(SQLiteTransactionCore):
             runtime_receipt,
             pending_outbox_ids,
             at,
+            fault=fault,
         )
 
     def rollover_descendant_target(

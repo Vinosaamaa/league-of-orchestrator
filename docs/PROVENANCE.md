@@ -323,6 +323,23 @@ concurrent/crash retry. Focused rollover tests cover the bounded snapshot,
 exact acknowledgement, owner CAS, single event/outbox, intake fencing,
 pre-switch abort, post-switch drain, and unchanged Champion bindings.
 
+Issue #23 deliberately adds one narrower descendant reconciliation shape for
+tasks created by the supported legacy importer before canonical assignment
+fields existed. It accepts only the exact version-1 imported task shell, the
+deterministic imported callsign assignment, one canonical import run with
+linked Roster artifacts, and aliased legacy transition provenance. After a
+fake Herdr adapter verifies the complete frozen pane, thread, terminal,
+routing, worktree, generation, and callsign identity, `done` is normalized to
+canonical `idle`; no other identity mismatch is normalized. The same
+transaction creates the missing runtime and assignment, CAS-binds the task,
+callsign, and Champion to the committed successor, retargets only the declared
+exact pending outboxes, and records one immutable receipt. Modern descendant
+reconciliation is unchanged. Synthetic supported-import parity, stale-proof,
+exact retry, every-boundary fault rollback, outbox, immutable prompt-owner, and
+bounded intake paging tests cover the deliberate compatibility difference; no
+live state, filesystem writer, hook, installation, reconciliation apply, or
+teardown is exercised.
+
 ## Reporting and privacy implementation provenance
 
 The issue-#22/#25 reporting, privacy, guarded remote adapter, report renderer,

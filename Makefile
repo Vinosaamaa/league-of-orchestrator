@@ -13,7 +13,8 @@ STORAGE_TESTS := \
 	tests/test_sqlite_storage_import_export.py \
 	tests/test_sqlite_storage_commands.py \
 	tests/test_sqlite_storage_concurrency.py \
-	tests/test_project_catalog_roster.py
+	tests/test_project_catalog_roster.py \
+	tests/test_autonomous_delivery.py
 
 REQUEST_LIFECYCLE_TESTS := \
 	tests/test_request_lifecycle.py \

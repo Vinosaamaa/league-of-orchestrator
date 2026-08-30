@@ -28,6 +28,7 @@ from request_lifecycle_fixture import (  # noqa: E402
     dispatch_request,
 )
 from storage_fixture import REPOSITORY, SHOTCALLER_ID  # noqa: E402
+from storage_test_support import invoke_cli  # noqa: E402
 
 
 def spec(claim: str, *, suffix: str = "one") -> AssignmentSpec:
@@ -102,6 +103,73 @@ def test_empty_repository_refuses_direct_before_first_write(root: Path) -> None:
     )
     assert hidden["execution_mode"] == "hidden"
     store.close()
+
+
+def test_durable_work_kinds_cannot_hide_implementation_ownership(root: Path) -> None:
+    for suffix, work_kind, mode in (
+        ("research", "durable-research", "direct"),
+        ("benchmark", "benchmark", "direct"),
+        ("release", "release", "hidden"),
+        ("debugging", "debugging", "hidden"),
+        ("bug-fix", "bug-fix", "direct"),
+    ):
+        store, clock = champion_context(root, f"durable-{suffix}", "read-only")
+        try:
+            dispatch_request(
+                store,
+                clock,
+                "R3",
+                "claim-r3",
+                f"dispatch-{suffix}",
+                work_kind,
+                mode,
+                hidden_supported=True,
+                requested_model="synthetic-model" if mode == "hidden" else None,
+                requested_effort="low" if mode == "hidden" else None,
+                hidden_subtask="Do not own implementation" if mode == "hidden" else None,
+                hidden_scope_budget="One bounded note" if mode == "hidden" else None,
+            )
+        except StorageRefusal as exc:
+            assert exc.code == "champion_required", (work_kind, exc.code)
+        else:
+            raise AssertionError(f"{work_kind} incorrectly accepted {mode} execution")
+        store.close()
+
+
+def test_cli_prepare_cannot_bypass_owner_issue_verification(root: Path) -> None:
+    state, store, _ = create_context(root, "prepare-issue-bypass")
+    store.close()
+    refusal = invoke_cli(
+        state,
+        "assign",
+        "prepare",
+        "--assignment-id",
+        "assignment:issue-bypass",
+        "--request-id",
+        "request:issue-bypass",
+        "--claim-token",
+        "claim:issue-bypass",
+        "--task-id",
+        "task:issue-bypass",
+        "--task-summary",
+        "Synthetic issue bypass",
+        "--coordinator-agent-id",
+        SHOTCALLER_ID,
+        "--champion-agent-id",
+        LUX_ID,
+        "--repository",
+        REPOSITORY,
+        "--issue",
+        "81",
+        "--branch",
+        "agent/synthetic/81",
+        "--worktree",
+        "/synthetic/worktree",
+        "--at",
+        "2026-01-01T00:00:00Z",
+        expected=2,
+    )
+    assert refusal["error"]["code"] == "issue_verification_required"
 
 
 def champion_context(root: Path, name: str, work_kind: str = "repository-write"):
@@ -331,6 +399,8 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="league-assignment-dispatch-") as temporary:
         root = Path(temporary)
         test_empty_repository_refuses_direct_before_first_write(root)
+        test_durable_work_kinds_cannot_hide_implementation_ownership(root)
+        test_cli_prepare_cannot_bypass_owner_issue_verification(root)
         test_exact_receipt_activation_and_atomic_rollback(root)
         test_receipt_mismatch_creates_cleanup_pending(root)
         test_partial_launch_preserves_cleanup_pending(root)

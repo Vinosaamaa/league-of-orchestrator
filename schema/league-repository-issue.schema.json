@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Vinosaamaa/league-of-orchestrator/schema/league-repository-issue.schema.json",
+  "title": "Verified issue-first assignment receipt",
+  "type": "object",
+  "required": ["schema", "repository", "repository_key", "issue", "issue_url", "issue_state", "issue_title", "issue_body_digest", "task_scope_digest", "reopen_action_receipt_digest", "verifier_kind", "verified_at", "receipt_digest"],
+  "properties": {
+    "schema": {"const": "league.repository-issue.v1"},
+    "repository": {"type": "string", "minLength": 1},
+    "repository_key": {"type": "string", "minLength": 1},
+    "issue": {"type": "integer", "minimum": 1},
+    "issue_url": {"type": "string", "format": "uri"},
+    "issue_state": {"enum": ["open", "closed"]},
+    "issue_title": {"type": "string", "minLength": 1},
+    "issue_body_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "task_scope_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "reopen_action_receipt_digest": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+    "verifier_kind": {"const": "github-api"},
+    "verified_at": {"type": "string", "format": "date-time"},
+    "receipt_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  },
+  "additionalProperties": false
+}

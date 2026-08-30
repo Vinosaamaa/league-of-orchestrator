@@ -24,6 +24,7 @@ class PrepareAssignmentCommand:
     assignment_role: str = "champion"
     dispatch_id: Optional[str] = None
     promoted_from_assignment_id: Optional[str] = None
+    issue_receipt: Optional[dict[str, Any]] = None
 
 
 @dataclass(frozen=True)

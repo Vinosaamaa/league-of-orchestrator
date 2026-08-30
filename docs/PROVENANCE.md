@@ -553,3 +553,27 @@ races while preserving unrelated tokens; exact retry returns the same stored
 receipt without another metadata write. In-place Shotcaller identity inspection also
 retries only transient malformed read-only Herdr results, with persistent
 malformation still refusing before reservation or publication.
+
+## Scoped autonomous-delivery provenance
+
+Issue #81 adds original League-only migration v17, `ModeStorage`, the six
+`league mode` commands, strict grant/action/receipt schemas, issue-first GitHub
+verification, source-managed guidance, and focused synthetic tests. It derives
+no authority from prompt text and imports no external implementation.
+
+The deliberate baseline differences are durable immutable Summoner grant
+revisions, Shotcaller-owned external-action uses, checked limits and goal
+transitions, revocation, bounded repair obligations, and one immutable
+repository-issue binding before visible launch mutation. Repository,
+configuration, migration, test, benchmark, durable research, release,
+operational, reproduction, debugging, and bug-fix work now force visible
+Champion execution; the prior direct-tiny answer/check path is preserved.
+
+Migration v17 is named
+`scoped-autonomous-delivery-and-issue-first-assignment`, checksum
+`4a69acd7a023eee1d66ca31dcf19d756a07e2eb7ebb3afc3900c746f9e5d7df3`.
+Existing migrations remain byte-for-byte unchanged. Focused tests use only
+temporary roots and fake GitHub/Herdr boundaries; they perform no live grant,
+merge, release, installation, deployment, production action, or teardown.
+The rules live in the League supplement; the toolkit-owned universal guide and
+the supplement's existing 16 KiB fail-closed staging bound remain unchanged.

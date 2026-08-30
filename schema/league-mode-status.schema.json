@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Vinosaamaa/league-of-orchestrator/schema/league-mode-status.schema.json",
+  "title": "Scoped autonomous-delivery status",
+  "type": "object",
+  "required": ["schema", "mode", "goal_id", "goal_state", "grant", "limits", "usage", "next_irreversible_action"],
+  "properties": {
+    "schema": {"const": "league.mode-status.v1"},
+    "mode": {"enum": ["manual", "autonomous_delivery"]},
+    "goal_id": {"type": "string", "minLength": 1},
+    "goal_state": {"enum": ["awaiting_authority", "implementing", "ready_to_land", "landing", "deploying", "verifying", "repair_pending", "delivered", "cleanup_pending", "cleaned"]},
+    "goal_version": {"type": "integer", "minimum": 1},
+    "grant": {"type": ["object", "null"]},
+    "limits": {"type": "object"},
+    "usage": {"type": "object"},
+    "next_irreversible_action": {"type": "string", "minLength": 1},
+    "idempotent": {"type": "boolean"},
+    "revocation_receipt_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  },
+  "additionalProperties": false
+}

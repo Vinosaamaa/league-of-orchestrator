@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import subprocess
 import tempfile
 from pathlib import Path
@@ -18,6 +19,8 @@ from league.storage import (  # noqa: E402
     LegacyDisplayReconciliationCommand,
     StorageRefusal,
 )
+from league.issue_first import GitHubIssueVerifier, issue_scope_digest  # noqa: E402
+from league.sqlite_project_ops import canonical_repository  # noqa: E402
 import league.visible_launch as visible_launch  # noqa: E402
 from league.visible_launch import (  # noqa: E402
     HerdrCodexLaunchAdapter,
@@ -360,12 +363,52 @@ class FakeHerdrRunner:
         return subprocess.CompletedProcess(command, 0, stdout, "")
 
 
+class FakeIssueVerifier:
+    def __init__(
+        self,
+        *,
+        repository: str | None = None,
+        state: str = "open",
+        reopen_digest: str | None = None,
+    ) -> None:
+        self.repository = repository
+        self.state = state
+        self.reopen_digest = reopen_digest
+        self.calls = 0
+
+    def verify(self, spec: AssignmentSpec, at: str) -> dict[str, object]:
+        self.calls += 1
+        repository = self.repository or spec.repository
+        receipt: dict[str, object] = {
+            "schema": "league.repository-issue.v1",
+            "repository": repository,
+            "repository_key": canonical_repository(repository)[1],
+            "issue": spec.issue,
+            "issue_url": f"https://example.invalid/issues/{spec.issue}",
+            "issue_state": self.state,
+            "issue_title": "Synthetic issue-first assignment",
+            "issue_body_digest": "b" * 64,
+            "task_scope_digest": issue_scope_digest(
+                repository, spec.issue, spec.task_id, spec.task_summary
+            ),
+            "reopen_action_receipt_digest": self.reopen_digest,
+            "verifier_kind": "github-api",
+            "verified_at": at,
+        }
+        receipt["receipt_digest"] = hashlib.sha256(
+            json.dumps(receipt, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        return receipt
+
+
 def _adapter(options: VisibleLaunchOptions, runner: FakeHerdrRunner):
-    return HerdrCodexLaunchAdapter(
+    adapter = HerdrCodexLaunchAdapter(
         options,
         runner,
         environment={"HERDR_ENV": "1", "HERDR_WORKSPACE_ID": "w1"},
     )
+    adapter.issue_verifier = FakeIssueVerifier()
+    return adapter
 
 
 def test_real_adapter_one_command_success_and_retry(root: Path) -> None:
@@ -1318,6 +1361,128 @@ def test_active_retry_refuses_newer_user_metadata(root: Path) -> None:
     store.close()
 
 
+def test_issue_first_refuses_missing_and_mismatched_scope_before_launch(root: Path) -> None:
+    store, clock, worktree = _context(root, "issue-first-refusal")
+    options = _options(root)
+    runner = FakeHerdrRunner(worktree)
+    adapter = _adapter(options, runner)
+    del adapter.issue_verifier
+    try:
+        VisibleChampionLaunchService(store, adapter, options, clock).launch(
+            _spec(worktree, "issue-first-refusal")
+        )
+    except StorageRefusal as exc:
+        assert exc.code == "issue_verification_required"
+    else:
+        raise AssertionError("visible launch accepted missing issue verification")
+    assert runner.calls == []
+    assert store.connection.execute(
+        "SELECT COUNT(*) FROM task_assignments WHERE task_assignment_id='assignment:issue-first-refusal'"
+    ).fetchone()[0] == 0
+
+    unproven_reopen = FakeIssueVerifier(reopen_digest="f" * 64)
+    try:
+        VisibleChampionLaunchService(
+            store, adapter, options, clock, issue_verifier=unproven_reopen
+        ).launch(_spec(worktree, "issue-first-refusal"))
+    except StorageRefusal as exc:
+        assert exc.code == "issue_reopen_authority_invalid"
+    else:
+        raise AssertionError("visible launch accepted an unproven issue reopen receipt")
+    assert runner.calls == []
+
+    mismatch = FakeIssueVerifier(repository="https://example.invalid/different.git")
+    try:
+        VisibleChampionLaunchService(
+            store, adapter, options, clock, issue_verifier=mismatch
+        ).launch(_spec(worktree, "issue-first-refusal"))
+    except StorageRefusal as exc:
+        assert exc.code == "issue_scope_mismatch"
+    else:
+        raise AssertionError("visible launch accepted a mismatched issue scope")
+    assert runner.calls == []
+    assert store.connection.execute(
+        "SELECT COUNT(*) FROM task_assignments WHERE task_assignment_id='assignment:issue-first-refusal'"
+    ).fetchone()[0] == 0
+    store.close()
+
+
+class FakeGitHubRunner:
+    def __init__(self, payload: dict[str, object] | None, *, returncode: int = 0) -> None:
+        self.payload = payload
+        self.returncode = returncode
+
+    def run(self, arguments, *, timeout_seconds: int = 30):
+        del timeout_seconds
+        return subprocess.CompletedProcess(
+            tuple(arguments),
+            self.returncode,
+            "" if self.payload is None else json.dumps(self.payload),
+            "synthetic failure" if self.returncode else "",
+        )
+
+
+def test_github_issue_verifier_refuses_missing_wrong_repository_and_closed_issue(root: Path) -> None:
+    del root
+    spec = AssignmentSpec(
+        assignment_id="assignment:github",
+        request_id="request:github",
+        claim_token="claim:github",
+        task_id="task:github",
+        task_summary="Implement the exact GitHub issue",
+        coordinator_agent_id=SHOTCALLER_ID,
+        champion_agent_id=LUX_ID,
+        repository="https://github.com/example/league.git",
+        issue=81,
+        branch="agent/example/81",
+        worktree="/synthetic/worktree",
+    )
+    try:
+        GitHubIssueVerifier(FakeGitHubRunner(None, returncode=1)).verify(spec, "2026-01-01T00:00:00Z")
+    except StorageRefusal as exc:
+        assert exc.code == "issue_verification_failed"
+    else:
+        raise AssertionError("missing repository issue was accepted")
+    payload: dict[str, object] = {
+        "number": 81,
+        "state": "open",
+        "title": "Implement the exact GitHub issue",
+        "body": "## Objective\nImplement.\n## Verification\nTest.\n## Hard boundaries\nStay scoped.",
+        "html_url": "https://github.com/example/league/issues/81",
+        "repository_url": "https://api.github.com/repos/example/wrong",
+    }
+    try:
+        GitHubIssueVerifier(FakeGitHubRunner(payload)).verify(spec, "2026-01-01T00:00:00Z")
+    except StorageRefusal as exc:
+        assert exc.code == "issue_identity_refused"
+    else:
+        raise AssertionError("wrong-repository issue was accepted")
+    payload["repository_url"] = "https://api.github.com/repos/example/league"
+    payload["title"] = "A different implementation scope"
+    try:
+        GitHubIssueVerifier(FakeGitHubRunner(payload)).verify(spec, "2026-01-01T00:00:00Z")
+    except StorageRefusal as exc:
+        assert exc.code == "issue_scope_mismatch"
+    else:
+        raise AssertionError("issue title mismatched the canonical task summary")
+    payload["title"] = "Implement the exact GitHub issue"
+    payload["state"] = "closed"
+    try:
+        GitHubIssueVerifier(FakeGitHubRunner(payload)).verify(spec, "2026-01-01T00:00:00Z")
+    except StorageRefusal as exc:
+        assert exc.code == "issue_closed"
+    else:
+        raise AssertionError("closed issue without reopen authority was accepted")
+    try:
+        GitHubIssueVerifier(
+            FakeGitHubRunner(payload), reopen_action_receipt_digest="f" * 64
+        ).verify(spec, "2026-01-01T00:00:00Z")
+    except StorageRefusal as exc:
+        assert exc.code == "issue_closed"
+    else:
+        raise AssertionError("closed issue was accepted before its exact open-issue retry")
+
+
 class DeferredSessionRunner(FakeHerdrRunner):
     def _agent(self) -> dict[str, object]:
         agent = super()._agent()
@@ -1453,6 +1618,7 @@ class FailingAdapter:
         self.base = base
         self._created = {"pane_id": "synthetic:pane"}
         self.cleanup_result = cleanup
+        self.issue_verifier = FakeIssueVerifier()
 
     def launch(self, spec: AssignmentSpec):
         raise LaunchAdapterError(
@@ -1482,6 +1648,7 @@ class ContextFailureAdapter:
         self.base = FakeLaunchAdapter()
         self._created = {"pane_id": "herdr:lux"}
         self.cleanup_result = cleanup
+        self.issue_verifier = FakeIssueVerifier()
 
     def launch(self, spec: AssignmentSpec):
         return self.base.launch(spec)
@@ -1601,6 +1768,8 @@ def main() -> None:
         test_legacy_display_refuses_missing_acceptance_worktree(root)
         test_post_context_title_restoration_refuses_unowned_metadata(root)
         test_active_retry_refuses_newer_user_metadata(root)
+        test_issue_first_refuses_missing_and_mismatched_scope_before_launch(root)
+        test_github_issue_verifier_refuses_missing_wrong_repository_and_closed_issue(root)
         test_real_adapter_persists_exact_initial_codex_session(root)
         test_pre_session_launch_failure_closes_exact_pending_pane(root)
         test_metadata_silent_success_is_exact_and_failure_stays_closed(root)

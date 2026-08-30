@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .sqlite_request_ops import _active_claim, _bounded_public_text, _request_row, _time
-from .sqlite_project_ops import resolve_project_routing_identity
+from .sqlite_project_ops import canonical_repository, resolve_project_routing_identity
 from .sqlite_callsign_ops import (
     _reserve_in_transaction,
     _rollback_reserved_in_transaction,
@@ -23,6 +23,7 @@ from .storage_assignment import (
     PrepareAssignmentCommand,
 )
 from .storage_types import LIFECYCLE_STATES, StorageRefusal
+from .issue_first import issue_scope_digest, validate_issue_receipt
 
 
 ASSIGNMENT_STATES = {
@@ -225,6 +226,16 @@ def _assignment_retry(
     )
     if not exact:
         raise StorageRefusal("assignment_conflict", "assignment retry has different identity")
+    if command.issue_receipt is not None:
+        receipt = validate_issue_receipt(command.issue_receipt)
+        binding = store.connection.execute(
+            "SELECT receipt_digest FROM repository_issue_bindings WHERE assignment_id=?",
+            (command.assignment_id,),
+        ).fetchone()
+        if binding is None or binding["receipt_digest"] != receipt["receipt_digest"]:
+            raise StorageRefusal(
+                "assignment_conflict", "assignment retry has different issue-first evidence"
+            )
     return {
         "assignment_id": command.assignment_id,
         "task_id": command.task_id,
@@ -384,7 +395,76 @@ def _persist_assignment_reservation(
             """,
             (command.assignment_id, command.at, command.promoted_from_assignment_id),
         )
+    if command.issue_receipt is not None:
+        _insert_issue_binding(store, command)
     return str(selected["callsign"])
+
+
+def _insert_issue_binding(store: Any, command: PrepareAssignmentCommand) -> None:
+    receipt = validate_issue_receipt(command.issue_receipt or {})
+    expected_scope = issue_scope_digest(
+        command.repository, command.issue, command.task_id, command.task_summary
+    )
+    exact = (
+        receipt["repository_key"] == canonical_repository(command.repository)[1]
+        and int(receipt["issue"]) == command.issue
+        and receipt["task_scope_digest"] == expected_scope
+    )
+    if not exact:
+        raise StorageRefusal(
+            "issue_scope_mismatch",
+            "verified repository issue does not match the canonical task scope",
+        )
+    reopen_digest = receipt["reopen_action_receipt_digest"]
+    if reopen_digest is not None:
+        action = store.connection.execute(
+            """
+            SELECT * FROM autonomous_action_uses
+             WHERE result_receipt_digest=? AND action_kind='issue_reopen' AND state='succeeded'
+            """,
+            (reopen_digest,),
+        ).fetchone()
+        if action is None or action["external_owner_agent_id"] != command.coordinator_agent_id:
+            raise StorageRefusal(
+                "issue_reopen_authority_invalid",
+                "closed issue has no exact settled Shotcaller reopen authority",
+            )
+        action_scope = json.loads(action["action_scope_json"])
+        resources = json.loads(action["resource_use_json"])
+        if (
+            canonical_repository(str(action_scope.get("repository")))[1]
+            != canonical_repository(command.repository)[1]
+            or resources.get("issue") != command.issue
+        ):
+            raise StorageRefusal(
+                "issue_reopen_authority_invalid",
+                "reopen authority does not match the exact repository issue",
+            )
+    store.connection.execute(
+        """
+        INSERT INTO repository_issue_bindings
+          (task_id,assignment_id,request_id,repository,issue,issue_url,issue_state,
+           issue_title,issue_body_digest,task_scope_digest,reopen_action_receipt_digest,
+           verifier_kind,verified_at,receipt_digest)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            command.task_id,
+            command.assignment_id,
+            command.request_id,
+            command.repository,
+            command.issue,
+            receipt["issue_url"],
+            receipt["issue_state"],
+            receipt["issue_title"],
+            receipt["issue_body_digest"],
+            receipt["task_scope_digest"],
+            reopen_digest,
+            receipt["verifier_kind"],
+            receipt["verified_at"],
+            receipt["receipt_digest"],
+        ),
+    )
 
 
 def _insert_pending_assignment_event(

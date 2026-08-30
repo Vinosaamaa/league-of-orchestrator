@@ -62,6 +62,7 @@ from .rollover_snapshot import (
 )
 from .visible_launch import (
     HerdrCodexLaunchAdapter,
+    SubprocessRunner,
     VisibleChampionLaunchService,
     VisibleLaunchOptions,
     derived_assignment_id,
@@ -73,6 +74,7 @@ from .legacy_display_reconciliation import (
     LegacyDisplayReconciliationService,
     LegacyDisplayReconciliationSpec,
 )
+from .issue_first import GitHubIssueVerifier
 
 
 COMMAND_SCHEMA = "league.command.v1"
@@ -977,7 +979,7 @@ def _add_assignment_commands(groups: argparse._SubParsersAction) -> None:
     commands = assignment.add_subparsers(dest="action", required=True)
     prepare = commands.add_parser(
         "prepare",
-        help="Reserve one role-specific visible Champion or hidden-scientist assignment.",
+        help="Reserve one hidden-scientist assignment; visible Champions must use assign run.",
     )
     for name in (
         "assignment-id",
@@ -1029,6 +1031,7 @@ def _add_assignment_commands(groups: argparse._SubParsersAction) -> None:
     launch.add_argument("--league-command")
     launch.add_argument("--requires", action="append", default=[])
     launch.add_argument("--startup-timeout-ms", type=int, default=120_000)
+    launch.add_argument("--issue-reopen-receipt-digest")
     launching = commands.add_parser("launching", help="Commit launch intent before adapter work.")
     launching.add_argument("--assignment-id", required=True)
     launching.add_argument("--expected-version", type=int, required=True)
@@ -1151,6 +1154,73 @@ def _add_hook_commands(groups: argparse._SubParsersAction) -> None:
         stop.add_argument(f"--{name}", required=True)
 
 
+def _add_mode_commands(groups: argparse._SubParsersAction) -> None:
+    mode = groups.add_parser(
+        "mode",
+        help="Authorize and account for one durable scoped autonomous-delivery goal.",
+    )
+    commands = mode.add_subparsers(dest="action", required=True)
+    authorize = commands.add_parser(
+        "authorize", help="Create one immutable Summoner grant revision and bind its exact goal."
+    )
+    authorize.add_argument("--grant", type=Path, required=True)
+    authorize.add_argument("--expected-goal-version", type=int, required=True)
+    authorize.add_argument("--at", required=True)
+    status = commands.add_parser(
+        "status", help="Show manual or autonomous mode, exact authority, usage, and goal state."
+    )
+    status.add_argument("--goal-id", required=True)
+    status.add_argument("--at", required=True)
+    use = commands.add_parser(
+        "use", help="Authorize and record one exact external action atomically."
+    )
+    use.add_argument("--action", dest="action_spec", type=Path, required=True)
+    use.add_argument("--expected-goal-version", type=int, required=True)
+    use.add_argument("--at", required=True)
+    settle = commands.add_parser(
+        "settle", help="Settle one exact in-progress action or create its repair obligation."
+    )
+    for name in (
+        "action-use-id",
+        "goal-id",
+        "use-receipt-digest",
+        "result-receipt-digest",
+        "at",
+    ):
+        settle.add_argument(f"--{name}", required=True)
+    settle.add_argument("--expected-goal-version", type=int, required=True)
+    settle.add_argument("--outcome", choices=("succeeded", "failed"), required=True)
+    settle.add_argument("--failure-class")
+    transition = commands.add_parser(
+        "transition", help="Perform one checked non-external delivery-goal transition."
+    )
+    transition.add_argument("--goal-id", required=True)
+    transition.add_argument("--expected-goal-version", type=int, required=True)
+    transition.add_argument(
+        "--state",
+        choices=(
+            "awaiting_authority",
+            "implementing",
+            "ready_to_land",
+            "landing",
+            "deploying",
+            "verifying",
+            "repair_pending",
+            "delivered",
+            "cleanup_pending",
+            "cleaned",
+        ),
+        required=True,
+    )
+    transition.add_argument("--at", required=True)
+    revoke = commands.add_parser(
+        "revoke", help="Revoke one grant immediately while retaining in-progress evidence."
+    )
+    for name in ("grant-id", "revoked-by", "reason", "at"):
+        revoke.add_argument(f"--{name}", required=True)
+    revoke.add_argument("--expected-goal-version", type=int, required=True)
+
+
 def _add_help_commands(groups: argparse._SubParsersAction) -> None:
     help_group = groups.add_parser("help", help="Emit machine-readable command and schema inventory.")
     commands = help_group.add_subparsers(dest="action", required=True)
@@ -1208,6 +1278,7 @@ def _parser() -> argparse.ArgumentParser:
         _add_request_commands,
         _add_assignment_commands,
         _add_hook_commands,
+        _add_mode_commands,
         _add_help_commands,
         _add_acceptance_commands,
     ):
@@ -2443,6 +2514,11 @@ def _request_untriaged(store: Storage, args: argparse.Namespace) -> CommandResul
 
 
 def _assign_prepare(store: Storage, args: argparse.Namespace) -> CommandResult:
+    if args.role == "champion":
+        raise StorageRefusal(
+            "issue_verification_required",
+            "visible repository work must use assign run for owner-API issue verification",
+        )
     return store.prepare_assignment(
         PrepareAssignmentCommand(
             assignment_id=args.assignment_id,
@@ -2503,8 +2579,15 @@ def _assign_launch(store: Storage, args: argparse.Namespace) -> CommandResult:
         worktree=str(Path(args.worktree).resolve()),
         required_capabilities=tuple(args.requires),
     )
-    adapter = HerdrCodexLaunchAdapter(options)
-    return VisibleChampionLaunchService(store, adapter, options).launch(spec), None
+    runner = SubprocessRunner()
+    adapter = HerdrCodexLaunchAdapter(options, runner)
+    verifier = GitHubIssueVerifier(
+        runner,
+        reopen_action_receipt_digest=args.issue_reopen_receipt_digest,
+    )
+    return VisibleChampionLaunchService(
+        store, adapter, options, issue_verifier=verifier
+    ).launch(spec), None
 
 
 def _assign_launching(store: Storage, args: argparse.Namespace) -> CommandResult:
@@ -2710,6 +2793,51 @@ def _hook_stop(store: Storage, args: argparse.Namespace) -> CommandResult:
     ), None
 
 
+def _mode_authorize(store: Storage, args: argparse.Namespace) -> CommandResult:
+    return store.authorize_mode(
+        _read_json_object(args.grant), args.expected_goal_version, args.at
+    ), None
+
+
+def _mode_status(store: Storage, args: argparse.Namespace) -> CommandResult:
+    return store.mode_status(args.goal_id, args.at), None
+
+
+def _mode_use(store: Storage, args: argparse.Namespace) -> CommandResult:
+    return store.use_mode_action(
+        _read_json_object(args.action_spec), args.expected_goal_version, args.at
+    ), None
+
+
+def _mode_settle(store: Storage, args: argparse.Namespace) -> CommandResult:
+    return store.settle_mode_action(
+        args.action_use_id,
+        args.goal_id,
+        args.expected_goal_version,
+        args.use_receipt_digest,
+        args.outcome,
+        args.result_receipt_digest,
+        args.failure_class,
+        args.at,
+    ), None
+
+
+def _mode_transition(store: Storage, args: argparse.Namespace) -> CommandResult:
+    return store.transition_mode_goal(
+        args.goal_id, args.expected_goal_version, args.state, args.at
+    ), None
+
+
+def _mode_revoke(store: Storage, args: argparse.Namespace) -> CommandResult:
+    return store.revoke_mode_grant(
+        args.grant_id,
+        args.revoked_by,
+        args.reason,
+        args.expected_goal_version,
+        args.at,
+    ), None
+
+
 HANDLERS: dict[str, CommandHandler] = {
     "storage.integrity": _storage_integrity,
     "storage.backup": _storage_backup,
@@ -2801,6 +2929,12 @@ HANDLERS: dict[str, CommandHandler] = {
     "hook.rearm": _hook_rearm,
     "hook.allow-stop-once": _hook_allow_stop_once,
     "hook.stop": _hook_stop,
+    "mode.authorize": _mode_authorize,
+    "mode.status": _mode_status,
+    "mode.use": _mode_use,
+    "mode.settle": _mode_settle,
+    "mode.transition": _mode_transition,
+    "mode.revoke": _mode_revoke,
 }
 
 
@@ -2835,6 +2969,11 @@ SCHEMA_INVENTORY = (
     "league-activity-evidence.schema.json",
     "league-report.schema.json",
     "league-outbound-receipt.schema.json",
+    "league-autonomous-grant.schema.json",
+    "league-autonomous-action.schema.json",
+    "league-mode-status.schema.json",
+    "league-mode-action-receipt.schema.json",
+    "league-repository-issue.schema.json",
 )
 
 CONFIG_ONLY_COMMANDS = {

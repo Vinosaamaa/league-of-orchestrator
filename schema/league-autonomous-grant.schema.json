@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Vinosaamaa/league-of-orchestrator/schema/league-autonomous-grant.schema.json",
+  "title": "Immutable scoped autonomous-delivery grant",
+  "type": "object",
+  "required": ["schema", "grant_id", "goal_id", "issuer", "shotcaller_agent_id", "exact_goal", "scope", "allowed_actions", "exclusions", "sensitive_inclusions", "resource_boundary", "starts_at", "expires_at", "limits", "revision"],
+  "properties": {
+    "schema": {"const": "league.autonomous-grant.v1"},
+    "grant_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "goal_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "issuer": {
+      "type": "object",
+      "required": ["kind", "id"],
+      "properties": {"kind": {"const": "summoner"}, "id": {"type": "string", "minLength": 1, "maxLength": 256}},
+      "additionalProperties": false
+    },
+    "shotcaller_agent_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "exact_goal": {"type": "string", "minLength": 1, "maxLength": 4096},
+    "scope": {
+      "type": "object",
+      "required": ["project_ids", "repositories", "environments", "deployment_targets"],
+      "properties": {
+        "project_ids": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
+        "repositories": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
+        "environments": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
+        "deployment_targets": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true}
+      },
+      "additionalProperties": false
+    },
+    "allowed_actions": {"type": "array", "minItems": 1, "items": {"enum": ["land", "merge", "release", "publish", "install", "deploy", "verify", "smoke", "repair", "cleanup", "issue_reopen"]}, "uniqueItems": true},
+    "exclusions": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
+    "sensitive_inclusions": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
+    "resource_boundary": {"type": "object"},
+    "starts_at": {"type": "string", "format": "date-time"},
+    "expires_at": {"type": ["string", "null"], "format": "date-time"},
+    "limits": {
+      "type": "object",
+      "required": ["max_attempts", "max_concurrency", "max_cost_microunits", "max_changed_files", "max_duration_seconds", "max_repair_attempts"],
+      "properties": {
+        "max_attempts": {"type": "integer", "minimum": 1},
+        "max_concurrency": {"type": "integer", "minimum": 1},
+        "max_cost_microunits": {"type": "integer", "minimum": 1},
+        "max_changed_files": {"type": "integer", "minimum": 1},
+        "max_duration_seconds": {"type": "integer", "minimum": 1},
+        "max_repair_attempts": {"type": "integer", "minimum": 1}
+      },
+      "additionalProperties": false
+    },
+    "revision": {"type": "integer", "minimum": 1}
+  },
+  "additionalProperties": false
+}

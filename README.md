@@ -27,7 +27,7 @@ Nothing here installs files, changes hooks, or connects to live Roster state.
 - Synthetic examples, authoring schemas, and focused local regression tests.
 - One standard-library SQLite implementation behind a `Storage` protocol and
   stable `league` command facade.
-- Seventeen contiguous checksummed schema migrations, a loaded-runtime WAL gate, verified
+- Eighteen contiguous checksummed schema migrations, a loaded-runtime WAL gate, verified
   backups, integrity checks, expected-version writes, and bounded contention.
 - A strict manifest importer covering every canonical issue-#18 artifact
   family, with dry-run digest confirmation before apply.
@@ -84,6 +84,14 @@ Nothing here installs files, changes hooks, or connects to live Roster state.
   acknowledgement-gated transfer, safe Squad registration, parent-request
   progress coalescing, versioned provider routing, and one evidence-triggered
   model escalation.
+- One immutable scoped `autonomous_delivery` grant lifecycle (owner alias:
+  **YOLO mode**) with exact goal/action receipts, expiry, revocation, configured
+  usage limits, bounded repair, backup/export coverage, and Shotcaller-only
+  external-action ownership.
+- Issue-first visible delegation that verifies the exact GitHub issue and binds
+  its public locator plus content/scope digests before assignment or tab
+  mutation; durable work kinds cannot route direct or hide implementation
+  ownership.
 
 The proven watcher remains one deep module. The new storage slice is a small
 modular monolith: one composite `Storage` interface with cohesive administrative,
@@ -177,6 +185,34 @@ The [privacy contract](docs/PRIVACY.md) records the guide ownership split:
 terminal-environment-toolkit alone owns the universal guide, while League may
 install only its orchestration supplement. Toolkit issue #45 owns the universal
 trigger; League issue #90 changes no toolkit or installed guide.
+The owner/operator model, grant state machine, issue-first boundary, migration,
+and remaining limits are documented in
+[scoped autonomous delivery](docs/design/scoped-autonomous-delivery.md).
+
+## Scoped autonomous delivery
+
+Manual remains the default. A Summoner authorizes one exact goal from a strict
+grant document, and the Shotcaller checks status before each irreversible step:
+
+```sh
+./bin/league --state-root /absolute/state mode authorize \
+  --grant /absolute/grant.json --expected-goal-version 0 \
+  --at 2026-01-01T00:00:00Z
+./bin/league --state-root /absolute/state mode status \
+  --goal-id goal:example --at 2026-01-01T00:00:01Z
+./bin/league --state-root /absolute/state mode use \
+  --action /absolute/action.json --expected-goal-version 2 \
+  --at 2026-01-01T00:00:02Z
+```
+
+`mode settle`, `mode transition`, and `mode revoke` finish the checked flow.
+Grant and action input schemas are
+[authorization](schema/league-autonomous-grant.schema.json) and
+[action use](schema/league-autonomous-action.schema.json); status, action, and
+issue-first receipts have separate public schemas. An autonomous grant never
+makes repository implementation direct: `request dispatch` still requires a
+visible Champion, and `assign run` verifies the issue against GitHub before any
+canonical assignment or terminal mutation.
 
 ## Repository-local SQLite implementation; cutover still gated
 
@@ -237,6 +273,7 @@ fake adapters.
 - [Outbound privacy boundary](docs/PRIVACY.md)
 - [Research-backed orchestration and model routing policy](docs/research/orchestration-model-routing-policy-evidence.md)
 - [Terminal-first Project Ledger design](docs/design/terminal-roster-ui.md)
+- [Scoped autonomous delivery and issue-first delegation](docs/design/scoped-autonomous-delivery.md)
 - [Baseline versus planned issues](docs/ROADMAP.md)
 
 ## Non-goals for this implementation PR

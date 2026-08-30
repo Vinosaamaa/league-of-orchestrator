@@ -39,6 +39,7 @@ class AssignmentSpec:
     worktree: str
     required_capabilities: tuple[str, ...] = ()
     callsign: Optional[str] = None
+    issue_receipt: Optional[dict[str, Any]] = None
 
 
 class LaunchAdapterError(RuntimeError):
@@ -90,6 +91,7 @@ class AssignmentService:
                 worktree=spec.worktree,
                 at=self.clock.now(),
                 required_capabilities=spec.required_capabilities,
+                issue_receipt=spec.issue_receipt,
             )
         )
         if prepared["state"] == "active":

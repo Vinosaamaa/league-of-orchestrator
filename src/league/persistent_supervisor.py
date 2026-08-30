@@ -17,10 +17,12 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
-from typing import Any, Callable, Protocol
+from typing import Any, Callable, Mapping, Protocol
 
+from .request_services import DeliveryAdapter
 from .sqlite_store import SQLiteStorage
 from .storage import StorageRefusal
+from .storage_watcher import RuntimeRegistrationCommand
 
 
 MAX_MESSAGE_BYTES = 1_100_000
@@ -28,6 +30,7 @@ MAX_ACCEPTED_WORK = 16
 MAX_RENEW_ATTEMPTS = 3
 DEFAULT_LEASE_SECONDS = 60
 DEFAULT_RENEW_SECONDS = 20
+DEFAULT_RECOVERY_SECONDS = 300
 SOCKET_NAME = ".league-supervisor.sock"
 LOCK_NAME = ".league-supervisor.lock"
 
@@ -42,6 +45,115 @@ class WakeAdapter(Protocol):
 
 class SemanticRecoveryAdapter(Protocol):
     def recover(self, state_root: Path, prompt_ids: tuple[str, ...]) -> None: ...
+
+
+class RuntimeObservationAdapter(Protocol):
+    def observe(
+        self, candidates: tuple[dict[str, Any], ...]
+    ) -> dict[str, dict[str, str]]: ...
+
+
+class HerdrRuntimeObservationAdapter:
+    """Read one bounded Herdr inventory without prompting or changing a pane."""
+
+    LIVE_STATUSES = frozenset({"active", "blocked", "done", "idle", "waiting", "working"})
+
+    def __init__(
+        self,
+        runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+    ) -> None:
+        self.runner = runner
+
+    @staticmethod
+    def _session(agent: Mapping[str, Any]) -> str | None:
+        session = agent.get("agent_session")
+        value = session.get("value") if isinstance(session, Mapping) else None
+        return value if isinstance(value, str) else None
+
+    def observe(
+        self, candidates: tuple[dict[str, Any], ...]
+    ) -> dict[str, dict[str, str]]:
+        if not candidates:
+            return {}
+        if any(candidate.get("backend_kind") != "herdr" for candidate in candidates):
+            raise StorageRefusal(
+                "runtime_observation_unsupported",
+                "runtime monitor encountered an unsupported backend",
+            )
+        try:
+            completed = self.runner(
+                ["herdr", "agent", "list"],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            payload = json.loads(completed.stdout)
+            agents = payload["result"]["agents"]
+        except (OSError, subprocess.SubprocessError, KeyError, TypeError, json.JSONDecodeError) as exc:
+            raise StorageRefusal(
+                "runtime_observation_refused",
+                "Herdr runtime inventory could not be observed exactly",
+                retryable=True,
+            ) from exc
+        if completed.returncode != 0 or not isinstance(agents, list) or any(
+            not isinstance(agent, Mapping) for agent in agents
+        ):
+            raise StorageRefusal(
+                "runtime_observation_refused",
+                "Herdr runtime inventory could not be observed exactly",
+                retryable=True,
+            )
+        results: dict[str, dict[str, str]] = {}
+        for candidate in candidates:
+            assignment_id = str(candidate["assignment_id"])
+            related = [
+                agent
+                for agent in agents
+                if agent.get("pane_id") == candidate.get("endpoint")
+                or agent.get("name") == candidate.get("routing_name")
+                or self._session(agent) == candidate.get("session_ref")
+            ]
+            if not related:
+                results[assignment_id] = {"state": "missing", "fingerprint": "missing"}
+                continue
+            if len(related) != 1:
+                results[assignment_id] = {"state": "mismatch", "fingerprint": "ambiguous"}
+                continue
+            agent = related[0]
+            session_ref = self._session(agent)
+            terminal_id = agent.get("terminal_id")
+            generation = (
+                "herdr:"
+                + hashlib.sha256(f"{terminal_id}\0{session_ref}".encode("utf-8")).hexdigest()[:24]
+                if isinstance(terminal_id, str) and isinstance(session_ref, str)
+                else ""
+            )
+            exact = (
+                agent.get("agent") == "codex"
+                and agent.get("pane_id") == candidate.get("endpoint")
+                and agent.get("name") == candidate.get("routing_name")
+                and session_ref == candidate.get("session_ref")
+                and generation == candidate.get("runtime_generation")
+                and agent.get("agent_status") in self.LIVE_STATUSES
+            )
+            results[assignment_id] = {
+                "state": "live" if exact else "mismatch",
+                "fingerprint": hashlib.sha256(
+                    json.dumps(
+                        {
+                            "pane": agent.get("pane_id"),
+                            "route": agent.get("name"),
+                            "session": session_ref,
+                            "generation": generation,
+                            "status": agent.get("agent_status"),
+                        },
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest(),
+            }
+        return results
 
 
 class HerdrWakeAdapter:
@@ -233,15 +345,23 @@ class PersistentSupervisor:
         callsign: str | None = None,
         lease_seconds: float = DEFAULT_LEASE_SECONDS,
         renew_seconds: float = DEFAULT_RENEW_SECONDS,
+        recovery_seconds: float = DEFAULT_RECOVERY_SECONDS,
         wake_adapter: WakeAdapter | None = None,
+        delivery_adapter: DeliveryAdapter | None = None,
         recovery_adapter: SemanticRecoveryAdapter | None = None,
+        runtime_observer: RuntimeObservationAdapter | None = None,
         store_factory: Callable[[Path], Any] = SQLiteStorage,
         max_accepted_work: int = MAX_ACCEPTED_WORK,
     ) -> None:
-        if lease_seconds <= 0 or renew_seconds <= 0 or renew_seconds >= lease_seconds:
+        if (
+            lease_seconds <= 0
+            or renew_seconds <= 0
+            or renew_seconds >= lease_seconds
+            or recovery_seconds <= 0
+        ):
             raise StorageRefusal(
                 "invalid_supervisor_lease",
-                "renew interval must be positive and shorter than the watcher lease",
+                "lease, renewal, and recovery intervals must be positive and renewal must be shorter than the lease",
             )
         if not 1 <= max_accepted_work <= 1_024:
             raise StorageRefusal(
@@ -252,8 +372,11 @@ class PersistentSupervisor:
         self.callsign = callsign
         self.lease_seconds = lease_seconds
         self.renew_seconds = renew_seconds
+        self.recovery_seconds = recovery_seconds
         self.wake_adapter = wake_adapter or HerdrWakeAdapter()
+        self.delivery_adapter = delivery_adapter
         self.recovery_adapter = recovery_adapter
+        self.runtime_observer = runtime_observer or HerdrRuntimeObservationAdapter()
         self.store_factory = store_factory
         self.socket_path = _socket_path(self.state_root)
         self.lock_path = self.state_root / LOCK_NAME
@@ -263,11 +386,16 @@ class PersistentSupervisor:
         self._fence = 0
         self._binding: dict[str, Any] = {}
         self._watcher_id = ""
+        self.registration_receipt: dict[str, Any] | None = None
         self._executor: ThreadPoolExecutor | None = None
         self._work_slots = threading.BoundedSemaphore(max_accepted_work)
         self._priority_lock = threading.Lock()
         self._user_priority_generation = 0
         self.user_priority = threading.Event()
+        self._monitor_lock = threading.Lock()
+        self._runtime_suspicions: dict[str, tuple[str, float]] = {}
+        self._next_runtime_observation = 0.0
+        self._runtime_observation_running = False
 
     @property
     def user_priority_generation(self) -> int:
@@ -310,23 +438,39 @@ class PersistentSupervisor:
                     0 if existing is None else int(existing["fence"]),
                 ) + 1
                 fence = self._fence
-            watcher_digest = hashlib.sha256(
-                f"{binding['actor_agent_id']}\0{self.state_root}".encode("utf-8")
-            ).hexdigest()[:24]
-            self._watcher_id = f"watcher:persistent:{watcher_digest}"
-            receipt = store.register_watcher(
-                binding["scope_id"],
-                self._watcher_id,
-                binding["actor_agent_id"],
-                binding["runtime_instance_id"],
-                _locator(self.socket_path),
-                self._lease_expiry(),
-                fence,
-                _at(),
-                block_on_obligations=True,
-            )
+                watcher_digest = hashlib.sha256(
+                    f"{binding['actor_agent_id']}\0{self.state_root}".encode("utf-8")
+                ).hexdigest()[:24]
+                self._watcher_id = f"watcher:persistent:{watcher_digest}"
+                receipt = store.register_watcher(
+                    binding["scope_id"],
+                    self._watcher_id,
+                    binding["actor_agent_id"],
+                    binding["runtime_instance_id"],
+                    _locator(self.socket_path),
+                    self._lease_expiry(),
+                    fence,
+                    _at(),
+                    block_on_obligations=True,
+                )
             self._binding = binding
             return receipt
+
+    def _assert_fenced_registration(self, store: Any, fence: int) -> None:
+        registration = store.watcher_registration(self._binding["actor_agent_id"])
+        if (
+            registration is None
+            or registration["watcher_id"] != self._watcher_id
+            or int(registration["fence"]) != fence
+            or registration["runtime_instance_id"]
+            != self._binding["runtime_instance_id"]
+            or registration["wake_locator"] != _locator(self.socket_path)
+            or datetime.fromisoformat(str(registration["leased_until"])) <= _now()
+        ):
+            raise StorageRefusal(
+                "watcher_fenced",
+                "persistent supervisor no longer owns the exact live watcher lease",
+            )
 
     def _release(self) -> None:
         if not self._binding or not self._watcher_id:
@@ -377,6 +521,7 @@ class PersistentSupervisor:
                 if not isinstance(hook, dict):
                     raise SupervisorUnavailable("supervisor hook request is malformed")
                 with self.store_factory(self.state_root) as store:
+                    self._assert_fenced_registration(store, fence)
                     result = handle_brokered_hook(store, hook)
                 capture = result.get("capture")
                 published_user_priority = bool(
@@ -431,14 +576,45 @@ class PersistentSupervisor:
             ):
                 raise SupervisorUnavailable("supervisor wake identity is stale")
             if kind == "user-message":
+                with self.store_factory(self.state_root) as store:
+                    self._assert_fenced_registration(store, fence)
                 self._publish_user_priority()
                 self._response(
                     connection,
                     {"ok": True, "priority": "user", "fence": fence},
                 )
                 return
+            if kind == "runtime-observation":
+                self._response(
+                    connection,
+                    {"ok": True, "observation_scheduled": True, "fence": fence},
+                )
+                self._schedule_runtime_observation(force=True)
+                return
+            if kind == "calm-pause":
+                with self.store_factory(self.state_root) as store:
+                    paused = store.pause_calm_supervision(
+                        self._binding["actor_agent_id"],
+                        self._watcher_id,
+                        fence,
+                        _at(),
+                    )
+                self._response(connection, {"ok": True, **paused})
+                return
+            if kind == "calm-resume":
+                with self.store_factory(self.state_root) as store:
+                    resumed = store.resume_calm_supervision(
+                        self._binding["actor_agent_id"],
+                        self._watcher_id,
+                        fence,
+                        _at(),
+                    )
+                self._response(connection, {"ok": True, **resumed})
+                return
             if kind != "champion-event" or not isinstance(message.get("envelope"), dict):
                 raise SupervisorUnavailable("supervisor message kind is unsupported")
+            with self.store_factory(self.state_root) as store:
+                self._assert_fenced_registration(store, fence)
             self.wake_adapter.send(self._binding, message["envelope"])
             self._response(
                 connection,
@@ -478,6 +654,7 @@ class PersistentSupervisor:
                         event_id=str(row["event_id"]),
                         recipient_agent_id=str(row["recipient_agent_id"]),
                         at=_at(),
+                        adapter=self.delivery_adapter,
                     )
         except (StorageRefusal, SupervisorUnavailable):
             return
@@ -496,6 +673,158 @@ class PersistentSupervisor:
         except StorageRefusal:
             return
         self._schedule_semantic_recovery(tuple(backlog["prompt_ids"]))
+
+    def _record_monitor_fault(self, fault_kind: str, fault_key: str) -> None:
+        from .canonical_delivery import dispatch_event
+
+        try:
+            with self.store_factory(self.state_root) as store:
+                fault = store.record_supervision_fault(
+                    self._binding["actor_agent_id"], fault_kind, fault_key, _at()
+                )
+                dispatch_event(
+                    store,
+                    outbox_id=fault["outbox_id"],
+                    event_id=fault["event_id"],
+                    recipient_agent_id=fault["recipient_agent_id"],
+                    at=_at(),
+                    adapter=self.delivery_adapter,
+                )
+        except (StorageRefusal, SupervisorUnavailable):
+            return
+
+    def _observe_runtime_candidates(self) -> None:
+        from .canonical_delivery import dispatch_event
+
+        now = time.monotonic()
+        try:
+            with self.store_factory(self.state_root) as store:
+                batch = store.runtime_monitor_candidates(
+                    self._binding["actor_agent_id"], limit=50
+                )
+                policy = store.supervision_policy(self._binding["actor_agent_id"])
+            if batch["truncated"]:
+                self._record_monitor_fault(
+                    "runtime_observation_refused", "candidate_inventory_truncated"
+                )
+                with self._monitor_lock:
+                    self._next_runtime_observation = now + self.recovery_seconds
+                return
+            candidates = tuple(batch["candidates"])
+            observations = self.runtime_observer.observe(candidates)
+        except StorageRefusal as exc:
+            self._record_monitor_fault("runtime_observation_refused", exc.code)
+            with self._monitor_lock:
+                self._next_runtime_observation = now + self.recovery_seconds
+            return
+
+        candidate_ids = {str(candidate["assignment_id"]) for candidate in candidates}
+        with self._monitor_lock:
+            for assignment_id in tuple(self._runtime_suspicions):
+                if assignment_id not in candidate_ids:
+                    self._runtime_suspicions.pop(assignment_id, None)
+
+        for candidate in candidates:
+            assignment_id = str(candidate["assignment_id"])
+            observation = observations.get(assignment_id)
+            if observation is None:
+                self._record_monitor_fault(
+                    "runtime_observation_refused", f"missing_result:{assignment_id}"
+                )
+                continue
+            state = observation.get("state")
+            fingerprint = str(observation.get("fingerprint", state))
+            if state == "live":
+                with self.store_factory(self.state_root) as store:
+                    store.register_runtime(
+                        RuntimeRegistrationCommand(
+                            runtime_instance_id=str(candidate["runtime_instance_id"]),
+                            actor_agent_id=str(candidate["champion_agent_id"]),
+                            harness_kind=str(candidate["harness_kind"]),
+                            backend_kind=str(candidate["backend_kind"]),
+                            session_ref=str(candidate["session_ref"]),
+                            endpoint=str(candidate["endpoint"]),
+                            runtime_generation=str(candidate["runtime_generation"]),
+                            status="active",
+                            verified=True,
+                            at=_at(),
+                        )
+                    )
+                with self._monitor_lock:
+                    self._runtime_suspicions.pop(assignment_id, None)
+                continue
+            if state not in {"missing", "mismatch"}:
+                self._record_monitor_fault(
+                    "runtime_observation_refused", f"invalid_result:{assignment_id}"
+                )
+                continue
+            with self._monitor_lock:
+                prior = self._runtime_suspicions.get(assignment_id)
+                if prior is None or prior[0] != fingerprint:
+                    self._runtime_suspicions[assignment_id] = (
+                        fingerprint,
+                        now + float(policy["unreachable_grace_seconds"]),
+                    )
+                    continue
+                if now < prior[1]:
+                    continue
+            try:
+                with self.store_factory(self.state_root) as store:
+                    store.register_runtime(
+                        RuntimeRegistrationCommand(
+                            runtime_instance_id=str(candidate["runtime_instance_id"]),
+                            actor_agent_id=str(candidate["champion_agent_id"]),
+                            harness_kind=str(candidate["harness_kind"]),
+                            backend_kind=str(candidate["backend_kind"]),
+                            session_ref=str(candidate["session_ref"]),
+                            endpoint=str(candidate["endpoint"]),
+                            runtime_generation=str(candidate["runtime_generation"]),
+                            status="failed",
+                            verified=False,
+                            at=_at(),
+                        )
+                    )
+                    reconciled = store.reconcile_assignment_runtime(assignment_id, _at())
+                    dispatch_event(
+                        store,
+                        outbox_id=reconciled["outbox_id"],
+                        event_id=reconciled["event_id"],
+                        recipient_agent_id=reconciled["recipient_agent_id"],
+                        at=_at(),
+                        adapter=self.delivery_adapter,
+                    )
+            except StorageRefusal as exc:
+                self._record_monitor_fault(
+                    "runtime_reconciliation_refused", f"{assignment_id}:{exc.code}"
+                )
+            finally:
+                with self._monitor_lock:
+                    self._runtime_suspicions.pop(assignment_id, None)
+
+        with self._monitor_lock:
+            deadlines = [deadline for _, deadline in self._runtime_suspicions.values()]
+            self._next_runtime_observation = (
+                min(deadlines) if deadlines else now + self.recovery_seconds
+            )
+
+    def _schedule_runtime_observation(self, *, force: bool = False) -> None:
+        with self._monitor_lock:
+            if self._runtime_observation_running or (
+                not force and time.monotonic() < self._next_runtime_observation
+            ):
+                return
+            self._runtime_observation_running = True
+
+        def observe() -> None:
+            try:
+                self._observe_runtime_candidates()
+            finally:
+                with self._monitor_lock:
+                    self._runtime_observation_running = False
+
+        if not self._submit(observe):
+            with self._monitor_lock:
+                self._runtime_observation_running = False
 
     def _renew_with_recovery(self) -> dict[str, Any]:
         last: StorageRefusal | None = None
@@ -542,6 +871,7 @@ class PersistentSupervisor:
             server.listen(16)
             server.settimeout(min(0.25, self.renew_seconds))
             receipt = self._register()
+            self.registration_receipt = receipt
             self.ready.set()
             if emit_ready:
                 print(
@@ -553,6 +883,12 @@ class PersistentSupervisor:
                             "callsign": self._binding["callsign"],
                             "fence": receipt["fence"],
                             "lease_seconds": self.lease_seconds,
+                            "recovery_seconds": self.recovery_seconds,
+                            "mode": receipt.get("mode", "all_material"),
+                            "runtime_state": receipt.get("runtime_state", "supervising"),
+                            "wake_policy": receipt.get("wake_policy", "normal"),
+                            "monitor_live": True,
+                            "silent_reconciliation": receipt.get("silent_reconciliation"),
                         },
                         sort_keys=True,
                         separators=(",", ":"),
@@ -561,11 +897,22 @@ class PersistentSupervisor:
                 )
             self._submit(self._recover_pending)
             self._submit(self._recover_semantic_backlog)
+            self._schedule_runtime_observation(force=True)
             next_renewal = time.monotonic() + self.renew_seconds
+            next_recovery = time.monotonic() + self.recovery_seconds
             while not self.stop_requested.is_set():
                 if time.monotonic() >= next_renewal:
-                    self._renew_with_recovery()
+                    try:
+                        self._renew_with_recovery()
+                    except StorageRefusal as exc:
+                        self._record_monitor_fault("supervisor_lease_loss", exc.code)
+                        raise
                     next_renewal = time.monotonic() + self.renew_seconds
+                self._schedule_runtime_observation()
+                if time.monotonic() >= next_recovery:
+                    self._submit(self._recover_pending)
+                    self._submit(self._recover_semantic_backlog)
+                    next_recovery = time.monotonic() + self.recovery_seconds
                 try:
                     connection, _ = server.accept()
                 except socket.timeout:
@@ -595,19 +942,33 @@ def supervisor_status(state_root: Path, callsign: str | None = None) -> dict[str
     with SQLiteStorage(state_root) as store:
         binding = store.supervisor_binding(callsign)
         registration = store.watcher_registration(binding["actor_agent_id"])
+        policy = store.supervision_policy(binding["actor_agent_id"])
     base = {
         "schema": "league.supervisor-status.v1",
         "callsign": binding["callsign"],
         "event_driven": True,
+        "mode": policy["mode"],
+        "runtime_state": policy["runtime_state"],
+        "wake_policy": policy["wake_policy"],
     }
     if registration is None or not str(registration["wake_locator"]).startswith("unix:"):
-        return {**base, "live": False, "reason": "registration_missing"}
+        return {
+            **base,
+            "live": False,
+            "monitor_live": False,
+            "reason": "registration_missing",
+        }
     try:
         response = send_supervisor_message(
             str(registration["wake_locator"]), {"kind": "ping"}, timeout_seconds=0.5
         )
     except SupervisorUnavailable:
-        return {**base, "live": False, "reason": "process_unreachable"}
+        return {
+            **base,
+            "live": False,
+            "monitor_live": False,
+            "reason": "process_unreachable",
+        }
     lease_valid = datetime.fromisoformat(str(registration["leased_until"])) > _now()
     identity_valid = (
         response.get("fence") == int(registration["fence"])
@@ -616,6 +977,7 @@ def supervisor_status(state_root: Path, callsign: str | None = None) -> dict[str
     return {
         **base,
         "live": bool(lease_valid and identity_valid),
+        "monitor_live": bool(lease_valid and identity_valid),
         "lease_valid": lease_valid,
         "identity_valid": identity_valid,
         "fence": int(registration["fence"]),
@@ -642,6 +1004,7 @@ def stop_supervisor(state_root: Path, callsign: str | None = None) -> dict[str, 
             return {
                 "schema": "league.supervisor-status.v1",
                 "callsign": binding["callsign"],
+                "event_driven": True,
                 "live": False,
                 "stopped": True,
             }
@@ -651,13 +1014,101 @@ def stop_supervisor(state_root: Path, callsign: str | None = None) -> dict[str, 
     )
 
 
+def pause_supervisor(state_root: Path, callsign: str | None = None) -> dict[str, Any]:
+    status = supervisor_status(state_root, callsign)
+    if not status["live"]:
+        raise StorageRefusal(
+            "supervisor_not_live", "the exact persistent supervisor is not live"
+        )
+    with SQLiteStorage(state_root) as store:
+        binding = store.supervisor_binding(callsign)
+        registration = store.watcher_registration(binding["actor_agent_id"])
+    assert registration is not None
+    response = send_supervisor_message(
+        str(registration["wake_locator"]),
+        {
+            "kind": "calm-pause",
+            "fence": int(registration["fence"]),
+            "runtime_generation": binding["runtime_generation"],
+        },
+        timeout_seconds=1,
+    )
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        with SQLiteStorage(state_root) as store:
+            policy = store.supervision_policy(binding["actor_agent_id"])
+            current = store.watcher_registration(binding["actor_agent_id"])
+        if (
+            current is not None
+            and current["watcher_id"] == registration["watcher_id"]
+            and policy["runtime_state"] == "paused"
+        ):
+            return {
+                "schema": "league.supervisor-status.v1",
+                "callsign": binding["callsign"],
+                "event_driven": True,
+                "live": True,
+                "paused": True,
+                "mode": "calm",
+                "runtime_state": "paused",
+                "wake_policy": "calm_paused",
+                "hooks_changed": False,
+                "monitor_live": True,
+                "fence": response["fence"],
+                "in_flight_count": response["in_flight_count"],
+            }
+        time.sleep(0.02)
+    raise StorageRefusal(
+        "supervisor_pause_timeout", "Calm supervisor did not pause within its bound"
+    )
+
+
+def resume_supervisor(state_root: Path, callsign: str | None = None) -> dict[str, Any]:
+    status = supervisor_status(state_root, callsign)
+    if not status["live"]:
+        raise StorageRefusal(
+            "supervisor_not_live", "the persistent runtime monitor is not live"
+        )
+    with SQLiteStorage(state_root) as store:
+        binding = store.supervisor_binding(callsign)
+        registration = store.watcher_registration(binding["actor_agent_id"])
+    assert registration is not None
+    response = send_supervisor_message(
+        str(registration["wake_locator"]),
+        {
+            "kind": "calm-resume",
+            "fence": int(registration["fence"]),
+            "runtime_generation": binding["runtime_generation"],
+        },
+        timeout_seconds=1,
+    )
+    return {
+        "schema": "league.supervisor-status.v1",
+        "callsign": binding["callsign"],
+        "event_driven": True,
+        "live": True,
+        "paused": False,
+        "mode": "calm",
+        "runtime_state": "supervising",
+        "wake_policy": "calm",
+        "hooks_changed": False,
+        "monitor_live": True,
+        "fence": response["fence"],
+        "silent_reconciliation": response["silent_reconciliation"],
+    }
+
+
 __all__ = [
     "HerdrWakeAdapter",
+    "HerdrRuntimeObservationAdapter",
     "PersistentSupervisor",
+    "RuntimeObservationAdapter",
     "SemanticRecoveryAdapter",
     "SupervisorUnavailable",
     "notify_user_message",
     "send_supervisor_message",
+    "pause_supervisor",
+    "resume_supervisor",
     "stop_supervisor",
     "supervisor_status",
 ]

@@ -71,6 +71,15 @@ from .sqlite_outbox_ops import pending_backlog as pending_backlog_operation
 from .sqlite_watcher_ops import release_watcher as release_watcher_operation
 from .sqlite_watcher_ops import supervisor_binding as supervisor_binding_operation
 from .sqlite_watcher_ops import watcher_registration as watcher_registration_operation
+from .sqlite_watcher_ops import apply_supervision_delivery_policy as apply_supervision_delivery_policy_operation
+from .sqlite_watcher_ops import champion_stop_decision as champion_stop_decision_operation
+from .sqlite_watcher_ops import configure_supervision_policy as configure_supervision_policy_operation
+from .sqlite_watcher_ops import pause_calm_supervision as pause_calm_supervision_operation
+from .sqlite_watcher_ops import resume_calm_supervision as resume_calm_supervision_operation
+from .sqlite_watcher_ops import record_supervision_fault as record_supervision_fault_operation
+from .sqlite_watcher_ops import runtime_monitor_candidates as runtime_monitor_candidates_operation
+from .sqlite_watcher_ops import silent_supervision_updates as silent_supervision_updates_operation
+from .sqlite_watcher_ops import supervision_policy as supervision_policy_operation
 from .sqlite_request_ops import answer_request as answer_request_operation
 from .sqlite_request_ops import claim_request as claim_request_operation
 from .sqlite_request_ops import dispatch_request as dispatch_request_operation
@@ -3170,6 +3179,7 @@ class SQLiteStorage(SQLiteTransactionCore):
         outbox_id: str,
         recipient_agent_id: str,
         at: str,
+        attention_required: bool = False,
     ) -> dict[str, Any]:
         return transition_task_operation(
             self,
@@ -3186,6 +3196,7 @@ class SQLiteStorage(SQLiteTransactionCore):
             outbox_id,
             recipient_agent_id,
             at,
+            attention_required,
         )
 
     def claim_outbox(
@@ -3305,6 +3316,100 @@ class SQLiteStorage(SQLiteTransactionCore):
         from .sqlite_watcher_ops import watcher_readiness
 
         return watcher_readiness(self, actor_agent_id)
+
+    def supervision_policy(self, actor_agent_id: str) -> dict[str, Any]:
+        return supervision_policy_operation(self, actor_agent_id)
+
+    def runtime_monitor_candidates(
+        self, owner_agent_id: str, *, limit: int = 50
+    ) -> dict[str, Any]:
+        return runtime_monitor_candidates_operation(self, owner_agent_id, limit=limit)
+
+    def record_supervision_fault(
+        self,
+        owner_agent_id: str,
+        fault_kind: str,
+        fault_key: str,
+        at: str,
+    ) -> dict[str, Any]:
+        return record_supervision_fault_operation(
+            self, owner_agent_id, fault_kind, fault_key, at
+        )
+
+    def configure_supervision_policy(
+        self,
+        scope_id: str,
+        actor_agent_id: str,
+        mode: str,
+        unreachable_grace_seconds: int,
+        at: str,
+    ) -> dict[str, Any]:
+        return configure_supervision_policy_operation(
+            self,
+            scope_id,
+            actor_agent_id,
+            mode,
+            unreachable_grace_seconds,
+            at,
+        )
+
+    def apply_supervision_delivery_policy(
+        self,
+        outbox_id: str,
+        event_id: str,
+        recipient_agent_id: str,
+        at: str,
+    ) -> dict[str, Any]:
+        return apply_supervision_delivery_policy_operation(
+            self, outbox_id, event_id, recipient_agent_id, at
+        )
+
+    def silent_supervision_updates(
+        self,
+        actor_agent_id: str,
+        *,
+        after_event_seq: Optional[int] = None,
+        limit: int = 20,
+        advance_cursor: bool = False,
+        at: Optional[str] = None,
+    ) -> dict[str, Any]:
+        return silent_supervision_updates_operation(
+            self,
+            actor_agent_id,
+            after_event_seq=after_event_seq,
+            limit=limit,
+            advance_cursor=advance_cursor,
+            at=at,
+        )
+
+    def pause_calm_supervision(
+        self,
+        actor_agent_id: str,
+        watcher_id: str,
+        fence: int,
+        at: str,
+    ) -> dict[str, Any]:
+        return pause_calm_supervision_operation(
+            self, actor_agent_id, watcher_id, fence, at
+        )
+
+    def resume_calm_supervision(
+        self,
+        actor_agent_id: str,
+        watcher_id: str,
+        fence: int,
+        at: str,
+    ) -> dict[str, Any]:
+        return resume_calm_supervision_operation(
+            self, actor_agent_id, watcher_id, fence, at
+        )
+
+    def champion_stop_decision(
+        self, champion_agent_id: str, terminal_generation: str, at: str
+    ) -> dict[str, Any]:
+        return champion_stop_decision_operation(
+            self, champion_agent_id, terminal_generation, at
+        )
 
     def release_watcher(
         self,

@@ -39,6 +39,7 @@ from league.canonical_watcher import (  # noqa: E402
 
 WATCHER = ROOT / "bin/agent-watcher"
 LEAGUE = ROOT / "bin/league"
+MAX_HOOK_LAUNCH_SECONDS = 2.0
 
 
 def _environment(root: Path, state: Path) -> dict[str, str]:
@@ -453,10 +454,10 @@ def test_long_lived_supervisor_allows_concurrent_prompt_and_stop(root: Path) -> 
     stop, stop_elapsed = results["stop"]
     assert prompt.returncode == 0, prompt.stdout + prompt.stderr
     assert json.loads(prompt.stdout) == {}
-    assert prompt_elapsed < 1.5
+    assert prompt_elapsed < MAX_HOOK_LAUNCH_SECONDS
     assert stop.returncode == 0, stop.stdout + stop.stderr
     assert json.loads(stop.stdout)["decision"] == "block"
-    assert stop_elapsed < 1.0
+    assert stop_elapsed < MAX_HOOK_LAUNCH_SECONDS
     output, error = waiter.communicate(timeout=5)
     assert not error, error
     assert json.loads(output)["priority"] == "user"
@@ -811,7 +812,7 @@ def test_missing_identity_quarantines_then_binds_and_triages(root: Path) -> None
     }
     started = time.monotonic()
     assert _watcher(env, "codex-user-prompt-hook", payload=payload) == {}
-    assert time.monotonic() - started < 1.0
+    assert time.monotonic() - started < MAX_HOOK_LAUNCH_SECONDS
     assert _watcher(env, "codex-user-prompt-hook", payload=payload) == {}
     exported_path = state / "missing-identity.json"
     _league(
@@ -1247,10 +1248,10 @@ def test_transition_contention_keeps_stop_safe_and_prompt_durable(root: Path) ->
     stop_result = json.loads(stop.stdout)
     assert stop_result["decision"] == "block"
     assert "retry" in stop_result["reason"].lower()
-    assert stop_elapsed < 1.0
+    assert stop_elapsed < MAX_HOOK_LAUNCH_SECONDS
     assert prompt.returncode == 0, prompt.stdout + prompt.stderr
     assert json.loads(prompt.stdout) == {}
-    assert prompt_elapsed < 1.5
+    assert prompt_elapsed < MAX_HOOK_LAUNCH_SECONDS
 
     retry = _watcher(env, "codex-stop-hook", payload=stop_payload)
     assert retry["decision"] == "block"

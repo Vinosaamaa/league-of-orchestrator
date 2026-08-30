@@ -12,6 +12,39 @@ from .storage_watcher import RuntimeRegistrationCommand
 from .storage_types import StorageRefusal
 
 
+SUPERVISION_MODES = frozenset({"all_material", "calm"})
+DEFAULT_UNREACHABLE_GRACE_SECONDS = 60
+MAX_CHAMPION_STOP_GUARDS = 64
+ATTENTION_STATUSES = frozenset(
+    {
+        "blocked",
+        "failed",
+        "unreachable",
+        "stale",
+        "ready_to_land",
+        "ready_for_review",
+        "ready_for_merge",
+        "ready_for_release",
+        "ready_for_install",
+        "ready_for_deploy",
+        "release_pending",
+        "install_pending",
+        "deploy_pending",
+        "lane_idle",
+        "cleanup_pending",
+        "cleanup_refused",
+        "preservation_ambiguous",
+    }
+)
+ROUTINE_STATUSES = frozenset(
+    {
+        "accepted", "ack", "acknowledged", "active", "started", "working", "progress",
+        "in_progress", "intermediate", "heartbeat", "lease", "liveness", "health",
+        "healthy", "delivered", "delivery_acknowledged",
+    }
+)
+
+
 def stop_feedback_reason(
     callsign: str, wait_generation: int, summaries: tuple[str, ...] = ()
 ) -> str:
@@ -221,6 +254,624 @@ def ensure_watcher_scope(
         )
 
 
+def _scope_metadata(row: Any) -> dict[str, Any]:
+    try:
+        value = json.loads(str(row["metadata_json"]))
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise StorageRefusal(
+            "supervision_policy_invalid", "watcher supervision metadata is malformed"
+        ) from exc
+    if not isinstance(value, dict):
+        raise StorageRefusal(
+            "supervision_policy_invalid", "watcher supervision metadata is malformed"
+        )
+    return value
+
+
+def _policy_from_scope(row: Any) -> dict[str, Any]:
+    metadata = _scope_metadata(row)
+    raw = metadata.get("supervision", {})
+    if not isinstance(raw, dict):
+        raise StorageRefusal(
+            "supervision_policy_invalid", "watcher supervision policy is malformed"
+        )
+    mode = raw.get("mode", "all_material")
+    grace_seconds = raw.get("unreachable_grace_seconds", DEFAULT_UNREACHABLE_GRACE_SECONDS)
+    runtime_state = raw.get("runtime_state", "supervising")
+    silent_cursor = raw.get("silent_event_cursor", 0)
+    if (
+        mode not in SUPERVISION_MODES
+        or runtime_state not in {"supervising", "paused"}
+        or not isinstance(grace_seconds, int)
+        or not 1 <= grace_seconds <= 3600
+        or not isinstance(silent_cursor, int)
+        or silent_cursor < 0
+    ):
+        raise StorageRefusal(
+            "supervision_policy_invalid", "watcher supervision policy is outside supported bounds"
+        )
+    return {
+        "scope_id": str(row["scope_id"]),
+        "actor_agent_id": str(row["actor_agent_id"]),
+        "mode": str(mode),
+        "runtime_state": str(runtime_state),
+        "wake_policy": (
+            "normal"
+            if mode == "all_material"
+            else "calm_paused" if runtime_state == "paused" else "calm"
+        ),
+        "silent_event_cursor": silent_cursor,
+        "unreachable_grace_seconds": grace_seconds,
+    }
+
+
+def supervision_policy(store: Any, actor_agent_id: str) -> dict[str, Any]:
+    row = store.connection.execute(
+        "SELECT scope_id,actor_agent_id,metadata_json FROM watcher_scopes WHERE actor_agent_id=? ORDER BY scope_id LIMIT 1",
+        (actor_agent_id,),
+    ).fetchone()
+    if row is None:
+        return {
+            "scope_id": None,
+            "actor_agent_id": actor_agent_id,
+            "mode": "all_material",
+            "runtime_state": "paused",
+            "wake_policy": "normal",
+            "silent_event_cursor": 0,
+            "unreachable_grace_seconds": DEFAULT_UNREACHABLE_GRACE_SECONDS,
+        }
+    return _policy_from_scope(row)
+
+
+def runtime_monitor_candidates(
+    store: Any, owner_agent_id: str, *, limit: int = 50
+) -> dict[str, Any]:
+    if not 1 <= limit <= 100:
+        raise StorageRefusal("invalid_limit", "runtime monitor limit is invalid")
+    rows = store.connection.execute(
+        """
+        SELECT ta.task_assignment_id assignment_id,ta.task_id,ta.request_id,
+               ta.coordinator_agent_id,ta.champion_agent_id,ta.runtime_instance_id,
+               a.callsign,a.routing_name,a.address,a.thread_id,a.backend,a.worktree,
+               r.harness_kind,r.backend_kind,r.session_ref,r.endpoint,
+               r.runtime_generation,r.status runtime_status,r.verified,r.last_seen_at
+          FROM task_assignments ta
+          JOIN agent_instances a ON a.agent_id=ta.champion_agent_id
+          JOIN runtime_instances r ON r.runtime_instance_id=ta.runtime_instance_id
+         WHERE ta.coordinator_agent_id=? AND ta.state='active'
+           AND ta.assignment_role='champion' AND a.retired_at IS NULL
+         ORDER BY ta.task_assignment_id LIMIT ?
+        """,
+        (owner_agent_id, limit + 1),
+    ).fetchall()
+    return {
+        "owner_agent_id": owner_agent_id,
+        "returned_count": min(len(rows), limit),
+        "truncated": len(rows) > limit,
+        "candidates": [dict(row) for row in rows[:limit]],
+    }
+
+
+def record_supervision_fault(
+    store: Any,
+    owner_agent_id: str,
+    fault_kind: str,
+    fault_key: str,
+    at: str,
+) -> dict[str, Any]:
+    _time(at, "supervision fault time")
+    if fault_kind not in {
+        "runtime_observation_refused",
+        "runtime_reconciliation_refused",
+        "supervisor_lease_loss",
+        "supervisor_restart_failure",
+    } or not fault_key:
+        raise StorageRefusal("supervision_fault_invalid", "supervision fault identity is invalid")
+    digest = hashlib.sha256(f"{fault_kind}\0{fault_key}".encode("utf-8")).hexdigest()[:32]
+    event_id = f"supervision-fault:{digest}"
+    outbox_id = f"outbox:{event_id}"
+    try:
+        with store._transaction():
+            owner = store.connection.execute(
+                "SELECT version FROM agent_instances WHERE agent_id=? AND role='shotcaller' AND retired_at IS NULL",
+                (owner_agent_id,),
+            ).fetchone()
+            if owner is None:
+                raise StorageRefusal("owner_invalid", "supervision fault owner is not active")
+            existing = store.connection.execute(
+                "SELECT event_id FROM events WHERE event_id=?", (event_id,)
+            ).fetchone()
+            if existing is None:
+                store.connection.execute(
+                    """
+                    INSERT INTO events
+                      (event_id,agent_id,task_id,entity_version,event_type,status,update_text,
+                       occurred_at,detail_json,aggregate_kind,aggregate_id)
+                    VALUES(?,?,NULL,?,'supervision_fault','failed',?,?,?,'agent',?)
+                    """,
+                    (
+                        event_id,
+                        owner_agent_id,
+                        owner["version"],
+                        "Persistent supervision requires owner attention",
+                        at,
+                        json.dumps(
+                            {"attention_required": True, "fault_kind": fault_kind},
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ),
+                        owner_agent_id,
+                    ),
+                )
+                store.connection.execute(
+                    """
+                    INSERT INTO delivery_outbox
+                      (outbox_id,event_id,recipient_agent_id,state,available_at,attempt_count)
+                    VALUES(?,?,?,'pending',?,0)
+                    """,
+                    (outbox_id, event_id, owner_agent_id, at),
+                )
+                store.connection.execute(
+                    """
+                    INSERT INTO obligations
+                      (obligation_id,owner_agent_id,kind,aggregate_id,dedupe_key,state,
+                       next_attention_at,details_json,created_at,updated_at)
+                    VALUES(?,?,'delivery',?,?,'open',?,'{}',?,?)
+                    """,
+                    (
+                        f"obligation:{outbox_id}", owner_agent_id, outbox_id,
+                        f"delivery:{outbox_id}", at, at, at,
+                    ),
+                )
+    except StorageRefusal:
+        raise
+    except sqlite3.DatabaseError as exc:
+        raise store._translate_database_error(
+            exc, "supervision fault recording conflicted with canonical state"
+        ) from exc
+    return {
+        "event_id": event_id,
+        "outbox_id": outbox_id,
+        "recipient_agent_id": owner_agent_id,
+        "fault_kind": fault_kind,
+        "idempotent": existing is not None,
+    }
+
+
+def configure_supervision_policy(
+    store: Any,
+    scope_id: str,
+    actor_agent_id: str,
+    mode: str,
+    unreachable_grace_seconds: int,
+    at: str,
+) -> dict[str, Any]:
+    _time(at, "supervision policy time")
+    if mode not in SUPERVISION_MODES or not 1 <= unreachable_grace_seconds <= 3600:
+        raise StorageRefusal(
+            "supervision_policy_invalid", "supervision mode or unreachable grace is invalid"
+        )
+    try:
+        with store._transaction():
+            actor = store.connection.execute(
+                "SELECT role,retired_at FROM agent_instances WHERE agent_id=?",
+                (actor_agent_id,),
+            ).fetchone()
+            if actor is None or actor["role"] != "shotcaller" or actor["retired_at"] is not None:
+                raise StorageRefusal(
+                    "owner_invalid", "supervision policy requires one active Shotcaller"
+                )
+            ensure_watcher_scope(
+                store, scope_id, actor_agent_id, block_on_obligations=None
+            )
+            row = store.connection.execute(
+                "SELECT scope_id,actor_agent_id,metadata_json FROM watcher_scopes WHERE scope_id=?",
+                (scope_id,),
+            ).fetchone()
+            metadata = _scope_metadata(row)
+            prior = metadata.get("supervision", {})
+            prior_cursor = (
+                prior.get("silent_event_cursor", 0) if isinstance(prior, dict) else 0
+            )
+            prior_runtime_state = (
+                prior.get("runtime_state", "supervising")
+                if isinstance(prior, dict)
+                else "supervising"
+            )
+            if prior_runtime_state not in {"supervising", "paused"}:
+                raise StorageRefusal(
+                    "supervision_policy_invalid",
+                    "watcher supervision lifecycle state is malformed",
+                )
+            metadata["supervision"] = {
+                "mode": mode,
+                "runtime_state": prior_runtime_state,
+                "silent_event_cursor": prior_cursor,
+                "unreachable_grace_seconds": unreachable_grace_seconds,
+                "updated_at": at,
+            }
+            store.connection.execute(
+                "UPDATE watcher_scopes SET metadata_json=? WHERE scope_id=?",
+                (json.dumps(metadata, sort_keys=True, separators=(",", ":")), scope_id),
+            )
+    except StorageRefusal:
+        raise
+    except sqlite3.DatabaseError as exc:
+        raise store._translate_database_error(
+            exc, "supervision policy update conflicted with canonical state"
+        ) from exc
+    return {
+        "scope_id": scope_id,
+        "actor_agent_id": actor_agent_id,
+        "mode": mode,
+        "runtime_state": prior_runtime_state,
+        "wake_policy": (
+            "normal"
+            if mode == "all_material"
+            else "calm" if prior_runtime_state == "supervising" else "calm_paused"
+        ),
+        "silent_event_cursor": prior_cursor,
+        "unreachable_grace_seconds": unreachable_grace_seconds,
+    }
+
+
+def _tracked_champion_lane_idle(store: Any, owner_agent_id: str) -> bool:
+    row = store.connection.execute(
+        """
+        SELECT
+          (SELECT COUNT(*) FROM agent_instances a
+            LEFT JOIN tasks t ON t.task_id=a.task_id
+           WHERE a.role='champion' AND a.shotcaller_agent_id=? AND a.retired_at IS NULL
+             AND a.status IN ('active','started','working','progress','blocked','ready_to_land')
+             AND (a.task_id IS NULL OR t.state IN
+               ('active','pending','accepted','working','progress','in_progress','blocked','ready_to_land')))
+          +
+          (SELECT COUNT(*) FROM tasks
+           WHERE coordinator_agent_id=? AND state IN
+             ('active','pending','accepted','working','progress','in_progress','blocked','ready_to_land'))
+          +
+          (SELECT COUNT(*) FROM task_assignments
+           WHERE coordinator_agent_id=? AND state IN ('pending','launching','cleanup_pending'))
+          +
+          (SELECT COUNT(*) FROM cleanup_obligations c JOIN tasks t ON t.task_id=c.task_id
+           WHERE t.coordinator_agent_id=?
+             AND c.cleanup_state NOT IN ('completed','cleanup_completed')) AS active_count
+        """,
+        (owner_agent_id,) * 4,
+    ).fetchone()
+    return int(row["active_count"]) == 0
+
+
+def _attention_reason(store: Any, row: Any) -> Optional[str]:
+    try:
+        detail = json.loads(str(row["detail_json"]))
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise StorageRefusal(
+            "supervision_event_invalid", "delivery event detail is malformed"
+        ) from exc
+    if not isinstance(detail, dict):
+        raise StorageRefusal(
+            "supervision_event_invalid", "delivery event detail is malformed"
+        )
+    event_type = str(row["event_type"] or "")
+    status = str(row["status"] or "")
+    if detail.get("attention_required") is True:
+        return "champion_escalation"
+    if event_type == "champion_unreachable":
+        return "champion_unreachable"
+    if status in ATTENTION_STATUSES:
+        return status
+    if "cleanup" in event_type or "refusal" in event_type:
+        return "cleanup_or_preservation"
+    if status in ROUTINE_STATUSES or any(
+        marker in event_type for marker in ("heartbeat", "lease", "acknowledg")
+    ):
+        return None
+    is_champion = row["source_role"] == "champion" or event_type == "champion_unreachable"
+    if not is_champion:
+        return "non_champion_material"
+    if status in {"completed", "complete", "cancelled", "rejected"}:
+        if row["task_id"] is not None:
+            cleanup = store.connection.execute(
+                """
+                SELECT cleanup_state FROM cleanup_obligations
+                 WHERE task_id=?
+                   AND cleanup_state NOT IN ('completed','cleanup_completed')
+                """,
+                (row["task_id"],),
+            ).fetchone()
+            if cleanup is not None:
+                return "cleanup_or_release"
+        return (
+            "tracked_lane_idle"
+            if _tracked_champion_lane_idle(store, str(row["recipient_agent_id"]))
+            else None
+        )
+    return "unclassified_material"
+
+
+def apply_supervision_delivery_policy(
+    store: Any,
+    outbox_id: str,
+    event_id: str,
+    recipient_agent_id: str,
+    at: str,
+) -> dict[str, Any]:
+    """Persist a silent receipt or permit one owner-facing material wake."""
+
+    _time(at, "supervision delivery time")
+    try:
+        with store._transaction():
+            row = store.connection.execute(
+                """
+                SELECT o.outbox_id,o.event_id,o.recipient_agent_id,o.state,o.last_outcome,
+                       e.event_seq,e.event_type,e.status,e.update_text,e.detail_json,e.task_id,
+                       COALESCE(e.agent_id,json_extract(e.detail_json,'$.champion_agent_id'))
+                         source_agent_id,
+                       a.role source_role
+                  FROM delivery_outbox o JOIN events e ON e.event_id=o.event_id
+                  LEFT JOIN agent_instances a ON a.agent_id=COALESCE(
+                    e.agent_id,json_extract(e.detail_json,'$.champion_agent_id'))
+                 WHERE o.outbox_id=?
+                """,
+                (outbox_id,),
+            ).fetchone()
+            if row is None:
+                raise StorageRefusal("delivery_unknown", "outbox row does not exist")
+            if row["event_id"] != event_id or row["recipient_agent_id"] != recipient_agent_id:
+                raise StorageRefusal(
+                    "source_event_mismatch", "supervision policy source identity does not match"
+                )
+            if row["state"] == "cancelled" and row["last_outcome"] == "calm_silent":
+                return {
+                    "action": "silent",
+                    "reason": "calm_silent",
+                    "idempotent": True,
+                }
+            policy = supervision_policy(store, recipient_agent_id)
+            if policy["mode"] == "all_material" or row["state"] != "pending":
+                return {"action": "wake", "reason": "all_material", "idempotent": False}
+            reason = _attention_reason(store, row)
+            if reason is not None:
+                return {"action": "wake", "reason": reason, "idempotent": False}
+            store.connection.execute(
+                """
+                UPDATE delivery_outbox
+                   SET state='cancelled',last_outcome='calm_silent',last_attempt_at=?
+                 WHERE outbox_id=? AND state='pending'
+                """,
+                (at, outbox_id),
+            )
+            store.connection.execute(
+                "DELETE FROM outbox_dispatch_leases WHERE outbox_id=?", (outbox_id,)
+            )
+            store.connection.execute(
+                """
+                UPDATE obligations SET state='satisfied',updated_at=?
+                 WHERE kind='delivery' AND aggregate_id=? AND state='open'
+                """,
+                (at, outbox_id),
+            )
+    except StorageRefusal:
+        raise
+    except sqlite3.DatabaseError as exc:
+        raise store._translate_database_error(
+            exc, "Calm delivery filtering conflicted with canonical state"
+        ) from exc
+    return {
+        "action": "silent",
+        "reason": (
+            "calm_paused"
+            if policy["runtime_state"] == "paused"
+            else "routine_champion_update"
+        ),
+        "idempotent": False,
+    }
+
+
+def silent_supervision_updates(
+    store: Any,
+    actor_agent_id: str,
+    *,
+    after_event_seq: Optional[int] = None,
+    limit: int = 20,
+    advance_cursor: bool = False,
+    at: Optional[str] = None,
+) -> dict[str, Any]:
+    if (
+        (after_event_seq is not None and after_event_seq < 0)
+        or not 1 <= limit <= 100
+        or (advance_cursor and at is None)
+    ):
+        raise StorageRefusal("invalid_limit", "silent-update bounds are invalid")
+    policy = supervision_policy(store, actor_agent_id)
+    cursor = policy["silent_event_cursor"] if after_event_seq is None else after_event_seq
+    rows = store.connection.execute(
+        """
+        SELECT e.event_seq,e.event_id,e.event_type,e.status,e.update_text,e.occurred_at,
+               COALESCE(e.agent_id,json_extract(e.detail_json,'$.champion_agent_id')) source_agent_id
+          FROM delivery_outbox o JOIN events e ON e.event_id=o.event_id
+         WHERE o.recipient_agent_id=? AND o.state='cancelled'
+           AND o.last_outcome='calm_silent' AND e.event_seq>?
+         ORDER BY e.event_seq LIMIT ?
+        """,
+        (actor_agent_id, cursor, limit + 1),
+    ).fetchall()
+    returned = [dict(row) for row in rows[:limit]]
+    next_cursor = int(returned[-1]["event_seq"]) if returned else cursor
+    if advance_cursor and policy["scope_id"] is not None:
+        _time(str(at), "silent reconciliation time")
+        with store._transaction():
+            scope = store.connection.execute(
+                "SELECT scope_id,actor_agent_id,metadata_json FROM watcher_scopes WHERE scope_id=?",
+                (policy["scope_id"],),
+            ).fetchone()
+            metadata = _scope_metadata(scope)
+            supervision = metadata.setdefault("supervision", {})
+            if not isinstance(supervision, dict):
+                raise StorageRefusal(
+                    "supervision_policy_invalid", "watcher supervision policy is malformed"
+                )
+            supervision["silent_event_cursor"] = next_cursor
+            supervision["reconciled_at"] = at
+            store.connection.execute(
+                "UPDATE watcher_scopes SET metadata_json=? WHERE scope_id=?",
+                (
+                    json.dumps(metadata, sort_keys=True, separators=(",", ":")),
+                    policy["scope_id"],
+                ),
+            )
+    return {
+        "actor_agent_id": actor_agent_id,
+        "mode": policy["mode"],
+        "runtime_state": policy["runtime_state"],
+        "wake_policy": policy["wake_policy"],
+        "after_event_seq": cursor,
+        "returned_count": len(returned),
+        "truncated": len(rows) > limit,
+        "next_after_event_seq": next_cursor,
+        "cursor_advanced": advance_cursor,
+        "updates": returned,
+    }
+
+
+def pause_calm_supervision(
+    store: Any,
+    actor_agent_id: str,
+    watcher_id: str,
+    fence: int,
+    at: str,
+) -> dict[str, Any]:
+    """Pause only model-facing Calm wakes while the safety monitor stays leased."""
+
+    _time(at, "Calm pause time")
+    try:
+        with store._transaction():
+            registration = store.connection.execute(
+                """
+                SELECT w.watcher_id,w.fence,s.scope_id,s.actor_agent_id,s.metadata_json
+                  FROM watcher_registrations w
+                  JOIN watcher_scopes s ON s.actor_agent_id=w.actor_agent_id
+                 WHERE w.actor_agent_id=?
+                """,
+                (actor_agent_id,),
+            ).fetchone()
+            if (
+                registration is None
+                or registration["watcher_id"] != watcher_id
+                or int(registration["fence"]) != fence
+            ):
+                raise StorageRefusal("watcher_fenced", "Calm pause uses a stale supervisor fence")
+            policy = _policy_from_scope(registration)
+            if policy["mode"] != "calm":
+                raise StorageRefusal(
+                    "calm_mode_required", "pause is supported only while Calm mode is configured"
+                )
+            metadata = _scope_metadata(registration)
+            supervision = metadata["supervision"]
+            supervision["runtime_state"] = "paused"
+            supervision["paused_at"] = at
+            obligations = _obligation_counts(store, actor_agent_id)
+            in_flight_count = (
+                obligations["active_champions"] + obligations["pending_assignments"]
+            )
+            store.connection.execute(
+                """
+                UPDATE watcher_scopes
+                   SET wait_active=0,stop_blocked=0,allow_stop_once=0,metadata_json=?
+                 WHERE scope_id=?
+                """,
+                (
+                    json.dumps(metadata, sort_keys=True, separators=(",", ":")),
+                    registration["scope_id"],
+                ),
+            )
+    except StorageRefusal:
+        raise
+    except sqlite3.DatabaseError as exc:
+        raise store._translate_database_error(
+            exc, "Calm pause conflicted with canonical supervision state"
+        ) from exc
+    return {
+        "actor_agent_id": actor_agent_id,
+        "scope_id": str(registration["scope_id"]),
+        "mode": "calm",
+        "runtime_state": "paused",
+        "wake_policy": "calm_paused",
+        "allow_stop_once": False,
+        "in_flight_count": in_flight_count,
+        "hooks_changed": False,
+        "monitor_live": True,
+        "fence": fence,
+    }
+
+
+def resume_calm_supervision(
+    store: Any,
+    actor_agent_id: str,
+    watcher_id: str,
+    fence: int,
+    at: str,
+) -> dict[str, Any]:
+    """Resume Calm wakes without replacing the persistent runtime monitor."""
+
+    _time(at, "Calm resume time")
+    try:
+        with store._transaction():
+            registration = store.connection.execute(
+                """
+                SELECT w.watcher_id,w.fence,s.scope_id,s.actor_agent_id,s.metadata_json
+                  FROM watcher_registrations w
+                  JOIN watcher_scopes s ON s.actor_agent_id=w.actor_agent_id
+                 WHERE w.actor_agent_id=?
+                """,
+                (actor_agent_id,),
+            ).fetchone()
+            if (
+                registration is None
+                or registration["watcher_id"] != watcher_id
+                or int(registration["fence"]) != fence
+            ):
+                raise StorageRefusal("watcher_fenced", "Calm resume uses a stale monitor fence")
+            policy = _policy_from_scope(registration)
+            if policy["mode"] != "calm":
+                raise StorageRefusal(
+                    "calm_mode_required", "resume is supported only while Calm mode is configured"
+                )
+            metadata = _scope_metadata(registration)
+            metadata["supervision"]["runtime_state"] = "supervising"
+            metadata["supervision"]["resumed_at"] = at
+            counts = _obligation_counts(store, actor_agent_id)
+            store.connection.execute(
+                "UPDATE watcher_scopes SET wait_active=?,metadata_json=? WHERE scope_id=?",
+                (
+                    int(sum(counts.values()) > 0),
+                    json.dumps(metadata, sort_keys=True, separators=(",", ":")),
+                    registration["scope_id"],
+                ),
+            )
+    except StorageRefusal:
+        raise
+    except sqlite3.DatabaseError as exc:
+        raise store._translate_database_error(
+            exc, "Calm resume conflicted with canonical supervision state"
+        ) from exc
+    reconciliation = silent_supervision_updates(
+        store, actor_agent_id, limit=20, advance_cursor=True, at=at
+    )
+    return {
+        "actor_agent_id": actor_agent_id,
+        "scope_id": str(registration["scope_id"]),
+        "mode": "calm",
+        "runtime_state": "supervising",
+        "wake_policy": "calm",
+        "silent_reconciliation": reconciliation,
+        "hooks_changed": False,
+        "monitor_live": True,
+        "fence": fence,
+    }
+
+
 def register_watcher(
     store: Any,
     scope_id: str,
@@ -256,6 +907,16 @@ def register_watcher(
             existing = store.connection.execute(
                 "SELECT * FROM watcher_registrations WHERE actor_agent_id=?", (actor_agent_id,)
             ).fetchone()
+            resuming = existing is None or _time(
+                str(existing["leased_until"]), "stored watcher lease"
+            ) <= now
+            renewing = bool(
+                existing is not None
+                and not resuming
+                and existing["watcher_id"] == watcher_id
+                and existing["runtime_instance_id"] == runtime_instance_id
+                and existing["wake_locator"] == wake_locator
+            )
             if existing is not None and int(existing["fence"]) >= fence:
                 exact = (
                     int(existing["fence"]) == fence
@@ -284,23 +945,40 @@ def register_watcher(
                 """,
                 (watcher_id, actor_agent_id, runtime_instance_id, wake_locator, leased_until, fence, at),
             )
-            store.connection.execute(
-                """
-                UPDATE watcher_scopes
-                   SET generation=generation+1,wait_generation=wait_generation+1,wait_active=1
-                 WHERE scope_id=?
-                """,
-                (scope_id,),
-            )
+            if not renewing:
+                store.connection.execute(
+                    """
+                    UPDATE watcher_scopes
+                       SET generation=generation+1,wait_generation=wait_generation+1,wait_active=1
+                     WHERE scope_id=?
+                    """,
+                    (scope_id,),
+                )
     except StorageRefusal:
         raise
     except sqlite3.DatabaseError as exc:
         raise store._translate_database_error(exc, "watcher registration conflicted") from exc
+    policy = supervision_policy(store, actor_agent_id)
+    reconciliation = (
+        silent_supervision_updates(
+            store, actor_agent_id, limit=20, advance_cursor=True, at=at
+        )
+        if (
+            policy["mode"] == "calm"
+            and policy["runtime_state"] == "supervising"
+            and resuming
+        )
+        else None
+    )
     return {
         "watcher_id": watcher_id,
         "actor_agent_id": actor_agent_id,
         "fence": fence,
         "supervision_status": "armed",
+        "mode": policy["mode"],
+        "runtime_state": policy["runtime_state"],
+        "wake_policy": policy["wake_policy"],
+        "silent_reconciliation": reconciliation,
         "idempotent": False,
     }
 
@@ -417,9 +1095,17 @@ def release_watcher(
                 "DELETE FROM watcher_registrations WHERE actor_agent_id=?",
                 (actor_agent_id,),
             )
-            store.connection.execute(
-                "UPDATE watcher_scopes SET wait_active=0 WHERE actor_agent_id=?",
+            scope = store.connection.execute(
+                "SELECT scope_id,actor_agent_id,metadata_json FROM watcher_scopes WHERE actor_agent_id=?",
                 (actor_agent_id,),
+            ).fetchone()
+            metadata = _scope_metadata(scope)
+            store.connection.execute(
+                "UPDATE watcher_scopes SET wait_active=0,metadata_json=? WHERE actor_agent_id=?",
+                (
+                    json.dumps(metadata, sort_keys=True, separators=(",", ":")),
+                    actor_agent_id,
+                ),
             )
     except StorageRefusal:
         raise
@@ -513,6 +1199,125 @@ def set_allow_stop_once(store: Any, scope_id: str, actor_agent_id: str) -> dict[
     return {"scope_id": scope_id, "allow_stop_once": True}
 
 
+def champion_stop_decision(
+    store: Any,
+    champion_agent_id: str,
+    terminal_generation: str,
+    at: str,
+) -> dict[str, Any]:
+    """Require one fresh durable transition before a Champion with active work stops."""
+
+    _time(at, "Champion Stop decision time")
+    if not terminal_generation:
+        raise StorageRefusal("invalid_stop", "Champion Stop requires a terminal generation")
+    try:
+        with store._transaction():
+            champion = store.connection.execute(
+                """
+                SELECT a.callsign,a.shotcaller_agent_id,a.task_id,t.summary,t.state
+                  FROM agent_instances a LEFT JOIN tasks t ON t.task_id=a.task_id
+                 WHERE a.agent_id=? AND a.role='champion' AND a.retired_at IS NULL
+                """,
+                (champion_agent_id,),
+            ).fetchone()
+            active_states = {
+                "active", "pending", "accepted", "working", "progress",
+                "in_progress", "blocked", "ready_to_land",
+            }
+            if (
+                champion is None
+                or champion["task_id"] is None
+                or champion["state"] not in active_states
+                or champion["shotcaller_agent_id"] is None
+            ):
+                return {
+                    "decision": "allow",
+                    "status": "no_active_work",
+                    "champion_agent_id": champion_agent_id,
+                }
+            owner_agent_id = str(champion["shotcaller_agent_id"])
+            scope = store.connection.execute(
+                "SELECT scope_id,actor_agent_id,metadata_json FROM watcher_scopes WHERE actor_agent_id=? ORDER BY scope_id LIMIT 1",
+                (owner_agent_id,),
+            ).fetchone()
+            if scope is None:
+                scope_id = f"watcher:{owner_agent_id}"
+                ensure_watcher_scope(
+                    store, scope_id, owner_agent_id, block_on_obligations=None
+                )
+                scope = store.connection.execute(
+                    "SELECT scope_id,actor_agent_id,metadata_json FROM watcher_scopes WHERE scope_id=?",
+                    (scope_id,),
+                ).fetchone()
+            metadata = _scope_metadata(scope)
+            guards = metadata.setdefault("champion_stop_guards", {})
+            if not isinstance(guards, dict):
+                raise StorageRefusal(
+                    "champion_stop_invalid", "Champion Stop guard metadata is malformed"
+                )
+            latest = store.connection.execute(
+                """
+                SELECT COALESCE(MAX(event_seq),0) event_seq FROM events
+                 WHERE (task_id=? OR agent_id=?)
+                   AND event_type IN ('task_transition','agent_transition')
+                """,
+                (champion["task_id"], champion_agent_id),
+            ).fetchone()
+            latest_seq = int(latest["event_seq"])
+            previous = guards.get(champion_agent_id)
+            if previous is not None and not isinstance(previous, dict):
+                raise StorageRefusal(
+                    "champion_stop_invalid", "Champion Stop guard metadata is malformed"
+                )
+            previous_seq = -1 if previous is None else int(previous.get("last_event_seq", -1))
+            previous_terminal = None if previous is None else previous.get("terminal_generation")
+            if previous is not None and latest_seq > previous_seq:
+                decision = "allow"
+                status = "fresh_transition"
+            elif previous_terminal == terminal_generation:
+                decision = "allow"
+                status = "blocked_once"
+            else:
+                decision = "block"
+                status = "transition_required"
+            if champion_agent_id not in guards and len(guards) >= MAX_CHAMPION_STOP_GUARDS:
+                raise StorageRefusal(
+                    "champion_stop_capacity",
+                    "Champion Stop guard capacity is exhausted; reconcile inactive Champions first",
+                )
+            guards[champion_agent_id] = {
+                "last_event_seq": latest_seq,
+                "terminal_generation": terminal_generation,
+                "updated_at": at,
+            }
+            store.connection.execute(
+                "UPDATE watcher_scopes SET metadata_json=? WHERE scope_id=?",
+                (
+                    json.dumps(metadata, sort_keys=True, separators=(",", ":")),
+                    scope["scope_id"],
+                ),
+            )
+    except StorageRefusal:
+        raise
+    except (TypeError, ValueError, sqlite3.DatabaseError) as exc:
+        if isinstance(exc, sqlite3.DatabaseError):
+            raise store._translate_database_error(
+                exc, "Champion Stop guard conflicted with canonical state"
+            ) from exc
+        raise StorageRefusal(
+            "champion_stop_invalid", "Champion Stop guard metadata is malformed"
+        ) from exc
+    return {
+        "decision": decision,
+        "status": status,
+        "champion_agent_id": champion_agent_id,
+        "callsign": str(champion["callsign"]),
+        "task_id": str(champion["task_id"]),
+        "task_summary": " ".join(str(champion["summary"]).split())[:160],
+        "latest_transition_event_seq": latest_seq,
+    }
+
+
 def _obligation_counts(store: Any, actor_agent_id: str) -> dict[str, int]:
     row = store.connection.execute(
         """
@@ -556,6 +1361,36 @@ def _obligation_counts(store: Any, actor_agent_id: str) -> dict[str, int]:
               AND c.cleanup_state NOT IN ('completed','cleanup_completed')) cleanup_obligations
         """,
         (actor_agent_id,) * 8,
+    ).fetchone()
+    return {name: int(row[name]) for name in row.keys()}
+
+
+def _paused_actionable_counts(store: Any, actor_agent_id: str) -> dict[str, int]:
+    row = store.connection.execute(
+        """
+        SELECT
+          (SELECT COUNT(*) FROM prompts
+            WHERE current_owner_agent_id=? AND triage_state='untriaged') untriaged_prompts,
+          (SELECT COUNT(*) FROM requests r
+            WHERE r.owner_agent_id=? AND r.state NOT IN ('answered','cancelled')
+              AND (
+                r.state IN ('awaiting_user','blocked')
+                OR NOT EXISTS (
+                  SELECT 1 FROM tasks t
+                   WHERE t.request_id=r.request_id
+                     AND t.state IN
+                       ('active','pending','accepted','working','progress','in_progress','blocked','ready_to_land')
+                )
+              )) owner_decisions,
+          (SELECT COUNT(*) FROM delivery_outbox
+            WHERE recipient_agent_id=? AND state='pending'
+              AND attempt_count>0 AND last_outcome IS NOT NULL
+              AND last_outcome!='calm_silent') failed_deliveries,
+          (SELECT COUNT(*) FROM cleanup_obligations c JOIN tasks t ON t.task_id=c.task_id
+            WHERE t.coordinator_agent_id=?
+              AND c.cleanup_state IN ('awaiting_authority','blocked')) cleanup_decisions
+        """,
+        (actor_agent_id,) * 4,
     ).fetchone()
     return {name: int(row[name]) for name in row.keys()}
 
@@ -606,12 +1441,21 @@ def stop_decision(
                 " ".join(str(row["summary"]).split())[:160]
                 for row in summary_rows
             )
-            total = sum(counts.values())
+            policy = _policy_from_scope(scope)
+            paused_actionable = (
+                _paused_actionable_counts(store, actor_agent_id)
+                if policy["mode"] == "calm" and policy["runtime_state"] == "paused"
+                else None
+            )
+            effective_counts = paused_actionable or counts
+            total = sum(effective_counts.values())
             common = {
                 "scope_id": scope_id,
                 "wait_generation": int(scope["wait_generation"]),
                 "terminal_fresh": terminal_fresh,
-                "obligations": counts,
+                "obligations": effective_counts,
+                "supervision_mode": policy["mode"],
+                "supervision_state": policy["runtime_state"],
                 "unresolved_summaries": list(summaries),
             }
             store.connection.execute(

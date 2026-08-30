@@ -14,6 +14,17 @@
     "identity_valid": {"type": "boolean"},
     "fence": {"type": "integer", "minimum": 1},
     "lease_seconds": {"type": "number", "exclusiveMinimum": 0},
+    "recovery_seconds": {"type": "number", "exclusiveMinimum": 0},
+    "mode": {"enum": ["all_material", "calm"]},
+    "runtime_state": {"enum": ["supervising", "paused"]},
+    "wake_policy": {"enum": ["normal", "calm", "calm_paused"]},
+    "monitor_live": {"type": "boolean"},
+    "paused": {"type": "boolean"},
+    "hooks_changed": {"const": false},
+    "in_flight_count": {"type": "integer", "minimum": 0},
+    "silent_reconciliation": {
+      "type": ["object", "null"]
+    },
     "reason": {"enum": ["registration_missing", "process_unreachable"]},
     "stopped": {"type": "boolean"}
   }

@@ -47,6 +47,67 @@ class WatcherStorage(Protocol):
         self, actor_agent_id: str
     ) -> Optional[dict[str, Any]]: ...
 
+    def supervision_policy(self, actor_agent_id: str) -> dict[str, Any]: ...
+
+    def runtime_monitor_candidates(
+        self, owner_agent_id: str, *, limit: int = 50
+    ) -> dict[str, Any]: ...
+
+    def record_supervision_fault(
+        self,
+        owner_agent_id: str,
+        fault_kind: str,
+        fault_key: str,
+        at: str,
+    ) -> dict[str, Any]: ...
+
+    def configure_supervision_policy(
+        self,
+        scope_id: str,
+        actor_agent_id: str,
+        mode: str,
+        unreachable_grace_seconds: int,
+        at: str,
+    ) -> dict[str, Any]: ...
+
+    def apply_supervision_delivery_policy(
+        self,
+        outbox_id: str,
+        event_id: str,
+        recipient_agent_id: str,
+        at: str,
+    ) -> dict[str, Any]: ...
+
+    def silent_supervision_updates(
+        self,
+        actor_agent_id: str,
+        *,
+        after_event_seq: Optional[int] = None,
+        limit: int = 20,
+        advance_cursor: bool = False,
+        at: Optional[str] = None,
+    ) -> dict[str, Any]: ...
+
+    def pause_calm_supervision(
+        self,
+        actor_agent_id: str,
+        watcher_id: str,
+        fence: int,
+        at: str,
+    ) -> dict[str, Any]: ...
+
+    def resume_calm_supervision(
+        self,
+        actor_agent_id: str,
+        watcher_id: str,
+        fence: int,
+        at: str,
+    ) -> dict[str, Any]: ...
+
+    def champion_stop_decision(
+        self, champion_agent_id: str, terminal_generation: str, at: str
+    ) -> dict[str, Any]: ...
+
     def release_watcher(
         self,
         watcher_id: str,

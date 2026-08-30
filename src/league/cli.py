@@ -673,6 +673,11 @@ def _add_task_commands(groups: argparse._SubParsersAction) -> None:
         transition.add_argument(f"--{name}", required=True)
     transition.add_argument("--expected-version", type=int, required=True)
     transition.add_argument("--blocker")
+    transition.add_argument(
+        "--attention-required",
+        action="store_true",
+        help="Wake the Shotcaller even when Calm mode would silence this transition.",
+    )
 
 
 def _add_runtime_commands(groups: argparse._SubParsersAction) -> None:
@@ -1236,6 +1241,22 @@ def _add_hook_commands(groups: argparse._SubParsersAction) -> None:
     stop = commands.add_parser("stop", help="Combine request, assignment, delivery, and cleanup obligations once.")
     for name in ("scope-id", "actor-agent-id", "terminal-generation", "at"):
         stop.add_argument(f"--{name}", required=True)
+    policy = commands.add_parser(
+        "set-supervision-policy",
+        help="Configure durable all-material or Calm wake delivery without changing hooks.",
+    )
+    for name in ("scope-id", "actor-agent-id", "at"):
+        policy.add_argument(f"--{name}", required=True)
+    policy.add_argument("--mode", choices=("all_material", "calm"), required=True)
+    policy.add_argument("--unreachable-grace-seconds", type=int, default=60)
+    reconcile_silent = commands.add_parser(
+        "reconcile-silent",
+        help="Return and acknowledge one bounded page of Calm-suppressed transitions.",
+    )
+    reconcile_silent.add_argument("--actor-agent-id", required=True)
+    reconcile_silent.add_argument("--after-event-seq", type=int)
+    reconcile_silent.add_argument("--limit", type=int, default=20)
+    reconcile_silent.add_argument("--at", required=True)
 
 
 def _add_mode_commands(groups: argparse._SubParsersAction) -> None:
@@ -1899,6 +1920,7 @@ def _task_transition(store: Storage, args: argparse.Namespace) -> CommandResult:
         args.outbox_id,
         args.recipient_agent_id,
         args.at,
+        args.attention_required,
     )
     if transition.get("outbox_id"):
         from .canonical_delivery import dispatch_event
@@ -3072,6 +3094,18 @@ def _mode_revoke(store: Storage, args: argparse.Namespace) -> CommandResult:
     ), None
 
 
+def _hook_set_supervision_policy(
+    store: Storage, args: argparse.Namespace
+) -> CommandResult:
+    return store.configure_supervision_policy(
+        args.scope_id,
+        args.actor_agent_id,
+        args.mode,
+        args.unreachable_grace_seconds,
+        args.at,
+    ), None
+
+
 def _issue_select(store: Storage, args: argparse.Namespace) -> CommandResult:
     runner = SubprocessRunner()
     service = GitHubIssueSelectionService(store, runner)
@@ -3089,6 +3123,16 @@ def _issue_select(store: Storage, args: argparse.Namespace) -> CommandResult:
         f"issue-attempt:{uuid.uuid4()}",
         args.at,
         reopen_action_receipt_digest=args.reopen_action_receipt_digest,
+    ), None
+
+
+def _hook_reconcile_silent(store: Storage, args: argparse.Namespace) -> CommandResult:
+    return store.silent_supervision_updates(
+        args.actor_agent_id,
+        after_event_seq=args.after_event_seq,
+        limit=args.limit,
+        advance_cursor=True,
+        at=args.at,
     ), None
 
 
@@ -3194,6 +3238,8 @@ HANDLERS: dict[str, CommandHandler] = {
     "mode.transition": _mode_transition,
     "mode.revoke": _mode_revoke,
     "issue.select": _issue_select,
+    "hook.set-supervision-policy": _hook_set_supervision_policy,
+    "hook.reconcile-silent": _hook_reconcile_silent,
 }
 
 

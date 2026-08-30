@@ -9,7 +9,12 @@ import uuid
 from datetime import datetime, timedelta
 from typing import Any, Callable
 
-from .request_services import DeliveryReceipt, DeliveryService, DeliveryUnavailable
+from .request_services import (
+    DeliveryAdapter,
+    DeliveryReceipt,
+    DeliveryService,
+    DeliveryUnavailable,
+)
 from .persistent_supervisor import SupervisorUnavailable, send_supervisor_message
 
 
@@ -111,10 +116,24 @@ def dispatch_event(
     event_id: str,
     recipient_agent_id: str,
     at: str,
+    adapter: DeliveryAdapter | None = None,
 ) -> dict[str, Any]:
+    policy = store.apply_supervision_delivery_policy(
+        outbox_id, event_id, recipient_agent_id, at
+    )
+    if policy["action"] == "silent":
+        return {
+            "outbox_id": outbox_id,
+            "event_id": event_id,
+            "recipient_agent_id": recipient_agent_id,
+            "state": "suppressed",
+            "effect_kind": "calm_silent",
+            "reason": policy["reason"],
+            "idempotent": policy["idempotent"],
+        }
     service = DeliveryService(
         store,
-        InstalledDeliveryAdapter(),
+        adapter or InstalledDeliveryAdapter(),
         _Clock(at),
         _Ids(),
         dispatcher_id="dispatcher:installed-agent-transition",

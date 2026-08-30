@@ -50,7 +50,7 @@ Codex owner turn
   v
 persistent local supervisor (outside model turns)
   |-- one renewable/fenced watcher lease
-  |-- event-driven Unix socket; no SQLite snapshot polling
+  |-- event-driven Unix socket; no steady SQLite snapshot polling
   |-- user prompt priority over Champion events
   |-- asynchronous orphan/backlog recovery adapter
   v
@@ -78,6 +78,36 @@ The supervisor's semantic recovery port is explicitly injected. It schedules
 only quarantined prompts or prompts whose owner has no verified live runtime,
 and returns from the hook before recovery finishes. No production recovery
 model is selected by this source slice.
+
+Calm mode is the machine policy value `calm` and has two variants. With
+supervision on (`supervising`), exact prompt capture and attention-worthy
+Champion transitions signal the renewable, fenced Unix socket; the Shotcaller
+wait is outside model inference. With supervision off (`paused`), Ashe ends the
+model turn, but the non-model monitor, watcher lease, socket, and global hooks
+remain active. The same Calm filter applies in both variants: routine events
+stay silent. Supervision-on attention uses the watcher socket; supervision-off
+attention uses the verified exact-once direct recipient path to start or wake
+Ashe. Stop ignores delegated in-flight work only while supervision is off, but
+still blocks once for owner-actionable obligations. Resume returns one bounded
+page of silent events from the saved cursor. Real owner prompts retain priority.
+
+Normal transition delivery is immediate and event-driven. Runtime exit without
+a canonical transition starts one configurable 60-second grace; recovery
+cancels it, while expiry performs one CAS-safe reconciliation and may create one
+unreachable attention event. A 300-second audit recovers only a lost notification
+or service restart and wakes only for a material unresolved attention condition.
+The monitor renews its lease silently every 20 seconds, the lease expires after
+60 seconds, and launchd's restart throttle is five seconds. The diagnostic
+`--poll-seconds 1` foreground loop is not this production boundary.
+
+The timer distinction is material. Owner-source installed 0.2.27 has no
+always-running watchdog, launch service, or independent OS timer. Its legacy
+foreground `supervise` command keeps an in-memory 30-second runtime snapshot and
+requires two matching observations (about 60 seconds) before its stall fallback.
+Its separate 300-second liveness deadline currently only resets silently and
+performs no health operation. Both vanish when `supervise` exits. The candidate
+has no normal one-second poll, 30-second snapshot loop, or self-resetting
+liveness deadline. The source launchd/socket service in PR #94 is uninstalled.
 
 ## Bounded pre-decision candidate inventory
 
@@ -237,6 +267,14 @@ SQLite boundary is not the dominant source of latency.
   socket, exact prompt broker, Stop feedback suppression, same-turn rearm,
   Champion wake, asynchronous recovery, stale-socket recovery, and bounded stop
   pass with temporary roots and injected fakes.
+- Calm Detached source acceptance proves bounded prompt wake, exactly-once
+  attention-transition wake through the watcher while supervision is on and
+  through verified direct delivery while it is off, complete routine/attention
+  classification, owner-prompt priority, stale-fence refusal, recovery of one
+  deliberately omitted notification, 60/300/20/60/5 timer defaults, grace
+  cancellation, bounded silent replay, both Stop variants, restart/lease
+  recovery, and one canonical runtime-reconciliation event after two exact
+  observations and the configured grace.
 - Stop alone changes no request semantics; explicit reconciliation closes only
   B, preserves provenance, is idempotent, and removes B from unfinished work.
 - Schema 16 migration, backup, rollback, foreign keys, integrity, command
@@ -270,6 +308,6 @@ and separate synchronous classifiers are not production modes.
 | Source-only service-manager boundary | [`config/league-supervisor.launchd.plist.in`](../../config/league-supervisor.launchd.plist.in) |
 | Duplicate reconciliation schema and transition | [`src/league/sqlite_request_reconciliation_schema.py`](../../src/league/sqlite_request_reconciliation_schema.py), [`schema/league-request-reconciliation.schema.json`](../../schema/league-request-reconciliation.schema.json) |
 | Prompt-shape corpus and measurement boundaries | [`tests/fixtures/semantic_prompt_shape_matrix.v1.json`](../../tests/fixtures/semantic_prompt_shape_matrix.v1.json), [`scripts/benchmark_inline_triage_prompt_shapes.py`](../../scripts/benchmark_inline_triage_prompt_shapes.py) |
-| Focused source acceptance | [`tests/test_request_turn_batch.py`](../../tests/test_request_turn_batch.py), [`tests/test_persistent_supervisor.py`](../../tests/test_persistent_supervisor.py), [`tests/test_request_reconciliation.py`](../../tests/test_request_reconciliation.py), [`tests/test_inline_triage_prompt_shapes.py`](../../tests/test_inline_triage_prompt_shapes.py) |
+| Focused source acceptance | [`tests/test_request_turn_batch.py`](../../tests/test_request_turn_batch.py), [`tests/test_persistent_supervisor.py`](../../tests/test_persistent_supervisor.py), [`tests/test_calm_supervision.py`](../../tests/test_calm_supervision.py), [`tests/test_request_reconciliation.py`](../../tests/test_request_reconciliation.py), [`tests/test_inline_triage_prompt_shapes.py`](../../tests/test_inline_triage_prompt_shapes.py) |
 | SQLite WAL, transaction, and migration behavior | [SQLite WAL documentation](https://sqlite.org/wal.html), [SQLite transaction documentation](https://sqlite.org/lang_transaction.html), [SQLite backup API](https://sqlite.org/backup.html) |
 | macOS persistent-service contract | [Apple Daemons and Services Programming Guide](https://developer.apple.com/library/archive/documentation/MacOSX/Conceptual/BPSystemStartup/Chapters/CreatingLaunchdJobs.html) |

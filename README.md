@@ -211,6 +211,31 @@ The normal Shotcaller path opens one `request turn` process; the same active
 model authors its semantic JSON. `agent-watcher service-run` is an external
 service-manager surface, never an active-turn command. The inert launchd
 template is not an install receipt.
+
+The repository-local supervisor supports `all_material` and Calm (`calm`) wake
+policies. Calm commits every transition but suppresses routine Champion
+progress. With supervision on, the Shotcaller remains in an event-driven wait
+outside model inference and attention arrives through the fenced Unix socket.
+`agent-watcher service-pause` turns Calm supervision off: the model turn ends,
+the non-model monitor, watcher lease, socket, and global hooks stay active, and
+attention uses the verified exact-once direct recipient path. `service-resume`
+restores the attached wait and returns one bounded silent-transition
+reconciliation. Real owner prompts retain priority in both variants.
+
+Normal delivery is immediate IPC, not polling. Missing runtime truth gets one
+configurable 60-second grace before CAS-safe reconciliation. A 300-second
+SQLite audit is recovery-only for lost notifications or service restart and
+never invokes a model when healthy. The service renews its silent lease every
+20 seconds, the lease expires after 60 seconds, and the inert launchd template
+uses a five-second restart throttle.
+
+Installed 0.2.27 has no always-running watchdog or OS-owned supervision timer.
+Its legacy foreground `supervise` loop keeps a 30-second runtime snapshot and
+requires two matching observations (about 60 seconds) before a stall fallback;
+its separate 300-second liveness deadline only resets silently and performs no
+health operation. Both timers disappear when that foreground command exits.
+These legacy timers are not the candidate design. The source launchd/socket
+service described here is not installed.
 The adapter, resource, cleanup, and routing contracts are documented in
 [runtime lifecycle](docs/runtime-lifecycle.md) and remain equally repository-local.
 The custom-root provenance and capability boundary is documented in

@@ -19,6 +19,8 @@ from .storage import RuntimeRegistrationCommand, StorageRefusal
 from .persistent_supervisor import (
     PersistentSupervisor,
     notify_user_message,
+    pause_supervisor,
+    resume_supervisor,
     send_supervisor_message,
     SupervisorUnavailable,
     stop_supervisor,
@@ -60,8 +62,12 @@ def _parser() -> argparse.ArgumentParser:
     service_run = commands.add_parser("service-run")
     service_run.add_argument("--lease-seconds", type=float, default=60)
     service_run.add_argument("--renew-seconds", type=float, default=20)
+    service_resume = commands.add_parser("service-resume")
+    service_resume.add_argument("--lease-seconds", type=float, default=60)
+    service_resume.add_argument("--renew-seconds", type=float, default=20)
     commands.add_parser("service-status")
     commands.add_parser("service-stop")
+    commands.add_parser("service-pause")
     supervise = commands.add_parser("supervise")
     supervise.add_argument("--poll-seconds", type=float, default=1.0)
     deliver = commands.add_parser("deliver")
@@ -182,6 +188,21 @@ def _busy_stop_result(
             "authoritative and Stop is safely retryable."
         ),
     }
+
+
+def _champion_stop_output(command: str, result: dict[str, Any]) -> dict[str, Any]:
+    if result["decision"] != "block":
+        return {}
+    reason = (
+        f"League requires {result['callsign']} to record a fresh durable transition "
+        f"for active task {result['task_id']} before this Champion turn ends: "
+        f"{result['task_summary']}"
+    )
+    return (
+        {"decision": "block", "reason": reason}
+        if command == "codex-stop-hook"
+        else {"followup_message": reason}
+    )
 
 
 def _codex_stop_reason(
@@ -456,6 +477,16 @@ def handle_brokered_hook(
             return {"hook_output": {}, "capture": None}
         assert actor_id is not None and callsign is not None and scope is not None
         terminal, _ = _codex_stop_generation(args, payload)
+        if actor_role == "champion":
+            result = store.champion_stop_decision(
+                actor_id,
+                terminal,
+                datetime.now().astimezone().isoformat(timespec="seconds"),
+            )
+            return {
+                "hook_output": _champion_stop_output(command, result),
+                "capture": None,
+            }
         result = store.stop_decision(
             scope,
             actor_id,
@@ -727,7 +758,10 @@ def _supervise(
                 for key, value in current["obligations"].items()
                 if key != "pending_deliveries"
             }
-            if after_obligations != before_obligations:
+            if (
+                after_obligations != before_obligations
+                and current["obligations"]["pending_deliveries"] == 0
+            ):
                 return {
                     "event": "obligations-changed",
                     "before": before_obligations,
@@ -764,8 +798,10 @@ def main(argv: list[str] | None = None) -> int:
         "deliver",
         "supervise",
         "service-run",
+        "service-resume",
         "service-status",
         "service-stop",
+        "service-pause",
         "status",
     }:
         raise StorageRefusal(
@@ -779,11 +815,17 @@ def main(argv: list[str] | None = None) -> int:
             lease_seconds=args.lease_seconds,
             renew_seconds=args.renew_seconds,
         ).run()
+    if args.command == "service-resume":
+        _emit(resume_supervisor(_state_root(), args.shotcaller))
+        return 0
     if args.command == "service-status":
         _emit(supervisor_status(_state_root(), args.shotcaller))
         return 0
     if args.command == "service-stop":
         _emit(stop_supervisor(_state_root(), args.shotcaller))
+        return 0
+    if args.command == "service-pause":
+        _emit(pause_supervisor(_state_root(), args.shotcaller))
         return 0
     payload = _payload() if args.command.endswith("-hook") else {}
     if args.command in {
@@ -885,17 +927,27 @@ def main(argv: list[str] | None = None) -> int:
                 ).hexdigest()
                 turn_id = None
             try:
-                result = store.stop_decision(
-                    scope,
-                    actor_id,
-                    terminal,
-                    datetime.now().astimezone().isoformat(timespec="seconds"),
-                    block_on_fresh_terminal=args.command == "codex-stop-hook",
-                )
+                if actor_role == "champion":
+                    result = store.champion_stop_decision(
+                        actor_id,
+                        terminal,
+                        datetime.now().astimezone().isoformat(timespec="seconds"),
+                    )
+                else:
+                    result = store.stop_decision(
+                        scope,
+                        actor_id,
+                        terminal,
+                        datetime.now().astimezone().isoformat(timespec="seconds"),
+                        block_on_fresh_terminal=args.command == "codex-stop-hook",
+                    )
             except StorageRefusal as exc:
                 if exc.code != "busy":
                     raise
                 _emit(_busy_stop_result(args, payload))
+                return 0
+            if actor_role == "champion":
+                _emit(_champion_stop_output(args.command, result))
                 return 0
             blocked = result["decision"] == "block"
             if args.command == "cursor-stop-hook":

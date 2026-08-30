@@ -1219,6 +1219,72 @@ def finish_hidden_assignment(
     }
 
 
+def _ensure_runtime_reconciliation_event(
+    store: Any, assignment: sqlite3.Row, entity_version: int, at: str
+) -> tuple[str, str]:
+    digest = hashlib.sha256(
+        f"{assignment['task_assignment_id']}\0{assignment['runtime_instance_id']}".encode(
+            "utf-8"
+        )
+    ).hexdigest()[:32]
+    event_id = f"assignment-runtime-unreachable:{digest}"
+    outbox_id = f"outbox:{event_id}"
+    existing = store.connection.execute(
+        "SELECT event_id FROM events WHERE event_id=?", (event_id,)
+    ).fetchone()
+    if existing is None:
+        store.connection.execute(
+            """
+            INSERT INTO events
+              (event_id,agent_id,task_id,entity_version,event_type,status,update_text,
+               occurred_at,detail_json,request_id,aggregate_kind,aggregate_id)
+            VALUES(?,?,NULL,?,'assignment_runtime_reconciled','unreachable',?,?,?,?,'assignment',?)
+            """,
+            (
+                event_id,
+                assignment["champion_agent_id"],
+                entity_version,
+                "Champion runtime mismatch was confirmed by two exact observations",
+                at,
+                _json(
+                    {
+                        "assignment_id": assignment["task_assignment_id"],
+                        "runtime_instance_id": assignment["runtime_instance_id"],
+                        "attention_required": True,
+                    }
+                ),
+                assignment["request_id"],
+                assignment["task_assignment_id"],
+            ),
+        )
+        store.connection.execute(
+            """
+            INSERT INTO delivery_outbox
+              (outbox_id,event_id,recipient_agent_id,state,available_at,attempt_count)
+            VALUES(?,?,?,'pending',?,0)
+            """,
+            (outbox_id, event_id, assignment["coordinator_agent_id"], at),
+        )
+        store.connection.execute(
+            """
+            INSERT INTO obligations
+              (obligation_id,owner_agent_id,kind,aggregate_id,dedupe_key,state,
+               next_attention_at,details_json,created_at,updated_at)
+            VALUES(?,?,'delivery',?,?,'open',?,'{}',?,?)
+            """,
+            (
+                f"obligation:{outbox_id}",
+                assignment["coordinator_agent_id"],
+                outbox_id,
+                f"delivery:{outbox_id}",
+                at,
+                at,
+                at,
+            ),
+        )
+    return event_id, outbox_id
+
+
 def reconcile_assignment_runtime(
     store: Any, assignment_id: str, at: str
 ) -> dict[str, Any]:
@@ -1234,12 +1300,18 @@ def reconcile_assignment_runtime(
             if assignment is None:
                 raise StorageRefusal("assignment_unknown", "assignment does not exist")
             if assignment["state"] == "cleanup_pending" and assignment["failure_class"] == "stale_runtime":
+                event_id, outbox_id = _ensure_runtime_reconciliation_event(
+                    store, assignment, int(assignment["version"]), at
+                )
                 return {
                     "assignment_id": assignment_id,
                     "assignment_role": assignment["assignment_role"],
                     "state": "cleanup_pending",
                     "version": int(assignment["version"]),
                     "runtime_status": "stale",
+                    "event_id": event_id,
+                    "outbox_id": outbox_id,
+                    "recipient_agent_id": assignment["coordinator_agent_id"],
                     "idempotent": True,
                 }
             if assignment["state"] != "active":
@@ -1302,6 +1374,9 @@ def reconcile_assignment_runtime(
                 """,
                 (f"cleanup:{assignment['task_id']}", assignment["task_id"], at),
             )
+            event_id, outbox_id = _ensure_runtime_reconciliation_event(
+                store, assignment, next_version, at
+            )
     except StorageRefusal:
         raise
     except sqlite3.DatabaseError as exc:
@@ -1314,6 +1389,9 @@ def reconcile_assignment_runtime(
         "state": "cleanup_pending",
         "version": next_version,
         "runtime_status": "stale",
+        "event_id": event_id,
+        "outbox_id": outbox_id,
+        "recipient_agent_id": assignment["coordinator_agent_id"],
         "idempotent": False,
     }
 
@@ -2673,14 +2751,24 @@ def _task_transition_retry(
     state: str,
     transition_key: str,
     recipient_agent_id: str,
+    attention_required: bool,
 ) -> Optional[dict[str, Any]]:
     duplicate = store.connection.execute(
-        "SELECT transition_id,event_id,task_id,to_state FROM task_transitions WHERE transition_key=?",
+        """
+        SELECT x.transition_id,x.event_id,x.task_id,x.to_state,e.detail_json
+          FROM task_transitions x JOIN events e ON e.event_id=x.event_id
+         WHERE x.transition_key=?
+        """,
         (transition_key,),
     ).fetchone()
     if duplicate is None:
         return None
-    if duplicate["task_id"] != task_id or duplicate["to_state"] != state:
+    detail = json.loads(str(duplicate["detail_json"]))
+    if (
+        duplicate["task_id"] != task_id
+        or duplicate["to_state"] != state
+        or bool(detail.get("attention_required", False)) != attention_required
+    ):
         raise StorageRefusal("transition_conflict", "transition key has different task content")
     outbox = store.connection.execute(
         "SELECT outbox_id,recipient_agent_id FROM delivery_outbox WHERE event_id=?",
@@ -2767,6 +2855,7 @@ def _persist_task_transition(
     outbox_id: str,
     recipient_agent_id: str,
     at: str,
+    attention_required: bool,
 ) -> int:
     next_version = expected_version + 1
     result_summary = update if state in {"completed", "complete", "ready_to_land"} else task["result_summary"]
@@ -2776,6 +2865,13 @@ def _persist_task_transition(
          WHERE task_id=? AND version=?
         """,
         (state, result_summary, next_version, at, task_id, expected_version),
+    )
+    store.connection.execute(
+        """
+        UPDATE runtime_instances SET last_seen_at=?
+         WHERE runtime_instance_id=? AND runtime_generation=?
+        """,
+        (at, runtime_instance_id, runtime["runtime_generation"]),
     )
     store.connection.execute(
         """
@@ -2816,6 +2912,7 @@ def _persist_task_transition(
                     "champion_agent_id": assignment["champion_agent_id"],
                     "runtime_instance_id": runtime_instance_id,
                     "runtime_generation": runtime["runtime_generation"],
+                    "attention_required": attention_required,
                 }
             ),
             task["request_id"],
@@ -2887,6 +2984,7 @@ def transition_task(
     outbox_id: str,
     recipient_agent_id: str,
     at: str,
+    attention_required: bool = False,
 ) -> dict[str, Any]:
     _time(at, "task transition time")
     if state not in LIFECYCLE_STATES and state not in {"rejected"}:
@@ -2901,6 +2999,7 @@ def transition_task(
                 state=state,
                 transition_key=transition_key,
                 recipient_agent_id=recipient_agent_id,
+                attention_required=attention_required,
             )
             if retry is not None:
                 return retry
@@ -2930,6 +3029,7 @@ def transition_task(
                 outbox_id=outbox_id,
                 recipient_agent_id=recipient_agent_id,
                 at=at,
+                attention_required=attention_required,
             )
             _persist_task_cleanup(store, task_id=task_id, state=state, at=at)
     except StorageRefusal:

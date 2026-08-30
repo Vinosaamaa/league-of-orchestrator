@@ -348,6 +348,7 @@ def pending_backlog(
 
 def delivery_target(store: Any, recipient_agent_id: str, at: str) -> Optional[dict[str, Any]]:
     now = _time(at, "delivery target time")
+    supervision = store.supervision_policy(recipient_agent_id)
     watcher = store.connection.execute(
         """
         SELECT w.watcher_id,w.runtime_instance_id,w.wake_locator,w.leased_until,w.fence,
@@ -360,6 +361,10 @@ def delivery_target(store: Any, recipient_agent_id: str, at: str) -> Optional[di
     ).fetchone()
     if (
         watcher is not None
+        and not (
+            supervision["mode"] == "calm"
+            and supervision["runtime_state"] == "paused"
+        )
         and _time(str(watcher["leased_until"]), "watcher lease") > now
         and watcher["status"] in {"active", "idle"}
         and watcher["verified"]

@@ -158,7 +158,9 @@ def main() -> None:
             "hook_event_name": "UserPromptSubmit",
             "prompt": "Synthetic exact brokered owner prompt",
         }
-        for _ in range(2):
+        prompt_started = time.monotonic()
+        prompt_wake_latency = None
+        for attempt in range(2):
             submitted = subprocess.run(
                 [str(ROOT / "bin/agent-watcher"), "codex-user-prompt-hook"],
                 input=json.dumps(prompt_payload),
@@ -169,6 +171,9 @@ def main() -> None:
                 check=False,
             )
             assert submitted.returncode == 0 and json.loads(submitted.stdout) == {}, submitted.stderr
+            if attempt == 0:
+                prompt_wake_latency = time.monotonic() - prompt_started
+                assert runtime.user_priority.is_set() and prompt_wake_latency < 2
         assert runtime.user_priority.is_set() and runtime.user_priority_generation == 1
         try:
             send_supervisor_message(

@@ -812,6 +812,317 @@ def test_snapshot_refresh_refuses_a_mismatched_canonical_runtime(root: Path) -> 
             raise AssertionError("mismatched canonical runtime refreshed the snapshot")
 
 
+def _bind_exact_herdr_runtime_with_capabilities(
+    store: SQLiteStorage,
+    root: Path,
+    champion_agent_id: str,
+    runtime_capabilities: list[str],
+) -> str:
+    champion = store.agent_status(champion_agent_id)
+    thread_id = "eeeeeeee-ffff-4aaa-8bbb-111111111111"
+    pane_id = "pane:capability-superset"
+    terminal_id = f"terminal:{champion_agent_id}"
+    worktree = (root / "capability-superset-worktree").resolve()
+    worktree.mkdir(exist_ok=True)
+    generation = "herdr:" + hashlib.sha256(
+        f"{terminal_id}\0{thread_id}".encode("utf-8")
+    ).hexdigest()[:24]
+    store.connection.execute(
+        """
+        UPDATE agent_instances
+           SET kind='codex-thread',thread_id=?,backend='herdr',routing_name=?,
+               display_agent='codex',address=?,worktree=?
+         WHERE agent_id=?
+        """,
+        (
+            thread_id,
+            str(champion["callsign"]).lower(),
+            pane_id,
+            str(worktree),
+            champion_agent_id,
+        ),
+    )
+    store.connection.execute(
+        """
+        UPDATE runtime_instances
+           SET harness_kind='codex-thread',backend_kind='herdr',session_ref=?,endpoint=?,
+               runtime_generation=?,status='idle',verified=1,capabilities_json=?
+         WHERE actor_agent_id=?
+        """,
+        (
+            thread_id,
+            pane_id,
+            generation,
+            json.dumps(runtime_capabilities, separators=(",", ":")),
+            champion_agent_id,
+        ),
+    )
+    return terminal_id
+
+
+def test_runtime_capability_superset_refreshes_and_reconciles_without_downgrade(
+    root: Path,
+) -> None:
+    state, _ = migrated_state(root, "runtime-capability-superset")
+    with SQLiteStorage(state) as store:
+        context = seed_rollover(store, champion_count=1)
+        champion_id = context["champion_ids"][0]
+        task_id = "task:champion:0"
+        actual_capabilities = ["hook.capture", "task.execute"]
+        terminal_id = _bind_exact_herdr_runtime_with_capabilities(
+            store, root, champion_id, actual_capabilities
+        )
+        store.connection.execute(
+            "UPDATE callsign_assignments SET requirements_json='[]' WHERE agent_id=?",
+            (champion_id,),
+        )
+        prepared, switched = switch_rollover(store, context)
+
+        refreshed = RolloverSnapshotRefreshService(
+            store, ExactSnapshotInventory()
+        ).refresh(
+            operation_id=prepared["operation_id"],
+            refresh_id="refresh:capability-superset",
+            squad_id=SQUAD_ID,
+            predecessor_agent_id=OLD_ID,
+            successor_agent_id=NEW_ID,
+            expected_rollover_version=switched["version"],
+            expected_snapshot_version=prepared["snapshot"]["version"],
+            expected_snapshot_digest=prepared["snapshot"]["digest"],
+            expires_at="2026-01-01T03:00:00Z",
+            at="2026-01-01T02:00:00Z",
+        )
+        assert refreshed["capability_bindings"] == [
+            {
+                "champion_agent_id": champion_id,
+                "required_capabilities": [],
+                "runtime_capabilities": actual_capabilities,
+            }
+        ]
+        row = store.rollover_bindings(
+            prepared["operation_id"], "2026-01-01T02:01:00Z"
+        )["page"]["rows"][0]
+        champion = store.agent_status(champion_id)
+        callsign_version = store.connection.execute(
+            "SELECT version FROM callsign_assignments WHERE agent_id=?",
+            (champion_id,),
+        ).fetchone()[0]
+        target = store.rollover_descendant_target(
+            prepared["operation_id"],
+            "reconciliation:capability-superset",
+            champion_id,
+            task_id,
+            refreshed["snapshot"]["digest"],
+            row["row_digest"],
+            refreshed["rollover_version"],
+            champion["version"],
+            1,
+            0,
+            callsign_version,
+        )
+        assert target["capabilities"] == actual_capabilities
+        runtime_id = target["runtime"]["runtime_instance_id"]
+        runtime = descendant_runtime_receipt(target, runtime_id, terminal_id)
+        runtime["runtime_generation"] = target["runtime"]["runtime_generation"]
+        inputs = (
+            prepared["operation_id"],
+            "reconciliation:capability-superset",
+            champion_id,
+            task_id,
+            runtime_id,
+            refreshed["snapshot"]["digest"],
+            row["row_digest"],
+            refreshed["rollover_version"],
+            champion["version"],
+            1,
+            0,
+            callsign_version,
+        )
+        first = store.reconcile_rollover_descendant(
+            *inputs, runtime, (), "2026-01-01T02:02:00Z"
+        )
+        second = store.reconcile_rollover_descendant(
+            *inputs, None, (), "2026-01-01T02:02:00Z"
+        )
+        assert first["receipt_digest"] == second["receipt_digest"]
+        assert second["idempotent"] is True
+        event = store.connection.execute(
+            "SELECT detail_json FROM events WHERE event_id=?",
+            ("reconciliation:capability-superset",),
+        ).fetchone()
+        receipt = json.loads(event["detail_json"])["receipt"]
+        assert receipt["required_capabilities"] == []
+        assert receipt["runtime_capabilities"] == actual_capabilities
+        stored = store.connection.execute(
+            "SELECT capabilities_json FROM runtime_instances WHERE runtime_instance_id=?",
+            (runtime_id,),
+        ).fetchone()[0]
+        assert json.loads(stored) == actual_capabilities
+
+
+def test_runtime_capability_contract_refuses_missing_and_unverified(
+    root: Path,
+) -> None:
+    for label, runtime_capabilities, verified in (
+        ("missing", ["task.execute"], 1),
+        ("unverified", ["repo.write", "task.execute"], 0),
+    ):
+        state, _ = migrated_state(root, f"runtime-capability-{label}")
+        with SQLiteStorage(state) as store:
+            context = seed_rollover(store, champion_count=1)
+            champion_id = context["champion_ids"][0]
+            _bind_exact_herdr_runtime_with_capabilities(
+                store, root, champion_id, runtime_capabilities
+            )
+            store.connection.execute(
+                "UPDATE runtime_instances SET verified=? WHERE actor_agent_id=?",
+                (verified, champion_id),
+            )
+            store.connection.execute(
+                """
+                UPDATE callsign_assignments SET requirements_json='["repo.write","task.execute"]'
+                 WHERE agent_id=?
+                """,
+                (champion_id,),
+            )
+            prepared, switched = switch_rollover(store, context)
+            try:
+                RolloverSnapshotRefreshService(
+                    store, ExactSnapshotInventory()
+                ).refresh(
+                    operation_id=prepared["operation_id"],
+                    refresh_id=f"refresh:capability-{label}",
+                    squad_id=SQUAD_ID,
+                    predecessor_agent_id=OLD_ID,
+                    successor_agent_id=NEW_ID,
+                    expected_rollover_version=switched["version"],
+                    expected_snapshot_version=prepared["snapshot"]["version"],
+                    expected_snapshot_digest=prepared["snapshot"]["digest"],
+                    expires_at="2026-01-01T03:00:00Z",
+                    at="2026-01-01T02:00:00Z",
+                )
+            except StorageRefusal as exc:
+                assert exc.code == "snapshot_refresh_runtime_mismatch"
+            else:
+                raise AssertionError(f"{label} runtime capability identity refreshed")
+            status = store.rollover_status(prepared["operation_id"])
+            assert status["version"] == switched["version"]
+            assert status["snapshot"] == prepared["snapshot"]
+            if label == "missing":
+                row = store.rollover_bindings(
+                    prepared["operation_id"], AT6
+                )["page"]["rows"][0]
+                champion = store.agent_status(champion_id)
+                callsign_version = store.connection.execute(
+                    "SELECT version FROM callsign_assignments WHERE agent_id=?",
+                    (champion_id,),
+                ).fetchone()[0]
+                try:
+                    store.rollover_descendant_target(
+                        prepared["operation_id"],
+                        "reconciliation:capability-missing",
+                        champion_id,
+                        "task:champion:0",
+                        prepared["snapshot"]["digest"],
+                        row["row_digest"],
+                        switched["version"],
+                        champion["version"],
+                        1,
+                        0,
+                        callsign_version,
+                    )
+                except StorageRefusal as exc:
+                    assert exc.code == "descendant_runtime_mismatch"
+                else:
+                    raise AssertionError(
+                        "descendant target accepted a runtime missing requirements"
+                    )
+
+
+def test_descendant_reconciliation_refuses_capability_drift_and_unverified_runtime(
+    root: Path,
+) -> None:
+    for label in ("changed", "unverified"):
+        state, _ = migrated_state(root, f"descendant-capability-{label}")
+        with SQLiteStorage(state) as store:
+            context = seed_rollover(store, champion_count=1)
+            champion_id = context["champion_ids"][0]
+            task_id = "task:champion:0"
+            actual_capabilities = ["hook.capture", "task.execute"]
+            terminal_id = _bind_exact_herdr_runtime_with_capabilities(
+                store, root, champion_id, actual_capabilities
+            )
+            store.connection.execute(
+                "UPDATE callsign_assignments SET requirements_json='[]' WHERE agent_id=?",
+                (champion_id,),
+            )
+            prepared, switched = switch_rollover(store, context)
+            row = store.rollover_bindings(
+                prepared["operation_id"], AT6
+            )["page"]["rows"][0]
+            champion = store.agent_status(champion_id)
+            callsign_version = store.connection.execute(
+                "SELECT version FROM callsign_assignments WHERE agent_id=?",
+                (champion_id,),
+            ).fetchone()[0]
+            target = store.rollover_descendant_target(
+                prepared["operation_id"],
+                f"reconciliation:capability-{label}",
+                champion_id,
+                task_id,
+                prepared["snapshot"]["digest"],
+                row["row_digest"],
+                switched["version"],
+                champion["version"],
+                1,
+                0,
+                callsign_version,
+            )
+            runtime_id = target["runtime"]["runtime_instance_id"]
+            runtime = descendant_runtime_receipt(target, runtime_id, terminal_id)
+            runtime["runtime_generation"] = target["runtime"]["runtime_generation"]
+            if label == "changed":
+                store.connection.execute(
+                    "UPDATE runtime_instances SET capabilities_json=? WHERE runtime_instance_id=?",
+                    (
+                        '["hook.capture","repo.write","task.execute"]',
+                        runtime_id,
+                    ),
+                )
+            else:
+                store.connection.execute(
+                    "UPDATE runtime_instances SET verified=0 WHERE runtime_instance_id=?",
+                    (runtime_id,),
+                )
+            try:
+                store.reconcile_rollover_descendant(
+                    prepared["operation_id"],
+                    f"reconciliation:capability-{label}",
+                    champion_id,
+                    task_id,
+                    runtime_id,
+                    prepared["snapshot"]["digest"],
+                    row["row_digest"],
+                    switched["version"],
+                    champion["version"],
+                    1,
+                    0,
+                    callsign_version,
+                    runtime,
+                    (),
+                    AT6,
+                )
+            except StorageRefusal as exc:
+                assert exc.code == "descendant_runtime_mismatch"
+            else:
+                raise AssertionError(f"{label} canonical runtime reconciled")
+            assert store.connection.execute(
+                "SELECT COUNT(*) FROM events WHERE event_id=?",
+                (f"reconciliation:capability-{label}",),
+            ).fetchone()[0] == 0
+            assert store.agent_status(champion_id)["shotcaller_agent_id"] == OLD_ID
+
+
 def test_snapshot_refresh_refuses_invalid_missing_runtime_generations_without_mutation(
     root: Path,
 ) -> None:
@@ -3165,6 +3476,9 @@ def main() -> None:
         test_snapshot_refresh_cli_runs_two_stable_herdr_inventories(root)
         test_snapshot_refresh_adapter_requires_one_exact_live_identity(root)
         test_snapshot_refresh_refuses_a_mismatched_canonical_runtime(root)
+        test_runtime_capability_superset_refreshes_and_reconciles_without_downgrade(root)
+        test_runtime_capability_contract_refuses_missing_and_unverified(root)
+        test_descendant_reconciliation_refuses_capability_drift_and_unverified_runtime(root)
         test_snapshot_refresh_refuses_invalid_missing_runtime_generations_without_mutation(root)
         test_snapshot_refresh_requires_canonical_generation_to_match_observed_terminal(root)
         test_switched_rollover_refreshes_only_the_expired_exact_snapshot(root)

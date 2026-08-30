@@ -60,6 +60,35 @@ DRAIN_RECEIPT_KEYS = {
 }
 
 
+def _runtime_capability_contract(
+    required_value: Any,
+    runtime_value: Any,
+    *,
+    code: str,
+    message: str,
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Validate immutable runtime capabilities against a callsign minimum."""
+
+    try:
+        required_raw = (
+            json.loads(required_value)
+            if isinstance(required_value, str)
+            else required_value
+        )
+        runtime_raw = (
+            json.loads(runtime_value)
+            if isinstance(runtime_value, str)
+            else runtime_value
+        )
+        required = capabilities(required_raw)
+        runtime = capabilities(runtime_raw)
+    except (json.JSONDecodeError, TypeError, StorageRefusal) as exc:
+        raise StorageRefusal(code, message) from exc
+    if not set(required).issubset(runtime):
+        raise StorageRefusal(code, message)
+    return required, runtime
+
+
 def _descendant_source_shape(
     store: Any,
     task: Any,
@@ -547,6 +576,23 @@ def rollover_descendant_target(
         raise StorageRefusal(
             "descendant_callsign_ambiguous", "descendant callsign binding is not exact"
         )
+    runtime_capabilities: tuple[str, ...] | None = None
+    try:
+        required_capabilities = capabilities(
+            json.loads(callsigns[0]["requirements_json"])
+        )
+    except (json.JSONDecodeError, TypeError, StorageRefusal) as exc:
+        raise StorageRefusal(
+            "descendant_runtime_mismatch",
+            "descendant callsign capability requirements are malformed",
+        ) from exc
+    if runtime is not None:
+        required_capabilities, runtime_capabilities = _runtime_capability_contract(
+            callsigns[0]["requirements_json"],
+            runtime["capabilities_json"],
+            code="descendant_runtime_mismatch",
+            message="canonical runtime is missing a required callsign capability",
+        )
     assignment = store.connection.execute(
         "SELECT task_assignment_id,version FROM task_assignments WHERE task_id=?", (task_id,)
     ).fetchone()
@@ -581,7 +627,12 @@ def rollover_descendant_target(
         "snapshot_row_digest": row["row_digest"],
         "runtime_count": len(runtimes),
         "runtime": None if runtime is None else dict(runtime),
-        "capabilities": json.loads(callsigns[0]["requirements_json"]),
+        "required_capabilities": list(required_capabilities),
+        "capabilities": list(
+            required_capabilities
+            if runtime_capabilities is None
+            else runtime_capabilities
+        ),
         "task_assignment_id": None if assignment is None else assignment["task_assignment_id"],
         "callsign_assignment_id": callsigns[0]["callsign_assignment_id"],
         "source_shape": source_shape,
@@ -1653,12 +1704,12 @@ def reconcile_rollover_descendant(
                 raise StorageRefusal(
                     "version_conflict", "descendant callsign assignment version changed"
                 )
-            required_capabilities = json.loads(callsign_assignment["requirements_json"])
-            if runtime_receipt["capabilities"] != required_capabilities:
-                raise StorageRefusal(
-                    "descendant_runtime_mismatch",
-                    "live runtime capabilities differ from the canonical callsign contract",
-                )
+            required_capabilities, receipt_capabilities = _runtime_capability_contract(
+                callsign_assignment["requirements_json"],
+                runtime_receipt["capabilities"],
+                code="descendant_runtime_mismatch",
+                message="live runtime is missing a required callsign capability",
+            )
             assignment = store.connection.execute(
                 "SELECT * FROM task_assignments WHERE task_id=?", (task_id,)
             ).fetchone()
@@ -1689,6 +1740,12 @@ def reconcile_rollover_descendant(
                         "descendant_runtime_closed",
                         "closed or failed imported runtime cannot be rebound",
                     )
+                _, canonical_runtime_capabilities = _runtime_capability_contract(
+                    callsign_assignment["requirements_json"],
+                    runtime["capabilities_json"],
+                    code="descendant_runtime_mismatch",
+                    message="canonical runtime is missing a required callsign capability",
+                )
                 if (
                     runtime["runtime_instance_id"] != runtime_instance_id
                     or not bool(runtime["verified"])
@@ -1697,7 +1754,7 @@ def reconcile_rollover_descendant(
                     or runtime["session_ref"] != runtime_receipt["session_ref"]
                     or runtime["endpoint"] != runtime_receipt["endpoint"]
                     or runtime["runtime_generation"] != runtime_receipt["runtime_generation"]
-                    or json.loads(runtime["capabilities_json"]) != required_capabilities
+                    or canonical_runtime_capabilities != receipt_capabilities
                 ):
                     raise StorageRefusal(
                         "descendant_runtime_mismatch",
@@ -1721,7 +1778,7 @@ def reconcile_rollover_descendant(
                         runtime_receipt["runtime_generation"],
                         runtime_receipt["status"],
                         at,
-                        stable_json(required_capabilities),
+                        stable_json(receipt_capabilities),
                     ),
                 )
                 if fault:
@@ -1803,6 +1860,8 @@ def reconcile_rollover_descendant(
                 "runtime_instance_id": runtime_instance_id,
                 "runtime_generation": runtime_receipt["runtime_generation"],
                 "runtime_receipt_digest": digest(dict(runtime_receipt)),
+                "required_capabilities": list(required_capabilities),
+                "runtime_capabilities": list(receipt_capabilities),
                 "created_runtime": created_runtime,
                 "callsign_assignment_id": callsign_assignment["callsign_assignment_id"],
                 "task_assignment_id": assignment_id,

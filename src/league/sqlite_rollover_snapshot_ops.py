@@ -8,9 +8,10 @@ import sqlite3
 from typing import Any, Callable, Mapping, Optional, Sequence
 
 from .rollover_descendant import _herdr_runtime_generation
-from .sqlite_callsign_ops import digest, stable_json, timestamp
+from .sqlite_callsign_ops import capabilities, digest, stable_json, timestamp
 from .sqlite_rollover_ops import (
     _operation,
+    _runtime_capability_contract,
     _runtime_identity,
     _snapshot_digest,
     _snapshot_row_digest,
@@ -119,22 +120,24 @@ def _descendant_context(
                 "descendant identity no longer matches the switched predecessor boundary",
             )
         try:
-            required_capabilities = json.loads(callsigns[0]["requirements_json"])
-        except (json.JSONDecodeError, TypeError) as exc:
+            required_capabilities = capabilities(
+                json.loads(callsigns[0]["requirements_json"])
+            )
+        except (json.JSONDecodeError, TypeError, StorageRefusal) as exc:
             raise StorageRefusal(
                 "snapshot_refresh_runtime_mismatch",
                 "descendant capability identity is malformed",
             ) from exc
         runtime = None
+        runtime_capabilities: tuple[str, ...] | None = None
         if runtimes:
             runtime = runtimes[0]
-            try:
-                runtime_capabilities = json.loads(runtime["capabilities_json"])
-            except (json.JSONDecodeError, TypeError) as exc:
-                raise StorageRefusal(
-                    "snapshot_refresh_runtime_mismatch",
-                    "canonical descendant runtime capabilities are malformed",
-                ) from exc
+            required_capabilities, runtime_capabilities = _runtime_capability_contract(
+                callsigns[0]["requirements_json"],
+                runtime["capabilities_json"],
+                code="snapshot_refresh_runtime_mismatch",
+                message="canonical descendant runtime is missing a required callsign capability",
+            )
             if (
                 not bool(runtime["verified"])
                 or runtime["status"] not in {"active", "idle"}
@@ -144,7 +147,6 @@ def _descendant_context(
                 or runtime["endpoint"] != champion["address"]
                 or not isinstance(runtime["runtime_generation"], str)
                 or not runtime["runtime_generation"]
-                or runtime_capabilities != required_capabilities
             ):
                 raise StorageRefusal(
                     "snapshot_refresh_runtime_mismatch",
@@ -163,7 +165,12 @@ def _descendant_context(
                 "address": champion["address"],
                 "worktree": champion["worktree"],
                 "canonical_row_digest": current_row["row_digest"],
-                "capabilities": required_capabilities,
+                "required_capabilities": list(required_capabilities),
+                "capabilities": list(
+                    required_capabilities
+                    if runtime_capabilities is None
+                    else runtime_capabilities
+                ),
                 "runtime": (
                     None
                     if runtime is None
@@ -171,6 +178,7 @@ def _descendant_context(
                         "runtime_instance_id": runtime["runtime_instance_id"],
                         "runtime_generation": runtime["runtime_generation"],
                         "status": runtime["status"],
+                        "capabilities": list(runtime_capabilities),
                     }
                 ),
             }
@@ -665,6 +673,18 @@ def refresh(
                 "snapshot": snapshot_value,
                 "rollover_version": next_rollover_version,
                 "descendant_count": len(refreshed_rows),
+                "capability_bindings": [
+                    {
+                        "champion_agent_id": descendant["champion_agent_id"],
+                        "required_capabilities": descendant["required_capabilities"],
+                        "runtime_capabilities": (
+                            None
+                            if descendant["runtime"] is None
+                            else descendant["runtime"]["capabilities"]
+                        ),
+                    }
+                    for descendant in context["descendants"]
+                ],
                 "canonical_digest": canonical_digest,
                 "observation_digest": observation_digest,
                 "final_observation_digest": final_observation_digest,

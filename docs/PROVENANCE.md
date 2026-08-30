@@ -700,3 +700,19 @@ acceptance dry-run report receipt is refreshed for that schema-19 target. Its
 legacy-source digest and exact
 post-import parity digest remain unchanged; only the truthful target-version
 report digest changes.
+
+## Rollover runtime capability provenance
+
+Issue #23 preserves callsign capabilities as minimum requirements, not an
+exact runtime inventory. Snapshot refresh and descendant reconciliation accept
+one verified canonical runtime only when every active callsign requirement is
+present in that runtime's normalized immutable capability set. A strict
+runtime superset is retained unchanged; missing requirements, malformed sets,
+runtime drift, and unverified identities still refuse before reconciliation.
+
+The immutable refresh and descendant reconciliation receipts record both the
+minimum requirement set and the actual canonical runtime set. This source-only
+correction changes no schema, callsign requirement, live runtime, hook,
+installed release, or active rollover state. Focused synthetic tests cover
+superset preservation, missing requirements, runtime drift, unverified
+identity, exact retry, and unchanged snapshot/ownership CAS boundaries.

@@ -281,17 +281,17 @@
       "properties": {
         "schema": {"const": "league.migration.v1"},
         "from_version": {"const": 0},
-        "to_version": {"const": 15},
+        "to_version": {"const": 16},
         "applied": {
           "type": "array",
           "prefixItems": [
             {"const": 1}, {"const": 2}, {"const": 3}, {"const": 4},
             {"const": 5}, {"const": 6}, {"const": 7}, {"const": 8},
             {"const": 9}, {"const": 10}, {"const": 11}, {"const": 12},
-            {"const": 13}, {"const": 14}, {"const": 15}
+            {"const": 13}, {"const": 14}, {"const": 15}, {"const": 16}
           ],
-          "minItems": 15,
-          "maxItems": 15
+          "minItems": 16,
+          "maxItems": 16
         },
         "backup": {"type": "null"},
         "policy": {"$ref": "#/$defs/connectionPolicy"}

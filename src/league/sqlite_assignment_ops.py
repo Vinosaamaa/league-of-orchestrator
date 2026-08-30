@@ -1397,7 +1397,7 @@ def assignment_launch_context(store: Any, assignment_id: str) -> dict[str, Any]:
                 == legacy_intent.get("target_title")
                 and legacy_receipt["terminal_title"]
                 == legacy_intent.get("target_title")
-                and legacy_receipt["state_change_seq"] > expected_sequence
+                and legacy_receipt["state_change_seq"] == expected_sequence + 1
             )
             if not exact_result:
                 raise StorageRefusal(
@@ -1746,7 +1746,7 @@ def finalize_legacy_display_reconciliation(
                 and bool(re.fullmatch(r"[0-9a-f]{64}", receipt["observation_digest"]))
                 and receipt.get("source") == expected_source
                 and int(receipt["state_change_seq"])
-                > int(command.expected_state_change_seq)
+                == int(command.expected_state_change_seq) + 1
             )
             if not valid:
                 raise StorageRefusal(

@@ -1089,6 +1089,38 @@ def test_legacy_display_reconciliation_refuses_orphaned_final_receipt(
     store.close()
 
 
+def test_legacy_display_readback_refuses_expected_plus_two_receipt(root: Path) -> None:
+    store, clock, worktree, launch, receipt, runner = _prepared_legacy_display(
+        root, "legacy-plus-two-receipt"
+    )
+    spec = _legacy_reconciliation_spec(launch, receipt, worktree, runner)
+    LegacyDisplayReconciliationService(
+        store,
+        HerdrLegacyDisplayAdapter(
+            runner,
+            environment={"HERDR_ENV": "1", "HERDR_WORKSPACE_ID": "w1"},
+        ),
+        clock,
+    ).reconcile(spec)
+    final = store.connection.execute(
+        "SELECT event_id,detail_json FROM events WHERE aggregate_id=? AND event_type='assignment_legacy_display_reconciled'",
+        (launch["assignment_id"],),
+    ).fetchone()
+    detail = json.loads(final["detail_json"])
+    detail["receipt"]["state_change_seq"] = spec.expected_state_change_seq + 2
+    store.connection.execute(
+        "UPDATE events SET detail_json=? WHERE event_id=?",
+        (json.dumps(detail, sort_keys=True, separators=(",", ":")), final["event_id"]),
+    )
+    try:
+        store.assignment_launch_context(str(launch["assignment_id"]))
+    except StorageRefusal as exc:
+        assert exc.code == "legacy_display_ambiguous"
+    else:
+        raise AssertionError("expected-plus-two legacy display receipt was accepted")
+    store.close()
+
+
 def test_legacy_display_interrupted_effect_refuses_newer_sequence(root: Path) -> None:
     store, clock, worktree, launch, receipt, runner = _prepared_legacy_display(
         root, "legacy-interrupted-race"
@@ -1563,6 +1595,7 @@ def main() -> None:
         test_legacy_display_reconciliation_requires_live_owned_presentation_source(root)
         test_legacy_display_reconciliation_refuses_boolean_sequence(root)
         test_legacy_display_reconciliation_refuses_orphaned_final_receipt(root)
+        test_legacy_display_readback_refuses_expected_plus_two_receipt(root)
         test_legacy_display_interrupted_effect_refuses_newer_sequence(root)
         test_legacy_display_refuses_malformed_modern_receipt(root)
         test_legacy_display_refuses_missing_acceptance_worktree(root)

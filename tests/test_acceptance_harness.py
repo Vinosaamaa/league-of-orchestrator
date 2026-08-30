@@ -27,6 +27,7 @@ from league.acceptance import (  # noqa: E402
     MAX_RELEASE_FILE_BYTES,
     POINTER_STAGES,
     PROCESS_SENTINEL_SCHEMA,
+    STAGING_RESERVATION_FILENAME,
     SentinelSet,
     _release_files,
     _staged_install,
@@ -674,9 +675,8 @@ def test_staging_crash_cleanup_and_retry(root: Path) -> None:
     assert retry_universal.read_bytes() == universal_before
 
 
-def test_separate_process_version_crash_recovers_and_retries(root: Path) -> None:
-    root.mkdir()
-    crash_home = root / "process-crash"
+def crash_staging_process(root: Path, name: str) -> Path:
+    crash_home = root / name
     crash_script = """
 import os
 import sys
@@ -717,8 +717,19 @@ _staged_install(Path(sys.argv[2]), Path(sys.argv[3]), fault=crash)
         crash_home / "release-bundle/0.2.28",
         crash_home / "stage-prefix/releases/0.2.28",
     ):
-        assert (candidate / ".league-staging-reservation.json").is_file()
+        assert (candidate / STAGING_RESERVATION_FILENAME).is_file()
         assert (candidate / "VERSION").is_file()
+    return crash_home
+
+
+def test_separate_process_version_crash_recovers_and_retries(root: Path) -> None:
+    root.mkdir()
+    crash_home = crash_staging_process(root, "process-crash")
+    environment = {
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "LC_ALL": "C",
+    }
 
     retry_script = """
 import sys
@@ -749,6 +760,55 @@ _staged_install(Path(sys.argv[2]), Path(sys.argv[3]))
     assert (
         crash_home / "stage-prefix/releases/0.2.28/VERSION"
     ).read_bytes() == (ROOT / "VERSION").read_bytes()
+
+
+def test_partial_stage_recovery_mismatches_refuse(root: Path) -> None:
+    root.mkdir()
+
+    marker_home = crash_staging_process(root, "marker-mismatch")
+    marker_path = (
+        marker_home
+        / "stage-prefix/releases/0.2.28"
+        / STAGING_RESERVATION_FILENAME
+    )
+    marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    marker["token"] = "0" * 64
+    write_json(marker_path, marker)
+    refused(
+        lambda: _staged_install(marker_home, ROOT),
+        "staged_release_identity_exists",
+    )
+
+    source_home = crash_staging_process(root, "source-mismatch")
+    for directory in (
+        source_home / "release-bundle/0.2.28",
+        source_home / "stage-prefix/releases/0.2.28",
+    ):
+        path = directory / STAGING_RESERVATION_FILENAME
+        marker = json.loads(path.read_text(encoding="utf-8"))
+        marker["source_version_sha256"] = "0" * 64
+        write_json(path, marker)
+    refused(
+        lambda: _staged_install(source_home, ROOT),
+        "staged_release_identity_exists",
+    )
+
+    inode_home = crash_staging_process(root, "inode-mismatch")
+    bundle = inode_home / "release-bundle/0.2.28"
+    displaced = root / "inode-mismatch-original"
+    bundle.rename(displaced)
+    shutil.copytree(displaced, bundle)
+    refused(
+        lambda: _staged_install(inode_home, ROOT),
+        "staged_release_identity_exists",
+    )
+
+    extra_home = crash_staging_process(root, "extra-content")
+    (extra_home / "release-bundle/0.2.28/extra-byte").write_bytes(b"unexpected\n")
+    refused(
+        lambda: _staged_install(extra_home, ROOT),
+        "staged_release_identity_exists",
+    )
 
 
 def test_staging_cleanup_preserves_replacements_and_original_refusal(
@@ -805,6 +865,31 @@ def test_staging_cleanup_preserves_replacements_and_original_refusal(
     assert restored_link.readlink() == foreign_target
     assert (foreign_target / "foreign-byte").read_bytes() == b"must remain\n"
     assert (displaced_bundle / "VERSION").read_bytes() == source_version.read_bytes()
+
+    subdirectory_home = root / "subdirectory-swap"
+    foreign_bundle = root / "foreign-bundle-bin"
+    foreign_release = root / "foreign-release-bin"
+    foreign_bundle.mkdir()
+    foreign_release.mkdir()
+
+    def swap_staged_subdirectories(event: str) -> None:
+        if event != "after_release_file:VERSION":
+            return
+        (subdirectory_home / "release-bundle/0.2.28/bin").symlink_to(
+            foreign_bundle, target_is_directory=True
+        )
+        (subdirectory_home / "stage-prefix/releases/0.2.28/bin").symlink_to(
+            foreign_release, target_is_directory=True
+        )
+
+    refused(
+        lambda: _staged_install(
+            subdirectory_home, ROOT, fault=swap_staged_subdirectories
+        ),
+        "staged_parity_failed",
+    )
+    assert not any(foreign_bundle.iterdir())
+    assert not any(foreign_release.iterdir())
 
     failure_home = root / "cleanup-failure"
 
@@ -903,6 +988,9 @@ def main() -> None:
         test_staging_crash_cleanup_and_retry(root / "staging-crash-retry")
         test_separate_process_version_crash_recovers_and_retries(
             root / "separate-process-crash"
+        )
+        test_partial_stage_recovery_mismatches_refuse(
+            root / "partial-stage-refusals"
         )
         test_staging_cleanup_preserves_replacements_and_original_refusal(
             root / "staging-cleanup"

@@ -552,6 +552,8 @@ def _read_regular_file(
             not stat.S_ISREG(current.st_mode)
             or (after_descriptor.st_dev, after_descriptor.st_ino) != identity
             or (current.st_dev, current.st_ino) != identity
+            or current.st_size != opened.st_size
+            or current.st_mtime_ns != opened.st_mtime_ns
             or after_descriptor.st_size != opened.st_size
             or after_descriptor.st_mtime_ns != opened.st_mtime_ns
             or byte_count != opened.st_size
@@ -648,6 +650,85 @@ def _cleanup_reserved_directories(
             )
         except BaseException:
             pass
+
+
+def _atomic_write_release(
+    root: Path,
+    relative: Path,
+    payload: bytes,
+    *,
+    mode: int,
+) -> None:
+    if (
+        relative.is_absolute()
+        or not relative.parts
+        or any(part in {"", ".", ".."} for part in relative.parts)
+    ):
+        raise StorageRefusal(
+            "staged_parity_failed", "staged release path escapes its root"
+        )
+    directories: list[int] = []
+    temporary: Optional[str] = None
+    try:
+        flags = (
+            os.O_RDONLY
+            | os.O_DIRECTORY
+            | os.O_NOFOLLOW
+            | getattr(os, "O_CLOEXEC", 0)
+        )
+        current = os.open(root, flags)
+        directories.append(current)
+        for component in relative.parts[:-1]:
+            try:
+                os.mkdir(component, mode=0o700, dir_fd=current)
+            except FileExistsError:
+                pass
+            current = os.open(component, flags, dir_fd=current)
+            directories.append(current)
+        temporary = f".{relative.name}.tmp-{secrets.token_hex(16)}"
+        descriptor = os.open(
+            temporary,
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | os.O_NOFOLLOW
+            | getattr(os, "O_CLOEXEC", 0),
+            mode,
+            dir_fd=current,
+        )
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+                os.fchmod(handle.fileno(), mode)
+            os.link(
+                temporary,
+                relative.name,
+                src_dir_fd=current,
+                dst_dir_fd=current,
+                follow_symlinks=False,
+            )
+            os.unlink(temporary, dir_fd=current)
+            temporary = None
+            os.fsync(current)
+        except BaseException:
+            if temporary is not None:
+                try:
+                    os.unlink(temporary, dir_fd=current)
+                except OSError:
+                    pass
+            raise
+    except StorageRefusal:
+        raise
+    except OSError as exc:
+        raise StorageRefusal(
+            "staged_parity_failed",
+            "staged release write requires non-symlink directories",
+        ) from exc
+    finally:
+        for directory in reversed(directories):
+            os.close(directory)
 
 
 def _write_staging_reservation(
@@ -850,8 +931,8 @@ def _stage_release_bytes(
         source_hashes[name] = digest
         bundle_file = release_bundle / relative
         destination = release / relative
-        _atomic_write(bundle_file, payload, mode=mode)
-        _atomic_write(destination, payload, mode=mode)
+        _atomic_write_release(release_bundle, relative, payload, mode=mode)
+        _atomic_write_release(release, relative, payload, mode=mode)
         release_hashes[name] = _regular_file_digest(
             bundle_file,
             root=release_bundle,

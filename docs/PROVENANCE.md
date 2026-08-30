@@ -430,9 +430,11 @@ refusal. A matching marker pair lets a later process recover only an exact
 VERSION-only partial stage with unchanged source bytes and recorded directory
 identities; all other existing candidates still refuse. Focused temporary-root
 coverage proves process-death recovery, foreign directory and symlink
-preservation, post-switch pointer rollback, VERSION regular-file identity,
-byte parity, guide-hash preservation, and rollback without changing any
-retained release or live pointer.
+preservation, marker/source/inode/extra-content refusal, post-switch pointer
+rollback, VERSION regular-file identity, and byte parity. Descriptor-relative
+writes cannot follow swapped staging subdirectories, and final source identity
+checks include size and timestamp. Guide-hash preservation and rollback remain
+verified without changing any retained release or live pointer.
 
 This branch was rebased onto canonical main
 `f015a5c34efca039accc911f8995a340eb067fc7`, whose merge tree is

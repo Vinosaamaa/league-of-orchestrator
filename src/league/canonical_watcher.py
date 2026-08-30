@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from .sqlite_store import DEFAULT_BUSY_TIMEOUT_MS, SQLiteStorage
-from .sqlite_watcher_ops import _obligation_counts
+from .sqlite_watcher_ops import _obligation_counts, stop_feedback_reason
 from .storage import RuntimeRegistrationCommand, StorageRefusal
 
 
@@ -143,8 +143,12 @@ def _codex_stop_generation(
             "stop_hook_invalid",
             "Codex Stop hook requires its exact event, session, turn, and active flag",
         )
+    return _codex_turn_generation(session_ref, turn_id), turn_id
+
+
+def _codex_turn_generation(session_ref: str, turn_id: str) -> str:
     identity = f"codex\0{session_ref}\0{turn_id}"
-    return hashlib.sha256(identity.encode()).hexdigest(), turn_id
+    return hashlib.sha256(identity.encode()).hexdigest()
 
 
 def _busy_stop_result(
@@ -157,14 +161,20 @@ def _busy_stop_result(
                 "authoritative and Stop is safely retryable."
             )
         }
-    _, turn_id = _codex_stop_generation(args, payload)
-    reason = (
-        "League canonical state is busy; unresolved obligations remain "
-        "authoritative and Stop is safely retryable."
-    )
-    if turn_id is not None:
-        reason = f"{reason} Codex turn {turn_id} was not consumed."
-    return {"decision": "block", "reason": reason}
+    _codex_stop_generation(args, payload)
+    return {
+        "decision": "block",
+        "reason": (
+            "League canonical state is busy; unresolved obligations remain "
+            "authoritative and Stop is safely retryable."
+        ),
+    }
+
+
+def _codex_stop_reason(callsign: str, wait_generation: int) -> str:
+    """Render only the resolved callsign; Codex turn identity stays internal."""
+
+    return stop_feedback_reason(callsign, wait_generation)
 
 
 def _hook_busy_timeout(command: str) -> int:
@@ -220,6 +230,23 @@ def _capture_prompt(
     prompt_id, source_event_key = _prompt_identity(
         adapter_kind, session_ref, raw_source_event_key, body
     )
+    if (
+        adapter_kind == "codex"
+        and actor_role == "shotcaller"
+        and actor_id is not None
+        and scope is not None
+        and store.consume_stop_feedback(
+            scope,
+            actor_id,
+            _codex_turn_generation(session_ref, raw_source_event_key),
+            body,
+        )
+    ):
+        return {
+            "suppressed": "exact_stop_feedback",
+            "prompt_id": None,
+            "idempotent": False,
+        }
     now = datetime.now().astimezone().isoformat(timespec="seconds")
     if actor_id is None:
         return store.quarantine_prompt(
@@ -695,12 +722,7 @@ def main(argv: list[str] | None = None) -> int:
             if args.command == "cursor-stop-hook":
                 _emit({"followup_message": "League has unresolved obligations."} if blocked else {})
             else:
-                reason = "League has unresolved obligations."
-                if turn_id is not None:
-                    reason = (
-                        "League has unresolved obligations for Codex turn "
-                        f"{turn_id} at wait generation {result['wait_generation']}."
-                    )
+                reason = _codex_stop_reason(callsign, result["wait_generation"])
                 _emit(
                     {"decision": "block", "reason": reason}
                     if blocked

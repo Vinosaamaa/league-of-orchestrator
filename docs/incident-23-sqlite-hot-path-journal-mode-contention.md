@@ -3,7 +3,7 @@
 **Issue:** [#23](https://github.com/Vinosaamaa/league-of-orchestrator/issues/23)  
 **Date:** 2026-08-29  
 **Severity:** P0  
-**Status:** Open; installed 0.2.21 revalidation found one launcher receipt defect, and the 0.2.22 candidate passes pending merge and installation
+**Status:** Open; installed 0.2.21 remains the stable pointer, merged 0.2.22 is not installed, and the 0.2.23 source candidate is pending PR/CI with no installation authority
 
 **Scope:** Local League prompt intake, Stop handling, supervision, visible Champion launch, and cleanup
 
@@ -578,10 +578,11 @@ residue. Candidate receipt SHA-256:
 | `league request triage`, `claim`, `dispatch`, `answer`, `result`, `unresolved`, `untriaged` | Recovery, inspection, compatibility, or non-model automation | Supported but deferred from normal active turns because separate invocations recreate chatty overhead. |
 | `league request route`, `awaiting-user`, `block`, `defer`, `cancel` | Explicit non-ordinary owner decision with claim/version evidence | Dedicated commands remain; they are not silently inferred by the adapter. |
 | `league assign run` | One visible Champion reservation-through-context launch | Preferred launcher. Manual `prepare`/`launching`/`activate` remain lower-level recovery surfaces. |
+| `league shotcaller create` | In-place creation from the exact calling unnamed Codex/Herdr pane | Allocates a callsign internally; creates no Squad, layout, or process. |
 | `league task transition` | One material Champion transition plus event/outbox commit | One command per material transition; routine heartbeat polling is not added. |
 | `league delivery claim-outbox`, `ack-outbox`, `fail-outbox`, `backlog` | Event-driven watcher/direct fallback delivery accounting | Internal/stable adapter surface; duplicate receipt is idempotent. |
 | `league cleanup plan`, `execute`, `status`, `reconcile` | Proof-gated cleanup and crash resume | `reconcile` is limited to exact disposable-canary policy. |
-| `league rollover prepare`, `bindings`, `acknowledge`, `commit`, `abort`, `drain`, `status` | Explicit Shotcaller owner replacement | Separate reliability workflow; not part of an ordinary request turn. |
+| `league rollover prepare`, `bindings`, `acknowledge`, `commit`, `intake-plan`, `reconcile-intake`, `reconcile-descendant`, `abort`, `drain`, `status` | Explicit Shotcaller owner replacement and exact bounded successor reconciliation | Separate reliability workflow; not part of an ordinary request turn. |
 | `league storage migrate`, `backup`, `import`, `integrity`, `export` | Maintenance under explicit authority | Only migrate may establish journal mode; import defaults no-apply. |
 | `league roster`, `report`, `artifact`, `resource`, `evidence`, `project`, `squad`, `routing`, `skill` | Canonical read/model/policy/evidence commands | No direct SQL or legacy file dependency. |
 | `agent-watcher` SQLite hooks/delivery and long-lived supervisor | Automatic hook boundary or installed event-driven runtime | Stable compatibility name; never polled by an active turn. |
@@ -596,19 +597,93 @@ residue. Candidate receipt SHA-256:
 | Stop safety | Concurrent Stop returns a normal block, never raw `ERROR: busy` | Passed in synthetic focused test |
 | Supervisor wake | The same foreground wait exits for user priority | Passed in synthetic focused test |
 | Focused affected suites | Watcher, migration, concurrency, request, acceptance, live-cutover, and public-safety gates | Passed locally; public-safety reruns on committed bytes |
-| Exact-head CI | Hosted checks bind to the published successor PR head | Pending for the refreshed PR #77 head |
-| Installed release | Tested merge tree and exact source-managed guide installed with prior release retained | Current 0.2.21 matches all 104 source release files; 0.2.22 installation is pending and the stable pointer was not changed |
+| Exact-head CI | Hosted checks bind to the published successor PR head | Pending for the 0.2.23 successor PR |
+| Installed release | Tested merge tree and exact source-managed guide installed with prior release retained | Current 0.2.21 remains installed; 0.2.22 was not installed and 0.2.23 has no installation authority |
 | Whole direct turn | One exact PID emits two prompt bodies, atomically begins triage/claims/routing, remains alive, atomically commits answer/result and delivery, returns full unresolved/cleanup boundary, then exits without a second League spawn | Passed in focused synthetic test |
 | Turn latency | Cold CLI, 26-process prior choreography, one-process whole turn, and open-connection batch phases measured separately | Passed; exact table above |
 | Visible launch | One command reserves, starts, observes generated UUID, verifies, activates, and briefs the exact Herdr/Codex runtime | Installed 0.2.21 failed on the silent metadata receipt; focused and staged 0.2.22 candidate passed |
 | Sandbox access | Launched Codex receives only the exact canonical League root as an added writable root and can use stable commands | Passed in installed E2E |
 | Failure cleanup | Unproven cleanup remains pending; proven endpoint/runtime/callsign cleanup settles blocked with zero active lease | Passed in focused synthetic test |
-| Disposable installed E2E | Capture, explicit triage, assign run, transition, Garen watcher delivery, terminal cleanup, zero residue, integrity | 0.2.21 failed and cleaned exactly; staged 0.2.22 passed; installed 0.2.22 gate pending |
+| Disposable installed E2E | Capture, explicit triage, assign run, transition, current-owner watcher delivery, terminal cleanup, zero residue, integrity | 0.2.21 failed and cleaned exactly; staged 0.2.22 passed; the corrected 0.2.23 installed gate requires separate authority |
+
+## Successor rollover and placement regression (0.2.23 source candidate)
+
+Post-rollover inspection found a separate canonical ownership gap. The
+successor could run a valid request turn, yet newly submitted prompts were not
+bound to its verified runtime, inherited prompt ownership still pointed at the
+predecessor, and frozen Champion task/runtime/delivery rows could still route
+material work to the predecessor. This invalidates earlier installed acceptance
+claims for the affected boundaries; a staged or synthetic success is not an
+installed successor-flow receipt.
+
+The source candidate applies the following generic contracts without rewriting
+capture history:
+
+- schema 12 permits exact imported task-assignment reconciliation, schema 13
+  permits standalone Shotcaller callsign scope, schema 14 adds mutable current
+  prompt ownership beside immutable capture provenance, and schema 15 adds
+  one-time exact Stop-feedback suppression;
+- `league shotcaller create` creates a canonical Shotcaller from the exact
+  current, unnamed Codex/Herdr pane, allocates its callsign internally, renames
+  that same pane, verifies the unchanged thread/terminal/worktree, and performs
+  no workspace, tab, pane, split, or process creation;
+- `league squad register` remains a separate contract for attaching a Squad to
+  an already-created live Shotcaller;
+- `league assign run` remains the distinct Champion creation contract and must
+  create a new Herdr tab root rather than reuse or split the Shotcaller pane;
+- rollover commits only the Squad owner fence. Each frozen Champion then moves
+  its agent owner, task coordinator/version, task assignment/version, callsign
+  assignment/version, verified runtime, and exact still-pending deliveries in
+  one compare-and-swap transaction. Claimed, missing, closed, ambiguous, stale,
+  broad, or mismatched state refuses;
+- `league rollover intake-plan` exposes repeatable exact pages. Reconciliation
+  transfers only current triage/request/obligation ownership; original prompt
+  actor, runtime, session, source key, body identity, and creation time remain
+  immutable. New requests from inherited prompts retain the original requester;
+- Stop displays the resolved callsign, never the raw provider turn identifier.
+  Only League's exact emitted feedback token for that scope, turn, and
+  generation is suppressed. A genuine second native steer in the same turn
+  rearms one block.
+
+### Regression-ticket matrix
+
+| Ticket | Prior accepted contract now under regression | Source acceptance in this candidate |
+| --- | --- | --- |
+| #3 | Exact material delivery reaches the current owner and remains pending when unavailable | Descendant delivery moves only with its canonical task/assignment transfer; claim races refuse. |
+| #5 | Stop blocks once without an infinite self-feedback loop | Callsign-only text plus exact one-time self-feedback suppression and genuine-steer rearm. |
+| #7 | Runtime identity is provider-bound and fail-closed | Current-pane Shotcaller bootstrap and imported-Champion live adapter verification require exact thread/pane/terminal/worktree evidence. |
+| #17 | Every prompt is durable before semantic action | First successor prompt binds with zero quarantine; mutable current owner does not alter immutable capture provenance. |
+| #66 | One process spans intake, semantic begin, and outcome commit | The same PID remains open through both phases; a concurrent native steer is captured promptly without a polling wait. Installed proof remains pending. |
+
+### Four independent clocks
+
+1. **Native steer:** the Codex provider accepts and exposes a real user message
+   to the active turn. League does not poll or impose a checkpoint allowance on
+   this latency.
+2. **Event wake:** prompt capture publishes user priority and a Champion
+   material event wakes an event-driven watcher or exact direct fallback.
+3. **Checkpoint lifetime:** an optional fallback may remain yielded and
+   interruptible; it is not started inside an ordinary active turn and its
+   maximum lifetime is not a prompt-latency budget.
+4. **Stale health:** heartbeat grace classifies watcher health independently of
+   native steering, event delivery, and checkpoint lifetime.
+
+Focused source tests now cover schema 15 migration/receipt alignment, one
+same-PID successor capture/begin/commit flow with zero quarantine, a prompt hook
+accepted while that process is yielded, all six semantic dispositions without
+minting a deferred request, more-than-500 intake paging, A-to-B-to-C provenance,
+fake-only Herdr descendant verification, exact CAS transfers, delivery claim
+races, all three placement contracts, and Stop feedback/rearm behavior. These
+are source-candidate results only. Installed 0.2.21 remains unchanged and the
+owner-visible successor-to-Champion lifecycle is still a post-merge,
+separately-authorized release gate.
 
 ## Rollback
 
-The release contains no database schema or data migration. If installed
-acceptance fails:
+The 0.2.23 candidate advances the database from schema 11 through the contiguous
+schema-15 migration sequence. Migration, staged acceptance, cutover receipt,
+backup, integrity check, and rollback must all name schema 15 exactly. If a
+future authorized installation or acceptance fails:
 
 1. keep UserPromptSubmit disabled;
 2. atomically restore the prior installed League release pointer;
@@ -652,8 +727,9 @@ The final installed gate must bind rather than narrate each effect:
 - UserPromptSubmit remained owner-disabled during release and acceptance. The
   implementation does not change that owner-controlled hook setting.
 - The passing 0.2.22 lifecycle is staged-candidate evidence, not installed
-  proof. The stable pointer remains 0.2.21 until separately authorized release
-  installation and rollback verification.
+  proof. The 0.2.23 successor correction remains source-only. The stable pointer
+  remains 0.2.21 until separately authorized release installation and rollback
+  verification.
 
 ## Action items
 
@@ -665,9 +741,9 @@ The final installed gate must bind rather than narrate each effect:
 | P0 | Add adapter-backed `league assign run` with narrow canonical-root access | Issue #23 implementer | Issue #23 | Installed and accepted |
 | P0 | Archive the retired JSON-era guide contract and install only SQLite-native guidance from exact merged source bytes | Issue #23 implementer | Issue #23 | Installed with byte parity |
 | P0 | Publish Markdown and self-contained HTML incident artifacts | Issue #23 implementer | Issue #23 | Complete |
-| P0 | Run focused tests, public-safety scan, and exact-head CI | Issue #23 implementer | Issue #23 | Refreshed PR #77 head pending |
-| P0 | Install the exact tested release with rollback retained | Release owner | Issue #23 | 0.2.22 pending; pointer preserved at 0.2.21 |
-| P0 | Run one installed disposable capture-to-cleanup E2E and prove zero residue/integrity | Issue #23 implementer | Issue #23 | Staged 0.2.22 passed; installed gate pending |
+| P0 | Run focused tests, public-safety scan, and exact-head CI | Issue #23 implementer | Issue #23 | 0.2.23 successor PR pending |
+| P0 | Install the exact tested release with rollback retained | Release owner | Issue #23 | No authority for 0.2.23; pointer preserved at 0.2.21 |
+| P0 | Run one installed disposable capture-to-cleanup E2E and prove zero residue/integrity | Issue #23 implementer | Issue #23 | Staged 0.2.22 passed; corrected 0.2.23 installed gate pending |
 | P0 | Publish corrected retired-JSON versus installed one-process median/p95 and command-count evidence | Issue #23 implementer | Issue #23 | Complete |
 | P0 | Re-enable UserPromptSubmit only after the installed disposable gate | Owner | Issue #23 | Not yet safe; not changed by this work |
 | P1 | Keep journal-mode mutation restricted to explicit maintenance commands | League maintainers | Storage contract | Ongoing invariant |
@@ -680,4 +756,5 @@ for model-authored triage, routing, and commit; one verified visible Champion
 with canonical-root access; working and completed watcher delivery; exact
 endpoint/worktree/branch cleanup; callsign release; no unresolved obligations;
 zero residue; and SQLite integrity. The same proof must run after the exact
-tested bytes are merged and installed with rollback retained.
+0.2.23 successor bytes pass PR/CI, are merged under separate authority, and are
+installed under separate authority with rollback retained.

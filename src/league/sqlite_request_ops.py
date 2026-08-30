@@ -297,8 +297,9 @@ def intake_prompt(
                 """
                 INSERT INTO prompts
                   (prompt_id,intake_actor_id,runtime_instance_id,adapter_kind,session_ref,
-                   source_event_key,triage_state,triage_digest,created_at)
-                VALUES(?,?,?,?,?,?,'untriaged',NULL,?)
+                   source_event_key,triage_state,triage_digest,created_at,current_owner_agent_id,
+                   current_owner_runtime_instance_id)
+                VALUES(?,?,?,?,?,?,'untriaged',NULL,?,?,?)
                 """,
                 (
                     prompt_id,
@@ -308,6 +309,8 @@ def intake_prompt(
                     session_ref,
                     source_event_key,
                     at,
+                    intake_actor_id,
+                    runtime_instance_id,
                 ),
             )
             store.connection.execute(
@@ -338,7 +341,10 @@ def intake_prompt(
                     """
                     UPDATE watcher_scopes
                        SET user_message_generation=user_message_generation+1,
-                           wait_generation=wait_generation+1,stop_blocked=0,wait_active=0
+                           wait_generation=wait_generation+1,stop_blocked=0,wait_active=0,
+                           pending_stop_feedback_digest=NULL,
+                           pending_stop_terminal_generation=NULL,
+                           pending_stop_wait_generation=NULL
                      WHERE scope_id=?
                     """,
                     (wake_scope_id,),
@@ -421,7 +427,10 @@ def quarantine_prompt(
                     """
                     UPDATE watcher_scopes
                        SET user_message_generation=user_message_generation+1,
-                           wait_generation=wait_generation+1,stop_blocked=0,wait_active=0
+                           wait_generation=wait_generation+1,stop_blocked=0,wait_active=0,
+                           pending_stop_feedback_digest=NULL,
+                           pending_stop_terminal_generation=NULL,
+                           pending_stop_wait_generation=NULL
                      WHERE scope_id=? AND actor_agent_id=?
                     """,
                     (wake_scope_id, wake_actor_id),
@@ -493,12 +502,15 @@ def bind_quarantined_prompt(
                 """
                 INSERT INTO prompts
                   (prompt_id,intake_actor_id,runtime_instance_id,adapter_kind,session_ref,
-                   source_event_key,triage_state,triage_digest,created_at)
-                VALUES(?,?,?,?,?,?,'untriaged',NULL,?)
+                   source_event_key,triage_state,triage_digest,created_at,current_owner_agent_id,
+                   current_owner_runtime_instance_id)
+                VALUES(?,?,?,?,?,?,'untriaged',NULL,?,?,?)
                 """,
                 (
                     prompt_id, intake_actor_id, runtime_instance_id, row["adapter_kind"],
                     row["session_ref"], row["source_event_key"], row["created_at"],
+                    intake_actor_id,
+                    runtime_instance_id,
                 ),
             )
             store.connection.execute(
@@ -540,7 +552,10 @@ def bind_quarantined_prompt(
                     """
                     UPDATE watcher_scopes
                        SET user_message_generation=user_message_generation+1,
-                           wait_generation=wait_generation+1,stop_blocked=0,wait_active=0
+                           wait_generation=wait_generation+1,stop_blocked=0,wait_active=0,
+                           pending_stop_feedback_digest=NULL,
+                           pending_stop_terminal_generation=NULL,
+                           pending_stop_wait_generation=NULL
                      WHERE scope_id=?
                     """,
                     (wake_scope_id,),
@@ -606,15 +621,14 @@ def _persist_triage_item(
     store: Any,
     *,
     prompt_id: str,
-    intake_actor_id: str,
+    capture_actor_id: str,
+    owner_agent_id: str,
     item: dict[str, Any],
     at: str,
 ) -> None:
     disposition = item["disposition"]
     request_id = item["request_id"]
-    if disposition in {"new_request", "deferred"}:
-        request_state = "deferred" if disposition == "deferred" else "open"
-        next_attention_at = item["next_attention_at"] if disposition == "deferred" else None
+    if disposition == "new_request":
         store.connection.execute(
             """
             INSERT INTO requests
@@ -626,16 +640,36 @@ def _persist_triage_item(
             (
                 request_id,
                 item["summary"],
-                intake_actor_id,
-                intake_actor_id,
-                request_state,
-                next_attention_at,
+                capture_actor_id,
+                owner_agent_id,
+                "open",
+                None,
                 at,
                 at,
             ),
         )
-    elif disposition in {"follow_up", "duplicate"}:
-        _request_row(store, str(request_id))
+    elif disposition in {"follow_up", "duplicate", "deferred"}:
+        request = _request_row(store, str(request_id))
+        if disposition == "deferred":
+            if request["owner_agent_id"] != owner_agent_id:
+                raise StorageRefusal(
+                    "owner_mismatch", "only the current request owner may defer it"
+                )
+            changed = store.connection.execute(
+                """
+                UPDATE requests SET state='deferred',next_attention_at=?,version=version+1,
+                       updated_at=? WHERE request_id=? AND owner_agent_id=? AND version=?
+                """,
+                (
+                    item["next_attention_at"],
+                    at,
+                    request_id,
+                    owner_agent_id,
+                    request["version"],
+                ),
+            )
+            if changed.rowcount != 1:
+                raise StorageRefusal("version_conflict", "deferred request changed")
     store.connection.execute(
         """
         INSERT INTO prompt_items(prompt_item_id,prompt_id,ordinal,summary,disposition)
@@ -652,7 +686,7 @@ def _persist_triage_item(
     if request_id is not None:
         source_role = {
             "new_request": "origin",
-            "deferred": "origin",
+            "deferred": "follow_up",
             "follow_up": "follow_up",
             "duplicate": "duplicate",
         }[disposition]
@@ -673,14 +707,15 @@ def _triage_prompt_in_transaction(
 ) -> dict[str, Any]:
     counts = _triage_counts()
     prompt = store.connection.execute(
-        "SELECT intake_actor_id,triage_state,triage_digest FROM prompts WHERE prompt_id=?",
+        "SELECT intake_actor_id,current_owner_agent_id,triage_state,triage_digest "
+        "FROM prompts WHERE prompt_id=?",
         (prompt_id,),
     ).fetchone()
     if prompt is None:
         raise StorageRefusal("prompt_unknown", "prompt does not exist")
     if (
         expected_owner_agent_id is not None
-        and prompt["intake_actor_id"] != expected_owner_agent_id
+        and prompt["current_owner_agent_id"] != expected_owner_agent_id
     ):
         raise StorageRefusal(
             "owner_mismatch", "triage batch contains a prompt owned by another actor"
@@ -703,7 +738,7 @@ def _triage_prompt_in_transaction(
             "request_count": sum(
                 1
                 for item in normalized
-                if item["disposition"] in {"new_request", "deferred"}
+                if item["disposition"] == "new_request"
             ),
             "dispositions": counts,
             "idempotent": True,
@@ -713,7 +748,8 @@ def _triage_prompt_in_transaction(
         _persist_triage_item(
             store,
             prompt_id=prompt_id,
-            intake_actor_id=prompt["intake_actor_id"],
+            capture_actor_id=prompt["intake_actor_id"],
+            owner_agent_id=prompt["current_owner_agent_id"],
             item=item,
             at=at,
         )
@@ -725,7 +761,7 @@ def _triage_prompt_in_transaction(
         "prompt_id": prompt_id,
         "triage_state": "complete",
         "item_count": len(normalized),
-        "request_count": counts["new_request"] + counts["deferred"],
+        "request_count": counts["new_request"],
         "dispositions": counts,
         "idempotent": False,
     }
@@ -2004,7 +2040,7 @@ def unresolved_requests(
     )
     untriaged_prompt_count = int(
         store.connection.execute(
-            "SELECT COUNT(*) FROM prompts WHERE intake_actor_id=? AND triage_state='untriaged'",
+            "SELECT COUNT(*) FROM prompts WHERE current_owner_agent_id=? AND triage_state='untriaged'",
             (owner_agent_id,),
         ).fetchone()[0]
     )
@@ -2013,7 +2049,7 @@ def unresolved_requests(
         SELECT p.prompt_id,p.adapter_kind,p.session_ref,p.source_event_key,p.created_at,
                pp.body_hash,pp.byte_count
           FROM prompts p JOIN prompt_payloads pp ON pp.prompt_id=p.prompt_id
-         WHERE p.intake_actor_id=? AND p.triage_state='untriaged'
+         WHERE p.current_owner_agent_id=? AND p.triage_state='untriaged'
          ORDER BY p.created_at,p.prompt_id
          LIMIT ?
         """,
@@ -2073,16 +2109,17 @@ def untriaged_intake(
         )
     total = int(
         store.connection.execute(
-            "SELECT COUNT(*) FROM prompts WHERE intake_actor_id=? AND triage_state='untriaged'",
+            "SELECT COUNT(*) FROM prompts WHERE current_owner_agent_id=? AND triage_state='untriaged'",
             (owner_agent_id,),
         ).fetchone()[0]
     )
     rows = store.connection.execute(
         """
-        SELECT p.prompt_id,p.runtime_instance_id,p.adapter_kind,p.session_ref,p.source_event_key,p.created_at,
+        SELECT p.prompt_id,p.runtime_instance_id,p.current_owner_runtime_instance_id,
+               p.adapter_kind,p.session_ref,p.source_event_key,p.created_at,
                pp.body,pp.body_hash,pp.byte_count,pp.pruned_at
           FROM prompts p JOIN prompt_payloads pp ON pp.prompt_id=p.prompt_id
-         WHERE p.intake_actor_id=? AND p.triage_state='untriaged'
+         WHERE p.current_owner_agent_id=? AND p.triage_state='untriaged'
          ORDER BY p.created_at,p.prompt_id
          LIMIT ?
         """,
@@ -2111,6 +2148,7 @@ def untriaged_intake(
             {
                 "prompt_id": row["prompt_id"],
                 "runtime_instance_id": row["runtime_instance_id"],
+                "owner_runtime_instance_id": row["current_owner_runtime_instance_id"],
                 "adapter_kind": row["adapter_kind"],
                 "session_ref": row["session_ref"],
                 "source_event_key": row["source_event_key"],

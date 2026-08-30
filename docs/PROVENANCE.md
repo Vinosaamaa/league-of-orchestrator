@@ -204,6 +204,29 @@ exact failure-cleanup receipts. The source-managed guide is therefore a
 deliberate behavioral replacement, covered by focused staging and runtime
 tests, rather than an untracked installed-policy edit.
 
+The issue-#23 rollover-successor correction deliberately separates immutable
+prompt capture provenance from mutable current triage ownership, moves each
+frozen Champion's agent/task/assignment/callsign/pending-delivery ownership in
+one exact transaction, and creates a new Shotcaller by converting only the
+verified calling Codex/Herdr pane in place. Squad registration remains a later,
+separate operation; visible Champion creation retains its new-tab-root
+contract. Stop user-visible text now names the resolved callsign, and only the
+exact League-emitted feedback for the same scope/turn/generation is suppressed
+from rearming. Genuine native steering remains provider-owned and always
+rearms.
+
+Migrations 12 through 15 are contiguous and named
+`nullable-request-rollover-descendant-assignments`,
+`standalone-shotcaller-callsign-scope`,
+`immutable-prompt-provenance-current-owner`, and
+`exact-stop-feedback-suppression`. Focused tests use temporary roots and
+recording fake Herdr adapters for no-runtime import, closed/mismatched/ambiguous
+refusal, exact CAS and delivery-claim races, repeatable intake paging,
+A-to-B-to-C provenance, current-pane publish/rollback fault injection, the
+same-PID request-turn lifecycle, yielded prompt-hook acceptance, and exact
+Stop-feedback behavior. No installed release, global guide, live SQLite state,
+Herdr layout, or stable pointer is changed by this source candidate.
+
 Tests that require process inspection explicitly inject the single
 `tests/fakes/ps` adapter through `tests/process_adapter.py`; Make targets do not
 alter `PATH` for unrelated tests. This keeps self-process and resource-lifecycle

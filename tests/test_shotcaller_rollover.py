@@ -3,6 +3,9 @@
 
 from __future__ import annotations
 
+import json
+import hashlib
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -17,7 +20,11 @@ from league.sqlite_handoff_schema import (  # noqa: E402
     SHUFFLE_VERSION,
 )
 from league.sqlite_store import SQLiteStorage  # noqa: E402
-from league.storage import StorageRefusal  # noqa: E402
+from league.rollover_descendant import (  # noqa: E402
+    HerdrDescendantRuntimeAdapter,
+    RolloverDescendantService,
+)
+from league.storage import RuntimeRegistrationCommand, StorageRefusal  # noqa: E402
 from storage_test_support import migrated_state  # noqa: E402
 
 
@@ -33,6 +40,7 @@ OLD_ID = "agent:old-shotcaller"
 NEW_ID = "agent:new-shotcaller"
 OLD_ASSIGNMENT = "callsign-assignment:old-shotcaller"
 NEW_ASSIGNMENT = "callsign-assignment:new-shotcaller"
+LEAGUE = ROOT / "bin/league"
 
 
 class InjectedCrash(RuntimeError):
@@ -55,6 +63,32 @@ def runtime_receipt(assignment: dict, suffix: str, caps: list[str]) -> dict:
         "routing_name": assignment["callsign"].lower(),
         "display_agent": "synthetic",
         "capabilities": caps,
+    }
+
+
+def descendant_runtime_receipt(
+    target: dict, runtime_instance_id: str, terminal_id: str = "terminal:synthetic"
+) -> dict:
+    return {
+        "schema": "league.rollover-descendant-runtime.v1",
+        "verified": True,
+        "champion_agent_id": target["champion_agent_id"],
+        "task_id": target["task_id"],
+        "runtime_instance_id": runtime_instance_id,
+        "harness_kind": "codex-thread",
+        "backend_kind": "herdr",
+        "session_ref": target["thread_id"],
+        "endpoint": target["address"],
+        "runtime_generation": f"herdr:{terminal_id}",
+        "status": "active",
+        "callsign": target["callsign"],
+        "routing_name": target["routing_name"],
+        "display_agent": target["display_agent"],
+        "worktree": target["worktree"],
+        "terminal_id": terminal_id,
+        "state_change_seq": 1,
+        "snapshot_row_digest": target["snapshot_row_digest"],
+        "capabilities": target["capabilities"],
     }
 
 
@@ -153,10 +187,11 @@ def seed_rollover(store: SQLiteStorage, *, champion_count: int = 3) -> dict:
         store.connection.execute(
             """
             INSERT INTO tasks
-              (task_id,summary,state,version,current_owner_agent_id,updated_at,champion_agent_id)
-            VALUES(?,?,'working',1,?,?,?)
+              (task_id,summary,state,version,current_owner_agent_id,updated_at,champion_agent_id,
+               coordinator_agent_id)
+            VALUES(?,?,'working',1,?,?,?,?)
             """,
-            (task_id, f"Synthetic Champion task {ordinal}", agent_id, AT1, agent_id),
+            (task_id, f"Synthetic Champion task {ordinal}", agent_id, AT1, agent_id, OLD_ID),
         )
         store.connection.execute(
             """
@@ -437,6 +472,1110 @@ def test_guarded_switch_crash_retry_and_drain(root: Path) -> None:
         ).fetchone()[0] == AT6
 
 
+def test_switched_rollover_reconciles_exact_imported_descendant(root: Path) -> None:
+    state, _ = migrated_state(root, "reconcile-imported-descendant")
+    with SQLiteStorage(state) as store:
+        context = seed_rollover(store, champion_count=1)
+        champion_id = context["champion_ids"][0]
+        task_id = "task:champion:0"
+        worktree = root / "reconcile-imported-descendant" / "champion-worktree"
+        worktree.mkdir()
+        worktree = worktree.resolve()
+        thread_id = "11111111-2222-4333-8444-555555555555"
+        store.connection.execute(
+            "UPDATE callsign_assignments SET runtime_instance_id=NULL WHERE agent_id=?",
+            (champion_id,),
+        )
+        store.connection.execute(
+            "DELETE FROM runtime_instances WHERE actor_agent_id=?", (champion_id,)
+        )
+        store.connection.execute(
+            """
+            UPDATE agent_instances
+               SET kind='codex-thread',thread_id=?,backend='herdr',routing_name='annie',
+                   display_agent='codex',address='pane:champion:0',worktree=?
+             WHERE agent_id=?
+            """,
+            (thread_id, str(worktree), champion_id),
+        )
+        prepared = prepare(store, context["successor"])
+        store.activate_callsign(
+            context["successor"]["assignment_id"],
+            1,
+            runtime_receipt(
+                context["successor"], "new-shotcaller", ["rollover.accept"]
+            ),
+            AT3,
+        )
+        pages = read_all_pages(store, prepared["operation_id"])
+        acknowledge(store, prepared, pages)
+        switched = store.commit_rollover(
+            prepared["operation_id"],
+            1,
+            1,
+            "event:owner-changed",
+            "outbox:owner-changed",
+            AT5,
+        )
+        for suffix, recipient in (
+            ("already-successor", NEW_ID),
+            ("still-predecessor", OLD_ID),
+        ):
+            store.connection.execute(
+                """
+                INSERT INTO events
+                  (event_id,agent_id,task_id,squad_id,entity_version,event_type,status,
+                   update_text,occurred_at,detail_json,aggregate_kind,aggregate_id)
+                VALUES(?,?,NULL,NULL,1,'diagnostic','working',?,?, '{}','agent',?)
+                """,
+                (
+                    f"event:descendant:{suffix}",
+                    champion_id,
+                    f"Synthetic descendant delivery {suffix}.",
+                    AT5,
+                    champion_id,
+                ),
+            )
+            store.connection.execute(
+                """
+                INSERT INTO delivery_outbox
+                  (outbox_id,event_id,recipient_agent_id,state,available_at,attempt_count)
+                VALUES(?,?,?,'pending',?,0)
+                """,
+                (
+                    f"outbox:descendant:{suffix}",
+                    f"event:descendant:{suffix}",
+                    recipient,
+                    AT5,
+                ),
+            )
+        before_snapshot = store.rollover_bindings(prepared["operation_id"], AT6)
+        champion = store.agent_status(champion_id)
+        assert champion is not None
+        assert champion["shotcaller_agent_id"] == OLD_ID
+        assert store.connection.execute(
+            "SELECT 1 FROM task_assignments WHERE task_id=?", (task_id,)
+        ).fetchone() is None
+
+    inventory = {
+        "result": {
+            "agents": [
+                {
+                    "agent": "codex",
+                    "agent_session": {"value": thread_id},
+                    "agent_status": "working",
+                    "cwd": str(worktree),
+                    "foreground_cwd": str(worktree),
+                    "name": "annie",
+                    "pane_id": "pane:champion:0",
+                    "state_change_seq": 9,
+                    "terminal_id": "terminal:champion:0",
+                }
+            ]
+        }
+    }
+
+    class FakeHerdr:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, ...]] = []
+
+        def run(self, argv: tuple[str, ...], *, timeout_seconds: int) -> subprocess.CompletedProcess[str]:
+            self.calls.append(argv)
+            return subprocess.CompletedProcess(argv, 0, json.dumps(inventory), "")
+
+    fake_herdr = FakeHerdr()
+    with SQLiteStorage(state) as store:
+        service = RolloverDescendantService(
+            store, HerdrDescendantRuntimeAdapter(fake_herdr)
+        )
+        arguments = {
+            "operation_id": prepared["operation_id"],
+            "reconciliation_id": "reconciliation:synthetic:champion:0",
+            "champion_agent_id": champion_id,
+            "task_id": task_id,
+            "runtime_instance_id": "runtime:champion:0:reconciled",
+            "snapshot_digest": prepared["snapshot"]["digest"],
+            "snapshot_row_digest": pages[0]["rows"][0]["row_digest"],
+            "expected_rollover_version": switched["version"],
+            "expected_agent_version": champion["version"],
+            "expected_task_version": 1,
+            "expected_assignment_version": 0,
+            "expected_callsign_assignment_version": 2,
+            "pending_outbox_ids": ("outbox:descendant:still-predecessor",),
+            "at": AT6,
+        }
+        reconciled = service.reconcile(**arguments)
+        retried = service.reconcile(**arguments)
+    assert reconciled == {
+        "champion_agent_id": champion_id,
+        "created_assignment": True,
+        "created_runtime": True,
+        "idempotent": False,
+        "operation_id": prepared["operation_id"],
+        "pending_delivery_count": 2,
+        "receipt_digest": reconciled["receipt_digest"],
+        "reconciliation_id": "reconciliation:synthetic:champion:0",
+        "retargeted_outbox_ids": ["outbox:descendant:still-predecessor"],
+        "runtime_instance_id": "runtime:champion:0:reconciled",
+        "successor_agent_id": NEW_ID,
+        "task_id": task_id,
+        "task_version": 2,
+    }
+    assert retried == {**reconciled, "idempotent": True}
+    assert fake_herdr.calls == [("herdr", "agent", "list")]
+
+    with SQLiteStorage(state) as store:
+        assert store.rollover_bindings(prepared["operation_id"], AT6) == before_snapshot
+        assert store.agent_status(champion_id)["shotcaller_agent_id"] == NEW_ID
+        transitioned = store.transition_task(
+            task_id,
+            "runtime:champion:0:reconciled",
+            2,
+            "blocked",
+            "Synthetic imported descendant now reaches the committed successor.",
+            "Await the exact successor decision.",
+            "Synthetic blocker.",
+            "transition:synthetic:champion:0:2",
+            "task:champion:0:blocked:2",
+            "event:synthetic:champion:0:2",
+            "outbox:synthetic:champion:0:2",
+            NEW_ID,
+            AT6,
+        )
+        assert transitioned["version"] == 3
+        pending = store.connection.execute(
+            "SELECT recipient_agent_id,state FROM delivery_outbox WHERE outbox_id=?",
+            (transitioned["outbox_id"],),
+        ).fetchone()
+        assert tuple(pending) == (NEW_ID, "pending")
+
+
+def test_switched_rollover_reconciles_exact_predecessor_intake_and_obligations(
+    root: Path,
+) -> None:
+    state, _ = migrated_state(root, "reconcile-predecessor-intake")
+    with SQLiteStorage(state) as store:
+        context = seed_rollover(store, champion_count=0)
+        request_total = 3
+        prompt_total = 4
+        obligation_total = 2
+        for ordinal in range(request_total):
+            store.connection.execute(
+                """
+                INSERT INTO requests
+                  (request_id,summary,requester_agent_id,owner_agent_id,return_to_agent_id,
+                   state,version,created_at,updated_at)
+                VALUES(?,?,?,?,?,'open',1,?,?)
+                """,
+                (
+                    f"request:predecessor:{ordinal:02d}",
+                    f"Synthetic predecessor request {ordinal}",
+                    OLD_ID,
+                    OLD_ID,
+                    OLD_ID,
+                    AT2,
+                    AT2,
+                ),
+            )
+        for ordinal in range(prompt_total):
+            store.intake_prompt(
+                f"prompt:predecessor:{ordinal:02d}",
+                OLD_ID,
+                "runtime:old-shotcaller",
+                "codex",
+                "synthetic:old-shotcaller",
+                f"source:predecessor:{ordinal:02d}",
+                f"Synthetic retained prompt {ordinal}.",
+                AT2,
+            )
+        for ordinal in range(obligation_total):
+            store.connection.execute(
+                """
+                INSERT INTO obligations
+                  (obligation_id,owner_agent_id,kind,aggregate_id,dedupe_key,state,
+                   next_attention_at,details_json,created_at,updated_at)
+                VALUES(?,?,?,?,?,'open',NULL,'{}',?,?)
+                """,
+                (
+                    f"obligation:predecessor:{ordinal}",
+                    OLD_ID,
+                    "request_followup",
+                    f"request:predecessor:{ordinal:02d}",
+                    f"rollover-predecessor:{ordinal}",
+                    AT2,
+                    AT2,
+                ),
+            )
+        prepared = prepare(store, context["successor"])
+        store.activate_callsign(
+            context["successor"]["assignment_id"],
+            1,
+            runtime_receipt(
+                context["successor"], "new-shotcaller", ["rollover.accept"]
+            ),
+            AT3,
+        )
+        pages = read_all_pages(store, prepared["operation_id"])
+        acknowledge(store, prepared, pages)
+        switched = store.commit_rollover(
+            prepared["operation_id"],
+            1,
+            1,
+            "event:owner-changed",
+            "outbox:owner-changed",
+            AT5,
+        )
+        store.connection.execute(
+            "UPDATE runtime_instances SET status='closed' WHERE actor_agent_id=?", (OLD_ID,)
+        )
+        try:
+            store.complete_rollover_drain(
+                prepared["operation_id"],
+                switched["version"],
+                {
+                    "schema": "league.rollover-drain-receipt.v1",
+                    "verified": True,
+                    "operation_id": prepared["operation_id"],
+                    "predecessor_agent_id": OLD_ID,
+                    "successor_agent_id": NEW_ID,
+                    "owner_event_id": "event:owner-changed",
+                    "archive_digest": "archive-digest",
+                    "resource_receipt_digest": "resource-receipt-digest",
+                    "callsign_release_receipt_digest": "callsign-release-digest",
+                },
+                AT6,
+            )
+        except StorageRefusal as exc:
+            assert exc.code == "drain_incomplete"
+        else:
+            raise AssertionError("predecessor drain ignored unreconciled intake")
+        planned_intake = store.rollover_intake_plan(
+            prepared["operation_id"],
+            prepared["snapshot"]["digest"],
+            switched["version"],
+        )
+        assert planned_intake["has_more"] is False
+        plan_value = planned_intake["plan"]
+        plan_path = root / "reconcile-predecessor-intake" / "intake-plan.json"
+        plan_path.write_text(
+            json.dumps(plan_value, sort_keys=True, separators=(",", ":")) + "\n",
+            encoding="utf-8",
+        )
+
+    command = subprocess.run(
+        [
+            str(LEAGUE),
+            "--state-root",
+            str(state),
+            "rollover",
+            "reconcile-intake",
+            "--operation-id",
+            prepared["operation_id"],
+            "--reconciliation-id",
+            "reconciliation:predecessor-intake",
+            "--snapshot-digest",
+            prepared["snapshot"]["digest"],
+            "--expected-rollover-version",
+            str(switched["version"]),
+            "--plan",
+            str(plan_path),
+            "--at",
+            AT6,
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert command.returncode == 0, command.stdout + command.stderr
+    result = json.loads(command.stdout)["result"]
+    assert result["request_count"] == request_total
+    assert result["prompt_count"] == prompt_total
+    assert result["obligation_count"] == obligation_total
+    assert result["unresolved_count"] == request_total + prompt_total
+    assert result["idempotent"] is False
+    retry = subprocess.run(command.args, text=True, capture_output=True, check=False)
+    assert retry.returncode == 0, retry.stdout + retry.stderr
+    assert json.loads(retry.stdout)["result"] == {**result, "idempotent": True}
+
+    with SQLiteStorage(state) as store:
+        assert store.unresolved_requests(OLD_ID)["unresolved_count"] == 0
+        successor = store.unresolved_requests(NEW_ID, limit=100)
+        assert successor["unresolved_count"] == request_total + prompt_total
+        assert successor["untriaged_prompt_count"] == prompt_total
+        assert successor["open_obligation_count"] == obligation_total
+        intake = store.untriaged_intake(NEW_ID, limit=100)
+        assert intake["returned_count"] == prompt_total
+        assert all(
+            row["runtime_instance_id"] == "runtime:old-shotcaller"
+            and row["owner_runtime_instance_id"] == "runtime:new-shotcaller"
+            for row in intake["prompts"]
+        )
+        provenance = store.connection.execute(
+            """
+            SELECT intake_actor_id,runtime_instance_id,session_ref,source_event_key,
+                   current_owner_agent_id,current_owner_runtime_instance_id
+              FROM prompts WHERE prompt_id='prompt:predecessor:00'
+            """
+        ).fetchone()
+        assert tuple(provenance) == (
+            OLD_ID,
+            "runtime:old-shotcaller",
+            "synthetic:old-shotcaller",
+            "source:predecessor:00",
+            NEW_ID,
+            "runtime:new-shotcaller",
+        )
+        triaged = store.triage_prompt(
+            "prompt:predecessor:00",
+            [
+                {
+                    "prompt_item_id": "prompt-item:inherited:00",
+                    "ordinal": 1,
+                    "summary": "Synthetic inherited prompt",
+                    "disposition": "new_request",
+                    "request_id": "request:inherited:00",
+                }
+            ],
+            AT6,
+        )
+        assert triaged["request_count"] == 1
+        inherited_request = store.connection.execute(
+            "SELECT requester_agent_id,owner_agent_id FROM requests WHERE request_id=?",
+            ("request:inherited:00",),
+        ).fetchone()
+        assert tuple(inherited_request) == (OLD_ID, NEW_ID)
+        event = store.connection.execute(
+            "SELECT detail_json FROM events WHERE event_type='rollover_intake_reconciled'"
+        ).fetchone()
+        receipt = json.loads(event["detail_json"])
+        assert receipt["plan_digest"] == hashlib.sha256(
+            json.dumps(plan_value, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        assert receipt["original_prompt_runtime_digest"]
+
+
+def test_intake_reconciliation_refuses_partial_or_stale_plan(root: Path) -> None:
+    state, _ = migrated_state(root, "stale-intake-reconciliation")
+    with SQLiteStorage(state) as store:
+        context = seed_rollover(store, champion_count=0)
+        store.intake_prompt(
+            "prompt:must-be-declared",
+            OLD_ID,
+            "runtime:old-shotcaller",
+            "codex",
+            "synthetic:old-shotcaller",
+            "source:must-be-declared",
+            "Synthetic prompt that cannot be silently omitted.",
+            AT2,
+        )
+        prepared = prepare(store, context["successor"])
+        store.activate_callsign(
+            context["successor"]["assignment_id"],
+            1,
+            runtime_receipt(
+                context["successor"], "new-shotcaller", ["rollover.accept"]
+            ),
+            AT3,
+        )
+        pages = read_all_pages(store, prepared["operation_id"])
+        acknowledge(store, prepared, pages)
+        switched = store.commit_rollover(
+            prepared["operation_id"], 1, 1, "event:owner-changed", "outbox:owner-changed", AT5
+        )
+        incomplete = {
+            "schema": "league.rollover-intake-reconciliation.v1",
+            "operation_id": prepared["operation_id"],
+            "predecessor_agent_id": OLD_ID,
+            "successor_agent_id": NEW_ID,
+            "successor_runtime_instance_id": "runtime:new-shotcaller",
+            "requests": [],
+            "prompts": [],
+            "obligations": [],
+        }
+        try:
+            store.reconcile_rollover_intake(
+                prepared["operation_id"],
+                "reconciliation:partial-intake",
+                prepared["snapshot"]["digest"],
+                switched["version"],
+                incomplete,
+                AT6,
+            )
+        except StorageRefusal as exc:
+            assert exc.code == "intake_reconciliation_stale"
+        else:
+            raise AssertionError("partial predecessor intake plan was accepted")
+        assert store.unresolved_requests(OLD_ID)["untriaged_prompt_count"] == 1
+
+
+def test_intake_reconciliation_pages_more_than_five_hundred_exact_records(
+    root: Path,
+) -> None:
+    state, _ = migrated_state(root, "paged-intake-reconciliation")
+    with SQLiteStorage(state) as store:
+        context = seed_rollover(store, champion_count=0)
+        total = 501
+        store.connection.executemany(
+            """
+            INSERT INTO requests
+              (request_id,summary,requester_agent_id,owner_agent_id,return_to_agent_id,
+               state,version,created_at,updated_at)
+            VALUES(?,?,?,?,?,'open',1,?,?)
+            """,
+            [
+                (
+                    f"request:paged:{ordinal:04d}",
+                    f"Synthetic paged request {ordinal}",
+                    OLD_ID,
+                    OLD_ID,
+                    OLD_ID,
+                    AT2,
+                    AT2,
+                )
+                for ordinal in range(total)
+            ],
+        )
+        prepared = prepare(store, context["successor"])
+        store.activate_callsign(
+            context["successor"]["assignment_id"],
+            1,
+            runtime_receipt(
+                context["successor"], "new-shotcaller", ["rollover.accept"]
+            ),
+            AT3,
+        )
+        pages = read_all_pages(store, prepared["operation_id"])
+        acknowledge(store, prepared, pages)
+        switched = store.commit_rollover(
+            prepared["operation_id"], 1, 1, "event:owner-changed", "outbox:owner-changed", AT5
+        )
+        first = store.rollover_intake_plan(
+            prepared["operation_id"], prepared["snapshot"]["digest"], switched["version"]
+        )
+        assert first["has_more"] is True and first["counts"]["requests"] == 500
+        first_result = store.reconcile_rollover_intake(
+            prepared["operation_id"],
+            "reconciliation:intake-page:1",
+            prepared["snapshot"]["digest"],
+            switched["version"],
+            first["plan"],
+            AT6,
+        )
+        assert first_result["has_more"] is True
+        second = store.rollover_intake_plan(
+            prepared["operation_id"], prepared["snapshot"]["digest"], switched["version"]
+        )
+        assert second["has_more"] is False and second["counts"]["requests"] == 1
+        second_result = store.reconcile_rollover_intake(
+            prepared["operation_id"],
+            "reconciliation:intake-page:2",
+            prepared["snapshot"]["digest"],
+            switched["version"],
+            second["plan"],
+            AT6,
+        )
+        assert second_result["request_count"] == 1 and second_result["has_more"] is False
+        assert store.unresolved_requests(OLD_ID)["unresolved_count"] == 0
+        assert store.unresolved_requests(NEW_ID, limit=500)["unresolved_count"] == total
+
+
+def test_successive_rollovers_preserve_original_prompt_provenance(root: Path) -> None:
+    state, _ = migrated_state(root, "successive-intake-rollovers")
+    third_id = "agent:third-shotcaller"
+    with SQLiteStorage(state) as store:
+        context = seed_rollover(store, champion_count=0)
+        store.intake_prompt(
+            "prompt:original-provenance",
+            OLD_ID,
+            "runtime:old-shotcaller",
+            "codex",
+            "synthetic:old-shotcaller",
+            "source:original-provenance",
+            "Synthetic prompt retained through two owner rollovers.",
+            AT2,
+        )
+        prepared = prepare(store, context["successor"])
+        store.activate_callsign(
+            context["successor"]["assignment_id"],
+            1,
+            runtime_receipt(
+                context["successor"], "new-shotcaller", ["rollover.accept"]
+            ),
+            AT3,
+        )
+        pages = read_all_pages(store, prepared["operation_id"])
+        acknowledge(store, prepared, pages)
+        first_switch = store.commit_rollover(
+            prepared["operation_id"], 1, 1, "event:owner-changed", "outbox:owner-changed", AT5
+        )
+        first_plan = store.rollover_intake_plan(
+            prepared["operation_id"], prepared["snapshot"]["digest"], first_switch["version"]
+        )
+        store.reconcile_rollover_intake(
+            prepared["operation_id"],
+            "reconciliation:intake:first-successor",
+            prepared["snapshot"]["digest"],
+            first_switch["version"],
+            first_plan["plan"],
+            AT6,
+        )
+
+        third = store.allocate_callsign(
+            "callsign-assignment:third-shotcaller",
+            third_id,
+            "shotcaller",
+            "squad",
+            SQUAD_ID,
+            ["rollover.accept"],
+            AT6,
+        )
+        second_prepared = store.prepare_rollover(
+            "rollover:synthetic:second",
+            SQUAD_ID,
+            NEW_ID,
+            third_id,
+            third["assignment_id"],
+            2,
+            2,
+            "explicit",
+            "authority-receipt-digest:second",
+            ["rollover.accept"],
+            plan(),
+            AT6,
+        )
+        store.activate_callsign(
+            third["assignment_id"],
+            1,
+            runtime_receipt(third, "third-shotcaller", ["rollover.accept"]),
+            AT6,
+        )
+        second_pages = read_all_pages(store, second_prepared["operation_id"])
+        second_snapshot = second_prepared["snapshot"]
+        store.acknowledge_rollover(
+            second_prepared["operation_id"],
+            third_id,
+            "runtime:third-shotcaller",
+            second_prepared["handoff_digest"],
+            second_snapshot["version"],
+            second_snapshot["count"],
+            second_snapshot["digest"],
+            second_pages,
+            AT6,
+        )
+        second_switch = store.commit_rollover(
+            second_prepared["operation_id"],
+            2,
+            2,
+            "event:owner-changed:second",
+            "outbox:owner-changed:second",
+            AT6,
+        )
+        second_plan = store.rollover_intake_plan(
+            second_prepared["operation_id"],
+            second_snapshot["digest"],
+            second_switch["version"],
+        )
+        store.reconcile_rollover_intake(
+            second_prepared["operation_id"],
+            "reconciliation:intake:second-successor",
+            second_snapshot["digest"],
+            second_switch["version"],
+            second_plan["plan"],
+            AT6,
+        )
+        provenance = store.connection.execute(
+            """
+            SELECT intake_actor_id,runtime_instance_id,session_ref,source_event_key,
+                   current_owner_agent_id,current_owner_runtime_instance_id
+              FROM prompts WHERE prompt_id='prompt:original-provenance'
+            """
+        ).fetchone()
+        assert tuple(provenance) == (
+            OLD_ID,
+            "runtime:old-shotcaller",
+            "synthetic:old-shotcaller",
+            "source:original-provenance",
+            third_id,
+            "runtime:third-shotcaller",
+        )
+        rollback_export = json.loads(
+            store.export_bytes(format_name="json", purpose="rollback", max_records=5000)
+        )
+        exported_prompt = next(
+            row
+            for row in rollback_export["tables"]["prompts"]
+            if row["prompt_id"] == "prompt:original-provenance"
+        )
+        assert exported_prompt["intake_actor_id"] == OLD_ID
+        assert exported_prompt["runtime_instance_id"] == "runtime:old-shotcaller"
+        assert exported_prompt["current_owner_agent_id"] == third_id
+        assert (
+            exported_prompt["current_owner_runtime_instance_id"]
+            == "runtime:third-shotcaller"
+        )
+
+
+def test_rollover_retargets_only_frozen_descendant_deliveries(root: Path) -> None:
+    state, _ = migrated_state(root, "bounded-descendant-delivery")
+    with SQLiteStorage(state) as store:
+        context = seed_rollover(store, champion_count=1)
+        champion_id = context["champion_ids"][0]
+        champion = store.agent_status(champion_id)
+        assert champion is not None
+        descendant = store.transition(
+            champion_id,
+            champion["version"],
+            "working",
+            "Synthetic frozen descendant update.",
+            AT2,
+        )
+        store.connection.execute(
+            """
+            INSERT INTO events
+              (event_id,agent_id,task_id,squad_id,entity_version,event_type,status,
+               update_text,occurred_at,detail_json,aggregate_kind,aggregate_id)
+            VALUES('event:predecessor-private',?,NULL,NULL,99,'diagnostic','working',
+                   'Synthetic predecessor-private event.',?,'{}','agent',?)
+            """,
+            (OLD_ID, AT2, OLD_ID),
+        )
+        store.connection.execute(
+            """
+            INSERT INTO delivery_outbox
+              (outbox_id,event_id,recipient_agent_id,state,available_at,attempt_count)
+            VALUES('outbox:predecessor-private','event:predecessor-private',?,'pending',?,0)
+            """,
+            (OLD_ID, AT2),
+        )
+        prepared = prepare(store, context["successor"])
+        store.activate_callsign(
+            context["successor"]["assignment_id"],
+            1,
+            runtime_receipt(
+                context["successor"], "new-shotcaller", ["rollover.accept"]
+            ),
+            AT3,
+        )
+        pages = read_all_pages(store, prepared["operation_id"])
+        acknowledge(store, prepared, pages)
+        store.commit_rollover(
+            prepared["operation_id"],
+            1,
+            1,
+            "event:owner-changed",
+            "outbox:owner-changed",
+            AT5,
+        )
+        recipients = {
+            row["outbox_id"]: row["recipient_agent_id"]
+            for row in store.connection.execute(
+                """
+                SELECT outbox_id,recipient_agent_id FROM delivery_outbox
+                 WHERE outbox_id IN (?,?) ORDER BY outbox_id
+                """,
+                (descendant["outbox_id"], "outbox:predecessor-private"),
+            )
+        }
+        assert recipients == {
+            descendant["outbox_id"]: OLD_ID,
+            "outbox:predecessor-private": OLD_ID,
+        }
+
+
+def test_descendant_reconciliation_fences_claim_race_and_stale_versions(root: Path) -> None:
+    state, _ = migrated_state(root, "descendant-claim-race")
+    with SQLiteStorage(state) as store:
+        context = seed_rollover(store, champion_count=1)
+        champion_id = context["champion_ids"][0]
+        worktree = (root / "descendant-claim-race" / "champion-worktree").resolve()
+        worktree.mkdir()
+        thread_id = "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff"
+        store.connection.execute(
+            "UPDATE callsign_assignments SET runtime_instance_id=NULL WHERE agent_id=?",
+            (champion_id,),
+        )
+        store.connection.execute(
+            "DELETE FROM runtime_instances WHERE actor_agent_id=?", (champion_id,)
+        )
+        store.connection.execute(
+            """
+            UPDATE agent_instances SET kind='codex-thread',thread_id=?,backend='herdr',
+                   routing_name='annie',display_agent='codex',address='pane:race',worktree=?
+             WHERE agent_id=?
+            """,
+            (thread_id, str(worktree), champion_id),
+        )
+        champion = store.agent_status(champion_id)
+        assert champion is not None
+        descendant = store.transition(
+            champion_id,
+            champion["version"],
+            "working",
+            "Synthetic descendant delivery raced with a claim.",
+            AT2,
+        )
+        prepared = prepare(store, context["successor"])
+        store.activate_callsign(
+            context["successor"]["assignment_id"],
+            1,
+            runtime_receipt(
+                context["successor"], "new-shotcaller", ["rollover.accept"]
+            ),
+            AT3,
+        )
+        pages = read_all_pages(store, prepared["operation_id"])
+        acknowledge(store, prepared, pages)
+        switched = store.commit_rollover(
+            prepared["operation_id"], 1, 1, "event:owner-changed", "outbox:owner-changed", AT5
+        )
+        champion = store.agent_status(champion_id)
+        assert champion is not None
+        for assignment_version, callsign_version in ((1, 2), (0, 3)):
+            try:
+                store.rollover_descendant_target(
+                    prepared["operation_id"],
+                    f"reconciliation:stale-version:{assignment_version}:{callsign_version}",
+                    champion_id,
+                    "task:champion:0",
+                    prepared["snapshot"]["digest"],
+                    pages[0]["rows"][0]["row_digest"],
+                    switched["version"],
+                    champion["version"],
+                    1,
+                    assignment_version,
+                    callsign_version,
+                )
+            except StorageRefusal as exc:
+                assert exc.code == "version_conflict"
+            else:
+                raise AssertionError("stale descendant assignment version was accepted")
+
+    class RacingAdapter:
+        def verify(self, target: dict, runtime_instance_id: str) -> dict:
+            with SQLiteStorage(state) as racer:
+                racer.connection.execute(
+                    "UPDATE delivery_outbox SET state='in_flight' WHERE outbox_id=? AND state='pending'",
+                    (descendant["outbox_id"],),
+                )
+            return descendant_runtime_receipt(target, runtime_instance_id, "terminal:race")
+
+    with SQLiteStorage(state) as store:
+        service = RolloverDescendantService(store, RacingAdapter())
+        try:
+            service.reconcile(
+                operation_id=prepared["operation_id"],
+                reconciliation_id="reconciliation:claim-race",
+                champion_agent_id=champion_id,
+                task_id="task:champion:0",
+                runtime_instance_id="runtime:champion:race",
+                snapshot_digest=prepared["snapshot"]["digest"],
+                snapshot_row_digest=pages[0]["rows"][0]["row_digest"],
+                expected_rollover_version=switched["version"],
+                expected_agent_version=champion["version"],
+                expected_task_version=1,
+                expected_assignment_version=0,
+                expected_callsign_assignment_version=2,
+                pending_outbox_ids=(descendant["outbox_id"],),
+                at=AT6,
+            )
+        except StorageRefusal as exc:
+            assert exc.code == "descendant_delivery_inflight"
+        else:
+            raise AssertionError("claimed descendant delivery was retargeted")
+        task = store.connection.execute(
+            "SELECT coordinator_agent_id,version FROM tasks WHERE task_id='task:champion:0'"
+        ).fetchone()
+        assert tuple(task) == (OLD_ID, 1)
+        assert store.agent_status(champion_id)["shotcaller_agent_id"] == OLD_ID
+        outbox = store.connection.execute(
+            "SELECT recipient_agent_id,state FROM delivery_outbox WHERE outbox_id=?",
+            (descendant["outbox_id"],),
+        ).fetchone()
+        assert tuple(outbox) == (OLD_ID, "in_flight")
+
+
+def test_descendant_reconciliation_refuses_stale_snapshot_row(root: Path) -> None:
+    state, _ = migrated_state(root, "stale-descendant-snapshot")
+    with SQLiteStorage(state) as store:
+        context = seed_rollover(store, champion_count=1)
+        prepared = prepare(store, context["successor"])
+        store.activate_callsign(
+            context["successor"]["assignment_id"],
+            1,
+            runtime_receipt(
+                context["successor"], "new-shotcaller", ["rollover.accept"]
+            ),
+            AT3,
+        )
+        pages = read_all_pages(store, prepared["operation_id"])
+        acknowledge(store, prepared, pages)
+        switched = store.commit_rollover(
+            prepared["operation_id"], 1, 1, "event:owner-changed", "outbox:owner-changed", AT5
+        )
+        champion_id = context["champion_ids"][0]
+        champion = store.agent_status(champion_id)
+        assert champion is not None
+        try:
+            store.reconcile_rollover_descendant(
+                prepared["operation_id"],
+                "reconciliation:stale-snapshot",
+                champion_id,
+                "task:champion:0",
+                "runtime:champion:0",
+                prepared["snapshot"]["digest"],
+                "0" * 64,
+                switched["version"],
+                champion["version"],
+                1,
+                0,
+                2,
+                None,
+                (),
+                AT6,
+            )
+        except StorageRefusal as exc:
+            assert exc.code == "descendant_snapshot_mismatch"
+        else:
+            raise AssertionError("stale descendant snapshot row was reconciled")
+        assert store.agent_status(champion_id)["shotcaller_agent_id"] == OLD_ID
+
+
+def test_descendant_runtime_adapter_refuses_missing_closed_mismatch_and_ambiguity(
+    root: Path,
+) -> None:
+    worktree = (root / "descendant-adapter-refusals").resolve()
+    worktree.mkdir()
+    thread_id = "cccccccc-dddd-4eee-8fff-000000000000"
+    target = {
+        "champion_agent_id": "agent:synthetic:champion",
+        "task_id": "task:synthetic:champion",
+        "callsign": "Annie",
+        "kind": "codex-thread",
+        "thread_id": thread_id,
+        "backend": "herdr",
+        "routing_name": "annie",
+        "display_agent": "codex",
+        "address": "pane:synthetic",
+        "worktree": str(worktree),
+        "snapshot_row_digest": "a" * 64,
+        "capabilities": ["task.execute"],
+    }
+    exact = {
+        "agent": "codex",
+        "agent_session": {"value": thread_id},
+        "agent_status": "working",
+        "cwd": str(worktree),
+        "foreground_cwd": str(worktree),
+        "name": "annie",
+        "pane_id": "pane:synthetic",
+        "state_change_seq": 2,
+        "terminal_id": "terminal:synthetic",
+    }
+
+    class Inventory:
+        def __init__(self, agents: list[dict]) -> None:
+            self.agents = agents
+
+        def run(self, argv: tuple[str, ...], *, timeout_seconds: int) -> subprocess.CompletedProcess[str]:
+            assert argv == ("herdr", "agent", "list") and timeout_seconds == 30
+            return subprocess.CompletedProcess(
+                argv, 0, json.dumps({"result": {"agents": self.agents}}), ""
+            )
+
+    cases = (
+        ([], "descendant_runtime_missing"),
+        ([{**exact, "agent_status": "closed"}], "descendant_runtime_closed"),
+        ([{**exact, "cwd": str(worktree / "other")}], "descendant_runtime_mismatch"),
+        ([exact, {**exact, "pane_id": "pane:other"}], "descendant_runtime_ambiguous"),
+    )
+    for agents, code in cases:
+        try:
+            HerdrDescendantRuntimeAdapter(Inventory(agents)).verify(
+                target, "runtime:synthetic:champion"
+            )
+        except StorageRefusal as exc:
+            assert exc.code == code
+        else:
+            raise AssertionError(f"descendant runtime adapter accepted {code}")
+
+
+def test_descendant_reconciliation_refuses_ambiguous_runtime(root: Path) -> None:
+    state, _ = migrated_state(root, "ambiguous-descendant-runtime")
+    with SQLiteStorage(state) as store:
+        context = seed_rollover(store, champion_count=1)
+        prepared = prepare(store, context["successor"])
+        store.activate_callsign(
+            context["successor"]["assignment_id"],
+            1,
+            runtime_receipt(
+                context["successor"], "new-shotcaller", ["rollover.accept"]
+            ),
+            AT3,
+        )
+        pages = read_all_pages(store, prepared["operation_id"])
+        acknowledge(store, prepared, pages)
+        switched = store.commit_rollover(
+            prepared["operation_id"], 1, 1, "event:owner-changed", "outbox:owner-changed", AT5
+        )
+        champion_id = context["champion_ids"][0]
+        champion = store.agent_status(champion_id)
+        assert champion is not None
+        store.register_runtime(
+            RuntimeRegistrationCommand(
+                runtime_instance_id="runtime:champion:ambiguous",
+                actor_agent_id=champion_id,
+                harness_kind="synthetic-secondary",
+                backend_kind="herdr",
+                session_ref="synthetic:champion:ambiguous",
+                endpoint="synthetic-endpoint:champion:ambiguous",
+                runtime_generation="generation:champion:ambiguous",
+                status="active",
+                verified=True,
+                at=AT6,
+                capabilities=("task.execute",),
+            )
+        )
+        try:
+            store.reconcile_rollover_descendant(
+                prepared["operation_id"],
+                "reconciliation:ambiguous-runtime",
+                champion_id,
+                "task:champion:0",
+                "runtime:champion:0",
+                prepared["snapshot"]["digest"],
+                pages[0]["rows"][0]["row_digest"],
+                switched["version"],
+                champion["version"],
+                1,
+                0,
+                2,
+                None,
+                (),
+                AT6,
+            )
+        except StorageRefusal as exc:
+            assert exc.code == "descendant_runtime_ambiguous"
+        else:
+            raise AssertionError("ambiguous descendant runtime was reconciled")
+        assert store.agent_status(champion_id)["shotcaller_agent_id"] == OLD_ID
+
+
+def test_descendant_reconciliation_requires_exact_pending_delivery_set(root: Path) -> None:
+    state, _ = migrated_state(root, "stale-descendant-delivery-set")
+    with SQLiteStorage(state) as store:
+        context = seed_rollover(store, champion_count=1)
+        champion_id = context["champion_ids"][0]
+        worktree = (root / "stale-descendant-delivery-set" / "champion-worktree").resolve()
+        worktree.mkdir()
+        thread_id = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+        store.connection.execute(
+            "UPDATE callsign_assignments SET runtime_instance_id=NULL WHERE agent_id=?",
+            (champion_id,),
+        )
+        store.connection.execute(
+            "DELETE FROM runtime_instances WHERE actor_agent_id=?", (champion_id,)
+        )
+        store.connection.execute(
+            """
+            UPDATE agent_instances SET kind='codex-thread',thread_id=?,backend='herdr',
+                   routing_name='annie',display_agent='codex',address='pane:stale',worktree=?
+             WHERE agent_id=?
+            """,
+            (thread_id, str(worktree), champion_id),
+        )
+        prepared = prepare(store, context["successor"])
+        store.activate_callsign(
+            context["successor"]["assignment_id"],
+            1,
+            runtime_receipt(
+                context["successor"], "new-shotcaller", ["rollover.accept"]
+            ),
+            AT3,
+        )
+        pages = read_all_pages(store, prepared["operation_id"])
+        acknowledge(store, prepared, pages)
+        switched = store.commit_rollover(
+            prepared["operation_id"], 1, 1, "event:owner-changed", "outbox:owner-changed", AT5
+        )
+        champion = store.agent_status(champion_id)
+        assert champion is not None
+        store.connection.execute(
+            """
+            INSERT INTO events
+              (event_id,agent_id,task_id,squad_id,entity_version,event_type,status,
+               update_text,occurred_at,detail_json,aggregate_kind,aggregate_id)
+            VALUES('event:descendant:undeclared',?,NULL,NULL,1,'diagnostic','working',
+                   'Synthetic undeclared descendant event.',?,'{}','agent',?)
+            """,
+            (champion_id, AT5, champion_id),
+        )
+        store.connection.execute(
+            """
+            INSERT INTO delivery_outbox
+              (outbox_id,event_id,recipient_agent_id,state,available_at,attempt_count)
+            VALUES('outbox:descendant:undeclared','event:descendant:undeclared',?,'pending',?,0)
+            """,
+            (OLD_ID, AT5),
+        )
+        target = store.rollover_descendant_target(
+            prepared["operation_id"],
+            "reconciliation:stale-delivery-set",
+            champion_id,
+            "task:champion:0",
+            prepared["snapshot"]["digest"],
+            pages[0]["rows"][0]["row_digest"],
+            switched["version"],
+            champion["version"],
+            1,
+            0,
+            2,
+        )
+        exact_runtime = {
+            "schema": "league.rollover-descendant-runtime.v1",
+            "verified": True,
+            "champion_agent_id": champion_id,
+            "task_id": "task:champion:0",
+            "runtime_instance_id": "runtime:champion:0:reconciled",
+            "harness_kind": "codex-thread",
+            "backend_kind": "herdr",
+            "session_ref": thread_id,
+            "endpoint": "pane:stale",
+            "runtime_generation": "herdr:synthetic-generation",
+            "status": "active",
+            "callsign": target["callsign"],
+            "routing_name": "annie",
+            "display_agent": "codex",
+            "worktree": str(worktree),
+            "terminal_id": "terminal:stale",
+            "state_change_seq": 1,
+            "snapshot_row_digest": pages[0]["rows"][0]["row_digest"],
+            "capabilities": target["capabilities"],
+        }
+        try:
+            store.reconcile_rollover_descendant(
+                prepared["operation_id"],
+                "reconciliation:stale-delivery-set",
+                champion_id,
+                "task:champion:0",
+                "runtime:champion:0:reconciled",
+                prepared["snapshot"]["digest"],
+                pages[0]["rows"][0]["row_digest"],
+                switched["version"],
+                champion["version"],
+                1,
+                0,
+                2,
+                exact_runtime,
+                (),
+                AT6,
+            )
+        except StorageRefusal as exc:
+            assert exc.code == "descendant_delivery_set_stale"
+        else:
+            raise AssertionError("missing pending descendant delivery was silently ignored")
+        assert store.agent_status(champion_id)["shotcaller_agent_id"] == OLD_ID
+
+
 def test_pre_switch_abort_restores_reservation(root: Path) -> None:
     state, _ = migrated_state(root, "abort")
     with SQLiteStorage(state) as store:
@@ -624,6 +1763,17 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="league-shotcaller-rollover-") as temporary:
         root = Path(temporary)
         test_guarded_switch_crash_retry_and_drain(root)
+        test_switched_rollover_reconciles_exact_imported_descendant(root)
+        test_switched_rollover_reconciles_exact_predecessor_intake_and_obligations(root)
+        test_intake_reconciliation_refuses_partial_or_stale_plan(root)
+        test_intake_reconciliation_pages_more_than_five_hundred_exact_records(root)
+        test_successive_rollovers_preserve_original_prompt_provenance(root)
+        test_rollover_retargets_only_frozen_descendant_deliveries(root)
+        test_descendant_reconciliation_fences_claim_race_and_stale_versions(root)
+        test_descendant_reconciliation_refuses_stale_snapshot_row(root)
+        test_descendant_runtime_adapter_refuses_missing_closed_mismatch_and_ambiguity(root)
+        test_descendant_reconciliation_refuses_ambiguous_runtime(root)
+        test_descendant_reconciliation_requires_exact_pending_delivery_set(root)
         test_pre_switch_abort_restores_reservation(root)
         test_pre_switch_abort_releases_cleaned_active_successor(root)
         test_public_safety_and_snapshot_staleness(root)

@@ -46,6 +46,16 @@ from .storage_request import (
 )
 from .storage_assignment import FinishHiddenAssignmentCommand
 from .request_services import AssignmentSpec
+from .shotcaller_bootstrap import (
+    HerdrShotcallerBootstrapAdapter,
+    ShotcallerBootstrapOptions,
+    ShotcallerBootstrapService,
+    ShotcallerBootstrapSpec,
+)
+from .rollover_descendant import (
+    HerdrDescendantRuntimeAdapter,
+    RolloverDescendantService,
+)
 from .visible_launch import (
     HerdrCodexLaunchAdapter,
     VisibleChampionLaunchService,
@@ -232,6 +242,26 @@ def _add_callsign_commands(groups: argparse._SubParsersAction) -> None:
     status.add_argument("--role", choices=("shotcaller", "champion", "hidden-worker"), required=True)
 
 
+def _add_shotcaller_commands(groups: argparse._SubParsersAction) -> None:
+    shotcaller = groups.add_parser(
+        "shotcaller", help="Create one canonical Shotcaller in the exact calling Codex pane."
+    )
+    commands = shotcaller.add_subparsers(dest="action", required=True)
+    create = commands.add_parser(
+        "create",
+        help="Allocate and bind the calling unnamed Codex thread without creating Herdr layout.",
+    )
+    for name in (
+        "callsign-assignment-id",
+        "agent-id",
+        "runtime-instance-id",
+        "thread-id",
+        "at",
+    ):
+        create.add_argument(f"--{name}", required=True)
+    create.add_argument("--capability", action="append", default=[])
+
+
 def _add_rollover_commands(groups: argparse._SubParsersAction) -> None:
     rollover = groups.add_parser(
         "rollover", help="Guard one disposable Shotcaller replacement for a stable Squad."
@@ -279,6 +309,49 @@ def _add_rollover_commands(groups: argparse._SubParsersAction) -> None:
         commit.add_argument(f"--{name}", required=True)
     commit.add_argument("--expected-owner-version", type=int, required=True)
     commit.add_argument("--expected-owner-fence", type=int, required=True)
+    reconcile_descendant = commands.add_parser(
+        "reconcile-descendant",
+        help="Bind one exact frozen imported Champion to the committed successor.",
+    )
+    for name in (
+        "operation-id",
+        "reconciliation-id",
+        "champion-agent-id",
+        "task-id",
+        "runtime-instance-id",
+        "snapshot-digest",
+        "snapshot-row-digest",
+        "at",
+    ):
+        reconcile_descendant.add_argument(f"--{name}", required=True)
+    reconcile_descendant.add_argument("--expected-rollover-version", type=int, required=True)
+    reconcile_descendant.add_argument("--expected-agent-version", type=int, required=True)
+    reconcile_descendant.add_argument("--expected-task-version", type=int, required=True)
+    reconcile_descendant.add_argument("--expected-assignment-version", type=int, required=True)
+    reconcile_descendant.add_argument(
+        "--expected-callsign-assignment-version", type=int, required=True
+    )
+    reconcile_descendant.add_argument(
+        "--pending-outbox-id",
+        action="append",
+        default=[],
+        help="Declare one exact pending descendant outbox still targeting the predecessor.",
+    )
+    reconcile_intake = commands.add_parser(
+        "reconcile-intake",
+        help="Rebind one exact predecessor-owned unresolved intake plan to the committed successor.",
+    )
+    for name in ("operation-id", "reconciliation-id", "snapshot-digest", "at"):
+        reconcile_intake.add_argument(f"--{name}", required=True)
+    reconcile_intake.add_argument("--expected-rollover-version", type=int, required=True)
+    reconcile_intake.add_argument("--plan", type=Path, required=True)
+    intake_plan = commands.add_parser(
+        "intake-plan",
+        help="Read the next exact bounded predecessor-intake reconciliation page.",
+    )
+    intake_plan.add_argument("--operation-id", required=True)
+    intake_plan.add_argument("--snapshot-digest", required=True)
+    intake_plan.add_argument("--expected-rollover-version", type=int, required=True)
     abort = commands.add_parser("abort", help="Abort only before the owner switch.")
     drain = commands.add_parser("drain", help="Complete old-owner cleanup after the switch.")
     for command in (abort, drain):
@@ -1057,6 +1130,7 @@ def _parser() -> argparse.ArgumentParser:
         _add_storage_commands,
         _add_agent_commands,
         _add_callsign_commands,
+        _add_shotcaller_commands,
         _add_rollover_commands,
         _add_delivery_commands,
         _add_project_commands,
@@ -1231,6 +1305,29 @@ def _callsign_status(store: Storage, args: argparse.Namespace) -> CommandResult:
     return store.callsign_status(args.role), None
 
 
+def _shotcaller_create(store: Storage, args: argparse.Namespace) -> CommandResult:
+    spec = ShotcallerBootstrapSpec(
+        assignment_id=args.callsign_assignment_id,
+        agent_id=args.agent_id,
+        runtime_instance_id=args.runtime_instance_id,
+        thread_id=args.thread_id,
+        capabilities=tuple(args.capability),
+    )
+    options = ShotcallerBootstrapOptions(
+        workspace_id=os.environ.get("HERDR_WORKSPACE_ID", ""),
+        tab_id=os.environ.get("HERDR_TAB_ID", ""),
+        pane_id=os.environ.get("HERDR_PANE_ID", ""),
+        worktree=str(Path.cwd().resolve()),
+    )
+    class FixedClock:
+        def now(self) -> str:
+            return args.at
+
+    return ShotcallerBootstrapService(
+        store, HerdrShotcallerBootstrapAdapter(options), FixedClock()
+    ).bootstrap(spec), None
+
+
 def _rollover_prepare(store: Storage, args: argparse.Namespace) -> CommandResult:
     return store.prepare_rollover(
         args.operation_id,
@@ -1279,6 +1376,50 @@ def _rollover_commit(store: Storage, args: argparse.Namespace) -> CommandResult:
         args.owner_event_id,
         args.owner_outbox_id,
         args.at,
+    ), None
+
+
+def _rollover_reconcile_descendant(
+    store: Storage, args: argparse.Namespace
+) -> CommandResult:
+    return RolloverDescendantService(
+        store, HerdrDescendantRuntimeAdapter()
+    ).reconcile(
+        operation_id=args.operation_id,
+        reconciliation_id=args.reconciliation_id,
+        champion_agent_id=args.champion_agent_id,
+        task_id=args.task_id,
+        runtime_instance_id=args.runtime_instance_id,
+        snapshot_digest=args.snapshot_digest,
+        snapshot_row_digest=args.snapshot_row_digest,
+        expected_rollover_version=args.expected_rollover_version,
+        expected_agent_version=args.expected_agent_version,
+        expected_task_version=args.expected_task_version,
+        expected_assignment_version=args.expected_assignment_version,
+        expected_callsign_assignment_version=args.expected_callsign_assignment_version,
+        pending_outbox_ids=tuple(args.pending_outbox_id),
+        at=args.at,
+    ), None
+
+
+def _rollover_reconcile_intake(
+    store: Storage, args: argparse.Namespace
+) -> CommandResult:
+    return store.reconcile_rollover_intake(
+        args.operation_id,
+        args.reconciliation_id,
+        args.snapshot_digest,
+        args.expected_rollover_version,
+        _read_json_object(args.plan),
+        args.at,
+    ), None
+
+
+def _rollover_intake_plan(store: Storage, args: argparse.Namespace) -> CommandResult:
+    return store.rollover_intake_plan(
+        args.operation_id,
+        args.snapshot_digest,
+        args.expected_rollover_version,
     ), None
 
 
@@ -1788,7 +1929,7 @@ def _mechanize_turn_decisions(
                 raise StorageRefusal("invalid_triage", "every semantic item must be an object")
             disposition = raw.get("disposition")
             allowed = {"summary", "disposition"}
-            if disposition in {"follow_up", "duplicate"}:
+            if disposition in {"follow_up", "duplicate", "deferred"}:
                 allowed.add("related_request_id")
             if disposition == "deferred":
                 allowed.add("defer_seconds")
@@ -1804,9 +1945,9 @@ def _mechanize_turn_decisions(
             )
             request_id: Optional[str] = None
             next_attention_at: Optional[str] = None
-            if disposition in {"new_request", "deferred"}:
+            if disposition == "new_request":
                 request_id = _turn_mechanical_id("request", item_id)
-            elif disposition in {"follow_up", "duplicate"}:
+            elif disposition in {"follow_up", "duplicate", "deferred"}:
                 related = raw.get("related_request_id")
                 if not isinstance(related, str) or not related:
                     raise StorageRefusal(
@@ -1840,7 +1981,7 @@ def _mechanize_turn_decisions(
                         "prompt_id": prompt["prompt_id"],
                         "adapter_kind": prompt["adapter_kind"],
                         "session_ref": prompt["session_ref"],
-                        "runtime_instance_id": prompt["runtime_instance_id"],
+                        "runtime_instance_id": prompt["owner_runtime_instance_id"],
                     }
                 )
         decisions.append({"prompt_id": prompt["prompt_id"], "items": items})
@@ -2460,10 +2601,14 @@ HANDLERS: dict[str, CommandHandler] = {
     "callsign.rollback": _callsign_rollback,
     "callsign.release": _callsign_release,
     "callsign.status": _callsign_status,
+    "shotcaller.create": _shotcaller_create,
     "rollover.prepare": _rollover_prepare,
     "rollover.bindings": _rollover_bindings,
     "rollover.acknowledge": _rollover_acknowledge,
     "rollover.commit": _rollover_commit,
+    "rollover.reconcile-descendant": _rollover_reconcile_descendant,
+    "rollover.reconcile-intake": _rollover_reconcile_intake,
+    "rollover.intake-plan": _rollover_intake_plan,
     "rollover.abort": _rollover_abort,
     "rollover.drain": _rollover_drain,
     "rollover.status": _rollover_status,

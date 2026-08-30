@@ -41,6 +41,14 @@ class WatcherStorage(Protocol):
         self, scope_id: str, actor_agent_id: str, at: str
     ) -> dict[str, Any]: ...
 
+    def consume_stop_feedback(
+        self,
+        scope_id: str,
+        actor_agent_id: str,
+        terminal_generation: str,
+        body: str,
+    ) -> bool: ...
+
     def rearm_wait(
         self, scope_id: str, actor_agent_id: str, event_id: str, at: str
     ) -> dict[str, Any]: ...

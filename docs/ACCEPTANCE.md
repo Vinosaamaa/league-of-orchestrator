@@ -451,10 +451,24 @@ rewrite a skill. Release-to-installed parity and a real runtime remain #23
 gates.
 
 The staged release manifest also proves exact source/release/staged parity for
-the portable report HTML template, League report skill, and shared guidance
-source. The guidance adapter tests stage only beneath disposable explicit roots;
-the acceptance harness does not install or cut over global Codex, Cursor, or Pi
-instructions.
+the portable report HTML template, League report skill, and League-specific
+`global-agent-instructions/league/AGENTS.md` source. The isolated package test
+installs only `league/AGENTS.md`, restores its prior synthetic bytes, and proves
+the synthetic universal `AGENTS.md` hash is identical before install, after
+install, and after rollback. A manifest naming the universal target refuses
+before file or release-pointer mutation. The acceptance harness does not install
+or cut over global Codex, Cursor, or Pi instructions.
+
+The production pre-cutover validator applies the same ownership rule to every
+declared current target: an absolute path resolving to `.agents/AGENTS.md` is
+forbidden regardless of target id or kind. Before the live executor acquires
+its lock or creates any node, backup, release directory, or attempt directory,
+it proves that the exact candidate release and release-bundle identities are
+unallocated; it repeats that check under the cutover lock before mutation.
+Refused identities leave byte, node, pointer, and tree fingerprints unchanged.
+Rollback skips current targets already equal to their original snapshot, so an
+unchanged League supplement and the unregistered universal guide retain their
+original filesystem nodes as well as their hashes.
 
 The generation switch in these harnesses is a model exercised beneath the
 disposable namespace. It is not a global cutover command. Canonical cutover,

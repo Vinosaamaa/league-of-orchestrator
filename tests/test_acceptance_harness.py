@@ -25,6 +25,7 @@ from league.acceptance import (  # noqa: E402
     POINTER_STAGES,
     PROCESS_SENTINEL_SCHEMA,
     SentinelSet,
+    _staged_install,
     run_acceptance,
     validate_hook_fixture,
 )
@@ -39,6 +40,19 @@ def refused(operation, code: str) -> None:
         assert exc.code == code, (exc.code, code)
         return
     raise AssertionError(f"expected refusal {code}")
+
+
+def tree_snapshot(root: Path) -> dict[str, tuple[str, bytes | str]]:
+    result: dict[str, tuple[str, bytes | str]] = {}
+    for path in sorted(root.rglob("*")):
+        relative = path.relative_to(root).as_posix()
+        if path.is_symlink():
+            result[relative] = ("symlink", path.readlink().as_posix())
+        elif path.is_file():
+            result[relative] = ("file", path.read_bytes())
+        else:
+            result[relative] = ("directory", "")
+    return result
 
 
 def write_json(path: Path, value: object) -> None:
@@ -129,6 +143,7 @@ def assert_staged_install_receipt(result: dict[str, object]) -> None:
         "hook_fixtures",
         "permissions_checked",
         "path_leaks",
+        "guidance",
         "rollback",
     }
     assert staged["source_release_staged_parity"] is True
@@ -146,6 +161,20 @@ def assert_staged_install_receipt(result: dict[str, object]) -> None:
         "integrity": True,
     }
     assert staged["permissions_checked"] and not staged["path_leaks"]
+    guidance = staged["guidance"]
+    assert guidance["source"] == "global-agent-instructions/league/AGENTS.md"
+    assert guidance["target"] == "league/AGENTS.md"
+    assert guidance["source_sha256"] == guidance["installed_sha256"]
+    assert guidance["prior_sha256"] == guidance["restored_sha256"]
+    assert len(
+        {
+            guidance["universal_before_sha256"],
+            guidance["universal_after_install_sha256"],
+            guidance["universal_after_rollback_sha256"],
+        }
+    ) == 1
+    assert guidance["universal_unchanged"] is True
+    assert guidance["rollback_completed"] is True
     assert staged["rollback"]["completed"] is True
     assert {item["harness"] for item in staged["hook_fixtures"]} == {
         "codex",
@@ -495,7 +524,41 @@ def test_schema_and_command_inventory() -> None:
     version = subprocess.run(
         [str(LEAGUE), "--version"], text=True, capture_output=True, check=True, timeout=10
     )
-    assert version.stdout.strip() == "league 0.2.24"
+    assert version.stdout.strip() == "league 0.2.28"
+
+
+def test_forbidden_universal_guide_manifest_precedes_install_mutation(root: Path) -> None:
+    root.mkdir()
+    pointer = root / "current"
+    pointer.write_text("synthetic-prior-pointer\n", encoding="utf-8")
+    before = {path.relative_to(root).as_posix(): path.read_bytes() for path in root.iterdir()}
+    refused(
+        lambda: _staged_install(root, ROOT, guidance_targets=("AGENTS.md",)),
+        "universal_guidance_forbidden",
+    )
+    after = {path.relative_to(root).as_posix(): path.read_bytes() for path in root.iterdir()}
+    assert after == before
+
+
+def test_existing_release_identity_precedes_install_mutation(root: Path) -> None:
+    for name, relative in (
+        ("release", Path("stage-prefix/releases/0.2.28")),
+        ("bundle", Path("release-bundle/0.2.28")),
+    ):
+        collision = root / name
+        collision.mkdir(parents=True)
+        candidate = collision / relative
+        candidate.mkdir(parents=True)
+        (candidate / "retained-byte").write_bytes(b"existing release identity\n")
+        pointer = collision / "stage-prefix/current"
+        pointer.parent.mkdir(parents=True, exist_ok=True)
+        pointer.symlink_to("releases/0.2.27")
+        before = tree_snapshot(collision)
+        refused(
+            lambda collision=collision: _staged_install(collision, ROOT),
+            "staged_release_identity_exists",
+        )
+        assert tree_snapshot(collision) == before
 
 
 def test_issue_23_incident_artifacts_are_complete_and_public_safe() -> None:
@@ -538,6 +601,12 @@ def main() -> None:
         root = Path(temporary)
         test_foundation_through_command_without_home(root / "command")
         test_fail_closed_inputs(root / "failure")
+        test_forbidden_universal_guide_manifest_precedes_install_mutation(
+            root / "forbidden-guide-manifest"
+        )
+        test_existing_release_identity_precedes_install_mutation(
+            root / "release-identity-collision"
+        )
         test_schema_and_command_inventory()
         test_issue_23_incident_artifacts_are_complete_and_public_safe()
     print(

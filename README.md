@@ -154,8 +154,13 @@ The project catalog and bounded Roster are documented in
 direction is [Project Ledger](docs/design/terminal-roster-ui.md).
 The report source, commands, completion gates, renderers, and report skill are
 documented in [reporting](docs/REPORTING.md). The classification, final-byte
-remote boundary, publication metadata gate, and staged shared guidance are in
-[privacy](docs/PRIVACY.md).
+remote boundary, publication metadata gate, and staged League supplement are
+in [privacy](docs/PRIVACY.md).
+
+The [privacy contract](docs/PRIVACY.md) records the guide ownership split:
+terminal-environment-toolkit alone owns the universal guide, while League may
+install only its orchestration supplement. Toolkit issue #45 owns the universal
+trigger; League issue #90 changes no toolkit or installed guide.
 
 ## Repository-local SQLite implementation; cutover still gated
 

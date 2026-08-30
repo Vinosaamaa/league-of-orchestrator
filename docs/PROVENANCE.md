@@ -40,7 +40,7 @@ These toolkit files were inventoried but not copied:
 | `install-agent-watcher` | `f051a516fbc4000bfbc1ee71b4cb9afd2e10dcbadcf994d78960da2518ca4495` | Live install and rollback remain toolkit-owned. |
 | `shell-completions/_agent-watcher` | `667d96d44c06fda95096a768c64d89790bafbe43c81124ca46511473d1592b2e` | Completion moves with a later installation slice. |
 | `AGENT_ORCHESTRATION_REFERENCE.md` | `ec2eff727ac52d23434d92c1f07ee7806206b4574fb7e33dbd3bf30040baccd4` | Installed global policy is not silently replaced. |
-| `global-agent-instructions/shared-AGENTS.md` | `67a1fec8e2e341ee55ae5936b5c402167d6fcf94c6d0154ad0da06d516d59a69` | Issue #23 deliberately replaces the retained legacy-writer guide only after exact-head release, backup, byte-parity installation, smoke, and rollback proof. |
+| `global-agent-instructions/shared-AGENTS.md` | `67a1fec8e2e341ee55ae5936b5c402167d6fcf94c6d0154ad0da06d516d59a69` | Universal guide remains terminal-environment-toolkit-owned and is never copied, packaged, installed, restored, or rolled back by League. Toolkit issue #45 owns its reconciliation. |
 
 The example and schema files in this repository are new, synthetic authoring
 artifacts derived from the runtime validator rather than copies of live Roster
@@ -200,9 +200,8 @@ and delivery effects; the connection holds no transaction while the model
 works. The same successor composes the existing assignment phases and real
 Herdr/Codex boundary into `assign run`, grants only the exact canonical state
 root as an additional workspace-write root, and records bounded context or
-exact failure-cleanup receipts. The source-managed guide is therefore a
-deliberate behavioral replacement, covered by focused staging and runtime
-tests, rather than an untracked installed-policy edit.
+exact failure-cleanup receipts. Those League-specific rules now live only in
+the orchestration supplement and no longer claim universal-guide ownership.
 
 The issue-#23 rollover-successor correction deliberately separates immutable
 prompt capture provenance from mutable current triage ownership, moves each
@@ -343,7 +342,7 @@ teardown is exercised.
 ## Reporting and privacy implementation provenance
 
 The issue-#22/#25 reporting, privacy, guarded remote adapter, report renderer,
-HTML template, report skill, source-managed shared instruction, explicit-root
+HTML template, report skill, source-managed League instruction, explicit-root
 guidance adapter, schemas, documentation, public-safety gate, and focused tests
 are original League implementation. No harness transcript, live Roster,
 multiplexer, browser profile, global instruction, installed file, remote
@@ -354,8 +353,41 @@ Project Ledger artifact; no asset or runtime dependency is copied from it.
 The candidate preserves exact local roots, repositories, and evidence only in
 the canonical local store. Outbound projections contain bounded summaries,
 approved public URLs, opaque League IDs, hashes, and explicit placeholders.
-The report skill uses only public `league report` commands and the cross-harness
-guide remains an uninstalled source input owned for later staging by issue #23.
+The report skill uses only public `league report` commands and the League
+supplement remains an uninstalled source input owned for later staging by issue
+#23.
+
+## Guide ownership correction provenance
+
+Issue #90 replaces the incorrectly universal League guide source with
+`global-agent-instructions/league/AGENTS.md`, SHA-256
+`1067522f0c7608fc8c4a657fa005c99f8d058df4fd979b7b3415c89535db4fbe`.
+The supplement retains only League orchestration deltas and refers universal
+issue, worktree, implementation, review, release, cleanup, and public-safety
+behavior to the terminal-environment-toolkit-owned guide. Toolkit issue #45
+owns the short universal trigger and makes no changes through this repository.
+
+The source candidate is `0.2.28`, the first unallocated release identity after
+the retained `0.2.25`, `0.2.26`, and stable `0.2.27` releases. The isolated
+installer refuses a pre-existing `0.2.28` release or release-bundle directory
+before changing its synthetic stable pointer or existing bytes; it never
+reuses a release identity as an overwrite target.
+
+The guidance adapter and isolated release rehearsal accept only
+`league/AGENTS.md`, reject `AGENTS.md` and universal path forms before file or
+pointer mutation, install exact packaged supplement bytes, restore only the
+prior supplement, and prove one universal hash across pre-install,
+post-install, and post-rollback receipts. These are deterministic temporary-root
+proofs; this candidate performs no installation, stable-pointer change, live
+guide mutation, merge, or toolkit edit.
+
+The issue-#90 blocker correction extends those invariants to the production
+`run_pre_cutover`/`run_live_cutover` boundary. Universal guide paths now refuse
+during plan validation, exact `0.2.28` release and release-bundle collisions
+refuse before the lock or any filesystem mutation, and the locked executor
+rechecks them before apply. Inode-aware temporary-root tests also prove that
+refusal changes no node or tree and that a late rollback does not replace an
+unchanged universal guide or League supplement.
 
 This branch was rebased onto canonical main
 `f015a5c34efca039accc911f8995a340eb067fc7`, whose merge tree is

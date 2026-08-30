@@ -54,7 +54,8 @@ HANDOFF_CALLSIGN_TESTS := \
 
 ACCEPTANCE_TESTS := \
 	tests/test_acceptance_harness.py \
-	tests/test_pre_cutover.py
+	tests/test_pre_cutover.py \
+	tests/test_live_cutover.py
 
 REPORTING_PRIVACY_TESTS := \
 	tests/test_privacy.py \

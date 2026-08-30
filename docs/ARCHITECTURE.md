@@ -61,8 +61,10 @@ The repository keeps the proven runtime and new storage boundary separate:
   not load skills, inspect bodies semantically, or mutate a custom root.
 - `src/league/privacy.py` owns the single exact-byte outbound validator;
   `remote_adapters.py` makes it mandatory immediately before every current or
-  future League remote transport. `guidance.py` has an explicit-root staging
-  API only and cannot discover or update installed guidance.
+  future League remote transport. `guidance.py` owns an explicit-root staging
+  and rollback API for only `league/AGENTS.md`. It refuses the universal
+  `AGENTS.md` target before mutation and cannot discover a home directory or
+  switch a release pointer.
 - `src/league/sqlite_report_ops.py` streams indexed canonical facts into one
   bounded stable JSON report. `reporting.py` derives Markdown and portable HTML
   from that object without another data source. The repository reporting skill
@@ -150,7 +152,9 @@ The repository-local SQLite path is separately testable:
    signals, explicit and expiring operator overrides, capability fallback,
    evidence-gated downgrade, and at most one safe-boundary escalation child.
 13. Configuration, hooks, guides, launchers, immutable failure/teardown/archive
-   evidence, installer backups, and other-product state remain files.
+   evidence, installer backups, and other-product state remain files. The
+   universal agent guide is terminal-environment-toolkit-owned; League owns
+   only its `league/AGENTS.md` orchestration supplement.
 14. Skill roots remain external file-owned inputs. The repository stores only
     public labels, identity/provenance/version/capability declarations, content
     hashes, and sanitized parity receipts; it stores no root path or skill body.

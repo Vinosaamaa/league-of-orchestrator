@@ -150,6 +150,20 @@ restoration, League leaves the new reservation, lease, agent baseline, and
 history intact as a recoverable cleanup obligation. Canonical rollback waits
 until a later exact-identity retry proves the alias and owned-token cleanup.
 
+One installed pre-baseline generation retained exactly
+`scope_kind=squad` and a historical Squad `scope_id` instead of empty metadata.
+That frozen profile is accepted only when those are the only keys, both values
+exactly match the sole prior rolled-back assignment, and the verified current
+thread equals the retired agent ID. The complete version-2 agent, assignment,
+rollback-event, available-callsign, and no-runtime/no-Squad/no-offer/no-lease
+fences remain unchanged. Re-reservation atomically stores the clean v2
+presentation baseline and normalizes durable metadata to `shotcaller` plus the
+exact agent/thread ID before any Herdr mutation. Extra keys, scope or subject
+tampering, another thread, incomplete history, an active assignment, or any
+owned resource refuses without publication. Exact retry is receipt-identical;
+finalization failure restores the captured presentation, rolls back only the
+new attempt, and retains the original historical assignment and event.
+
 Installed Herdr 0.2.32 exposed an additional identity-shape distinction. An
 unbound Codex pane can have a provider-generated callsign/sidebar/thread/title
 such as an owner prompt while having no routing binding and no

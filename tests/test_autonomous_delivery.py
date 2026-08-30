@@ -1122,20 +1122,6 @@ def test_max_concurrency_settles_older_valid_protected_use(root: Path) -> None:
             "concurrency"
         ] == 2
 
-        settled_older = active.settle_protected_gate(
-            SettleProtectedGateCommand(
-                action_use_id=older["action_use_id"],
-                gate_name="assign.reconcile-runtime",
-                gate_scope_digest=older["protected_gate"]["gate_scope_digest"],
-                expected_goal_version=older["goal_version_at_use"],
-                use_receipt_digest=older["use_receipt_digest"],
-                outcome="succeeded",
-                result_receipt_digest="a" * 64,
-                failure_class=None,
-                at=AT,
-            )
-        )
-        assert settled_older["goal_version"] == 4
         settled_newer = active.settle_protected_gate(
             SettleProtectedGateCommand(
                 action_use_id=newer["action_use_id"],
@@ -1149,7 +1135,21 @@ def test_max_concurrency_settles_older_valid_protected_use(root: Path) -> None:
                 at=AT,
             )
         )
-        assert settled_newer["goal_version"] == 5
+        assert settled_newer["goal_version"] == 4
+        settled_older = active.settle_protected_gate(
+            SettleProtectedGateCommand(
+                action_use_id=older["action_use_id"],
+                gate_name="assign.reconcile-runtime",
+                gate_scope_digest=older["protected_gate"]["gate_scope_digest"],
+                expected_goal_version=older["goal_version_at_use"],
+                use_receipt_digest=older["use_receipt_digest"],
+                outcome="succeeded",
+                result_receipt_digest="a" * 64,
+                failure_class=None,
+                at=AT,
+            )
+        )
+        assert settled_older["goal_version"] == 5
         assert active.mode_status("goal:synthetic-delivery", AT)["usage"][
             "concurrency"
         ] == 0

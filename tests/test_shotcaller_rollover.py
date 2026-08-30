@@ -1382,6 +1382,7 @@ def _seed_partially_reconciled_refresh(
     label: str,
     *,
     outbox_count: int = 0,
+    preexisting_assignment: bool = False,
 ) -> dict:
     context = seed_rollover(store, champion_count=2)
     champion_id = context["champion_ids"][0]
@@ -1389,6 +1390,34 @@ def _seed_partially_reconciled_refresh(
     terminal_id = _bind_exact_herdr_runtime_with_capabilities(
         store, root, champion_id, ["hook.capture", "task.execute"]
     )
+    assignment_version = 0
+    if preexisting_assignment:
+        champion = store.agent_status(champion_id)
+        runtime_id = store.connection.execute(
+            "SELECT runtime_instance_id FROM runtime_instances WHERE actor_agent_id=?",
+            (champion_id,),
+        ).fetchone()[0]
+        store.connection.execute(
+            """
+            INSERT INTO task_assignments
+              (task_assignment_id,task_id,request_id,coordinator_agent_id,
+               champion_agent_id,runtime_instance_id,callsign,assignment_role,state,
+               acceptance_receipt_json,cleanup_required,version,created_at,updated_at)
+            VALUES(?,?,NULL,?,?,?,?, 'champion','active',?,0,1,?,?)
+            """,
+            (
+                f"assignment:partial-refresh:{label}",
+                task_id,
+                OLD_ID,
+                champion_id,
+                runtime_id,
+                champion["callsign"],
+                json.dumps({"schema": "synthetic.preexisting-assignment.v1"}),
+                AT5,
+                AT5,
+            ),
+        )
+        assignment_version = 1
     prepared, switched = switch_rollover(store, context)
     rows = {
         row["champion_agent_id"]: row
@@ -1433,7 +1462,7 @@ def _seed_partially_reconciled_refresh(
         switched["version"],
         champion["version"],
         1,
-        0,
+        assignment_version,
         callsign_version,
     )
     runtime_id = target["runtime"]["runtime_instance_id"]
@@ -1454,7 +1483,7 @@ def _seed_partially_reconciled_refresh(
         switched["version"],
         champion["version"],
         1,
-        0,
+        assignment_version,
         callsign_version,
         runtime_receipt_value,
         tuple(pending_outbox_ids),
@@ -1588,6 +1617,98 @@ def test_snapshot_refresh_refuses_forged_or_missing_successor_receipt(
             status = store.rollover_status(partial["prepared"]["operation_id"])
             assert status["snapshot"] == partial["prepared"]["snapshot"]
             assert status["version"] == partial["switched"]["version"]
+
+
+def test_snapshot_refresh_requires_complete_exact_existing_assignment_receipt(
+    root: Path,
+) -> None:
+    state, _ = migrated_state(root, "refresh-partial-exact-receipt")
+    with SQLiteStorage(state) as store:
+        partial = _seed_partially_reconciled_refresh(
+            store,
+            root,
+            "exact-receipt",
+            preexisting_assignment=True,
+        )
+        event = store.connection.execute(
+            "SELECT detail_json FROM events WHERE event_id=?",
+            (partial["reconciliation_id"],),
+        ).fetchone()
+        canonical_detail = json.loads(event["detail_json"])
+        canonical_receipt = canonical_detail["receipt"]
+        assert canonical_receipt["created_assignment"] is False
+        before = store.rollover_status(partial["prepared"]["operation_id"])
+
+        mutations = []
+        for key, value in canonical_receipt.items():
+            missing = dict(canonical_receipt)
+            del missing[key]
+            mutations.append((f"missing-{key}", missing))
+            changed = dict(canonical_receipt)
+            changed[key] = (
+                0
+                if value is None or type(value) is bool
+                else None
+                if isinstance(value, (str, int, list))
+                else "wrong-type"
+            )
+            mutations.append((f"type-{key}", changed))
+        extra = dict(canonical_receipt)
+        extra["unexpected_live_evidence"] = "forged"
+        mutations.append(("extra-field", extra))
+
+        for label, mutated_receipt in mutations:
+            mutated_detail = {
+                "receipt": mutated_receipt,
+                "receipt_digest": hashlib.sha256(
+                    json.dumps(
+                        mutated_receipt,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest(),
+            }
+            store.connection.execute(
+                "UPDATE events SET detail_json=? WHERE event_id=?",
+                (
+                    json.dumps(
+                        mutated_detail,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                    partial["reconciliation_id"],
+                ),
+            )
+            try:
+                RolloverSnapshotRefreshService(
+                    store, ExactSnapshotInventory()
+                ).refresh(
+                    **_partial_refresh_inputs(partial, f"exact-receipt-{label}")
+                )
+            except StorageRefusal as exc:
+                assert exc.code == "snapshot_refresh_identity_changed"
+            else:
+                raise AssertionError(f"{label} incomplete receipt refreshed snapshot")
+            after = store.rollover_status(partial["prepared"]["operation_id"])
+            assert after["snapshot"] == before["snapshot"]
+            assert after["version"] == before["version"]
+            assert store.connection.execute(
+                """
+                SELECT COUNT(*) FROM events
+                 WHERE event_type='rollover_snapshot_refreshed'
+                """
+            ).fetchone()[0] == 0
+            store.connection.execute(
+                "UPDATE events SET detail_json=? WHERE event_id=?",
+                (
+                    json.dumps(
+                        canonical_detail,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                    partial["reconciliation_id"],
+                ),
+            )
 
 
 def test_snapshot_refresh_refuses_partially_retargeted_descendant_outbox(
@@ -3774,6 +3895,7 @@ def main() -> None:
         test_snapshot_refresh_retry_returns_the_identical_receipt(root)
         test_snapshot_refresh_preserves_exact_mixed_progress_and_terminal_marker(root)
         test_snapshot_refresh_refuses_forged_or_missing_successor_receipt(root)
+        test_snapshot_refresh_requires_complete_exact_existing_assignment_receipt(root)
         test_snapshot_refresh_refuses_partially_retargeted_descendant_outbox(root)
         test_partial_progress_refresh_keeps_expiry_and_crash_boundaries(root)
         test_refreshed_snapshot_drives_descendant_reconciliation(root)

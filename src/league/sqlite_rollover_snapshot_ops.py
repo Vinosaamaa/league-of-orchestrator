@@ -10,6 +10,7 @@ from typing import Any, Callable, Mapping, Optional, Sequence
 from .rollover_descendant import _herdr_runtime_generation
 from .sqlite_callsign_ops import capabilities, digest, stable_json, timestamp
 from .sqlite_rollover_ops import (
+    _descendant_reconciliation_receipt_exact,
     _operation,
     _runtime_capability_contract,
     _runtime_identity,
@@ -114,6 +115,7 @@ def _successor_progress(
     }
     if (
         not isinstance(receipt_digest, str)
+        or not _descendant_reconciliation_receipt_exact(receipt)
         or digest(receipt) != receipt_digest
         or any(receipt.get(key) != value for key, value in required_receipt.items())
         or event["event_type"] != "rollover_descendant_reconciled"
@@ -124,10 +126,6 @@ def _successor_progress(
         or int(event["entity_version"]) != receipt_task_version
         or receipt.get("required_capabilities") != list(required_capabilities)
         or receipt.get("runtime_capabilities") != list(runtime_capabilities)
-        or type(receipt.get("created_assignment")) is not bool
-        or type(receipt.get("created_runtime")) is not bool
-        or receipt.get("source_shape")
-        not in {"modern", "imported_legacy_partial"}
     ):
         raise StorageRefusal(
             "snapshot_refresh_identity_changed",

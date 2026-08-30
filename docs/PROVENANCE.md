@@ -724,7 +724,10 @@ boundary. A descendant still owned by the predecessor keeps the prior checks.
 A descendant already owned by the successor is accepted only when one durable
 `rollover_descendant_reconciled` receipt proves the same operation and exact
 task, assignment, callsign, runtime, capability, and outbox transfer. Capture
-history and prior snapshot revisions remain immutable.
+history and prior snapshot revisions remain immutable. The proof validator
+requires the complete reconciliation receipt schema for both newly created and
+pre-existing task assignments; any missing, extra, or type-changed immutable
+live-evidence field refuses even when the attacker recomputes the outer digest.
 
 The replacement snapshot retains the complete original Champion/task/callsign
 set. Its immutable refresh receipt records predecessor-pending and

@@ -58,6 +58,157 @@ DRAIN_RECEIPT_KEYS = {
     "resource_receipt_digest",
     "callsign_release_receipt_digest",
 }
+DESCENDANT_RECONCILIATION_RECEIPT_KEYS = {
+    "schema",
+    "operation_id",
+    "reconciliation_id",
+    "snapshot_id",
+    "snapshot_digest",
+    "snapshot_row_digest",
+    "squad_id",
+    "predecessor_agent_id",
+    "successor_agent_id",
+    "champion_agent_id",
+    "task_id",
+    "runtime_instance_id",
+    "runtime_generation",
+    "runtime_receipt_digest",
+    "required_capabilities",
+    "runtime_capabilities",
+    "created_runtime",
+    "callsign_assignment_id",
+    "task_assignment_id",
+    "created_assignment",
+    "source_shape",
+    "import_provenance_digest",
+    "expected_rollover_version",
+    "expected_agent_version",
+    "expected_task_version",
+    "expected_assignment_version",
+    "expected_callsign_assignment_version",
+    "task_version",
+    "retargeted_outbox_ids",
+    "pending_delivery_count",
+    "reason",
+    "result",
+    "at",
+}
+
+
+def _descendant_reconciliation_receipt_exact(receipt: Any) -> bool:
+    """Validate the complete immutable descendant reconciliation receipt."""
+
+    if (
+        not isinstance(receipt, dict)
+        or set(receipt) != DESCENDANT_RECONCILIATION_RECEIPT_KEYS
+        or receipt.get("schema")
+        != "league.rollover-descendant-reconciliation.v1"
+        or receipt.get("result") != "reconciled"
+        or type(receipt.get("created_runtime")) is not bool
+        or type(receipt.get("created_assignment")) is not bool
+    ):
+        return False
+    string_keys = DESCENDANT_RECONCILIATION_RECEIPT_KEYS - {
+        "required_capabilities",
+        "runtime_capabilities",
+        "created_runtime",
+        "created_assignment",
+        "import_provenance_digest",
+        "expected_rollover_version",
+        "expected_agent_version",
+        "expected_task_version",
+        "expected_assignment_version",
+        "expected_callsign_assignment_version",
+        "task_version",
+        "retargeted_outbox_ids",
+        "pending_delivery_count",
+    }
+    if any(
+        not isinstance(receipt.get(key), str) or not receipt[key]
+        for key in string_keys
+    ):
+        return False
+    integer_keys = {
+        "expected_rollover_version",
+        "expected_agent_version",
+        "expected_task_version",
+        "expected_assignment_version",
+        "expected_callsign_assignment_version",
+        "task_version",
+        "pending_delivery_count",
+    }
+    if any(type(receipt.get(key)) is not int for key in integer_keys):
+        return False
+    if (
+        min(
+            receipt["expected_rollover_version"],
+            receipt["expected_agent_version"],
+            receipt["expected_task_version"],
+            receipt["expected_callsign_assignment_version"],
+            receipt["task_version"],
+        )
+        < 1
+        or receipt["expected_assignment_version"] < 0
+        or receipt["pending_delivery_count"] < 0
+        or receipt["task_version"] != receipt["expected_task_version"] + 1
+        or (
+            receipt["created_assignment"]
+            and receipt["expected_assignment_version"] != 0
+        )
+        or (
+            not receipt["created_assignment"]
+            and receipt["expected_assignment_version"] < 1
+        )
+    ):
+        return False
+    try:
+        required = capabilities(receipt["required_capabilities"])
+        runtime = capabilities(receipt["runtime_capabilities"])
+        timestamp(receipt["at"], "descendant reconciliation receipt time")
+    except (TypeError, StorageRefusal):
+        return False
+    if (
+        list(required) != receipt["required_capabilities"]
+        or list(runtime) != receipt["runtime_capabilities"]
+        or not set(required).issubset(runtime)
+    ):
+        return False
+    outboxes = receipt.get("retargeted_outbox_ids")
+    if (
+        not isinstance(outboxes, list)
+        or any(not isinstance(item, str) or not item for item in outboxes)
+        or outboxes != sorted(set(outboxes))
+        or receipt["pending_delivery_count"] < len(outboxes)
+    ):
+        return False
+    digest_keys = {
+        "snapshot_digest",
+        "snapshot_row_digest",
+        "runtime_receipt_digest",
+    }
+    if any(
+        re.fullmatch(r"[0-9a-f]{64}", receipt[key]) is None
+        for key in digest_keys
+    ):
+        return False
+    source_shape = receipt.get("source_shape")
+    provenance = receipt.get("import_provenance_digest")
+    expected_reason = {
+        "modern": "committed_rollover_descendant_binding",
+        "imported_legacy_partial": "committed_rollover_imported_legacy_partial_binding",
+    }.get(source_shape)
+    return bool(
+        expected_reason
+        and receipt.get("reason") == expected_reason
+        and (
+            (source_shape == "modern" and provenance is None)
+            or (
+                source_shape == "imported_legacy_partial"
+                and isinstance(provenance, str)
+                and re.fullmatch(r"[0-9a-f]{64}", provenance) is not None
+            )
+        )
+    )
 
 
 def _runtime_capability_contract(
@@ -1601,6 +1752,7 @@ def reconcile_rollover_descendant(
                 if (
                     retry["event_type"] != "rollover_descendant_reconciled"
                     or retry["task_id"] != task_id
+                    or not _descendant_reconciliation_receipt_exact(receipt)
                     or any(receipt.get(key) != value for key, value in expected_retry.items())
                     or digest(receipt) != receipt_digest
                 ):
@@ -1989,6 +2141,11 @@ def reconcile_rollover_descendant(
                 "result": "reconciled",
                 "at": at,
             }
+            if not _descendant_reconciliation_receipt_exact(receipt):
+                raise StorageRefusal(
+                    "descendant_reconciliation_conflict",
+                    "generated descendant reconciliation receipt is not exact",
+                )
             if created_assignment:
                 store.connection.execute(
                     """

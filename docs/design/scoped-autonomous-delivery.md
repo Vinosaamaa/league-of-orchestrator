@@ -21,6 +21,12 @@ contained durable scope, acceptance, and authority boundaries. A captured
 prompt could therefore become the effective work container even though prompts
 are intake evidence rather than issue-owned implementation state.
 
+The first issue-first draft still began after issue creation. It could verify a
+new issue without proving that the Shotcaller had searched equivalent open and
+closed work, which allowed two concurrent or repeated requests to create the
+same durable container. Job Journey #216/#217 is the regression receipt: #216
+already held the work and #217 was later closed as its duplicate.
+
 Finally, routing described the direct-tiny boundary through signals, but did not
 make every durable work kind authoritative. A caller could label repository,
 research, benchmark, release, operational, reproduction, debugging, or bug-fix
@@ -33,6 +39,17 @@ active grant revision, separate revocation receipts, bounded external-action
 uses, repair obligations, and immutable repository-issue bindings. Scope changes
 create the next grant revision; an old grant remains evidence but cannot
 authorize a new action. SQLite triggers reject grant and issue-binding mutation.
+
+The same migration adds one CAS-fenced issue-scope lease and immutable
+per-task selection receipts. `league issue select` normalizes the requested
+title and the issue Objective/Scope words, searches every bounded GitHub page
+across open and closed issues, and records `reuse_open`, `reopen_closed`, or
+`create_distinct`. Open matches win deterministically. Closed recurrence uses
+the existing authorize/effect/settle action path, then exact selection retry
+after the owner API reports open; its settled receipt preserves any prior task,
+assignment, Champion, runtime, and session linkage. A create that
+crashes before settlement is recovered by searching again after the lease,
+rather than issuing another create.
 
 `league mode authorize` accepts a strict `league.autonomous-grant.v1` document.
 It records issuer and Shotcaller identities, exact goal, project/repository,
@@ -55,16 +72,15 @@ successful cleanup reaches `cleaned`. `league mode transition` permits only
 checked non-external edges, and `league mode revoke` prevents every new use
 while retaining already-started action evidence.
 
-Before the production `league assign run` path reserves a callsign, it reads the
+Before the production `league assign run` path reserves a callsign, it proves
+the supplied selection digest from canonical SQLite and reads the
 exact GitHub issue from the repository owner API. The issue must match the
 repository and number and record scope, acceptance, and authority boundaries.
 Only a public issue locator, title, body digest, canonical task-scope digest,
 state, verifier kind, and receipt digest enter SQLite; issue body bytes do not.
-The issue title must match the canonical task summary. Missing,
-wrong-repository, scope-mismatched, and closed issues refuse. Reopening requires
-a settled Shotcaller `issue_reopen` action whose receipt and repository/issue
-resource identity match exactly, followed by the exact assignment retry after
-the owner API reports the issue open.
+The issue body, normalized title, semantic-scope digest, and canonical task
+scope must match the durable selection. Missing, unproven, wrong-repository,
+scope-mismatched, changed, and closed issues refuse.
 
 Direct answers and acknowledgements remain issue-free. A read-only check may be
 direct only when it is pre-bounded, answer-or-routing-only, at most five minutes
@@ -87,6 +103,10 @@ inside the same bounded read-only perimeter.
   duplicating public or later-sensitive content in canonical state and exports.
 - Trusting an issue number supplied to the launcher was rejected because it
   does not establish repository ownership, state, or durable scope.
+- Searching only open issues or only exact title bytes was rejected because it
+  misses closed recurrence and trivial case/punctuation differences.
+- Performing search then create without a SQLite owner fence was rejected
+  because concurrent Shotcallers could both observe absence and create.
 - Letting hidden workers own implementation was rejected because it removes the
   visible issue/worktree owner required for review, delivery, and cleanup.
 
@@ -103,6 +123,8 @@ inside the same bounded read-only perimeter.
   teardown.
 - Assignment issue verification completes before callsign reservation, task
   creation, adapter launch, or tab creation.
+- One repository/title/semantic-scope lease owns issue creation at a time;
+  every task gets an immutable selection receipt before assignment.
 - Grant, action, repair, issue, backup, export, installation, deployment,
   production verification, and cleanup receipts remain separate facts.
 
@@ -119,15 +141,18 @@ Focused synthetic tests use temporary SQLite roots and fake GitHub/Herdr
 adapters. They cover default manual status, grant retry/CAS, expiry, revocation,
 scope and sensitive refusal, configured usage limits, Shotcaller-only ownership,
 repair creation, backup/restore, redacted and rollback export,
-missing/wrong/closed/mismatched issue refusal, valid issue-first launch, exact
-retry, and the expanded direct/hidden routing boundary.
+missing/wrong/closed/mismatched/unproven issue refusal, open-equivalent reuse,
+authorized closed recurrence with prior linkage, distinct-scope creation,
+concurrent-create serialization, valid issue-first launch, exact retry, and the
+expanded direct/hidden routing boundary.
 
 ## Remaining limits and cutover boundary
 
-The issue verifier currently supports GitHub repositories through the installed
-`gh api` owner surface; other forges fail closed. Structural headings prove that
-scope, acceptance, and boundaries are present, while the Shotcaller remains
-responsible for the semantic quality of those sections. A successful repository
+The issue selector/verifier currently supports GitHub through the installed
+`gh api` owner surface; other forges fail closed. Semantic matching is a
+deterministic normalization of the title and Objective/Scope words, so the
+Shotcaller remains responsible for authoring one canonical scope and deciding
+whether genuinely changed work is distinct. A successful repository
 test or pull request does not prove merge, release, installation, deployment,
 production verification, or cleanup. Those actions still require their exact
 authority and receipts, and installed/live acceptance remains a separate gate.

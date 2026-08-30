@@ -8,6 +8,7 @@ import json
 import os
 import sqlite3
 import sys
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, BinaryIO, Callable, Optional
@@ -74,7 +75,12 @@ from .legacy_display_reconciliation import (
     LegacyDisplayReconciliationService,
     LegacyDisplayReconciliationSpec,
 )
-from .issue_first import GitHubIssueVerifier
+from .issue_first import (
+    MAX_ISSUE_BODY_BYTES,
+    GitHubIssueSelectionService,
+    GitHubIssueVerifier,
+    IssueSelectionSpec,
+)
 
 
 COMMAND_SCHEMA = "league.command.v1"
@@ -1031,7 +1037,7 @@ def _add_assignment_commands(groups: argparse._SubParsersAction) -> None:
     launch.add_argument("--league-command")
     launch.add_argument("--requires", action="append", default=[])
     launch.add_argument("--startup-timeout-ms", type=int, default=120_000)
-    launch.add_argument("--issue-reopen-receipt-digest")
+    launch.add_argument("--issue-selection-receipt-digest", required=True)
     launching = commands.add_parser("launching", help="Commit launch intent before adapter work.")
     launching.add_argument("--assignment-id", required=True)
     launching.add_argument("--expected-version", type=int, required=True)
@@ -1221,6 +1227,28 @@ def _add_mode_commands(groups: argparse._SubParsersAction) -> None:
     revoke.add_argument("--expected-goal-version", type=int, required=True)
 
 
+def _add_issue_commands(groups: argparse._SubParsersAction) -> None:
+    issue = groups.add_parser(
+        "issue", help="Select, reopen, or create one issue after durable duplicate preflight."
+    )
+    commands = issue.add_subparsers(dest="action", required=True)
+    select = commands.add_parser(
+        "select",
+        help="Search open and closed issues, then reuse, reopen, or create only distinct scope.",
+    )
+    for name in (
+        "task-id",
+        "task-summary",
+        "coordinator-agent-id",
+        "repository",
+        "issue-title",
+        "at",
+    ):
+        select.add_argument(f"--{name}", required=True)
+    select.add_argument("--issue-body", type=Path, required=True)
+    select.add_argument("--reopen-action-receipt-digest")
+
+
 def _add_help_commands(groups: argparse._SubParsersAction) -> None:
     help_group = groups.add_parser("help", help="Emit machine-readable command and schema inventory.")
     commands = help_group.add_subparsers(dest="action", required=True)
@@ -1279,6 +1307,7 @@ def _parser() -> argparse.ArgumentParser:
         _add_assignment_commands,
         _add_hook_commands,
         _add_mode_commands,
+        _add_issue_commands,
         _add_help_commands,
         _add_acceptance_commands,
     ):
@@ -1822,6 +1851,19 @@ def _read_json_object(path: Path) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise StorageRefusal("input_invalid", "JSON input must be an object")
     return value
+
+
+def _read_bounded_text(path: Path, maximum: int, label: str) -> str:
+    try:
+        with path.open("rb") as stream:
+            payload = stream.read(maximum + 1)
+        if not payload or len(payload) > maximum or b"\x00" in payload:
+            raise StorageRefusal("input_invalid", f"{label} is empty or exceeds its bound")
+        return payload.decode("utf-8")
+    except StorageRefusal:
+        raise
+    except (OSError, UnicodeError) as exc:
+        raise StorageRefusal("input_invalid", f"{label} could not be read") from exc
 
 
 def _runtime_matrix(_: Storage, __: argparse.Namespace) -> CommandResult:
@@ -2583,7 +2625,7 @@ def _assign_launch(store: Storage, args: argparse.Namespace) -> CommandResult:
     adapter = HerdrCodexLaunchAdapter(options, runner)
     verifier = GitHubIssueVerifier(
         runner,
-        reopen_action_receipt_digest=args.issue_reopen_receipt_digest,
+        selection_receipt_digest=args.issue_selection_receipt_digest,
     )
     return VisibleChampionLaunchService(
         store, adapter, options, issue_verifier=verifier
@@ -2838,6 +2880,26 @@ def _mode_revoke(store: Storage, args: argparse.Namespace) -> CommandResult:
     ), None
 
 
+def _issue_select(store: Storage, args: argparse.Namespace) -> CommandResult:
+    runner = SubprocessRunner()
+    service = GitHubIssueSelectionService(store, runner)
+    return service.select(
+        IssueSelectionSpec(
+            task_id=args.task_id,
+            task_summary=args.task_summary,
+            coordinator_agent_id=args.coordinator_agent_id,
+            repository=args.repository,
+            issue_title=args.issue_title,
+            issue_body=_read_bounded_text(
+                args.issue_body, MAX_ISSUE_BODY_BYTES, "repository issue body"
+            ),
+        ),
+        f"issue-attempt:{uuid.uuid4()}",
+        args.at,
+        reopen_action_receipt_digest=args.reopen_action_receipt_digest,
+    ), None
+
+
 HANDLERS: dict[str, CommandHandler] = {
     "storage.integrity": _storage_integrity,
     "storage.backup": _storage_backup,
@@ -2935,6 +2997,7 @@ HANDLERS: dict[str, CommandHandler] = {
     "mode.settle": _mode_settle,
     "mode.transition": _mode_transition,
     "mode.revoke": _mode_revoke,
+    "issue.select": _issue_select,
 }
 
 
@@ -2974,6 +3037,7 @@ SCHEMA_INVENTORY = (
     "league-mode-status.schema.json",
     "league-mode-action-receipt.schema.json",
     "league-repository-issue.schema.json",
+    "league-issue-selection-receipt.schema.json",
 )
 
 CONFIG_ONLY_COMMANDS = {

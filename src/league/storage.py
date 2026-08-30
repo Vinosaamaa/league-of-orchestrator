@@ -12,6 +12,7 @@ from .storage_assignment import (
 from .storage_callsign import CallsignQueueStorage
 from .storage_delivery import DeliveryStorage
 from .storage_lifecycle import LifecycleStorage
+from .storage_issue import IssueStorage
 from .storage_mode import ModeStorage
 from .storage_outbox import OutboxDispatchIdentity, OutboxStorage
 from .storage_project import ProjectStorage
@@ -53,6 +54,7 @@ class Storage(
     CallsignQueueStorage,
     RolloverStorage,
     ModeStorage,
+    IssueStorage,
 ):
     """The only domain-facing persistence interface.
 

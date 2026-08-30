@@ -415,38 +415,38 @@ def _insert_issue_binding(store: Any, command: PrepareAssignmentCommand) -> None
             "issue_scope_mismatch",
             "verified repository issue does not match the canonical task scope",
         )
-    reopen_digest = receipt["reopen_action_receipt_digest"]
-    if reopen_digest is not None:
-        action = store.connection.execute(
-            """
-            SELECT * FROM autonomous_action_uses
-             WHERE result_receipt_digest=? AND action_kind='issue_reopen' AND state='succeeded'
-            """,
-            (reopen_digest,),
-        ).fetchone()
-        if action is None or action["external_owner_agent_id"] != command.coordinator_agent_id:
-            raise StorageRefusal(
-                "issue_reopen_authority_invalid",
-                "closed issue has no exact settled Shotcaller reopen authority",
-            )
-        action_scope = json.loads(action["action_scope_json"])
-        resources = json.loads(action["resource_use_json"])
-        if (
-            canonical_repository(str(action_scope.get("repository")))[1]
-            != canonical_repository(command.repository)[1]
-            or resources.get("issue") != command.issue
-        ):
-            raise StorageRefusal(
-                "issue_reopen_authority_invalid",
-                "reopen authority does not match the exact repository issue",
-            )
+    selection = store.connection.execute(
+        """
+        SELECT * FROM repository_issue_selection_receipts WHERE receipt_digest=?
+        """,
+        (receipt["issue_selection_receipt_digest"],),
+    ).fetchone()
+    selection_exact = selection is not None and (
+        selection["task_id"] == command.task_id
+        and selection["task_summary"] == command.task_summary
+        and selection["coordinator_agent_id"] == command.coordinator_agent_id
+        and selection["repository_key"] == canonical_repository(command.repository)[1]
+        and int(selection["issue"]) == command.issue
+        and selection["issue_state"] == "open"
+        and selection["normalized_title"] == receipt["normalized_title"]
+        and selection["semantic_scope_digest"] == receipt["semantic_scope_digest"]
+        and selection["issue_body_digest"] == receipt["issue_body_digest"]
+        and selection["task_scope_digest"] == receipt["task_scope_digest"]
+    )
+    if not selection_exact:
+        raise StorageRefusal(
+            "issue_selection_unproven",
+            "assignment has no exact durable duplicate-preflight selection receipt",
+        )
+    assert selection is not None
+    reopen_digest = selection["reopen_action_receipt_digest"]
     store.connection.execute(
         """
         INSERT INTO repository_issue_bindings
           (task_id,assignment_id,request_id,repository,issue,issue_url,issue_state,
-           issue_title,issue_body_digest,task_scope_digest,reopen_action_receipt_digest,
-           verifier_kind,verified_at,receipt_digest)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+           issue_title,issue_body_digest,task_scope_digest,issue_selection_receipt_digest,
+           reopen_action_receipt_digest,verifier_kind,verified_at,receipt_digest)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """,
         (
             command.task_id,
@@ -459,6 +459,7 @@ def _insert_issue_binding(store: Any, command: PrepareAssignmentCommand) -> None
             receipt["issue_title"],
             receipt["issue_body_digest"],
             receipt["task_scope_digest"],
+            receipt["issue_selection_receipt_digest"],
             reopen_digest,
             receipt["verifier_kind"],
             receipt["verified_at"],

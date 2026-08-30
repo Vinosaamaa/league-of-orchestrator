@@ -569,9 +569,17 @@ configuration, migration, test, benchmark, durable research, release,
 operational, reproduction, debugging, and bug-fix work now force visible
 Champion execution; the prior direct-tiny answer/check path is preserved.
 
+The owner-found duplicate-issue regression deliberately extends v17 with
+a normalized repository/title/semantic-scope lease and immutable per-task issue
+selection receipts. Open equivalents are reused, genuine closed recurrence
+requires the existing settled Shotcaller reopen authority and preserves prior
+Champion/runtime session linkage, distinct work creates once, and concurrent
+creators fail closed behind the SQLite owner fence. `assign run` now requires
+that receipt in addition to the fresh owner-API issue verification.
+
 Migration v17 is named
 `scoped-autonomous-delivery-and-issue-first-assignment`, checksum
-`4a69acd7a023eee1d66ca31dcf19d756a07e2eb7ebb3afc3900c746f9e5d7df3`.
+`11712fe17a52effa9ad34de1a0e40a43152b91e6ab53cde6ccad6e626f9dba60`.
 Existing migrations remain byte-for-byte unchanged. Focused tests use only
 temporary roots and fake GitHub/Herdr boundaries; they perform no live grant,
 merge, release, installation, deployment, production action, or teardown.

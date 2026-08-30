@@ -18,6 +18,7 @@ from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
 
 from . import sqlite_runtime_ops
 from . import sqlite_mode_ops
+from . import sqlite_issue_ops
 from .sqlite_artifact_ops import declare as declare_repository_artifact_operation
 from .sqlite_artifact_ops import publish as record_repository_publication_operation
 from .sqlite_artifact_ops import status as task_artifacts_operation
@@ -165,6 +166,7 @@ from .sqlite_rollover_snapshot_schema import (
 )
 from .sqlite_autonomous_schema import MIGRATION_NAME as AUTONOMOUS_MIGRATION_NAME
 from .sqlite_autonomous_schema import STATEMENTS as AUTONOMOUS_MIGRATION_STATEMENTS
+from .storage_issue import BeginIssueSelectionCommand, CompleteIssueSelectionCommand
 
 
 WAL_MINIMUM = (3, 51, 3)
@@ -1409,6 +1411,8 @@ _EXPORT_TABLES = (
     "authorization_revocations",
     "autonomous_action_uses",
     "autonomous_repair_obligations",
+    "repository_issue_selection_leases",
+    "repository_issue_selection_receipts",
     "repository_issue_bindings",
 )
 
@@ -1485,6 +1489,8 @@ _EXPORT_ORDER = {
     "authorization_revocations": "revoked_at,grant_id",
     "autonomous_action_uses": "started_at,action_use_id",
     "autonomous_repair_obligations": "created_at,repair_id",
+    "repository_issue_selection_leases": "repository_key,normalized_title,selection_key",
+    "repository_issue_selection_receipts": "created_at,selection_receipt_id",
     "repository_issue_bindings": "repository,issue,task_id",
 }
 
@@ -1573,6 +1579,25 @@ _INSPECTION_REDACTIONS = {
         "failure_class",
     },
     "autonomous_repair_obligations": {"failure_class"},
+    "repository_issue_selection_leases": {
+        "repository",
+        "current_task_id",
+        "current_task_summary",
+        "current_coordinator_agent_id",
+        "owner_attempt_id",
+    },
+    "repository_issue_selection_receipts": {
+        "task_id",
+        "task_summary",
+        "coordinator_agent_id",
+        "repository",
+        "issue_title",
+        "prior_task_id",
+        "prior_assignment_id",
+        "prior_champion_agent_id",
+        "prior_runtime_instance_id",
+        "prior_session_ref",
+    },
     "repository_issue_bindings": {"issue_title"},
 }
 
@@ -2061,6 +2086,38 @@ class SQLiteStorage(SQLiteTransactionCore):
             reason,
             expected_goal_version,
             at,
+        )
+
+    def begin_issue_selection(
+        self, command: BeginIssueSelectionCommand
+    ) -> dict[str, Any]:
+        return sqlite_issue_ops.begin_issue_selection(self, command)
+
+    def complete_issue_selection(
+        self, command: CompleteIssueSelectionCommand
+    ) -> dict[str, Any]:
+        return sqlite_issue_ops.complete_issue_selection(self, command)
+
+    def release_issue_selection(
+        self,
+        selection_key: str,
+        owner_attempt_id: str,
+        expected_version: int,
+        at: str,
+    ) -> dict[str, Any]:
+        return sqlite_issue_ops.release_issue_selection(
+            self, selection_key, owner_attempt_id, expected_version, at
+        )
+
+    def verify_issue_reopen_authority(
+        self,
+        receipt_digest: str,
+        coordinator_agent_id: str,
+        repository: str,
+        issue: int,
+    ) -> dict[str, Any]:
+        return sqlite_issue_ops.verify_issue_reopen_authority(
+            self, receipt_digest, coordinator_agent_id, repository, issue
         )
 
     def agent_status(self, agent_id: str) -> Optional[dict[str, Any]]:

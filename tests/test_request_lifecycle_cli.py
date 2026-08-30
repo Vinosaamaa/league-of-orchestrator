@@ -68,6 +68,7 @@ def test_help_inventory_and_schemas() -> None:
         "mode.settle",
         "mode.transition",
         "mode.revoke",
+        "issue.select",
     }
     assert required <= set(inventory["commands"])
     assert {f"request.{name}" for name in cli.REQUEST_STATE_COMMANDS} <= set(
@@ -89,6 +90,7 @@ def test_help_inventory_and_schemas() -> None:
         "league-mode-status.schema.json",
         "league-mode-action-receipt.schema.json",
         "league-repository-issue.schema.json",
+        "league-issue-selection-receipt.schema.json",
     } <= set(inventory["schemas"])
     for name in inventory["schemas"]:
         schema = json.loads((ROOT / "schema" / name).read_text(encoding="utf-8"))

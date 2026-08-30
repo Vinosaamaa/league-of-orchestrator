@@ -94,6 +94,62 @@ STATEMENTS = (
     )
     """,
     """
+    CREATE TABLE repository_issue_selection_leases (
+      selection_key TEXT PRIMARY KEY,
+      repository TEXT NOT NULL,
+      repository_key TEXT NOT NULL,
+      normalized_title TEXT NOT NULL,
+      semantic_scope_digest TEXT NOT NULL CHECK (length(semantic_scope_digest)=64),
+      state TEXT NOT NULL CHECK (state IN ('available','selecting','completed')),
+      owner_attempt_id TEXT,
+      current_task_id TEXT NOT NULL,
+      current_task_summary TEXT NOT NULL,
+      current_coordinator_agent_id TEXT NOT NULL REFERENCES agent_instances(agent_id),
+      lease_expires_at TEXT,
+      version INTEGER NOT NULL CHECK (version > 0),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE (repository_key,normalized_title,semantic_scope_digest),
+      CHECK ((state='selecting') =
+             (owner_attempt_id IS NOT NULL AND lease_expires_at IS NOT NULL))
+    )
+    """,
+    """
+    CREATE TABLE repository_issue_selection_receipts (
+      selection_receipt_id TEXT PRIMARY KEY,
+      selection_key TEXT NOT NULL REFERENCES repository_issue_selection_leases(selection_key),
+      selection_version INTEGER NOT NULL CHECK (selection_version > 0),
+      task_id TEXT NOT NULL UNIQUE,
+      task_summary TEXT NOT NULL,
+      coordinator_agent_id TEXT NOT NULL REFERENCES agent_instances(agent_id),
+      repository TEXT NOT NULL,
+      repository_key TEXT NOT NULL,
+      normalized_title TEXT NOT NULL,
+      semantic_scope_digest TEXT NOT NULL CHECK (length(semantic_scope_digest)=64),
+      decision TEXT NOT NULL CHECK (decision IN (
+        'reuse_open','reopen_closed','create_distinct'
+      )),
+      issue INTEGER NOT NULL CHECK (issue > 0),
+      issue_url TEXT NOT NULL,
+      issue_state TEXT NOT NULL CHECK (issue_state='open'),
+      issue_title TEXT NOT NULL,
+      issue_body_digest TEXT NOT NULL CHECK (length(issue_body_digest)=64),
+      duplicate_matches INTEGER NOT NULL CHECK (duplicate_matches >= 0),
+      prior_task_id TEXT,
+      prior_assignment_id TEXT,
+      prior_champion_agent_id TEXT,
+      prior_runtime_instance_id TEXT,
+      prior_session_ref TEXT,
+      reopen_action_receipt_digest TEXT,
+      task_scope_digest TEXT NOT NULL CHECK (length(task_scope_digest)=64),
+      receipt_digest TEXT NOT NULL UNIQUE CHECK (length(receipt_digest)=64),
+      created_at TEXT NOT NULL,
+      CHECK (reopen_action_receipt_digest IS NULL OR length(reopen_action_receipt_digest)=64),
+      UNIQUE (reopen_action_receipt_digest),
+      UNIQUE (selection_key,task_id)
+    )
+    """,
+    """
     CREATE TABLE repository_issue_bindings (
       task_id TEXT PRIMARY KEY REFERENCES tasks(task_id),
       assignment_id TEXT NOT NULL UNIQUE REFERENCES task_assignments(task_assignment_id),
@@ -105,6 +161,8 @@ STATEMENTS = (
       issue_title TEXT NOT NULL,
       issue_body_digest TEXT NOT NULL CHECK (length(issue_body_digest)=64),
       task_scope_digest TEXT NOT NULL CHECK (length(task_scope_digest)=64),
+      issue_selection_receipt_digest TEXT NOT NULL
+        REFERENCES repository_issue_selection_receipts(receipt_digest),
       reopen_action_receipt_digest TEXT,
       verifier_kind TEXT NOT NULL CHECK (verifier_kind='github-api'),
       verified_at TEXT NOT NULL,
@@ -115,6 +173,7 @@ STATEMENTS = (
     "CREATE INDEX ix_grants_goal_revision ON authorization_grants(goal_id,revision)",
     "CREATE INDEX ix_mode_actions_goal_state ON autonomous_action_uses(goal_id,state,started_at)",
     "CREATE INDEX ix_mode_repairs_goal_state ON autonomous_repair_obligations(goal_id,state,updated_at)",
+    "CREATE INDEX ix_issue_selection_receipts_repository_issue ON repository_issue_selection_receipts(repository_key,issue,created_at)",
     "CREATE INDEX ix_issue_bindings_repository_issue ON repository_issue_bindings(repository,issue)",
     """
     CREATE TRIGGER authorization_grants_immutable_update
@@ -135,5 +194,15 @@ STATEMENTS = (
     CREATE TRIGGER repository_issue_bindings_immutable_delete
     BEFORE DELETE ON repository_issue_bindings
     BEGIN SELECT RAISE(ABORT,'repository_issue_binding_immutable'); END
+    """,
+    """
+    CREATE TRIGGER repository_issue_selection_receipts_immutable_update
+    BEFORE UPDATE ON repository_issue_selection_receipts
+    BEGIN SELECT RAISE(ABORT,'repository_issue_selection_receipt_immutable'); END
+    """,
+    """
+    CREATE TRIGGER repository_issue_selection_receipts_immutable_delete
+    BEFORE DELETE ON repository_issue_selection_receipts
+    BEGIN SELECT RAISE(ABORT,'repository_issue_selection_receipt_immutable'); END
     """,
 )

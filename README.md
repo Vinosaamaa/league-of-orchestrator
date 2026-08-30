@@ -88,10 +88,10 @@ Nothing here installs files, changes hooks, or connects to live Roster state.
   **YOLO mode**) with exact goal/action receipts, expiry, revocation, configured
   usage limits, bounded repair, backup/export coverage, and Shotcaller-only
   external-action ownership.
-- Issue-first visible delegation that verifies the exact GitHub issue and binds
-  its public locator plus content/scope digests before assignment or tab
-  mutation; durable work kinds cannot route direct or hide implementation
-  ownership.
+- Issue-first visible delegation with duplicate preflight across open and
+  closed GitHub issues, durable reuse/reopen/create selection receipts, and an
+  exact binding before assignment or tab mutation; durable work kinds cannot
+  route direct or hide implementation ownership.
 
 The proven watcher remains one deep module. The new storage slice is a small
 modular monolith: one composite `Storage` interface with cohesive administrative,
@@ -213,6 +213,25 @@ issue-first receipts have separate public schemas. An autonomous grant never
 makes repository implementation direct: `request dispatch` still requires a
 visible Champion, and `assign run` verifies the issue against GitHub before any
 canonical assignment or terminal mutation.
+
+Before `assign run`, select the issue through the duplicate-preflight command:
+
+```sh
+./bin/league --state-root /absolute/state issue select \
+  --task-id task:example --task-summary "Implement the exact task" \
+  --coordinator-agent-id <shotcaller-agent-id> \
+  --repository https://github.com/owner/repository.git \
+  --issue-title "Implement the exact issue" --issue-body /absolute/issue.md \
+  --at 2026-01-01T00:00:00Z
+```
+
+The command searches all open and closed issues by normalized title and the
+normalized Objective/Scope section. It reuses an open equivalent, recognizes a
+closed recurrence only after the supported `issue_reopen` action is settled and
+the owner API reports it open on exact retry, and creates only distinct scope.
+Pass its `receipt_digest` to `assign run` as
+`--issue-selection-receipt-digest`; an absent, stale, or mismatched receipt
+refuses before assignment or terminal mutation.
 
 ## Repository-local SQLite implementation; cutover still gated
 

@@ -347,12 +347,12 @@ def _obligation_counts(store: Any, actor_agent_id: str) -> dict[str, int]:
                AND a.status IN ('active','started','working','progress','blocked','ready_to_land')
                AND (
                  a.task_id IS NULL
-                 OR t.state IN ('active','pending','accepted','in_progress','blocked','ready_to_land')
+                 OR t.state IN ('active','pending','accepted','working','progress','in_progress','blocked','ready_to_land')
                )
           ) + (
             SELECT COUNT(*) FROM tasks t
              WHERE t.coordinator_agent_id=?
-               AND t.state IN ('active','pending','accepted','in_progress','blocked','ready_to_land')
+               AND t.state IN ('active','pending','accepted','working','progress','in_progress','blocked','ready_to_land')
                AND NOT EXISTS (
                  SELECT 1 FROM agent_instances a
                   WHERE a.task_id=t.task_id

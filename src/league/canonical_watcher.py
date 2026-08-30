@@ -398,16 +398,34 @@ def _supervision_snapshot(
            AND a.status IN ('active','started','working','progress','blocked','ready_to_land')
            AND (
              a.task_id IS NULL
-             OR t.state IN ('active','pending','accepted','in_progress','blocked','ready_to_land')
+             OR t.state IN ('active','pending','accepted','working','progress','in_progress','blocked','ready_to_land')
            )
          ORDER BY a.agent_id
         """,
         (actor_id,),
     ).fetchall()
+    watcher_delivery = store.connection.execute(
+        """
+        SELECT r.event_id,r.received_at,e.status,e.occurred_at,e.update_text,
+               COALESCE(
+                 (SELECT a.callsign FROM agent_instances a WHERE a.agent_id=e.agent_id),
+                 (SELECT a.callsign
+                    FROM task_assignments x
+                    JOIN agent_instances a ON a.agent_id=x.champion_agent_id
+                   WHERE x.task_id=e.task_id
+                   ORDER BY x.updated_at DESC,x.task_assignment_id DESC LIMIT 1)
+               ) callsign
+          FROM recipient_receipts r JOIN events e ON e.event_id=r.event_id
+         WHERE r.recipient_agent_id=? AND r.effect_kind='watcher_event'
+         ORDER BY r.received_at DESC,r.event_id DESC LIMIT 1
+        """,
+        (actor_id,),
+    ).fetchone()
     return {
         "user_message_generation": 0 if generation is None else int(generation[0]),
         "obligations": _obligation_counts(store, actor_id),
         "champions": [dict(row) for row in champions],
+        "watcher_delivery": None if watcher_delivery is None else dict(watcher_delivery),
     }
 
 
@@ -495,6 +513,19 @@ def _supervise(
                     "shotcaller": callsign,
                     "writer": "sqlite",
                 }
+            if current["watcher_delivery"] != baseline["watcher_delivery"]:
+                delivered = current["watcher_delivery"]
+                if delivered is not None:
+                    return {
+                        "event": "champion-update",
+                        "event_id": delivered["event_id"],
+                        "callsign": delivered["callsign"],
+                        "status": delivered["status"],
+                        "at": delivered["occurred_at"],
+                        "update": delivered["update_text"],
+                        "shotcaller": callsign,
+                        "writer": "sqlite",
+                    }
             if current["champions"] != baseline["champions"]:
                 previous = {row["agent_id"]: row for row in baseline["champions"]}
                 changed = next(
@@ -505,27 +536,38 @@ def _supervise(
                     ),
                     None,
                 )
-                if changed is None:
+                if changed is None and current["obligations"]["pending_deliveries"] == 0:
                     return {
                         "event": "champions-idle",
                         "active": len(current["champions"]),
                         "shotcaller": callsign,
                         "writer": "sqlite",
                     }
-                return {
-                    "event": "champion-update",
-                    "callsign": changed["callsign"],
-                    "status": changed["status"],
-                    "at": changed["updated_at"],
-                    "update": changed["update_text"],
-                    "shotcaller": callsign,
-                    "writer": "sqlite",
-                }
-            if current["obligations"] != baseline["obligations"]:
+                if changed is not None and current["obligations"]["pending_deliveries"] == 0:
+                    return {
+                        "event": "champion-update",
+                        "callsign": changed["callsign"],
+                        "status": changed["status"],
+                        "at": changed["updated_at"],
+                        "update": changed["update_text"],
+                        "shotcaller": callsign,
+                        "writer": "sqlite",
+                    }
+            before_obligations = {
+                key: value
+                for key, value in baseline["obligations"].items()
+                if key != "pending_deliveries"
+            }
+            after_obligations = {
+                key: value
+                for key, value in current["obligations"].items()
+                if key != "pending_deliveries"
+            }
+            if after_obligations != before_obligations:
                 return {
                     "event": "obligations-changed",
-                    "before": baseline["obligations"],
-                    "after": current["obligations"],
+                    "before": before_obligations,
+                    "after": after_obligations,
                     "shotcaller": callsign,
                     "writer": "sqlite",
                 }

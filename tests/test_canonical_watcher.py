@@ -17,10 +17,21 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / "src"), str(ROOT / "tests")]
 
-from storage_fixture import AT2, CHAMPION_ID, SHOTCALLER_ID  # noqa: E402
+from storage_fixture import AT2, CHAMPION_ID, SHOTCALLER_ID, TASK_ID  # noqa: E402
 from storage_test_support import seeded_state  # noqa: E402
+from lifecycle_fakes import FakeIds, FakeLaunchAdapter  # noqa: E402
+from request_lifecycle_fixture import (  # noqa: E402
+    GAREN_RUNTIME_TWO,
+    LUX_ID,
+    capture_p100,
+    create_context,
+    dispatch_request,
+)
+from league.request_services import AssignmentService, AssignmentSpec  # noqa: E402
 from league.sqlite_store import SQLiteStorage  # noqa: E402
 from league.sqlite_watcher_ops import _obligation_counts  # noqa: E402
+from league.storage import RuntimeRegistrationCommand  # noqa: E402
+from league.canonical_watcher import _supervision_snapshot  # noqa: E402
 
 
 WATCHER = ROOT / "bin/agent-watcher"
@@ -255,7 +266,9 @@ def test_supervise_wakes_and_stop_allows_after_settlement(root: Path) -> None:
     output, error = waiter.communicate(timeout=5)
     assert not error, error
     wake = json.loads(output)
-    assert wake["event"] == "champions-idle"
+    assert wake["event"] == "champion-update"
+    assert wake["event_id"] == settled["result"]["event_id"]
+    assert wake["status"] == "completed"
     assert wake["writer"] == "sqlite"
     status = _watcher(env, "--shotcaller", "Garen", "status")
     assert status == {"shotcaller": "Garen", "writer": "sqlite"}
@@ -270,6 +283,24 @@ def test_supervise_wakes_and_stop_allows_after_settlement(root: Path) -> None:
         },
     )
     assert allowed == {}, allowed
+
+
+def test_working_and_progress_tasks_remain_supervised(root: Path) -> None:
+    _, state, _ = seeded_state(root, "working-task-supervision")
+    with SQLiteStorage(state) as store:
+        for task_state in ("working", "progress"):
+            with store._transaction():
+                store.connection.execute(
+                    "UPDATE tasks SET state=? WHERE task_id=?", (task_state, TASK_ID)
+                )
+            counts = _obligation_counts(store, SHOTCALLER_ID)
+            snapshot = _supervision_snapshot(
+                store, "watcher:Garen", SHOTCALLER_ID
+            )
+            assert counts["active_champions"] >= 1
+            assert any(
+                row["agent_id"] == CHAMPION_ID for row in snapshot["champions"]
+            )
 
 
 def test_supervise_user_priority(root: Path) -> None:
@@ -1226,9 +1257,12 @@ def test_material_delivery_watcher_direct_dedup_and_unavailable(root: Path) -> N
         "2026-01-01T00:02:00Z",
     )
     assert transitioned["result"]["delivery"]["state"] == "delivered"
+    assert transitioned["result"]["delivery"]["effect_kind"] == "watcher_event"
     output, error = waiter.communicate(timeout=5)
     assert not error, error
-    assert json.loads(output)["event"] == "champion-update"
+    wake = json.loads(output)
+    assert wake["event"] == "champion-update"
+    assert wake["event_id"] == transitioned["result"]["event_id"]
 
     _, direct_state, _ = seeded_state(root, "direct-delivery")
     direct_env = _environment(root / "direct-delivery", direct_state)
@@ -1317,11 +1351,98 @@ def test_material_delivery_watcher_direct_dedup_and_unavailable(root: Path) -> N
     )
 
 
+def test_task_transition_cli_dispatches_exact_watcher_receipt(root: Path) -> None:
+    state, store, clock = create_context(root, "task-transition-cli-delivery")
+    capture_p100(store, clock)
+    store.claim_request("R3", "runtime:garen:one", "claim-r3", clock.after(120), clock.now())
+    dispatch_request(store, clock, "R3", "claim-r3", "dispatch-r3", "repository-write", "champion")
+    active = AssignmentService(store, FakeLaunchAdapter(), clock, FakeIds()).assign(
+        AssignmentSpec(
+            assignment_id="assignment:task-transition-cli",
+            request_id="R3",
+            claim_token="claim-r3",
+            task_id="task:task-transition-cli",
+            task_summary="Synthetic stable task-transition delivery",
+            coordinator_agent_id=SHOTCALLER_ID,
+            champion_agent_id=LUX_ID,
+            callsign="Lux",
+            repository="https://example.invalid/league.git",
+            issue=23,
+            branch="agent/synthetic/task-transition-cli",
+            worktree="/synthetic/worktrees/task-transition-cli",
+        )
+    )
+    store.register_runtime(
+        RuntimeRegistrationCommand(
+            GAREN_RUNTIME_TWO,
+            SHOTCALLER_ID,
+            "codex-thread",
+            "herdr",
+            f"session:{GAREN_RUNTIME_TWO}",
+            "synthetic:garen:two",
+            "generation:garen:two",
+            "closed",
+            True,
+            clock.now(),
+        )
+    )
+    store.close()
+    env = _environment(root / "task-transition-cli-delivery", state)
+    waiter = subprocess.Popen(
+        [env["TEST_INSTALLED_WATCHER"], "--shotcaller", "Garen", "supervise", "--poll-seconds", "0.05"],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+    )
+    time.sleep(0.15)
+    assert waiter.poll() is None
+    transitioned = _league_env(
+        state,
+        env,
+        "task",
+        "transition",
+        "--task-id",
+        active["task_id"],
+        "--runtime-instance-id",
+        active["runtime_instance_id"],
+        "--expected-version",
+        "3",
+        "--state",
+        "working",
+        "--update",
+        "Synthetic CLI task transition delivered.",
+        "--next-action",
+        "Complete the synthetic task.",
+        "--transition-id",
+        "transition:task-transition-cli",
+        "--transition-key",
+        "transition-key:task-transition-cli",
+        "--event-id",
+        "event:task-transition-cli",
+        "--outbox-id",
+        "outbox:task-transition-cli",
+        "--recipient-agent-id",
+        SHOTCALLER_ID,
+        "--at",
+        clock.now(),
+    )
+    assert transitioned["result"]["delivery"]["state"] == "delivered"
+    assert transitioned["result"]["delivery"]["effect_kind"] == "watcher_event"
+    output, error = waiter.communicate(timeout=5)
+    assert not error, error
+    wake = json.loads(output)
+    assert wake["event"] == "champion-update"
+    assert wake["event_id"] == transitioned["result"]["event_id"]
+    assert wake["status"] == "working"
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="league-canonical-watcher-") as temporary:
         root = Path(temporary)
         test_explicit_and_session_stop_dispatch(root)
         test_supervise_wakes_and_stop_allows_after_settlement(root)
+        test_working_and_progress_tasks_remain_supervised(root)
         test_supervise_user_priority(root)
         test_long_lived_supervisor_allows_concurrent_prompt_and_stop(root)
         test_codex_and_cursor_prompt_capture_exactly_once(root)
@@ -1335,6 +1456,7 @@ def main() -> None:
         test_transition_contention_keeps_stop_safe_and_prompt_durable(root)
         test_codex_stop_rejects_incomplete_real_payload(root)
         test_material_delivery_watcher_direct_dedup_and_unavailable(root)
+        test_task_transition_cli_dispatches_exact_watcher_receipt(root)
     print("PASS: installed SQLite Stop/supervise plus watcher/direct exact-once delivery and pending fallback")
 
 

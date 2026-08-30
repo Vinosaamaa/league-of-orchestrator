@@ -198,7 +198,7 @@ def _validate_runtime_context(context: Mapping[str, Any], actions: Sequence[Mapp
         raise StorageRefusal("cleanup_identity_mismatch", "canonical runtime identity is missing or ambiguous")
     runtime = matches[0]
     if (
-        runtime["harness_kind"] != "codex"
+        runtime["harness_kind"] not in {"codex", "codex-thread"}
         or runtime["backend_kind"] != "herdr"
         or runtime["session_ref"] != harness["session_id"]
         or runtime["endpoint"] != backend["pane_id"]

@@ -534,29 +534,17 @@ class GitAdapter(_BaseAdapter):
             )
         elif action["action_kind"] == "branch_delete":
             mode = self._branch_deletion_mode()
-            if mode == "merged-ancestor":
-                self.runner.run(
-                    (
-                        "git",
-                        "-C",
-                        self.identity["repository"],
-                        "branch",
-                        "-d",
-                        self.identity["branch"],
-                    )
+            self.runner.run(
+                (
+                    "git",
+                    "-C",
+                    self.identity["repository"],
+                    "update-ref",
+                    "-d",
+                    f"refs/heads/{self.identity['branch']}",
+                    self.identity["head"],
                 )
-            else:
-                self.runner.run(
-                    (
-                        "git",
-                        "-C",
-                        self.identity["repository"],
-                        "update-ref",
-                        "-d",
-                        f"refs/heads/{self.identity['branch']}",
-                        self.identity["head"],
-                    )
-                )
+            )
             return {
                 "exact_git_target": True,
                 "action": action["action_kind"],

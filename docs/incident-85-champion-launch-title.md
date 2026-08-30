@@ -139,7 +139,12 @@ League-owned, and sidebar, thread, and terminal titles must contain no retired
 callsign. League stores that clean presentation as a v2 durable baseline in the
 same transaction as re-reservation, then requires an exact second
 source/title/token/thread/terminal/generation/sequence observation before any
-Herdr publication.
+Herdr publication. If the process crashes immediately after the routing rename,
+an exact retry resumes only when the alias is the reserved callsign, every
+presentation byte still matches the baseline, and the sequence is exactly one
+newer. It skips the duplicate rename. Any mismatch clears the League-owned
+alias and restores only baseline display tokens before rolling back the new
+reservation, leaving newer user presentation metadata unchanged.
 
 Recovery refuses before any Herdr mutation when assignment history is
 ambiguous, the thread generation differs, the agent is not the exact bootstrap

@@ -548,7 +548,12 @@ whose source is not League-owned and whose title/sidebar/thread contain no
 retired callsign, then atomically records a v2 baseline containing its source,
 title, endpoint generation, and state-change sequence with the new reservation.
 A second exact observation before publication refuses any source, title, token,
-thread, terminal, generation, route, or sequence race.
+thread, terminal, generation, route, or sequence race. One crash-only exception
+resumes an already-published exact callsign alias when every presentation byte
+still matches the v2 baseline and the sequence is exactly baseline plus one;
+retry skips the rename and continues publication. Any other routed partial
+effect restores the owned alias and baseline tokens before canonical rollback,
+preserving a newer user presentation.
 The reopened issue adds one deliberately separate legacy provenance path:
 owner-authorized reconciliation binds the exact canonical Champion identity to
 the expected live presentation, writes immutable intent before the external

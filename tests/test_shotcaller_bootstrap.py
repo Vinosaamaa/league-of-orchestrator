@@ -248,6 +248,28 @@ class UserTitleAfterPublishHerdr(RecordingHerdr):
         self.title = "User selected title"
 
 
+class CrashAfterRenameHerdr(RecordingHerdr):
+    """The process dies after Herdr commits the routing rename."""
+
+    def __init__(self, worktree: Path, **kwargs) -> None:
+        super().__init__(worktree, **kwargs)
+        self.crash_after_rename = False
+
+    def run(
+        self, arguments, *, timeout_seconds: int = 30
+    ) -> subprocess.CompletedProcess[str]:
+        command = tuple(arguments)
+        result = super().run(arguments, timeout_seconds=timeout_seconds)
+        if (
+            self.crash_after_rename
+            and command[:3] == ("herdr", "agent", "rename")
+            and command[-1] != "--clear"
+        ):
+            self.crash_after_rename = False
+            raise InjectedBootstrapCrash("after_shotcaller_routing_rename")
+        return result
+
+
 class TransientMalformedCurrentHerdr(RecordingHerdr):
     """The exact in-place pane briefly returns non-JSON before a valid read."""
 
@@ -1607,6 +1629,188 @@ def test_legacy_residue_crash_after_baseline_retries_exactly_once(
     )
 
 
+def test_legacy_residue_crash_after_routing_rename_resumes_owned_publication(
+    root: Path,
+) -> None:
+    state, _ = migrated_state(root, "shotcaller-legacy-route-crash-retry")
+    worktree = root / "shotcaller-legacy-route-crash-retry" / "worktree"
+    worktree.mkdir()
+    clock = FakeClock()
+    runner = CrashAfterRenameHerdr(worktree, publish_mismatch=True)
+    with SQLiteStorage(state) as store:
+        _seed_available_ashe(store, clock)
+        service = _service(store, clock, worktree, runner)
+        original, original_assignment = _make_legacy_bootstrap_residue(
+            store, service, runner
+        )
+        retry = ShotcallerBootstrapSpec(
+            assignment_id="callsign-assignment:bootstrap:ashe:legacy-route-crash",
+            agent_id=original.agent_id,
+            runtime_instance_id=original.runtime_instance_id,
+            thread_id=original.thread_id,
+            capabilities=original.capabilities,
+        )
+        runner.crash_after_rename = True
+        calls_before_crash = len(runner.calls)
+
+        try:
+            service.bootstrap(retry)
+        except InjectedBootstrapCrash:
+            pass
+        else:
+            raise AssertionError("legacy recovery did not crash after routing rename")
+
+        reserved = store.callsign_assignment_status(retry.assignment_id)
+        assert reserved is not None and reserved["state"] == "reserved"
+        assert store.shotcaller_bootstrap_baseline(retry.assignment_id) is not None
+        assert runner.name == "ashe"
+        assert runner.metadata_source == "herdr:codex"
+        assert runner.title == "Interview Prep"
+        assert runner.tokens == {"user_theme": "focused"}
+        crash_calls = runner.calls[calls_before_crash:]
+        assert sum(
+            call[:3] == ("herdr", "agent", "rename") and call[-1] != "--clear"
+            for call in crash_calls
+        ) == 1
+        assert not any(
+            call[:3] == ("herdr", "pane", "report-metadata")
+            for call in crash_calls
+        )
+
+        calls_before_resume = len(runner.calls)
+        created = service.bootstrap(retry)
+        resume_calls = runner.calls[calls_before_resume:]
+        calls_before_exact_retry = len(runner.calls)
+        retried = service.bootstrap(retry)
+
+        assert created["state"] == "active"
+        assert retried == {**created, "idempotent": True}
+        assert store.shotcaller_bootstrap_status(retry.assignment_id) == retried
+        assert store.callsign_assignment_status(original.assignment_id) == original_assignment
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM runtime_instances WHERE actor_agent_id=?", (AGENT_ID,)
+        ).fetchone()[0] == 1
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM squads WHERE shotcaller_agent_id=?", (AGENT_ID,)
+        ).fetchone()[0] == 0
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM squad_registration_offers WHERE shotcaller_agent_id=?",
+            (AGENT_ID,),
+        ).fetchone()[0] == 0
+
+    assert runner.name == "ashe"
+    assert runner.title == "Ashe"
+    assert runner.tokens == {
+        "user_theme": "focused",
+        "sidebar_name": "Ashe",
+        "thread_title": "Ashe",
+    }
+    assert not any(
+        call[:3] == ("herdr", "agent", "rename") for call in resume_calls
+    )
+    assert sum(
+        call[:3] == ("herdr", "pane", "report-metadata") for call in resume_calls
+    ) == 1
+    assert not any(
+        call[:3]
+        in {
+            ("herdr", "agent", "rename"),
+            ("herdr", "pane", "report-metadata"),
+            ("herdr", "agent", "prompt"),
+            ("herdr", "tab", "create"),
+            ("herdr", "pane", "split"),
+            ("herdr", "workspace", "create"),
+            ("herdr", "agent", "start"),
+        }
+        for call in runner.calls[calls_before_exact_retry:]
+    )
+
+
+def test_legacy_route_crash_with_newer_user_write_restores_before_rollback(
+    root: Path,
+) -> None:
+    state, _ = migrated_state(root, "shotcaller-legacy-route-crash-user-write")
+    worktree = root / "shotcaller-legacy-route-crash-user-write" / "worktree"
+    worktree.mkdir()
+    clock = FakeClock()
+    runner = CrashAfterRenameHerdr(worktree, publish_mismatch=True)
+    with SQLiteStorage(state) as store:
+        _seed_available_ashe(store, clock)
+        service = _service(store, clock, worktree, runner)
+        original, original_assignment = _make_legacy_bootstrap_residue(
+            store, service, runner
+        )
+        retry = ShotcallerBootstrapSpec(
+            assignment_id="callsign-assignment:bootstrap:ashe:legacy-route-user-write",
+            agent_id=original.agent_id,
+            runtime_instance_id=original.runtime_instance_id,
+            thread_id=original.thread_id,
+            capabilities=original.capabilities,
+        )
+        runner.crash_after_rename = True
+        try:
+            service.bootstrap(retry)
+        except InjectedBootstrapCrash:
+            pass
+        else:
+            raise AssertionError("legacy recovery did not crash after routing rename")
+
+        runner.metadata_source = "user-selected"
+        runner.title = "User selected title"
+        runner.tokens = {"user_theme": "newer"}
+        runner.state_change_seq += 1
+        calls_before_retry = len(runner.calls)
+
+        try:
+            service.bootstrap(retry)
+        except StorageRefusal as exc:
+            assert exc.code == "shotcaller_metadata_unverified"
+        else:
+            raise AssertionError("route-only recovery overwrote a newer user presentation")
+
+        assert store.callsign_assignment_status(original.assignment_id) == original_assignment
+        attempted = store.callsign_assignment_status(retry.assignment_id)
+        assert attempted is not None and attempted["state"] == "rolled_back"
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM runtime_instances WHERE actor_agent_id=?", (AGENT_ID,)
+        ).fetchone()[0] == 0
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM squads WHERE shotcaller_agent_id=?", (AGENT_ID,)
+        ).fetchone()[0] == 0
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM squad_registration_offers WHERE shotcaller_agent_id=?",
+            (AGENT_ID,),
+        ).fetchone()[0] == 0
+
+    retry_calls = runner.calls[calls_before_retry:]
+    assert runner.name is None
+    assert runner.metadata_source == "user-selected"
+    assert runner.title == "User selected title"
+    assert runner.tokens == {"user_theme": "newer"}
+    assert any(
+        call[:3] == ("herdr", "agent", "rename") and call[-1] == "--clear"
+        for call in retry_calls
+    )
+    rollback_reports = [
+        call
+        for call in retry_calls
+        if call[:3] == ("herdr", "pane", "report-metadata")
+    ]
+    assert len(rollback_reports) == 1
+    assert "--title" not in rollback_reports[0]
+    assert not any(
+        call[:3]
+        in {
+            ("herdr", "agent", "prompt"),
+            ("herdr", "tab", "create"),
+            ("herdr", "pane", "split"),
+            ("herdr", "workspace", "create"),
+            ("herdr", "agent", "start"),
+        }
+        for call in retry_calls
+    )
+
+
 def test_legacy_residue_finalization_failure_restores_captured_presentation(
     root: Path,
 ) -> None:
@@ -2313,6 +2517,8 @@ def main() -> None:
         test_legacy_residue_refuses_newer_presentation_write_before_publication(root)
         test_legacy_residue_refuses_thread_or_generation_race_before_publication(root)
         test_legacy_residue_crash_after_baseline_retries_exactly_once(root)
+        test_legacy_residue_crash_after_routing_rename_resumes_owned_publication(root)
+        test_legacy_route_crash_with_newer_user_write_restores_before_rollback(root)
         test_legacy_residue_finalization_failure_restores_captured_presentation(root)
         test_recovered_bootstrap_exact_retry_is_receipt_identical_and_read_only(root)
         test_recovered_bootstrap_finalization_fault_rolls_back_without_losing_history(root)

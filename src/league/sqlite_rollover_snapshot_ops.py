@@ -11,6 +11,7 @@ from .rollover_descendant import _herdr_runtime_generation
 from .sqlite_callsign_ops import capabilities, digest, stable_json, timestamp
 from .sqlite_rollover_ops import (
     _descendant_reconciliation_receipt_exact,
+    _historical_imported_descendant_reconciliation_receipt_exact,
     _operation,
     _runtime_capability_contract,
     _runtime_identity,
@@ -113,9 +114,13 @@ def _successor_progress(
         "callsign_assignment_id": callsign_assignment["callsign_assignment_id"],
         "result": "reconciled",
     }
+    current_receipt = _descendant_reconciliation_receipt_exact(receipt)
+    historical_imported_receipt = (
+        _historical_imported_descendant_reconciliation_receipt_exact(receipt)
+    )
     if (
         not isinstance(receipt_digest, str)
-        or not _descendant_reconciliation_receipt_exact(receipt)
+        or not (current_receipt or historical_imported_receipt)
         or digest(receipt) != receipt_digest
         or any(receipt.get(key) != value for key, value in required_receipt.items())
         or event["event_type"] != "rollover_descendant_reconciled"
@@ -124,8 +129,15 @@ def _successor_progress(
         or event["aggregate_id"] != task_id
         or event["source_event_id"] != operation["owner_event_id"]
         or int(event["entity_version"]) != receipt_task_version
-        or receipt.get("required_capabilities") != list(required_capabilities)
-        or receipt.get("runtime_capabilities") != list(runtime_capabilities)
+        or (
+            current_receipt
+            and (
+                receipt.get("required_capabilities")
+                != list(required_capabilities)
+                or receipt.get("runtime_capabilities")
+                != list(runtime_capabilities)
+            )
+        )
     ):
         raise StorageRefusal(
             "snapshot_refresh_identity_changed",
@@ -147,6 +159,32 @@ def _successor_progress(
         """,
         (receipt.get("snapshot_id"), champion["agent_id"]),
     ).fetchone()
+    source_runtime = None if receipt.get("created_runtime") is True else runtime
+    source_private_binding = {
+        "agent_id": champion["agent_id"],
+        "task_id": task_id,
+        "shotcaller_agent_id": operation["predecessor_agent_id"],
+        "kind": champion["kind"],
+        "thread_id": champion["thread_id"],
+        "backend": champion["backend"],
+        "routing_name": champion["routing_name"],
+        "display_agent": champion["display_agent"],
+        "repository": champion["repository"],
+        "issue": champion["issue"],
+        "branch": champion["branch"],
+        "worktree": champion["worktree"],
+        "runtime_instance_id": (
+            None if source_runtime is None else source_runtime["runtime_instance_id"]
+        ),
+        "session_ref": None if source_runtime is None else source_runtime["session_ref"],
+        "endpoint": None if source_runtime is None else source_runtime["endpoint"],
+        "runtime_generation": (
+            None if source_runtime is None else source_runtime["runtime_generation"]
+        ),
+        "capabilities": (
+            None if source_runtime is None else source_runtime["capabilities_json"]
+        ),
+    }
     if (
         source_snapshot is None
         or source_snapshot["operation_id"] != operation["operation_id"]
@@ -155,6 +193,7 @@ def _successor_progress(
         or source_row["task_id"] != task_id
         or source_row["callsign"] != champion["callsign"]
         or source_row["row_digest"] != receipt.get("snapshot_row_digest")
+        or source_row["binding_digest"] != digest(source_private_binding)
         or _snapshot_row_digest(
             source_snapshot["snapshot_id"],
             int(source_snapshot["snapshot_version"]),

@@ -95,7 +95,12 @@ Nothing here installs files, changes hooks, or connects to live Roster state.
   partially reconciled switched rollover may refresh only when every
   successor-owned descendant has one exact immutable reconciliation receipt;
   the new receipt retains the full original set and exposes proved terminal
-  markers so already-transferred rows are not reconciled twice.
+  markers so already-transferred rows are not reconciled twice. An imported
+  legacy descendant created by an older reconciler may use only that release's
+  exact historical receipt profile: both runtime and assignment must have been
+  created atomically, the assignment must retain the byte-equivalent acceptance
+  receipt, and current task/callsign/runtime/capability/outbox state must pass
+  the same checks. Incomplete modern receipts never fall back to this profile.
 - Deterministic bounded activity reports with stable JSON, exact range/timezone
   and scope, immutable show/since specifications, completion gates, indexed
   pagination, and JSON-derived Markdown/portable HTML.

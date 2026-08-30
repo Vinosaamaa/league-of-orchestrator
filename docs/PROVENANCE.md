@@ -731,6 +731,18 @@ and both timers vanish when the foreground loop exits. Those legacy timers are
 not the source candidate behavior. The launchd/socket source in this change
 remains uninstalled.
 
+The post-0.2.35 issue-#66 Stop correction treats Codex `turn_id` as a turn
+scope, not a per-prompt event key. Each real `UserPromptSubmit` invocation
+mints one opaque League capture identity, carries that same identity through a
+broker retry or direct fallback, and binds it to the immutable prompt/source
+provenance. Two genuine same-turn invocations therefore remain distinct even
+when their prompt bytes are identical. Stop rearms only from a committed
+durable wait event; a fresh-looking terminal identifier alone cannot add a
+second block. The exact pending League feedback remains one-time suppressed,
+and the matching Stop retry is allowed. This source-only correction adds no
+schema migration and performs no installation, hook mutation, live
+reconciliation, or runtime cutover.
+
 The 3×3 prompt-size/intent-count matrix measures exact capture, JSON sideband,
 candidate linking, SQLite commit, and one-process completion on synthetic
 temporary roots. Its gold sideband proves local mechanics only; it does not

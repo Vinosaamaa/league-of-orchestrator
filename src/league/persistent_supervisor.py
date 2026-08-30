@@ -578,10 +578,7 @@ class PersistentSupervisor:
             capture = result.get("capture")
             published_user_priority = bool(
                 isinstance(capture, dict)
-                and capture.get("owned_by_shotcaller") is True
-                and isinstance(capture.get("prompt_id"), str)
-                and capture.get("idempotent") is False
-                and capture.get("suppressed") is None
+                and capture.get("priority_eligible") is True
             )
             if published_user_priority:
                 self._publish_user_priority()

@@ -263,6 +263,7 @@ def intake_prompt(
                     "prompt_id": existing["prompt_id"],
                     "triage_state": existing["triage_state"],
                     "idempotent": True,
+                    "wake_committed": False,
                 }
             runtime = store.connection.execute(
                 """
@@ -350,18 +351,24 @@ def intake_prompt(
                     UPDATE watcher_scopes
                        SET user_message_generation=user_message_generation+1,
                            wait_generation=wait_generation+1,stop_blocked=0,wait_active=0,
+                           last_event_id=?,
                            pending_stop_feedback_digest=NULL,
                            pending_stop_terminal_generation=NULL,
                            pending_stop_wait_generation=NULL
                      WHERE scope_id=?
                     """,
-                    (wake_scope_id,),
+                    (prompt_id, wake_scope_id),
                 )
     except StorageRefusal:
         raise
     except sqlite3.DatabaseError as exc:
         raise store._translate_database_error(exc, "prompt intake conflicted with canonical state") from exc
-    return {"prompt_id": prompt_id, "triage_state": "untriaged", "idempotent": False}
+    return {
+        "prompt_id": prompt_id,
+        "triage_state": "untriaged",
+        "idempotent": False,
+        "wake_committed": wake_scope_id is not None,
+    }
 
 
 def quarantine_prompt(
@@ -407,6 +414,7 @@ def quarantine_prompt(
                     "state": existing["state"],
                     "reason": existing["reason"],
                     "idempotent": True,
+                    "wake_committed": False,
                 }
             store.connection.execute(
                 """
@@ -436,12 +444,13 @@ def quarantine_prompt(
                     UPDATE watcher_scopes
                        SET user_message_generation=user_message_generation+1,
                            wait_generation=wait_generation+1,stop_blocked=0,wait_active=0,
+                           last_event_id=?,
                            pending_stop_feedback_digest=NULL,
                            pending_stop_terminal_generation=NULL,
                            pending_stop_wait_generation=NULL
                      WHERE scope_id=? AND actor_agent_id=?
                     """,
-                    (wake_scope_id, wake_actor_id),
+                    (prompt_id, wake_scope_id, wake_actor_id),
                 )
                 store.connection.execute(
                     """
@@ -460,6 +469,7 @@ def quarantine_prompt(
         "state": "quarantined",
         "reason": "runtime_unverified",
         "idempotent": False,
+        "wake_committed": wake_scope_id is not None,
     }
 
 
@@ -490,7 +500,12 @@ def bind_quarantined_prompt(
                 )
                 if not exact:
                     raise StorageRefusal("prompt_binding_conflict", "prompt was bound to a different runtime")
-                return {"prompt_id": prompt_id, "triage_state": "untriaged", "idempotent": True}
+                return {
+                    "prompt_id": prompt_id,
+                    "triage_state": "untriaged",
+                    "idempotent": True,
+                    "wake_committed": False,
+                }
             runtime = store.connection.execute(
                 """
                 SELECT actor_agent_id,status,verified,session_ref
@@ -580,7 +595,12 @@ def bind_quarantined_prompt(
         raise
     except sqlite3.DatabaseError as exc:
         raise store._translate_database_error(exc, "prompt binding conflicted with canonical state") from exc
-    return {"prompt_id": prompt_id, "triage_state": "untriaged", "idempotent": False}
+    return {
+        "prompt_id": prompt_id,
+        "triage_state": "untriaged",
+        "idempotent": False,
+        "wake_committed": wake_scope_id is not None,
+    }
 
 
 def _normalize_triage_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:

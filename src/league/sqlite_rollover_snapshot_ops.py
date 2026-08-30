@@ -482,11 +482,85 @@ def _descendant_context(
                     "snapshot_refresh_identity_changed",
                     "only an exact imported legacy predecessor may adopt a null route",
                 )
-            if source_row["binding_digest"] != current_row["binding_digest"]:
+            def binding_digest(
+                bound_runtime: Optional[Mapping[str, Any]],
+                *,
+                routing_name: Optional[str],
+                display_agent: Optional[str],
+            ) -> str:
+                return digest(
+                    {
+                        "agent_id": champion_agent_id,
+                        "task_id": task_id,
+                        "shotcaller_agent_id": champion["shotcaller_agent_id"],
+                        "kind": champion["kind"],
+                        "thread_id": champion["thread_id"],
+                        "backend": champion["backend"],
+                        "routing_name": routing_name,
+                        "display_agent": display_agent,
+                        "repository": champion["repository"],
+                        "issue": champion["issue"],
+                        "branch": champion["branch"],
+                        "worktree": champion["worktree"],
+                        "runtime_instance_id": (
+                            None
+                            if bound_runtime is None
+                            else bound_runtime["runtime_instance_id"]
+                        ),
+                        "session_ref": (
+                            None
+                            if bound_runtime is None
+                            else bound_runtime["session_ref"]
+                        ),
+                        "endpoint": (
+                            None if bound_runtime is None else bound_runtime["endpoint"]
+                        ),
+                        "runtime_generation": (
+                            None
+                            if bound_runtime is None
+                            else bound_runtime["runtime_generation"]
+                        ),
+                        "capabilities": (
+                            None
+                            if bound_runtime is None
+                            else bound_runtime["capabilities_json"]
+                        ),
+                    }
+                )
+
+            current_binding_digest = binding_digest(
+                runtime,
+                routing_name=champion["routing_name"],
+                display_agent=champion["display_agent"],
+            )
+            source_without_runtime_digest = binding_digest(
+                None,
+                routing_name=champion["routing_name"],
+                display_agent=champion["display_agent"],
+            )
+            source_binding_digest = source_row["binding_digest"]
+            runtime_materialized_after_snapshot = False
+            if (
+                current_binding_digest != current_row["binding_digest"]
+                or (
+                    source_binding_digest != current_binding_digest
+                    and not (
+                        runtime is not None
+                        and source_binding_digest == source_without_runtime_digest
+                    )
+                )
+            ):
                 raise StorageRefusal(
                     "snapshot_refresh_identity_changed",
-                    "null-route descendant no longer matches its frozen binding",
+                    "null-route descendant differs beyond one exact materialized runtime",
                 )
+            if source_binding_digest != current_binding_digest:
+                runtime_materialized_after_snapshot = True
+            resulting_binding_digest = binding_digest(
+                runtime,
+                routing_name=str(champion["callsign"]).lower(),
+                display_agent="codex",
+            )
             route_adoption = {
                 "routing_name": str(champion["callsign"]).lower(),
                 "display_agent": "codex",
@@ -500,6 +574,12 @@ def _descendant_context(
                 "source_shape": source_shape,
                 "import_provenance_digest": import_provenance_digest,
                 "snapshot_row_digest": source_row["row_digest"],
+                "source_binding_digest": source_binding_digest,
+                "pre_adoption_binding_digest": current_binding_digest,
+                "resulting_binding_digest": resulting_binding_digest,
+                "runtime_materialized_after_snapshot": (
+                    runtime_materialized_after_snapshot
+                ),
                 "runtime_instance_id": (
                     None if runtime is None else runtime["runtime_instance_id"]
                 ),
@@ -1045,6 +1125,14 @@ def _adopt_legacy_null_routes(
             "runtime_generation": adoption["runtime_generation"],
             "runtime_status": adoption["runtime_status"],
             "runtime_capabilities": adoption["runtime_capabilities"],
+            "runtime_materialized_after_snapshot": adoption[
+                "runtime_materialized_after_snapshot"
+            ],
+            "source_binding_digest": adoption["source_binding_digest"],
+            "pre_adoption_binding_digest": adoption[
+                "pre_adoption_binding_digest"
+            ],
+            "resulting_binding_digest": adoption["resulting_binding_digest"],
             "endpoint_digest": digest({"endpoint": descendant["address"]}),
             "thread_digest": digest({"thread_id": descendant["thread_id"]}),
             "worktree_digest": digest({"worktree": descendant["worktree"]}),
@@ -1121,6 +1209,14 @@ def _adopt_legacy_null_routes(
                 "routing_name": adoption["routing_name"],
                 "expected_agent_version": expected_agent_version,
                 "agent_version": next_agent_version,
+                "source_binding_digest": adoption["source_binding_digest"],
+                "pre_adoption_binding_digest": adoption[
+                    "pre_adoption_binding_digest"
+                ],
+                "resulting_binding_digest": adoption["resulting_binding_digest"],
+                "runtime_materialized_after_snapshot": adoption[
+                    "runtime_materialized_after_snapshot"
+                ],
             }
         )
     if results and fault:
@@ -1227,6 +1323,9 @@ def refresh(
             adopted_agents = {
                 item["champion_agent_id"] for item in route_adoptions
             }
+            adoption_by_agent = {
+                item["champion_agent_id"]: item for item in route_adoptions
+            }
             before_rows = {
                 row["champion_agent_id"]: row for row in context["current_rows"]
             }
@@ -1236,8 +1335,10 @@ def refresh(
             }
             if set(before_rows) != set(after_rows) or any(
                 (
-                    after_rows[agent_id]["binding_digest"]
-                    == before_rows[agent_id]["binding_digest"]
+                    before_rows[agent_id]["binding_digest"]
+                    != adoption_by_agent[agent_id]["pre_adoption_binding_digest"]
+                    or after_rows[agent_id]["binding_digest"]
+                    != adoption_by_agent[agent_id]["resulting_binding_digest"]
                 )
                 if agent_id in adopted_agents
                 else after_rows[agent_id] != before_rows[agent_id]

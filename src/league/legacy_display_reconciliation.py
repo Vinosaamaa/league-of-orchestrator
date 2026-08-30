@@ -191,6 +191,26 @@ class HerdrLegacyDisplayAdapter:
             "observation_digest": _digest(observation),
         }
 
+    def _reconciliation_tokens(
+        self,
+        spec: LegacyDisplayReconciliationSpec,
+        reconciliation_id: str,
+        source: str,
+        authority: str,
+    ) -> dict[str, str]:
+        target = f"{spec.callsign} · {spec.target_task_label}"
+        owner = hashlib.sha256(spec.assignment_id.encode("utf-8")).hexdigest()[:16]
+        return {
+            "callsign": spec.callsign,
+            "sidebar_name": spec.callsign,
+            "task_label": spec.target_task_label,
+            "thread_title": target,
+            "legacy_display_owner": owner,
+            "legacy_display_assignment": reconciliation_id,
+            "legacy_display_source": source,
+            "legacy_display_applies_to": authority,
+        }
+
     def _pending_effect_exact(
         self,
         spec: LegacyDisplayReconciliationSpec,
@@ -199,19 +219,15 @@ class HerdrLegacyDisplayAdapter:
         tokens: Mapping[str, str],
     ) -> bool:
         target = f"{spec.callsign} · {spec.target_task_label}"
-        owner = hashlib.sha256(spec.assignment_id.encode("utf-8")).hexdigest()[:16]
+        expected = self._reconciliation_tokens(
+            spec,
+            reconciliation_id,
+            str(observation.get("presentation_source", "")),
+            str(observation.get("authority_source", "")),
+        )
         return bool(
             observation.get("title") == target
-            and tokens.get("callsign") == spec.callsign
-            and tokens.get("sidebar_name") == spec.callsign
-            and tokens.get("task_label") == spec.target_task_label
-            and tokens.get("thread_title") == target
-            and tokens.get("legacy_display_owner") == owner
-            and tokens.get("legacy_display_assignment") == reconciliation_id
-            and tokens.get("legacy_display_source")
-            == observation.get("presentation_source")
-            and tokens.get("legacy_display_applies_to")
-            == observation.get("authority_source")
+            and all(tokens.get(key) == value for key, value in expected.items())
         )
 
     def reconcile(
@@ -247,10 +263,17 @@ class HerdrLegacyDisplayAdapter:
                 "legacy Champion presentation changed before reconciliation",
             )
         target = f"{spec.callsign} · {spec.target_task_label}"
-        owner = hashlib.sha256(spec.assignment_id.encode("utf-8")).hexdigest()[:16]
         source = str(current["presentation_source"])
         authority = str(current["authority_source"])
         sequence = int(current["state_change_seq"]) + 1
+        reconciliation_tokens = self._reconciliation_tokens(
+            spec, reconciliation_id, source, authority
+        )
+        token_arguments = tuple(
+            part
+            for key, value in reconciliation_tokens.items()
+            for part in ("--token", f"{key}={value}")
+        )
         report = (
             "herdr",
             "pane",
@@ -266,22 +289,7 @@ class HerdrLegacyDisplayAdapter:
             "codex",
             "--title",
             target,
-            "--token",
-            f"callsign={spec.callsign}",
-            "--token",
-            f"sidebar_name={spec.callsign}",
-            "--token",
-            f"task_label={spec.target_task_label}",
-            "--token",
-            f"thread_title={target}",
-            "--token",
-            f"legacy_display_owner={owner}",
-            "--token",
-            f"legacy_display_assignment={reconciliation_id}",
-            "--token",
-            f"legacy_display_source={source}",
-            "--token",
-            f"legacy_display_applies_to={authority}",
+            *token_arguments,
             "--seq",
             str(sequence),
         )
@@ -304,14 +312,7 @@ class HerdrLegacyDisplayAdapter:
             ) from exc
         expected_tokens = {
             **baseline_tokens,
-            "callsign": spec.callsign,
-            "sidebar_name": spec.callsign,
-            "task_label": spec.target_task_label,
-            "thread_title": target,
-            "legacy_display_owner": owner,
-            "legacy_display_assignment": reconciliation_id,
-            "legacy_display_source": source,
-            "legacy_display_applies_to": authority,
+            **reconciliation_tokens,
         }
         prior_digest: str | None = None
         stable = 0

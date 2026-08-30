@@ -23,6 +23,13 @@ THREAD_UUID = re.compile(
 LIVE_STATUSES = {"active", "blocked", "idle", "waiting", "working"}
 
 
+class _MalformedHerdrResult(StorageRefusal):
+    def __init__(self, label: str) -> None:
+        super().__init__(
+            "shotcaller_identity_unverified", f"{label} returned malformed JSON"
+        )
+
+
 @dataclass(frozen=True)
 class ShotcallerBootstrapSpec:
     assignment_id: str
@@ -44,9 +51,7 @@ def _result(completed: subprocess.CompletedProcess[str], label: str) -> dict[str
     try:
         envelope = json.loads(completed.stdout)
     except (TypeError, json.JSONDecodeError) as exc:
-        raise StorageRefusal(
-            "shotcaller_identity_unverified", f"{label} returned malformed JSON"
-        ) from exc
+        raise _MalformedHerdrResult(label) from exc
     result = envelope.get("result") if isinstance(envelope, dict) else None
     if completed.returncode != 0 or not isinstance(result, dict):
         raise StorageRefusal(
@@ -112,12 +117,8 @@ class HerdrShotcallerBootstrapAdapter:
         for attempt in range(3):
             try:
                 return self._run(arguments, label)
-            except StorageRefusal as exc:
-                malformed = (
-                    exc.code == "shotcaller_identity_unverified"
-                    and str(exc) == f"{label} returned malformed JSON"
-                )
-                if not malformed or attempt == 2:
+            except _MalformedHerdrResult:
+                if attempt == 2:
                     raise
         raise AssertionError("bounded Herdr identity read retry exhausted")
 

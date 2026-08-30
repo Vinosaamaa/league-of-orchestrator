@@ -1199,7 +1199,7 @@ def assignment_launch_context(store: Any, assignment_id: str) -> dict[str, Any]:
         SELECT event_id,occurred_at,detail_json FROM events
          WHERE aggregate_kind='assignment' AND aggregate_id=?
            AND event_type='assignment_legacy_display_reconciliation_intent'
-         ORDER BY event_seq
+         ORDER BY event_seq LIMIT 2
         """,
         (assignment_id,),
     ).fetchall()
@@ -1208,7 +1208,7 @@ def assignment_launch_context(store: Any, assignment_id: str) -> dict[str, Any]:
         SELECT event_id,occurred_at,detail_json FROM events
          WHERE aggregate_kind='assignment' AND aggregate_id=?
            AND event_type='assignment_legacy_display_reconciled'
-         ORDER BY event_seq
+         ORDER BY event_seq LIMIT 2
         """,
         (assignment_id,),
     ).fetchall()
@@ -1355,7 +1355,11 @@ def _validate_legacy_display_command(
         (command.champion_agent_id,),
     ).fetchone()
     runtime_rows = store.connection.execute(
-        "SELECT * FROM runtime_instances WHERE actor_agent_id=? AND status IN ('active','idle')",
+        """
+        SELECT runtime_instance_id,session_ref,endpoint,runtime_generation,verified
+          FROM runtime_instances
+         WHERE actor_agent_id=? AND status IN ('active','idle') LIMIT 2
+        """,
         (command.champion_agent_id,),
     ).fetchall()
     receipt = (
@@ -1404,6 +1408,7 @@ def _validate_legacy_display_command(
         SELECT detail_json FROM events
          WHERE aggregate_kind='assignment' AND aggregate_id=?
            AND event_type='assignment_context_delivered'
+         LIMIT 2
         """,
         (command.assignment_id,),
     ).fetchall()
@@ -1412,6 +1417,7 @@ def _validate_legacy_display_command(
         SELECT 1 FROM events
          WHERE aggregate_kind='assignment' AND aggregate_id=?
            AND event_type='assignment_title_revalidated'
+         LIMIT 1
         """,
         (command.assignment_id,),
     ).fetchall()
@@ -1448,7 +1454,7 @@ def begin_legacy_display_reconciliation(
                 store, command
             )
             intents = store.connection.execute(
-                "SELECT event_id,detail_json FROM events WHERE aggregate_kind='assignment' AND aggregate_id=? AND event_type='assignment_legacy_display_reconciliation_intent'",
+                "SELECT event_id,detail_json FROM events WHERE aggregate_kind='assignment' AND aggregate_id=? AND event_type='assignment_legacy_display_reconciliation_intent' LIMIT 2",
                 (command.assignment_id,),
             ).fetchall()
             if intents:
@@ -1477,7 +1483,7 @@ def begin_legacy_display_reconciliation(
                     ),
                 )
             results = store.connection.execute(
-                "SELECT detail_json FROM events WHERE aggregate_kind='assignment' AND aggregate_id=? AND event_type='assignment_legacy_display_reconciled'",
+                "SELECT detail_json FROM events WHERE aggregate_kind='assignment' AND aggregate_id=? AND event_type='assignment_legacy_display_reconciled' LIMIT 2",
                 (command.assignment_id,),
             ).fetchall()
             if len(results) > 1:
@@ -1516,7 +1522,7 @@ def finalize_legacy_display_reconciliation(
                 store, command
             )
             intents = store.connection.execute(
-                "SELECT detail_json FROM events WHERE aggregate_kind='assignment' AND aggregate_id=? AND event_type='assignment_legacy_display_reconciliation_intent'",
+                "SELECT detail_json FROM events WHERE aggregate_kind='assignment' AND aggregate_id=? AND event_type='assignment_legacy_display_reconciliation_intent' LIMIT 2",
                 (command.assignment_id,),
             ).fetchall()
             if len(intents) != 1 or json.loads(intents[0]["detail_json"]) != detail:
@@ -1574,7 +1580,7 @@ def finalize_legacy_display_reconciliation(
                 "receipt": dict(receipt),
             }
             results = store.connection.execute(
-                "SELECT event_id,detail_json FROM events WHERE aggregate_kind='assignment' AND aggregate_id=? AND event_type='assignment_legacy_display_reconciled'",
+                "SELECT event_id,detail_json FROM events WHERE aggregate_kind='assignment' AND aggregate_id=? AND event_type='assignment_legacy_display_reconciled' LIMIT 2",
                 (command.assignment_id,),
             ).fetchall()
             if results:

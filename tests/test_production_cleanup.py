@@ -32,6 +32,7 @@ from league.real_canary import (  # noqa: E402
 )
 from league.sqlite_store import SQLiteStorage  # noqa: E402
 from league.storage import StorageRefusal  # noqa: E402
+from lifecycle_fakes import issue_bound_spec  # noqa: E402
 from test_real_cleanup import FakeHerdrRunner, herdr_identity  # noqa: E402
 from storage_test_support import invoke_cli, migrated_state  # noqa: E402
 
@@ -269,7 +270,9 @@ def test_production_cleanup_crash_resume_and_lease_scope(root: Path) -> None:
     root.mkdir(parents=True, exist_ok=True)
     git = _create_git_canary(root)
     herdr = herdr_identity()
-    setup = _setup_sqlite(root, ROOT, git, herdr)
+    setup = _setup_sqlite(
+        root, ROOT, git, herdr, issue_spec_resolver=issue_bound_spec
+    )
     state = root / "league/state"
     manifest_path, _ = _cleanup_files(
         root,
@@ -426,7 +429,9 @@ def test_ready_to_land_owner_cancellation_recovers_planned_fence_zero_after_reop
     root.mkdir(parents=True, exist_ok=True)
     git = _create_git_canary(root)
     herdr = herdr_identity()
-    setup = _setup_sqlite(root, ROOT, git, herdr)
+    setup = _setup_sqlite(
+        root, ROOT, git, herdr, issue_spec_resolver=issue_bound_spec
+    )
     state = root / "league/state"
     manifest_path, _ = _cleanup_files(
         root,

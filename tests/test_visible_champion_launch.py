@@ -632,7 +632,9 @@ def test_resume_retry_reconciles_owned_endpoint_without_second_launch(root: Path
     store, clock, worktree = _context(root, "resume-retry-reconcile")
     options = _options(root)
     runner = ResumeSessionReportRunner(worktree, options, initial_session=True)
+    issue_verifier = FakeIssueVerifier(store=store)
     spec = _spec(worktree, "resume-retry-reconcile")
+    spec = replace(spec, issue_receipt=issue_verifier.verify(spec, clock.now()))
     prepared = store.prepare_assignment(
         PrepareAssignmentCommand(
             assignment_id=spec.assignment_id,
@@ -647,6 +649,7 @@ def test_resume_retry_reconciles_owned_endpoint_without_second_launch(root: Path
             branch=spec.branch,
             worktree=spec.worktree,
             at=clock.now(),
+            issue_receipt=spec.issue_receipt,
             required_capabilities=spec.required_capabilities,
         )
     )
@@ -666,7 +669,7 @@ def test_resume_retry_reconciles_owned_endpoint_without_second_launch(root: Path
         resume_thread_id=THREAD_ID,
     )
     retried = VisibleChampionLaunchService(
-        store, retry_adapter, options, clock
+        store, retry_adapter, options, clock, issue_verifier=issue_verifier
     ).launch(spec)
     assert retried["state"] == "active"
     assert retried["runtime_instance_id"] == first["runtime_instance_id"]

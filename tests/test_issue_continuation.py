@@ -22,7 +22,7 @@ from league.continuation import (  # noqa: E402
 from league.request_services import AssignmentService, AssignmentSpec  # noqa: E402
 from league.sqlite_continuation_ops import authorize_resumed_runtime  # noqa: E402
 from league.storage import StorageRefusal  # noqa: E402
-from lifecycle_fakes import FakeClock  # noqa: E402
+from lifecycle_fakes import FakeClock, issue_bound_spec  # noqa: E402
 from request_lifecycle_fixture import (  # noqa: E402
     AHRI_ID,
     GAREN_RUNTIME,
@@ -476,6 +476,10 @@ def _prepare_fixture(
         issue=83,
         branch=f"agent/synthetic/{name}-original",
         worktree=str(worktree),
+        issue_receipt=None,
+    )
+    spec = issue_bound_spec(
+        store, spec, clock.now(), repository=spec.repository
     )
     AssignmentService(
         store, ExactThreadLaunchAdapter(thread_id), clock, Ids(name + ":original")
@@ -659,6 +663,10 @@ def test_reopen_exact_thread_new_callsign_and_final_cleanup(root: Path) -> None:
         issue=83,
         branch=continuation["branch"],
         worktree=continuation["worktree"],
+        issue_receipt=None,
+    )
+    successor = issue_bound_spec(
+        store, successor, clock.now(), repository=successor.repository
     )
     wrong_receipt = ExactThreadLaunchAdapter(
         "44444444-4444-4444-8444-444444444444"

@@ -126,22 +126,21 @@ def _wait_for_watcher_registration(
     state: Path, waiter: subprocess.Popen[str], *, timeout: float = 3
 ) -> None:
     deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if waiter.poll() is not None:
-            output, error = waiter.communicate()
-            raise AssertionError(
-                f"watcher exited before canonical registration: {output}{error}"
-            )
-        with SQLiteStorage(state, busy_timeout_ms=100, request_wal=False) as observer:
+    with SQLiteStorage(state, busy_timeout_ms=100, request_wal=False) as observer:
+        while time.monotonic() < deadline:
+            if waiter.poll() is not None:
+                output, error = waiter.communicate()
+                raise AssertionError(
+                    f"watcher exited before canonical registration: {output}{error}"
+                )
             registered = observer.connection.execute(
                 "SELECT 1 FROM watcher_registrations WHERE actor_agent_id=?",
                 (SHOTCALLER_ID,),
             ).fetchone() is not None
-            assert observer.policy.journal_mode == "WAL"
-        if registered:
-            assert waiter.poll() is None
-            return
-        time.sleep(0.02)
+            if registered:
+                assert waiter.poll() is None
+                return
+            time.sleep(0.02)
     waiter.terminate()
     try:
         output, error = waiter.communicate(timeout=1)

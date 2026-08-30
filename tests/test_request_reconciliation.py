@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-from io import BytesIO
 import json
 from pathlib import Path
 import sys
@@ -13,10 +12,10 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / "src"), str(ROOT / "tests")]
 
-from league.cli import main as league_main  # noqa: E402
 from league.sqlite_store import SQLiteStorage  # noqa: E402
 from request_lifecycle_fixture import GAREN_RUNTIME, create_context  # noqa: E402
 from storage_fixture import SHOTCALLER_ID  # noqa: E402
+from storage_test_support import invoke_cli  # noqa: E402
 
 
 def _request(store, clock, suffix: str, summary: str) -> None:
@@ -48,31 +47,35 @@ def _request(store, clock, suffix: str, summary: str) -> None:
     )
 
 
-def _command(state: Path, clock, *extra: str) -> tuple[int, dict]:
-    sink = BytesIO()
-    code = league_main(
-        [
-            "--state-root",
-            str(state),
+def _command(
+    state: Path,
+    clock,
+    *,
+    duplicate_request_id: str = "request:reconcile:B",
+    canonical_request_id: str = "request:reconcile:A",
+    expected_duplicate_version: int = 1,
+    expected_canonical_version: int = 1,
+    expected_exit: int = 0,
+) -> tuple[int, dict]:
+    result = invoke_cli(
+        state,
             "request",
             "reconcile-duplicate",
             "--duplicate-request-id",
-            "request:reconcile:B",
+            duplicate_request_id,
             "--canonical-request-id",
-            "request:reconcile:A",
+            canonical_request_id,
             "--owner-agent-id",
             SHOTCALLER_ID,
             "--expected-duplicate-version",
-            "1",
+            str(expected_duplicate_version),
             "--expected-canonical-version",
-            "1",
+            str(expected_canonical_version),
             "--at",
             clock.now(),
-            *extra,
-        ],
-        output=sink,
+        expected=expected_exit,
     )
-    return code, json.loads(sink.getvalue())
+    return expected_exit, result
 
 
 def test_stop_is_read_only_and_reconciliation_is_exact(root: Path) -> None:
@@ -131,34 +134,21 @@ def test_reconciliation_refuses_self_and_stale_versions(root: Path) -> None:
     _request(store, clock, "A", "Canonical owner request")
     _request(store, clock, "B", "Duplicate owner request")
     store.close()
-    sink = BytesIO()
-    self_code = league_main(
-        [
-            "--state-root", str(state), "request", "reconcile-duplicate",
-            "--duplicate-request-id", "request:reconcile:A",
-            "--canonical-request-id", "request:reconcile:A",
-            "--owner-agent-id", SHOTCALLER_ID,
-            "--expected-duplicate-version", "1",
-            "--expected-canonical-version", "1",
-            "--at", clock.now(),
-        ],
-        output=sink,
+    self_code, self_result = _command(
+        state,
+        clock,
+        duplicate_request_id="request:reconcile:A",
+        canonical_request_id="request:reconcile:A",
+        expected_exit=2,
     )
-    assert self_code == 2 and json.loads(sink.getvalue())["error"]["code"] == "invalid_reconciliation"
-    stale_sink = BytesIO()
-    stale_code = league_main(
-        [
-            "--state-root", str(state), "request", "reconcile-duplicate",
-            "--duplicate-request-id", "request:reconcile:B",
-            "--canonical-request-id", "request:reconcile:A",
-            "--owner-agent-id", SHOTCALLER_ID,
-            "--expected-duplicate-version", "2",
-            "--expected-canonical-version", "1",
-            "--at", clock.now(),
-        ],
-        output=stale_sink,
+    assert self_code == 2 and self_result["error"]["code"] == "invalid_reconciliation"
+    stale_code, stale_result = _command(
+        state,
+        clock,
+        expected_duplicate_version=2,
+        expected_exit=3,
     )
-    assert stale_code == 3 and json.loads(stale_sink.getvalue())["error"]["code"] == "version_conflict"
+    assert stale_code == 3 and stale_result["error"]["code"] == "version_conflict"
 
 
 def main() -> None:

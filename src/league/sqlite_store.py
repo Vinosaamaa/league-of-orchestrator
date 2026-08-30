@@ -144,6 +144,7 @@ from .storage_outbox import OutboxDispatchIdentity
 from .storage_request import (
     AnswerRequestCommand,
     DispatchRequestCommand,
+    ReconcileDuplicateRequestCommand,
     RequestProgressCommand,
     RequestResultCommand,
 )
@@ -2929,7 +2930,9 @@ class SQLiteStorage(SQLiteTransactionCore):
 
         return request_turn_boundary(self, owner_agent_id)
 
-    def reconcile_duplicate_request(self, command: Any) -> dict[str, Any]:
+    def reconcile_duplicate_request(
+        self, command: ReconcileDuplicateRequestCommand
+    ) -> dict[str, Any]:
         from .sqlite_request_ops import reconcile_duplicate_request
 
         return reconcile_duplicate_request(self, command)

@@ -33,6 +33,7 @@ REQUEST_LIFECYCLE_TESTS := \
 BENCHMARK_TESTS := \
 	tests/test_request_turn_benchmark.py \
 	tests/test_semantic_triage_benchmark.py \
+	tests/test_semantic_triage_benchmark_integration.py \
 	tests/test_inline_triage_prompt_shapes.py
 
 RUNTIME_LIFECYCLE_TESTS := \

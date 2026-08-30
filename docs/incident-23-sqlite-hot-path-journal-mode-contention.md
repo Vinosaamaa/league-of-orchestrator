@@ -687,7 +687,7 @@ successor does not repair live state. It adds the source boundary required for
 a separately authorized repair:
 
 The current installed League version observed read-only for issue #66 is
-0.2.27. Its watcher command inventory does not include the source candidate's
+0.2.28. Its watcher command inventory does not include the source candidate's
 service lifecycle, and no persistent League service is live. Historical 0.2.21
 and 0.2.23 observations elsewhere in this incident remain explicitly scoped to
 those earlier releases.

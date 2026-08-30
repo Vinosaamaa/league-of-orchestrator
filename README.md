@@ -229,7 +229,7 @@ never invokes a model when healthy. The service renews its silent lease every
 20 seconds, the lease expires after 60 seconds, and the inert launchd template
 uses a five-second restart throttle.
 
-Installed 0.2.27 has no always-running watchdog or OS-owned supervision timer.
+Installed 0.2.28 has no always-running watchdog or OS-owned supervision timer.
 Its legacy foreground `supervise` loop keeps a 30-second runtime snapshot and
 requires two matching observations (about 60 seconds) before a stall fallback;
 its separate 300-second liveness deadline only resets silently and performs no

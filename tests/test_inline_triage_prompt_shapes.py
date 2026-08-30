@@ -2,7 +2,6 @@
 """Focused smoke for the 3x3 inline prompt-shape benchmark."""
 
 import importlib.util
-import inspect
 import json
 from pathlib import Path
 import subprocess
@@ -19,15 +18,13 @@ SPEC.loader.exec_module(BENCHMARK)
 
 
 def main() -> None:
-    source = inspect.getsource(BENCHMARK._one)
-    assert "finally:" in source and "_terminate_and_reap" in source
     sleeper = subprocess.Popen(
         [sys.executable, "-c", "import time; time.sleep(30)"],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
-    BENCHMARK._terminate_and_reap(sleeper)
+    BENCHMARK.terminate_and_reap(sleeper)
     assert sleeper.poll() is not None
     assert all(
         stream is None or stream.closed

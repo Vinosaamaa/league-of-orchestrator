@@ -2231,6 +2231,42 @@ def _read_turn_payload(source: BinaryIO) -> dict[str, Any]:
     return value
 
 
+def _turn_begin_payload(
+    source: BinaryIO,
+    intake: dict[str, Any],
+    expected_prompt_ids: tuple[str, ...],
+) -> dict[str, Any]:
+    payload = (
+        _read_turn_payload(source)
+        if expected_prompt_ids
+        else {
+            "candidate_inventory_digest": intake["candidate_inventory"]["digest"],
+            "decisions": [],
+            "plans": [],
+        }
+    )
+    if set(payload) != {
+        "candidate_inventory_digest",
+        "decisions",
+        "plans",
+    } or not isinstance(payload["decisions"], list):
+        raise StorageRefusal(
+            "invalid_turn_payload",
+            "turn begin input must contain the candidate digest, decisions, and plans",
+        )
+    if (
+        not isinstance(payload["candidate_inventory_digest"], str)
+        or payload["candidate_inventory_digest"]
+        != intake["candidate_inventory"]["digest"]
+    ):
+        raise StorageRefusal(
+            "version_conflict",
+            "turn begin candidate digest differs from exact intake",
+            retryable=True,
+        )
+    return payload
+
+
 def _turn_time(value: Optional[str] = None) -> str:
     if value is not None:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
@@ -3450,36 +3486,9 @@ def main(
                 expected_prompt_ids = tuple(
                     prompt["prompt_id"] for prompt in intake["prompts"]
                 )
-                begin_payload = (
-                    _read_turn_payload(source)
-                    if expected_prompt_ids
-                    else {
-                        "candidate_inventory_digest": intake["candidate_inventory"]["digest"],
-                        "decisions": [],
-                        "plans": [],
-                    }
+                begin_payload = _turn_begin_payload(
+                    source, intake, expected_prompt_ids
                 )
-                if set(begin_payload) != {
-                    "candidate_inventory_digest",
-                    "decisions",
-                    "plans",
-                } or not isinstance(
-                    begin_payload["decisions"], list
-                ):
-                    raise StorageRefusal(
-                        "invalid_turn_payload",
-                        "turn begin input must contain the candidate digest, decisions, and plans",
-                    )
-                if (
-                    not isinstance(begin_payload["candidate_inventory_digest"], str)
-                    or begin_payload["candidate_inventory_digest"]
-                    != intake["candidate_inventory"]["digest"]
-                ):
-                    raise StorageRefusal(
-                        "version_conflict",
-                        "turn begin candidate digest differs from exact intake",
-                        retryable=True,
-                    )
                 decisions, new_requests = _mechanize_turn_decisions(
                     intake, begin_payload["decisions"], begin_at
                 )

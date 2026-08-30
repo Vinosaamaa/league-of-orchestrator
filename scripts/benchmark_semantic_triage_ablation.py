@@ -11,7 +11,6 @@ from pathlib import Path
 import queue
 import random
 import select
-import shutil
 import sqlite3
 import statistics
 import subprocess
@@ -89,6 +88,49 @@ def _terminate_and_reap(process: subprocess.Popen[Any]) -> None:
     for stream in (process.stdin, process.stdout, process.stderr):
         if stream is not None and not stream.closed:
             stream.close()
+
+
+def _write_process_input(
+    process: subprocess.Popen[bytes],
+    payload: bytes,
+    deadline: float,
+    *,
+    close: bool = False,
+) -> None:
+    """Write bounded child input without allowing a full pipe to defeat timeout."""
+
+    if process.stdin is None:
+        raise RuntimeError("benchmark child input pipe is unavailable")
+    descriptor = process.stdin.fileno()
+    view = memoryview(payload)
+    os.set_blocking(descriptor, False)
+    try:
+        while view:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not select.select([], [descriptor], [], remaining)[1]:
+                raise TimeoutError("benchmark child stopped consuming bounded input")
+            try:
+                written = os.write(descriptor, view)
+            except BlockingIOError:
+                continue
+            view = view[written:]
+    finally:
+        if close:
+            process.stdin.close()
+        elif not process.stdin.closed:
+            os.set_blocking(descriptor, True)
+
+
+def _clone_sqlite_state(source: Path, target: Path) -> None:
+    """Clone only the closed canonical database needed by one benchmark arm."""
+
+    target.mkdir()
+    destination = sqlite3.connect(target / "league.sqlite3")
+    try:
+        with SQLiteStorage(source) as store:
+            store.connection.backup(destination)
+    finally:
+        destination.close()
 
 
 def _percentile(values: Sequence[float], fraction: float) -> float:
@@ -406,9 +448,8 @@ def _codex_model_runner(
             spawned_ns = time.perf_counter_ns()
             if process.stdin is None:
                 raise RuntimeError("Codex input pipe is unavailable")
-            process.stdin.write(prompt)
-            process.stdin.close()
             deadline = time.monotonic() + PROCESS_TIMEOUT_SECONDS
+            _write_process_input(process, prompt, deadline, close=True)
             turn_started_ns: int | None = None
             message_ns: int | None = None
             completed_ns: int | None = None
@@ -477,6 +518,7 @@ def _wait_for_supervisor_ready(
 ) -> None:
     """Observe one bounded canonical watcher registration/scope row."""
     deadline = time.monotonic() + timeout_seconds
+    delay_seconds = 0.01
     while time.monotonic() < deadline:
         if waiter.poll() is not None:
             output, error = waiter.communicate()
@@ -485,7 +527,8 @@ def _wait_for_supervisor_ready(
             readiness = observer.watcher_readiness(SHOTCALLER_ID)
             if readiness is not None and int(readiness["wait_active"]) == 1:
                 return
-        time.sleep(0.02)
+        time.sleep(delay_seconds)
+        delay_seconds = min(delay_seconds * 2, 0.2)
     raise RuntimeError("installed watcher did not publish canonical readiness")
 
 
@@ -632,6 +675,72 @@ def _fixture_snapshot(
     )
 
 
+def _read_turn_response(
+    process: subprocess.Popen[bytes], deadline: float
+) -> tuple[dict[str, Any], int, int]:
+    line, observed_ns = _read_process_line(process, deadline)
+    parse_started_ns = time.perf_counter_ns()
+    payload = json.loads(line)
+    parse_completed_ns = time.perf_counter_ns()
+    return payload, observed_ns, parse_completed_ns - parse_started_ns
+
+
+def _semantic_arm(
+    cases: Sequence[dict[str, Any]],
+    arm: str,
+    model_root: Path,
+    args: argparse.Namespace,
+    model_runner: ModelRunner,
+) -> tuple[dict[str, Any], dict[str, float]]:
+    if arm == "on":
+        return model_runner(cases, model_root, args)
+    precomputed = _stable_json(_gold_payload(cases))
+    parse_started_ns = time.perf_counter_ns()
+    semantic = json.loads(precomputed)
+    parse_completed_ns = time.perf_counter_ns()
+    return semantic, {
+        "model_process_startup_ms": 0.0,
+        "semantic_model_ms": 0.0,
+        "model_completion_tail_ms": 0.0,
+        "model_total_ms": 0.0,
+        "model_process_exit_tail_ms": 0.0,
+        "model_wall_ms": 0.0,
+        "decision_json_parse_ms": (parse_completed_ns - parse_started_ns) / 1_000_000,
+    }
+
+
+def _write_turn_payload(
+    process: subprocess.Popen[bytes], payload: dict[str, Any], deadline: float
+) -> tuple[int, int, int, int]:
+    assert process.stdin is not None
+    encode_started_ns = time.perf_counter_ns()
+    encoded = (_stable_json(payload) + "\n").encode("utf-8")
+    encode_completed_ns = time.perf_counter_ns()
+    handoff_started_ns = time.perf_counter_ns()
+    _write_process_input(process, encoded, deadline)
+    handoff_completed_ns = time.perf_counter_ns()
+    return (
+        encode_started_ns,
+        encode_completed_ns,
+        handoff_started_ns,
+        handoff_completed_ns,
+    )
+
+
+def _answer_actions(new_count: int) -> dict[str, Any]:
+    return {
+        "actions": [
+            {
+                "kind": "answer",
+                "request_index": index,
+                "content": f"Synthetic benchmark answer {index}",
+                "resolution_summary": f"Completed synthetic benchmark request {index}",
+            }
+            for index in range(1, new_count + 1)
+        ]
+    }
+
+
 def _turn(
     state: Path,
     cases: Sequence[dict[str, Any]],
@@ -668,52 +777,29 @@ def _turn(
             if process.stdin is None:
                 raise RuntimeError("League turn input pipe is unavailable")
             deadline = time.monotonic() + PROCESS_TIMEOUT_SECONDS
-            intake_line, intake_ns = _read_process_line(process, deadline)
-            parse_started_ns = time.perf_counter_ns()
-            intake = json.loads(intake_line)
-            parse_completed_ns = time.perf_counter_ns()
+            intake, intake_ns, intake_parse_ns = _read_turn_response(process, deadline)
             if intake["result"]["returned_count"] != len(cases):
                 raise RuntimeError("League turn intake count differs from the frozen batch")
             if [row["body"] for row in intake["result"]["prompts"]] != [
                 row["prompt"] for row in cases
             ]:
                 raise RuntimeError("League turn changed frozen prompt order or bytes")
-            if arm == "on":
-                semantic, model_metrics = model_runner(cases, model_root, args)
-            else:
-                precomputed = _stable_json(_gold_payload(cases))
-                off_parse_started_ns = time.perf_counter_ns()
-                semantic = json.loads(precomputed)
-                off_parse_completed_ns = time.perf_counter_ns()
-                model_metrics = {
-                    "model_process_startup_ms": 0.0,
-                    "semantic_model_ms": 0.0,
-                    "model_completion_tail_ms": 0.0,
-                    "model_total_ms": 0.0,
-                    "model_process_exit_tail_ms": 0.0,
-                    "model_wall_ms": 0.0,
-                    "decision_json_parse_ms": (
-                        off_parse_completed_ns - off_parse_started_ns
-                    )
-                    / 1_000_000,
-                }
+            semantic, model_metrics = _semantic_arm(
+                cases, arm, model_root, args, model_runner
+            )
             _validate_model_payload(semantic, cases)
             accuracy = _accuracy(semantic, cases)
             league_semantic = _league_payload(semantic)
             league_semantic["candidate_inventory_digest"] = intake["result"][
                 "candidate_inventory"
             ]["digest"]
-            encode_started_ns = time.perf_counter_ns()
-            begin_encoded = (_stable_json(league_semantic) + "\n").encode("utf-8")
-            encode_completed_ns = time.perf_counter_ns()
-            handoff_started_ns = time.perf_counter_ns()
-            process.stdin.write(begin_encoded)
-            process.stdin.flush()
-            handoff_completed_ns = time.perf_counter_ns()
-            begun_line, begun_ns = _read_process_line(process, deadline)
-            begun_parse_started_ns = time.perf_counter_ns()
-            begun = json.loads(begun_line)
-            begun_parse_completed_ns = time.perf_counter_ns()
+            (
+                encode_started_ns,
+                encode_completed_ns,
+                handoff_started_ns,
+                handoff_completed_ns,
+            ) = _write_turn_payload(process, league_semantic, deadline)
+            begun, begun_ns, begun_parse_ns = _read_turn_response(process, deadline)
             if not begun.get("ok"):
                 error_value = begun.get("error", {})
                 raise RuntimeError(
@@ -728,26 +814,16 @@ def _turn(
                 for decision in league_semantic["decisions"]
                 for item in decision["items"]
             )
-            actions = {
-                "actions": [
-                    {
-                        "kind": "answer",
-                        "request_index": index,
-                        "content": f"Synthetic benchmark answer {index}",
-                        "resolution_summary": f"Completed synthetic benchmark request {index}",
-                    }
-                    for index in range(1, new_count + 1)
-                ]
-            }
-            commit_encode_started_ns = time.perf_counter_ns()
-            commit_encoded = (_stable_json(actions) + "\n").encode("utf-8")
-            commit_encode_completed_ns = time.perf_counter_ns()
-            process.stdin.write(commit_encoded)
-            process.stdin.flush()
-            committed_line, committed_ns = _read_process_line(process, deadline)
-            committed_parse_started_ns = time.perf_counter_ns()
-            committed = json.loads(committed_line)
-            committed_parse_completed_ns = time.perf_counter_ns()
+            actions = _answer_actions(new_count)
+            (
+                commit_encode_started_ns,
+                commit_encode_completed_ns,
+                _commit_handoff_started_ns,
+                _commit_handoff_completed_ns,
+            ) = _write_turn_payload(process, actions, deadline)
+            committed, committed_ns, committed_parse_ns = _read_turn_response(
+                process, deadline
+            )
             returncode = process.wait(timeout=max(0.0, deadline - time.monotonic()))
             completed_ns = time.perf_counter_ns()
             errors.seek(0)
@@ -769,9 +845,7 @@ def _turn(
         "commit_json_serialize_ms": (commit_encode_completed_ns - commit_encode_started_ns) / 1_000_000,
         "sqlite_final_commit_roundtrip_ms": (committed_ns - commit_encode_completed_ns) / 1_000_000,
         "league_json_parse_ms": (
-            (parse_completed_ns - parse_started_ns)
-            + (begun_parse_completed_ns - begun_parse_started_ns)
-            + (committed_parse_completed_ns - committed_parse_started_ns)
+            intake_parse_ns + begun_parse_ns + committed_parse_ns
         ) / 1_000_000,
         "one_process_total_ms": (completed_ns - started_ns) / 1_000_000,
         "league_processes": 1,
@@ -879,7 +953,7 @@ def _pair(
     ordered_cases = [by_body[body] for body in ordered_bodies]
     arm_roots = {name: pair_root / name for name in ("off", "on")}
     for target in arm_roots.values():
-        shutil.copytree(state, target)
+        _clone_sqlite_state(state, target)
     order = ["off", "on"]
     random.Random(args.seed + batch_size * 1000 + sample + (10_000 if thermal == "warm" else 0)).shuffle(order)
     measurements: dict[str, dict[str, Any]] = {}
@@ -1021,6 +1095,57 @@ def run_benchmark(
         },
         "cells": cells,
     }
+
+
+# Stable, deliberately small surface for focused benchmark contract tests. The
+# command implementation keeps its detailed helpers private so measurement
+# refactors do not force test rewrites.
+def load_corpus(path: Path) -> tuple[list[dict[str, Any]], str]:
+    return _load_corpus(path)
+
+
+def select_batch(
+    cases: Sequence[dict[str, Any]], batch_size: int, sample: int, seed: int
+) -> list[dict[str, Any]]:
+    return _batch(cases, batch_size, sample, seed)
+
+
+def gold_payload(cases: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    return _gold_payload(cases)
+
+
+def score_accuracy(
+    payload: dict[str, Any], cases: Sequence[dict[str, Any]]
+) -> dict[str, Any]:
+    return _accuracy(payload, cases)
+
+
+def run_pair(
+    parent: Path,
+    cases: Sequence[dict[str, Any]],
+    thermal: str,
+    batch_size: int,
+    sample: int,
+    args: argparse.Namespace,
+    model_runner: ModelRunner,
+) -> dict[str, Any]:
+    return _pair(parent, cases, thermal, batch_size, sample, args, model_runner)
+
+
+def aggregate_samples(pairs: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    return _aggregate(pairs)
+
+
+def terminate_and_reap(process: subprocess.Popen[Any]) -> None:
+    _terminate_and_reap(process)
+
+
+def write_process_input(
+    process: subprocess.Popen[bytes], payload: bytes, deadline: float
+) -> None:
+    """Stable focused-test contract for deadline-bounded child input."""
+
+    _write_process_input(process, payload, deadline)
 
 
 def _parser() -> argparse.ArgumentParser:

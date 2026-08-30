@@ -1285,6 +1285,27 @@ def _ensure_runtime_reconciliation_event(
     return event_id, outbox_id
 
 
+def _stale_runtime_reconciliation_receipt(
+    assignment: Any,
+    version: int,
+    event_id: str,
+    outbox_id: str,
+    *,
+    idempotent: bool,
+) -> dict[str, Any]:
+    return {
+        "assignment_id": assignment["task_assignment_id"],
+        "assignment_role": assignment["assignment_role"],
+        "state": "cleanup_pending",
+        "version": version,
+        "runtime_status": "stale",
+        "event_id": event_id,
+        "outbox_id": outbox_id,
+        "recipient_agent_id": assignment["coordinator_agent_id"],
+        "idempotent": idempotent,
+    }
+
+
 def reconcile_assignment_runtime(
     store: Any, assignment_id: str, at: str
 ) -> dict[str, Any]:
@@ -1303,17 +1324,13 @@ def reconcile_assignment_runtime(
                 event_id, outbox_id = _ensure_runtime_reconciliation_event(
                     store, assignment, int(assignment["version"]), at
                 )
-                return {
-                    "assignment_id": assignment_id,
-                    "assignment_role": assignment["assignment_role"],
-                    "state": "cleanup_pending",
-                    "version": int(assignment["version"]),
-                    "runtime_status": "stale",
-                    "event_id": event_id,
-                    "outbox_id": outbox_id,
-                    "recipient_agent_id": assignment["coordinator_agent_id"],
-                    "idempotent": True,
-                }
+                return _stale_runtime_reconciliation_receipt(
+                    assignment,
+                    int(assignment["version"]),
+                    event_id,
+                    outbox_id,
+                    idempotent=True,
+                )
             if assignment["state"] != "active":
                 return {
                     "assignment_id": assignment_id,
@@ -1383,17 +1400,9 @@ def reconcile_assignment_runtime(
         raise store._translate_database_error(
             exc, "assignment runtime reconciliation conflicted with canonical state"
         ) from exc
-    return {
-        "assignment_id": assignment_id,
-        "assignment_role": assignment["assignment_role"],
-        "state": "cleanup_pending",
-        "version": next_version,
-        "runtime_status": "stale",
-        "event_id": event_id,
-        "outbox_id": outbox_id,
-        "recipient_agent_id": assignment["coordinator_agent_id"],
-        "idempotent": False,
-    }
+    return _stale_runtime_reconciliation_receipt(
+        assignment, next_version, event_id, outbox_id, idempotent=False
+    )
 
 
 def block_assignment(

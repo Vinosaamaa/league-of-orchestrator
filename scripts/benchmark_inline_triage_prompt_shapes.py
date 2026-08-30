@@ -67,6 +67,12 @@ def _terminate_and_reap(process: subprocess.Popen[Any]) -> None:
             stream.close()
 
 
+def terminate_and_reap(process: subprocess.Popen[Any]) -> None:
+    """Stable focused-test contract for bounded benchmark child cleanup."""
+
+    _terminate_and_reap(process)
+
+
 def _load(path: Path) -> tuple[list[dict[str, Any]], str]:
     encoded = path.read_bytes()
     payload = json.loads(encoded)

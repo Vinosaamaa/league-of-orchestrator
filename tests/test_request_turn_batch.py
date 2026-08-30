@@ -497,53 +497,52 @@ def test_turn_limit_refuses_before_intake(root: Path) -> None:
         assert observer.untriaged_intake(SHOTCALLER_ID)["returned_count"] == 1
 
 
-def test_truncated_or_changed_candidates_fence_only_external_dispatch(root: Path) -> None:
+def _submit_semantic(process: subprocess.Popen[str], payload: dict) -> dict:
+    assert process.stdin is not None and process.stdout is not None
+    process.stdin.write(json.dumps(payload, separators=(",", ":")) + "\n")
+    process.stdin.flush()
+    return json.loads(process.stdout.readline())
+
+
+def test_truncated_candidates_fence_only_external_dispatch(root: Path) -> None:
     state, store, clock = create_context(root, "turn-shortlist-external")
     for ordinal in range(13):
         _seed_request(store, clock, ordinal)
     _capture(store, clock, "prompt:external", "Delegate a repository change")
     store.close()
     process = _start_turn(state, clock.now())
-    assert process.stdin is not None and process.stdout is not None
+    assert process.stdout is not None
     intake = json.loads(process.stdout.readline())
-    process.stdin.write(
-        json.dumps(
-            {
-                "candidate_inventory_digest": intake["result"]["candidate_inventory"]["digest"],
-                "decisions": [_semantic_decision("Delegate repository work")],
-                "plans": [_external_semantic_plan()],
-            },
-            separators=(",", ":"),
-        )
-        + "\n"
+    refused = _submit_semantic(
+        process,
+        {
+            "candidate_inventory_digest": intake["result"]["candidate_inventory"]["digest"],
+            "decisions": [_semantic_decision("Delegate repository work")],
+            "plans": [_external_semantic_plan()],
+        },
     )
-    process.stdin.flush()
-    refused = json.loads(process.stdout.readline())
     assert process.wait(timeout=10) == 3
     assert refused["error"]["code"] == "candidate_inventory_truncated", refused
 
+
+def test_changed_candidates_fence_external_dispatch(root: Path) -> None:
     changed_state, changed_store, changed_clock = create_context(root, "turn-candidate-cas")
     _seed_request(changed_store, changed_clock, 1, "Existing candidate")
     _capture(changed_store, changed_clock, "prompt:cas", "Delegate changed candidate work")
     changed_store.close()
     changed = _start_turn(changed_state, changed_clock.now())
-    assert changed.stdin is not None and changed.stdout is not None
+    assert changed.stdout is not None
     changed_intake = json.loads(changed.stdout.readline())
     with SQLiteStorage(changed_state) as writer:
         _seed_request(writer, changed_clock, 2, "Concurrent candidate")
-    changed.stdin.write(
-        json.dumps(
-            {
-                "candidate_inventory_digest": changed_intake["result"]["candidate_inventory"]["digest"],
-                "decisions": [_semantic_decision("Delegate changed candidate work")],
-                "plans": [_external_semantic_plan()],
-            },
-            separators=(",", ":"),
-        )
-        + "\n"
+    changed_refused = _submit_semantic(
+        changed,
+        {
+            "candidate_inventory_digest": changed_intake["result"]["candidate_inventory"]["digest"],
+            "decisions": [_semantic_decision("Delegate changed candidate work")],
+            "plans": [_external_semantic_plan()],
+        },
     )
-    changed.stdin.flush()
-    changed_refused = json.loads(changed.stdout.readline())
     assert changed.wait(timeout=10) == 3
     assert changed_refused["error"]["code"] == "version_conflict", changed_refused
 
@@ -557,7 +556,8 @@ def main() -> None:
         test_partial_duplicate_or_reordered_decisions_refuse(root)
         test_one_process_persists_all_dispositions_without_minting_deferred_requests(root)
         test_small_shortlist_does_not_block_direct_and_pages_off_path(root)
-        test_truncated_or_changed_candidates_fence_only_external_dispatch(root)
+        test_truncated_candidates_fence_only_external_dispatch(root)
+        test_changed_candidates_fence_external_dispatch(root)
         test_turn_limit_refuses_before_intake(root)
     print(
         "PASS: one request-turn process emits exact intake, atomically begins ordered model "

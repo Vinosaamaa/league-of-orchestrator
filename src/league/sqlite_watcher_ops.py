@@ -1428,27 +1428,28 @@ def stop_decision(
                 "SELECT * FROM watcher_scopes WHERE scope_id=?", (scope_id,)
             ).fetchone()
             terminal_fresh = scope["last_terminal_generation"] != terminal_generation
-            counts = _obligation_counts(store, actor_agent_id)
-            summary_rows = store.connection.execute(
-                """
-                SELECT summary FROM requests
-                 WHERE owner_agent_id=? AND state NOT IN ('answered','cancelled')
-                 ORDER BY updated_at DESC,request_id LIMIT 10
-                """,
-                (actor_agent_id,),
-            ).fetchall()
-            summaries = tuple(
-                " ".join(str(row["summary"]).split())[:160]
-                for row in summary_rows
-            )
             policy = _policy_from_scope(scope)
-            paused_actionable = (
+            effective_counts = (
                 _paused_actionable_counts(store, actor_agent_id)
                 if policy["mode"] == "calm" and policy["runtime_state"] == "paused"
-                else None
+                else _obligation_counts(store, actor_agent_id)
             )
-            effective_counts = paused_actionable or counts
             total = sum(effective_counts.values())
+            if total:
+                summary_rows = store.connection.execute(
+                    """
+                    SELECT summary FROM requests
+                     WHERE owner_agent_id=? AND state NOT IN ('answered','cancelled')
+                     ORDER BY updated_at DESC,request_id LIMIT 10
+                    """,
+                    (actor_agent_id,),
+                ).fetchall()
+                summaries = tuple(
+                    " ".join(str(row["summary"]).split())[:160]
+                    for row in summary_rows
+                )
+            else:
+                summaries = ()
             common = {
                 "scope_id": scope_id,
                 "wait_generation": int(scope["wait_generation"]),

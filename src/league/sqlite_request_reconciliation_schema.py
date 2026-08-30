@@ -16,4 +16,5 @@ STATEMENTS = (
     )
     """,
     "CREATE INDEX ix_request_reconciliations_canonical ON request_reconciliations(canonical_request_id,duplicate_request_id)",
+    "CREATE INDEX ix_requests_owner_updated ON requests(owner_agent_id,updated_at DESC,request_id) WHERE state NOT IN ('answered','cancelled')",
 )

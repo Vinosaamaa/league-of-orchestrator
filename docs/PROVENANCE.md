@@ -677,7 +677,7 @@ renews silently every 20 seconds, ownership expires after 60 seconds, and the
 launchd template throttles restart to five seconds. The retained one-second
 `supervise` loop is diagnostic compatibility, not the production runtime.
 
-Owner-source installed 0.2.27 truth remains distinct: its foreground legacy
+Owner-source installed 0.2.28 truth remains distinct: its foreground legacy
 loop has a 30-second runtime snapshot, two matching observations (about 60
 seconds) before a stall fallback, and a 300-second liveness deadline that only
 resets silently. It has no separate OS timer or always-running liveness process,

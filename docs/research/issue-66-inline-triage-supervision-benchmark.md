@@ -1,11 +1,11 @@
 # Issue #66 inline semantic triage and persistent supervision
 
-**Date:** 2026-08-30  
-**Issue:** [#66](https://github.com/Vinosaamaa/league-of-orchestrator/issues/66)  
-**Implementation measured:** `01964ae094ae6d34bfe6544ff589e95986d55ae7`  
-**Implementation tree:** `48a9e13efc33416a51735d2416c20296eba6e71d`  
-**Source version:** League 0.2.24  
-**Installed version observed read-only:** League 0.2.27  
+**Date:** 2026-08-30
+**Issue:** [#66](https://github.com/Vinosaamaa/league-of-orchestrator/issues/66)
+**Implementation measured:** `01964ae094ae6d34bfe6544ff589e95986d55ae7`
+**Implementation tree:** `48a9e13efc33416a51735d2416c20296eba6e71d`
+**Source version:** League 0.2.24
+**Historical installed benchmark reference observed read-only:** League 0.2.27
 **Status:** source candidate only; open, unmerged, uninstalled, and not live
 
 ## Decision
@@ -32,7 +32,7 @@ Two live failures motivated this source slice:
 1. No persistent League supervisor service was active. A benchmark process was
    not production supervision.
 2. Genuine prompts reached the active owner turn but its canonical final
-   boundary still reported zero untriaged prompts. The installed 0.2.27 watcher
+   boundary still reported zero untriaged prompts. The installed 0.2.28 watcher
    command inventory also lacks the new `service-run`, `service-status`, and
    `service-stop` surfaces.
 
@@ -100,7 +100,7 @@ The monitor renews its lease silently every 20 seconds, the lease expires after
 60 seconds, and launchd's restart throttle is five seconds. The diagnostic
 `--poll-seconds 1` foreground loop is not this production boundary.
 
-The timer distinction is material. Owner-source installed 0.2.27 has no
+The timer distinction is material. Owner-source installed 0.2.28 has no
 always-running watchdog, launch service, or independent OS timer. Its legacy
 foreground `supervise` command keeps an in-memory 30-second runtime snapshot and
 requires two matching observations (about 60 seconds) before its stall fallback.

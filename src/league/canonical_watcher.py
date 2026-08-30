@@ -46,6 +46,11 @@ def _payload() -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+BROKERED_HOOK_COMMANDS = frozenset(
+    {"codex-stop-hook", "codex-user-prompt-hook", "cursor-before-submit-hook"}
+)
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="agent-watcher")
     parser.add_argument("--shotcaller")
@@ -456,11 +461,7 @@ def handle_brokered_hook(
     shotcaller = hook.get("shotcaller")
     session_id = hook.get("session_id")
     if (
-        command not in {
-            "codex-stop-hook",
-            "codex-user-prompt-hook",
-            "cursor-before-submit-hook",
-        }
+        command not in BROKERED_HOOK_COMMANDS
         or not isinstance(payload, dict)
         or (shotcaller is not None and not isinstance(shotcaller, str))
         or (session_id is not None and not isinstance(session_id, str))
@@ -540,7 +541,7 @@ def _broker_hook(args: argparse.Namespace, payload: dict[str, Any]) -> dict[str,
                 "payload": payload,
             },
         },
-        timeout_seconds=1.0,
+        timeout_seconds=0.1,
     )
 
 
@@ -828,11 +829,7 @@ def main(argv: list[str] | None = None) -> int:
         _emit(pause_supervisor(_state_root(), args.shotcaller))
         return 0
     payload = _payload() if args.command.endswith("-hook") else {}
-    if args.command in {
-        "codex-stop-hook",
-        "codex-user-prompt-hook",
-        "cursor-before-submit-hook",
-    }:
+    if args.command in BROKERED_HOOK_COMMANDS:
         try:
             response = _broker_hook(args, payload)
         except StorageRefusal:

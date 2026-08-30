@@ -490,8 +490,9 @@ def test_paused_stop_and_unreachable_are_bounded(root: Path) -> None:
         },
     )
     deadline = time.monotonic() + 2
-    while True:
-        with SQLiteStorage(liveness_state) as observer:
+    delay_seconds = 0.01
+    with SQLiteStorage(liveness_state) as observer:
+        while True:
             assignment = observer.assignment_launch_context("assignment:calm")
             reconciled_rows = observer.connection.execute(
                 """
@@ -500,14 +501,15 @@ def test_paused_stop_and_unreachable_are_bounded(root: Path) -> None:
                  WHERE e.event_type='assignment_runtime_reconciled'
                 """
             ).fetchall()
-        if (
-            assignment["state"] == "cleanup_pending"
-            and reconciled_rows
-            and reconciled_rows[0]["state"] == "delivered"
-        ):
-            break
-        assert time.monotonic() < deadline
-        time.sleep(0.02)
+            if (
+                assignment["state"] == "cleanup_pending"
+                and reconciled_rows
+                and reconciled_rows[0]["state"] == "delivered"
+            ):
+                break
+            assert time.monotonic() < deadline
+            time.sleep(delay_seconds)
+            delay_seconds = min(delay_seconds * 2, 0.1)
     assert len(reconciled_rows) == 1
     assert tuple(reconciled_rows[0][1:]) == ("delivered", "acknowledged"), tuple(
         reconciled_rows[0]

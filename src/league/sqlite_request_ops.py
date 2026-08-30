@@ -1047,175 +1047,169 @@ def request_turn_boundary(store: Any, owner_agent_id: str) -> dict[str, Any]:
     }
 
 
-def reconcile_duplicate_request(
+def _existing_reconciliation_receipt(
     store: Any, command: ReconcileDuplicateRequestCommand
-) -> dict[str, Any]:
-    """Supersede one same-owner duplicate without erasing either request's provenance."""
+) -> dict[str, Any] | None:
+    existing = store.connection.execute(
+        "SELECT * FROM request_reconciliations WHERE duplicate_request_id=?",
+        (command.duplicate_request_id,),
+    ).fetchone()
+    if existing is None:
+        return None
+    exact = (
+        existing["canonical_request_id"] == command.canonical_request_id
+        and existing["actor_agent_id"] == command.owner_agent_id
+        and int(existing["duplicate_version_before"])
+        == command.expected_duplicate_version
+        and int(existing["canonical_version_at_link"])
+        == command.expected_canonical_version
+    )
+    if not exact:
+        raise StorageRefusal(
+            "reconciliation_conflict",
+            "duplicate request already has a different reconciliation",
+        )
+    duplicate = _request_row(store, command.duplicate_request_id)
+    return {
+        "schema": "league.request-reconciliation.v1",
+        "duplicate_request_id": command.duplicate_request_id,
+        "canonical_request_id": command.canonical_request_id,
+        "duplicate_state": duplicate["state"],
+        "duplicate_version": int(duplicate["version"]),
+        "canonical_version": int(existing["canonical_version_at_link"]),
+        "idempotent": True,
+    }
 
-    _time(command.at, "request reconciliation time")
-    if command.duplicate_request_id == command.canonical_request_id:
-        raise StorageRefusal("invalid_reconciliation", "a request cannot supersede itself")
-    if command.expected_duplicate_version < 1 or command.expected_canonical_version < 1:
-        raise StorageRefusal("invalid_reconciliation", "expected request versions must be positive")
-    try:
-        with store._transaction():
-            existing = store.connection.execute(
-                "SELECT * FROM request_reconciliations WHERE duplicate_request_id=?",
-                (command.duplicate_request_id,),
-            ).fetchone()
-            if existing is not None:
-                exact = (
-                    existing["canonical_request_id"] == command.canonical_request_id
-                    and existing["actor_agent_id"] == command.owner_agent_id
-                    and int(existing["duplicate_version_before"])
-                    == command.expected_duplicate_version
-                    and int(existing["canonical_version_at_link"])
-                    == command.expected_canonical_version
-                )
-                if not exact:
-                    raise StorageRefusal(
-                        "reconciliation_conflict",
-                        "duplicate request already has a different reconciliation",
-                    )
-                duplicate = _request_row(store, command.duplicate_request_id)
-                return {
-                    "schema": "league.request-reconciliation.v1",
-                    "duplicate_request_id": command.duplicate_request_id,
-                    "canonical_request_id": command.canonical_request_id,
-                    "duplicate_state": duplicate["state"],
-                    "duplicate_version": int(duplicate["version"]),
-                    "canonical_version": int(existing["canonical_version_at_link"]),
-                    "idempotent": True,
-                }
-            duplicate = _request_row(store, command.duplicate_request_id)
-            canonical = _request_row(store, command.canonical_request_id)
-            if (
-                duplicate["owner_agent_id"] != command.owner_agent_id
-                or canonical["owner_agent_id"] != command.owner_agent_id
-                or duplicate["owner_agent_id"] != canonical["owner_agent_id"]
-                or duplicate["owner_squad_id"] != canonical["owner_squad_id"]
-            ):
-                raise StorageRefusal(
-                    "owner_mismatch",
-                    "duplicate reconciliation requires the same current owner and Squad",
-                )
-            if (
-                int(duplicate["version"]) != command.expected_duplicate_version
-                or int(canonical["version"]) != command.expected_canonical_version
-            ):
-                raise StorageRefusal(
-                    "version_conflict", "request changed before reconciliation", retryable=True
-                )
-            if duplicate["state"] in TERMINAL_REQUEST_STATES or canonical["state"] in TERMINAL_REQUEST_STATES:
-                raise StorageRefusal(
-                    "reconciliation_conflict",
-                    "terminal requests refuse duplicate reconciliation",
-                )
-            chain = store.connection.execute(
-                """
-                SELECT 1 FROM request_reconciliations
-                 WHERE duplicate_request_id=? OR canonical_request_id=?
-                 LIMIT 1
-                """,
-                (command.canonical_request_id, command.duplicate_request_id),
-            ).fetchone()
-            if chain is not None:
-                raise StorageRefusal(
-                    "reconciliation_cycle",
-                    "duplicate reconciliation chains and cycles are refused",
-                )
-            external = store.connection.execute(
-                """
-                SELECT 1 FROM request_dispatches
-                 WHERE request_id=? AND execution_mode<>'direct' LIMIT 1
-                """,
-                (command.duplicate_request_id,),
-            ).fetchone()
-            created_work = store.connection.execute(
-                "SELECT 1 FROM tasks WHERE request_id=? LIMIT 1",
-                (command.duplicate_request_id,),
-            ).fetchone()
-            produced_result = store.connection.execute(
-                "SELECT 1 FROM request_results WHERE request_id=? LIMIT 1",
-                (command.duplicate_request_id,),
-            ).fetchone()
-            if external is not None or created_work is not None or produced_result is not None:
-                raise StorageRefusal(
-                    "irreversible_execution_started",
-                    "duplicate request has execution or result evidence and requires separate resolution",
-                )
-            next_version = int(duplicate["version"]) + 1
-            changed = store.connection.execute(
-                """
-                UPDATE requests
-                   SET state='cancelled',resolution_summary=?,version=?,updated_at=?
-                 WHERE request_id=? AND owner_agent_id=? AND version=?
-                """,
-                (
-                    "Superseded by the canonical same-owner request.",
-                    next_version,
-                    command.at,
-                    command.duplicate_request_id,
-                    command.owner_agent_id,
-                    command.expected_duplicate_version,
-                ),
-            )
-            if changed.rowcount != 1:
-                raise StorageRefusal(
-                    "version_conflict", "duplicate request changed", retryable=True
-                )
-            store.connection.execute(
-                "UPDATE request_claims SET released_at=? WHERE request_id=? AND released_at IS NULL",
-                (command.at, command.duplicate_request_id),
-            )
-            event_id = (
-                "request-reconciliation:"
-                + _digest(
-                    _json(
-                        {
-                            "duplicate": command.duplicate_request_id,
-                            "canonical": command.canonical_request_id,
-                            "duplicate_version": command.expected_duplicate_version,
-                            "canonical_version": command.expected_canonical_version,
-                        }
-                    )
-                )
-            )
-            _insert_request_event(
-                store,
-                event_id=event_id,
-                request_id=command.duplicate_request_id,
-                actor_id=command.owner_agent_id,
-                request_version=next_version,
-                event_type="request_superseded",
-                state="cancelled",
-                update="Duplicate request superseded by a canonical same-owner request.",
-                at=command.at,
-                detail={"canonical_request_id": command.canonical_request_id},
-            )
-            store.connection.execute(
-                """
-                INSERT INTO request_reconciliations
-                  (duplicate_request_id,canonical_request_id,actor_agent_id,
-                   duplicate_version_before,canonical_version_at_link,event_id,reconciled_at)
-                VALUES(?,?,?,?,?,?,?)
-                """,
-                (
-                    command.duplicate_request_id,
-                    command.canonical_request_id,
-                    command.owner_agent_id,
-                    command.expected_duplicate_version,
-                    command.expected_canonical_version,
-                    event_id,
-                    command.at,
-                ),
-            )
-    except StorageRefusal:
-        raise
-    except sqlite3.DatabaseError as exc:
-        raise store._translate_database_error(
-            exc, "request reconciliation conflicted with canonical state"
-        ) from exc
+
+def _validated_reconciliation_requests(
+    store: Any, command: ReconcileDuplicateRequestCommand
+) -> tuple[Any, Any]:
+    duplicate = _request_row(store, command.duplicate_request_id)
+    canonical = _request_row(store, command.canonical_request_id)
+    if (
+        duplicate["owner_agent_id"] != command.owner_agent_id
+        or canonical["owner_agent_id"] != command.owner_agent_id
+        or duplicate["owner_agent_id"] != canonical["owner_agent_id"]
+        or duplicate["owner_squad_id"] != canonical["owner_squad_id"]
+    ):
+        raise StorageRefusal(
+            "owner_mismatch",
+            "duplicate reconciliation requires the same current owner and Squad",
+        )
+    if (
+        int(duplicate["version"]) != command.expected_duplicate_version
+        or int(canonical["version"]) != command.expected_canonical_version
+    ):
+        raise StorageRefusal(
+            "version_conflict", "request changed before reconciliation", retryable=True
+        )
+    if (
+        duplicate["state"] in TERMINAL_REQUEST_STATES
+        or canonical["state"] in TERMINAL_REQUEST_STATES
+    ):
+        raise StorageRefusal(
+            "reconciliation_conflict",
+            "terminal requests refuse duplicate reconciliation",
+        )
+    chain = store.connection.execute(
+        """
+        SELECT 1 FROM request_reconciliations
+         WHERE duplicate_request_id=? OR canonical_request_id=? LIMIT 1
+        """,
+        (command.canonical_request_id, command.duplicate_request_id),
+    ).fetchone()
+    if chain is not None:
+        raise StorageRefusal(
+            "reconciliation_cycle",
+            "duplicate reconciliation chains and cycles are refused",
+        )
+    evidence_queries = (
+        (
+            "SELECT 1 FROM request_dispatches "
+            "WHERE request_id=? AND execution_mode<>'direct' LIMIT 1"
+        ),
+        "SELECT 1 FROM tasks WHERE request_id=? LIMIT 1",
+        "SELECT 1 FROM request_results WHERE request_id=? LIMIT 1",
+    )
+    if any(
+        store.connection.execute(query, (command.duplicate_request_id,)).fetchone()
+        is not None
+        for query in evidence_queries
+    ):
+        raise StorageRefusal(
+            "irreversible_execution_started",
+            "duplicate request has execution or result evidence and requires separate resolution",
+        )
+    return duplicate, canonical
+
+
+def _persist_request_reconciliation(
+    store: Any, command: ReconcileDuplicateRequestCommand, duplicate: Any
+) -> dict[str, Any]:
+    next_version = int(duplicate["version"]) + 1
+    changed = store.connection.execute(
+        """
+        UPDATE requests
+           SET state='cancelled',resolution_summary=?,version=?,updated_at=?
+         WHERE request_id=? AND owner_agent_id=? AND version=?
+        """,
+        (
+            "Superseded by the canonical same-owner request.",
+            next_version,
+            command.at,
+            command.duplicate_request_id,
+            command.owner_agent_id,
+            command.expected_duplicate_version,
+        ),
+    )
+    if changed.rowcount != 1:
+        raise StorageRefusal(
+            "version_conflict", "duplicate request changed", retryable=True
+        )
+    store.connection.execute(
+        "UPDATE request_claims SET released_at=? "
+        "WHERE request_id=? AND released_at IS NULL",
+        (command.at, command.duplicate_request_id),
+    )
+    event_id = "request-reconciliation:" + _digest(
+        _json(
+            {
+                "duplicate": command.duplicate_request_id,
+                "canonical": command.canonical_request_id,
+                "duplicate_version": command.expected_duplicate_version,
+                "canonical_version": command.expected_canonical_version,
+            }
+        )
+    )
+    _insert_request_event(
+        store,
+        event_id=event_id,
+        request_id=command.duplicate_request_id,
+        actor_id=command.owner_agent_id,
+        request_version=next_version,
+        event_type="request_superseded",
+        state="cancelled",
+        update="Duplicate request superseded by a canonical same-owner request.",
+        at=command.at,
+        detail={"canonical_request_id": command.canonical_request_id},
+    )
+    store.connection.execute(
+        """
+        INSERT INTO request_reconciliations
+          (duplicate_request_id,canonical_request_id,actor_agent_id,
+           duplicate_version_before,canonical_version_at_link,event_id,reconciled_at)
+        VALUES(?,?,?,?,?,?,?)
+        """,
+        (
+            command.duplicate_request_id,
+            command.canonical_request_id,
+            command.owner_agent_id,
+            command.expected_duplicate_version,
+            command.expected_canonical_version,
+            event_id,
+            command.at,
+        ),
+    )
     return {
         "schema": "league.request-reconciliation.v1",
         "duplicate_request_id": command.duplicate_request_id,
@@ -1225,6 +1219,33 @@ def reconcile_duplicate_request(
         "canonical_version": command.expected_canonical_version,
         "idempotent": False,
     }
+
+
+def reconcile_duplicate_request(
+    store: Any, command: ReconcileDuplicateRequestCommand
+) -> dict[str, Any]:
+    """Supersede one same-owner duplicate without erasing either request's provenance."""
+
+    _time(command.at, "request reconciliation time")
+    if command.duplicate_request_id == command.canonical_request_id:
+        raise StorageRefusal("invalid_reconciliation", "a request cannot supersede itself")
+    if command.expected_duplicate_version < 1 or command.expected_canonical_version < 1:
+        raise StorageRefusal(
+            "invalid_reconciliation", "expected request versions must be positive"
+        )
+    try:
+        with store._transaction():
+            receipt = _existing_reconciliation_receipt(store, command)
+            if receipt is not None:
+                return receipt
+            duplicate, _canonical = _validated_reconciliation_requests(store, command)
+            return _persist_request_reconciliation(store, command, duplicate)
+    except StorageRefusal:
+        raise
+    except sqlite3.DatabaseError as exc:
+        raise store._translate_database_error(
+            exc, "request reconciliation conflicted with canonical state"
+        ) from exc
 
 
 def claim_request(
@@ -2407,9 +2428,8 @@ def _candidate_request_inventory(
         if len(term) > 2
     }
     prompt_terms = set(
-        sorted(prompt_terms, key=lambda term: (-len(term), term))[:32]
+        sorted(prompt_terms, key=lambda term: (-len(term), term))[:64]
     )
-    prompt_text = " ".join(prompt_texts).lower()
     prepared: list[dict[str, Any]] = []
     for row in rows:
         summary = " ".join(str(row["summary"]).split())[:240]
@@ -2428,7 +2448,15 @@ def _candidate_request_inventory(
         terms = {term for term in re.findall(r"[a-z0-9]+", searchable) if len(term) > 2}
         candidate["_overlap"] = len(prompt_terms & terms)
         candidate["_routing_overlap"] = int(
-            any(str(value).lower() in prompt_text for value in routing_key.values())
+            any(
+                (routing_terms := {
+                    term
+                    for term in re.findall(r"[a-z0-9]+", str(value).lower())
+                    if len(term) > 2
+                })
+                and routing_terms <= prompt_terms
+                for value in routing_key.values()
+            )
         )
         candidate["_updated_at"] = str(row["updated_at"])
         prepared.append(candidate)

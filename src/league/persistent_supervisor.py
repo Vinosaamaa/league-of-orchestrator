@@ -104,16 +104,32 @@ class HerdrRuntimeObservationAdapter:
                 "Herdr runtime inventory could not be observed exactly",
                 retryable=True,
             )
+        indexes: dict[str, dict[str, set[int]]] = {
+            "pane": {},
+            "route": {},
+            "session": {},
+        }
+        for index, agent in enumerate(agents):
+            values = {
+                "pane": agent.get("pane_id"),
+                "route": agent.get("name"),
+                "session": self._session(agent),
+            }
+            for kind, value in values.items():
+                if isinstance(value, str) and value:
+                    indexes[kind].setdefault(value, set()).add(index)
         results: dict[str, dict[str, str]] = {}
         for candidate in candidates:
             assignment_id = str(candidate["assignment_id"])
-            related = [
-                agent
-                for agent in agents
-                if agent.get("pane_id") == candidate.get("endpoint")
-                or agent.get("name") == candidate.get("routing_name")
-                or self._session(agent) == candidate.get("session_ref")
-            ]
+            related_indexes: set[int] = set()
+            for kind, value in (
+                ("pane", candidate.get("endpoint")),
+                ("route", candidate.get("routing_name")),
+                ("session", candidate.get("session_ref")),
+            ):
+                if isinstance(value, str) and value:
+                    related_indexes.update(indexes[kind].get(value, ()))
+            related = [agents[index] for index in sorted(related_indexes)]
             if not related:
                 results[assignment_id] = {"state": "missing", "fingerprint": "missing"}
                 continue
@@ -495,6 +511,109 @@ class PersistentSupervisor:
         finally:
             connection.close()
 
+    def _dispatch_message(
+        self, connection: socket.socket, message: dict[str, Any], fence: int
+    ) -> None:
+        kind = message.get("kind")
+        if kind == "hook":
+            from .canonical_watcher import handle_brokered_hook
+
+            hook = message.get("hook")
+            if not isinstance(hook, dict):
+                raise SupervisorUnavailable("supervisor hook request is malformed")
+            with self.store_factory(self.state_root) as store:
+                self._assert_fenced_registration(store, fence)
+                result = handle_brokered_hook(store, hook)
+            capture = result.get("capture")
+            published_user_priority = bool(
+                isinstance(capture, dict)
+                and capture.get("owned_by_shotcaller") is True
+                and isinstance(capture.get("prompt_id"), str)
+                and capture.get("idempotent") is False
+                and capture.get("suppressed") is None
+            )
+            if published_user_priority:
+                self._publish_user_priority()
+            self._response(
+                connection,
+                {
+                    "ok": True,
+                    "hook_output": result["hook_output"],
+                    "capture": capture,
+                    "priority": "user" if published_user_priority else None,
+                },
+            )
+            if (
+                isinstance(capture, dict)
+                and capture.get("state") == "quarantined"
+                and isinstance(capture.get("prompt_id"), str)
+            ):
+                self._schedule_semantic_recovery((str(capture["prompt_id"]),))
+            return
+        if kind == "ping":
+            self._response(
+                connection,
+                {
+                    "ok": True,
+                    "schema": "league.supervisor-status.v1",
+                    "live": True,
+                    "event_driven": True,
+                    "callsign": self._binding["callsign"],
+                    "fence": fence,
+                },
+            )
+            return
+        if kind == "stop":
+            self._response(connection, {"ok": True, "stopping": True, "fence": fence})
+            self.stop_requested.set()
+            return
+        if (
+            message.get("fence") != fence
+            or message.get("runtime_generation") != self._binding["runtime_generation"]
+        ):
+            raise SupervisorUnavailable("supervisor wake identity is stale")
+        if kind == "user-message":
+            with self.store_factory(self.state_root) as store:
+                self._assert_fenced_registration(store, fence)
+            self._publish_user_priority()
+            self._response(connection, {"ok": True, "priority": "user", "fence": fence})
+            return
+        if kind == "runtime-observation":
+            self._response(
+                connection,
+                {"ok": True, "observation_scheduled": True, "fence": fence},
+            )
+            self._schedule_runtime_observation(force=True)
+            return
+        if kind in {"calm-pause", "calm-resume"}:
+            with self.store_factory(self.state_root) as store:
+                result = (
+                    store.pause_calm_supervision
+                    if kind == "calm-pause"
+                    else store.resume_calm_supervision
+                )(
+                    self._binding["actor_agent_id"],
+                    self._watcher_id,
+                    fence,
+                    _at(),
+                )
+            self._response(connection, {"ok": True, **result})
+            return
+        if kind != "champion-event" or not isinstance(message.get("envelope"), dict):
+            raise SupervisorUnavailable("supervisor message kind is unsupported")
+        with self.store_factory(self.state_root) as store:
+            self._assert_fenced_registration(store, fence)
+        self.wake_adapter.send(self._binding, message["envelope"])
+        self._response(
+            connection,
+            {
+                "ok": True,
+                "delivered": True,
+                "event_id": message["envelope"].get("event_id"),
+                "fence": fence,
+            },
+        )
+
     def _handle(self, connection: socket.socket) -> None:
         connection.settimeout(15)
         payload = bytearray()
@@ -513,118 +632,7 @@ class PersistentSupervisor:
                 raise SupervisorUnavailable("supervisor message is malformed")
             with self._fence_lock:
                 fence = self._fence
-            kind = message.get("kind")
-            if kind == "hook":
-                from .canonical_watcher import handle_brokered_hook
-
-                hook = message.get("hook")
-                if not isinstance(hook, dict):
-                    raise SupervisorUnavailable("supervisor hook request is malformed")
-                with self.store_factory(self.state_root) as store:
-                    self._assert_fenced_registration(store, fence)
-                    result = handle_brokered_hook(store, hook)
-                capture = result.get("capture")
-                published_user_priority = bool(
-                    isinstance(capture, dict)
-                    and capture.get("owned_by_shotcaller") is True
-                    and isinstance(capture.get("prompt_id"), str)
-                    and capture.get("idempotent") is False
-                    and capture.get("suppressed") is None
-                )
-                if published_user_priority:
-                    self._publish_user_priority()
-                self._response(
-                    connection,
-                    {
-                        "ok": True,
-                        "hook_output": result["hook_output"],
-                        "capture": capture,
-                        "priority": "user" if published_user_priority else None,
-                    },
-                )
-                if (
-                    isinstance(capture, dict)
-                    and capture.get("state") == "quarantined"
-                    and isinstance(capture.get("prompt_id"), str)
-                ):
-                    self._schedule_semantic_recovery((str(capture["prompt_id"]),))
-                return
-            if kind == "ping":
-                self._response(
-                    connection,
-                    {
-                        "ok": True,
-                        "schema": "league.supervisor-status.v1",
-                        "live": True,
-                        "event_driven": True,
-                        "callsign": self._binding["callsign"],
-                        "fence": fence,
-                    },
-                )
-                return
-            if kind == "stop":
-                self._response(
-                    connection,
-                    {"ok": True, "stopping": True, "fence": fence},
-                )
-                self.stop_requested.set()
-                return
-            if (
-                message.get("fence") != fence
-                or message.get("runtime_generation")
-                != self._binding["runtime_generation"]
-            ):
-                raise SupervisorUnavailable("supervisor wake identity is stale")
-            if kind == "user-message":
-                with self.store_factory(self.state_root) as store:
-                    self._assert_fenced_registration(store, fence)
-                self._publish_user_priority()
-                self._response(
-                    connection,
-                    {"ok": True, "priority": "user", "fence": fence},
-                )
-                return
-            if kind == "runtime-observation":
-                self._response(
-                    connection,
-                    {"ok": True, "observation_scheduled": True, "fence": fence},
-                )
-                self._schedule_runtime_observation(force=True)
-                return
-            if kind == "calm-pause":
-                with self.store_factory(self.state_root) as store:
-                    paused = store.pause_calm_supervision(
-                        self._binding["actor_agent_id"],
-                        self._watcher_id,
-                        fence,
-                        _at(),
-                    )
-                self._response(connection, {"ok": True, **paused})
-                return
-            if kind == "calm-resume":
-                with self.store_factory(self.state_root) as store:
-                    resumed = store.resume_calm_supervision(
-                        self._binding["actor_agent_id"],
-                        self._watcher_id,
-                        fence,
-                        _at(),
-                    )
-                self._response(connection, {"ok": True, **resumed})
-                return
-            if kind != "champion-event" or not isinstance(message.get("envelope"), dict):
-                raise SupervisorUnavailable("supervisor message kind is unsupported")
-            with self.store_factory(self.state_root) as store:
-                self._assert_fenced_registration(store, fence)
-            self.wake_adapter.send(self._binding, message["envelope"])
-            self._response(
-                connection,
-                {
-                    "ok": True,
-                    "delivered": True,
-                    "event_id": message["envelope"].get("event_id"),
-                    "fence": fence,
-                },
-            )
+            self._dispatch_message(connection, message, fence)
         except StorageRefusal as exc:
             self._response(
                 connection,
@@ -644,10 +652,9 @@ class PersistentSupervisor:
         try:
             with self.store_factory(self.state_root) as store:
                 rows = store.pending_backlog(_at(), limit=100, per_recipient=20)
-            for row in rows:
-                if row["recipient_agent_id"] != self._binding["actor_agent_id"]:
-                    continue
-                with self.store_factory(self.state_root) as store:
+                for row in rows:
+                    if row["recipient_agent_id"] != self._binding["actor_agent_id"]:
+                        continue
                     dispatch_event(
                         store,
                         outbox_id=str(row["outbox_id"]),
@@ -693,9 +700,90 @@ class PersistentSupervisor:
         except (StorageRefusal, SupervisorUnavailable):
             return
 
-    def _observe_runtime_candidates(self) -> None:
+    def _apply_runtime_observation(
+        self,
+        store: Any,
+        candidate: dict[str, Any],
+        observation: dict[str, str] | None,
+        policy: dict[str, Any],
+        now: float,
+    ) -> None:
         from .canonical_delivery import dispatch_event
 
+        assignment_id = str(candidate["assignment_id"])
+        if observation is None:
+            self._record_monitor_fault(
+                "runtime_observation_refused", f"missing_result:{assignment_id}"
+            )
+            return
+        state = observation.get("state")
+        fingerprint = str(observation.get("fingerprint", state))
+        if state == "live":
+            store.register_runtime(
+                RuntimeRegistrationCommand(
+                    runtime_instance_id=str(candidate["runtime_instance_id"]),
+                    actor_agent_id=str(candidate["champion_agent_id"]),
+                    harness_kind=str(candidate["harness_kind"]),
+                    backend_kind=str(candidate["backend_kind"]),
+                    session_ref=str(candidate["session_ref"]),
+                    endpoint=str(candidate["endpoint"]),
+                    runtime_generation=str(candidate["runtime_generation"]),
+                    status="active",
+                    verified=True,
+                    at=_at(),
+                )
+            )
+            with self._monitor_lock:
+                self._runtime_suspicions.pop(assignment_id, None)
+            return
+        if state not in {"missing", "mismatch"}:
+            self._record_monitor_fault(
+                "runtime_observation_refused", f"invalid_result:{assignment_id}"
+            )
+            return
+        with self._monitor_lock:
+            prior = self._runtime_suspicions.get(assignment_id)
+            if prior is None or prior[0] != fingerprint:
+                self._runtime_suspicions[assignment_id] = (
+                    fingerprint,
+                    now + float(policy["unreachable_grace_seconds"]),
+                )
+                return
+            if now < prior[1]:
+                return
+        try:
+            store.register_runtime(
+                RuntimeRegistrationCommand(
+                    runtime_instance_id=str(candidate["runtime_instance_id"]),
+                    actor_agent_id=str(candidate["champion_agent_id"]),
+                    harness_kind=str(candidate["harness_kind"]),
+                    backend_kind=str(candidate["backend_kind"]),
+                    session_ref=str(candidate["session_ref"]),
+                    endpoint=str(candidate["endpoint"]),
+                    runtime_generation=str(candidate["runtime_generation"]),
+                    status="failed",
+                    verified=False,
+                    at=_at(),
+                )
+            )
+            reconciled = store.reconcile_assignment_runtime(assignment_id, _at())
+            dispatch_event(
+                store,
+                outbox_id=reconciled["outbox_id"],
+                event_id=reconciled["event_id"],
+                recipient_agent_id=reconciled["recipient_agent_id"],
+                at=_at(),
+                adapter=self.delivery_adapter,
+            )
+        except StorageRefusal as exc:
+            self._record_monitor_fault(
+                "runtime_reconciliation_refused", f"{assignment_id}:{exc.code}"
+            )
+        finally:
+            with self._monitor_lock:
+                self._runtime_suspicions.pop(assignment_id, None)
+
+    def _observe_runtime_candidates(self) -> None:
         now = time.monotonic()
         try:
             with self.store_factory(self.state_root) as store:
@@ -724,82 +812,16 @@ class PersistentSupervisor:
                 if assignment_id not in candidate_ids:
                     self._runtime_suspicions.pop(assignment_id, None)
 
-        for candidate in candidates:
-            assignment_id = str(candidate["assignment_id"])
-            observation = observations.get(assignment_id)
-            if observation is None:
-                self._record_monitor_fault(
-                    "runtime_observation_refused", f"missing_result:{assignment_id}"
+        with self.store_factory(self.state_root) as store:
+            for candidate in candidates:
+                assignment_id = str(candidate["assignment_id"])
+                self._apply_runtime_observation(
+                    store,
+                    candidate,
+                    observations.get(assignment_id),
+                    policy,
+                    now,
                 )
-                continue
-            state = observation.get("state")
-            fingerprint = str(observation.get("fingerprint", state))
-            if state == "live":
-                with self.store_factory(self.state_root) as store:
-                    store.register_runtime(
-                        RuntimeRegistrationCommand(
-                            runtime_instance_id=str(candidate["runtime_instance_id"]),
-                            actor_agent_id=str(candidate["champion_agent_id"]),
-                            harness_kind=str(candidate["harness_kind"]),
-                            backend_kind=str(candidate["backend_kind"]),
-                            session_ref=str(candidate["session_ref"]),
-                            endpoint=str(candidate["endpoint"]),
-                            runtime_generation=str(candidate["runtime_generation"]),
-                            status="active",
-                            verified=True,
-                            at=_at(),
-                        )
-                    )
-                with self._monitor_lock:
-                    self._runtime_suspicions.pop(assignment_id, None)
-                continue
-            if state not in {"missing", "mismatch"}:
-                self._record_monitor_fault(
-                    "runtime_observation_refused", f"invalid_result:{assignment_id}"
-                )
-                continue
-            with self._monitor_lock:
-                prior = self._runtime_suspicions.get(assignment_id)
-                if prior is None or prior[0] != fingerprint:
-                    self._runtime_suspicions[assignment_id] = (
-                        fingerprint,
-                        now + float(policy["unreachable_grace_seconds"]),
-                    )
-                    continue
-                if now < prior[1]:
-                    continue
-            try:
-                with self.store_factory(self.state_root) as store:
-                    store.register_runtime(
-                        RuntimeRegistrationCommand(
-                            runtime_instance_id=str(candidate["runtime_instance_id"]),
-                            actor_agent_id=str(candidate["champion_agent_id"]),
-                            harness_kind=str(candidate["harness_kind"]),
-                            backend_kind=str(candidate["backend_kind"]),
-                            session_ref=str(candidate["session_ref"]),
-                            endpoint=str(candidate["endpoint"]),
-                            runtime_generation=str(candidate["runtime_generation"]),
-                            status="failed",
-                            verified=False,
-                            at=_at(),
-                        )
-                    )
-                    reconciled = store.reconcile_assignment_runtime(assignment_id, _at())
-                    dispatch_event(
-                        store,
-                        outbox_id=reconciled["outbox_id"],
-                        event_id=reconciled["event_id"],
-                        recipient_agent_id=reconciled["recipient_agent_id"],
-                        at=_at(),
-                        adapter=self.delivery_adapter,
-                    )
-            except StorageRefusal as exc:
-                self._record_monitor_fault(
-                    "runtime_reconciliation_refused", f"{assignment_id}:{exc.code}"
-                )
-            finally:
-                with self._monitor_lock:
-                    self._runtime_suspicions.pop(assignment_id, None)
 
         with self._monitor_lock:
             deadlines = [deadline for _, deadline in self._runtime_suspicions.values()]

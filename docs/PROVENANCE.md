@@ -540,6 +540,15 @@ prompt, and rollback preserves newer user-owned presentation metadata while
 restoring only League-owned sidebar/thread tokens to baseline and releasing the
 League route and callsign reservation. Focused fakes prove unrelated user
 tokens remain exact, zero layout/process creation, and no Squad registration.
+One owner-authorized compatibility exception covers a pre-baseline version-2
+retired unbound Shotcaller residue whose metadata is exactly empty. It still
+requires the complete single rolled-back assignment/event history and absence
+of every active resource. League accepts only a current unbound presentation
+whose source is not League-owned and whose title/sidebar/thread contain no
+retired callsign, then atomically records a v2 baseline containing its source,
+title, endpoint generation, and state-change sequence with the new reservation.
+A second exact observation before publication refuses any source, title, token,
+thread, terminal, generation, route, or sequence race.
 The reopened issue adds one deliberately separate legacy provenance path:
 owner-authorized reconciliation binds the exact canonical Champion identity to
 the expected live presentation, writes immutable intent before the external

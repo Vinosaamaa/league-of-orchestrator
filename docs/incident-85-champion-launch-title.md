@@ -132,6 +132,15 @@ same callsign and rebind the retired row only when the stored bootstrap
 baseline proves the same terminal/thread generation and the prior assignment,
 rollback event, role, scope, and failure receipt are complete.
 
+The pre-baseline compatibility path is narrower: it accepts only the complete
+version-2 rolled-back shape with exactly empty agent metadata and no active
+resource. The current route must be absent, the presentation source must not be
+League-owned, and sidebar, thread, and terminal titles must contain no retired
+callsign. League stores that clean presentation as a v2 durable baseline in the
+same transaction as re-reservation, then requires an exact second
+source/title/token/thread/terminal/generation/sequence observation before any
+Herdr publication.
+
 Recovery refuses before any Herdr mutation when assignment history is
 ambiguous, the thread generation differs, the agent is not the exact bootstrap
 residue, the callsign is not available, or any runtime, lease, Squad,

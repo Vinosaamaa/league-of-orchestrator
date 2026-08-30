@@ -2232,6 +2232,8 @@ class SQLiteStorage(SQLiteTransactionCore):
         at: str,
         *,
         fault: Optional[FaultInjector] = None,
+        recovery_baseline: Optional[Mapping[str, Any]] = None,
+        recovery_thread_id: Optional[str] = None,
     ) -> dict[str, Any]:
         return allocate_callsign_operation(
             self,
@@ -2243,6 +2245,8 @@ class SQLiteStorage(SQLiteTransactionCore):
             required_capabilities,
             at,
             fault=fault,
+            recovery_baseline=recovery_baseline,
+            recovery_thread_id=recovery_thread_id,
         )
 
     def callsign_assignment_status(self, assignment_id: str) -> Optional[dict[str, Any]]:

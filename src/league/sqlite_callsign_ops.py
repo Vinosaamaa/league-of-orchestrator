@@ -518,6 +518,250 @@ def _availability(store: Any, role: str, required: tuple[str, ...]) -> tuple[Any
     }
 
 
+def _recover_retired_shotcaller_in_transaction(
+    store: Any,
+    assignment_id: str,
+    agent: Any,
+    role: str,
+    scope_kind: str,
+    scope_id: str,
+    required: tuple[str, ...],
+    at: str,
+    fault: Optional[FaultInjector],
+    recovery_baseline: Optional[Mapping[str, Any]],
+    recovery_thread_id: Optional[str],
+) -> dict[str, Any]:
+    """Rebind only one exact clean failed in-place Shotcaller bootstrap."""
+
+    if (
+        role != "shotcaller"
+        or scope_kind != "shotcaller"
+        or scope_id != agent["agent_id"]
+        or agent["role"] != "shotcaller"
+        or agent["kind"] != "unbound"
+        or agent["retired_at"] is None
+        or int(agent["version"]) != 2
+        or agent["callsign"] is None
+        or any(
+            agent[key] is not None
+            for key in (
+                "shotcaller_agent_id",
+                "task_id",
+                "address",
+                "thread_id",
+                "backend",
+                "routing_name",
+                "display_agent",
+                "repository",
+                "issue",
+                "branch",
+                "worktree",
+                "blocker",
+            )
+        )
+        or agent["status"] != "active"
+        or agent["update_text"] != "reservation rolled back"
+        or agent["updated_at"] != agent["retired_at"]
+        or agent["next_action"] != "Complete exact runtime acceptance"
+        or not isinstance(recovery_thread_id, str)
+        or not recovery_thread_id
+        or recovery_baseline is None
+    ):
+        raise StorageRefusal("agent_conflict", "callsign subject identity already exists")
+    try:
+        metadata = json.loads(agent["metadata_json"])
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise StorageRefusal("agent_conflict", "retired Shotcaller residue is malformed") from exc
+    if not isinstance(metadata, dict) or set(metadata) != {
+        "scope_kind",
+        "scope_id",
+        SHOTCALLER_BASELINE_KEY,
+    }:
+        raise StorageRefusal("agent_conflict", "retired identity is not a bootstrap residue")
+    if metadata["scope_kind"] != "shotcaller" or metadata["scope_id"] != agent["agent_id"]:
+        raise StorageRefusal("agent_conflict", "retired bootstrap scope is not exact")
+    stored_baseline = _shotcaller_baseline(metadata[SHOTCALLER_BASELINE_KEY])
+    observed_baseline = _shotcaller_baseline(recovery_baseline)
+    expected_generation = "herdr:" + hashlib.sha256(
+        f"{observed_baseline['terminal_id']}\0{recovery_thread_id}".encode("utf-8")
+    ).hexdigest()[:24]
+    if (
+        observed_baseline["terminal_id"] != stored_baseline["terminal_id"]
+        or observed_baseline["endpoint_generation"]
+        != stored_baseline["endpoint_generation"]
+        or observed_baseline["endpoint_generation"] != expected_generation
+    ):
+        raise StorageRefusal("agent_conflict", "retired bootstrap belongs to another thread")
+
+    assignments = store.connection.execute(
+        "SELECT * FROM callsign_assignments WHERE agent_id=? "
+        "ORDER BY reserved_at,callsign_assignment_id",
+        (agent["agent_id"],),
+    ).fetchall()
+    if len(assignments) != 1:
+        raise StorageRefusal("agent_conflict", "retired Shotcaller assignment history is ambiguous")
+    prior = assignments[0]
+    if (
+        prior["callsign_assignment_id"] == assignment_id
+        or prior["subject_id"] != f"agent:{agent['agent_id']}"
+        or prior["callsign"] != agent["callsign"]
+        or prior["role"] != "shotcaller"
+        or prior["scope_kind"] != "shotcaller"
+        or prior["scope_id"] != agent["agent_id"]
+        or prior["state"] != "rolled_back"
+        or int(prior["version"]) != 2
+        or prior["runtime_instance_id"] is not None
+        or prior["acceptance_digest"] is not None
+        or prior["release_receipt_digest"] is not None
+        or not prior["failure_receipt_digest"]
+        or prior["activated_at"] is not None
+        or prior["released_at"] is None
+    ):
+        raise StorageRefusal("agent_conflict", "retired Shotcaller was not cleanly rolled back")
+    rollback_event = store.connection.execute(
+        "SELECT entity_version,detail_json FROM events WHERE event_id=? AND agent_id=? "
+        "AND event_type='callsign_reservation_rolled_back' AND status='rolled_back'",
+        (f"callsign:{prior['callsign_assignment_id']}:rolled-back", agent["agent_id"]),
+    ).fetchone()
+    if (
+        rollback_event is None
+        or int(rollback_event["entity_version"]) != 2
+        or rollback_event["detail_json"]
+        != stable_json(
+            {
+                "assignment_id": prior["callsign_assignment_id"],
+                "failure_receipt_digest": prior["failure_receipt_digest"],
+                "queue_version": int(prior["queue_version"]),
+            }
+        )
+        or agent["retired_at"] != prior["released_at"]
+    ):
+        raise StorageRefusal("agent_conflict", "retired Shotcaller rollback history is incomplete")
+    if (
+        store.connection.execute(
+            "SELECT 1 FROM runtime_instances WHERE actor_agent_id=? OR session_ref=? LIMIT 1",
+            (agent["agent_id"], recovery_thread_id),
+        ).fetchone()
+        is not None
+        or store.connection.execute(
+            "SELECT 1 FROM squads WHERE shotcaller_agent_id=? LIMIT 1",
+            (agent["agent_id"],),
+        ).fetchone()
+        is not None
+        or store.connection.execute(
+            "SELECT 1 FROM squad_registration_offers WHERE shotcaller_agent_id=? LIMIT 1",
+            (agent["agent_id"],),
+        ).fetchone()
+        is not None
+        or store.connection.execute(
+            "SELECT 1 FROM callsign_leases WHERE callsign=? OR agent_id=? LIMIT 1",
+            (agent["callsign"], agent["agent_id"]),
+        ).fetchone()
+        is not None
+    ):
+        raise StorageRefusal("agent_conflict", "retired Shotcaller residue still owns state")
+    queue = store.connection.execute(
+        "SELECT q.*,c.enabled FROM callsign_queue q JOIN callsigns c ON c.callsign=q.callsign "
+        "WHERE q.callsign=?",
+        (agent["callsign"],),
+    ).fetchone()
+    offered = {
+        str(row["capability"])
+        for row in store.connection.execute(
+            "SELECT capability FROM callsign_capabilities WHERE callsign=?",
+            (agent["callsign"],),
+        )
+    }
+    if (
+        queue is None
+        or queue["pool_role"] != "shotcaller"
+        or queue["state"] != "available"
+        or queue["reservation_assignment_id"] is not None
+        or not queue["enabled"]
+        or any(item not in offered for item in required)
+    ):
+        raise StorageRefusal("agent_conflict", "retired Shotcaller callsign is not available")
+
+    meta = _meta(store, "shotcaller")
+    queue_version = int(meta["queue_version"]) + 1
+    changed = store.connection.execute(
+        "UPDATE callsign_queue SET state='reserved',reservation_assignment_id=?,"
+        "version=version+1,updated_at=? WHERE callsign=? AND state='available' "
+        "AND reservation_assignment_id IS NULL AND version=?",
+        (assignment_id, at, agent["callsign"], queue["version"]),
+    )
+    if changed.rowcount != 1:
+        raise StorageRefusal("agent_conflict", "retired Shotcaller callsign changed concurrently")
+    store.connection.execute(
+        "UPDATE callsign_queue_meta SET queue_version=? WHERE pool_role='shotcaller'",
+        (queue_version,),
+    )
+    if fault:
+        fault("after_callsign_queue_reservation")
+    changed = store.connection.execute(
+        "UPDATE agent_instances SET version=3,updated_at=?,update_text='callsign re-reserved',"
+        "retired_at=NULL WHERE agent_id=? AND version=2 AND retired_at IS NOT NULL",
+        (at, agent["agent_id"]),
+    )
+    if changed.rowcount != 1:
+        raise StorageRefusal("agent_conflict", "retired Shotcaller identity changed concurrently")
+    store.connection.execute(
+        "INSERT INTO callsign_leases(callsign,agent_id,launch_attempt_id,reserved_at) "
+        "VALUES(?,?,NULL,?)",
+        (agent["callsign"], agent["agent_id"], at),
+    )
+    store.connection.execute(
+        """
+        INSERT INTO callsign_assignments
+          (callsign_assignment_id,callsign,subject_id,agent_id,runtime_instance_id,
+           role,scope_kind,scope_id,state,reservation_position,queue_version,
+           requirements_json,acceptance_digest,release_receipt_digest,
+           failure_receipt_digest,version,reserved_at,activated_at,released_at)
+        VALUES(?,?,?, ?,NULL,'shotcaller','shotcaller',?,'reserved',?,?,?,
+               NULL,NULL,NULL,1,?,NULL,NULL)
+        """,
+        (
+            assignment_id,
+            agent["callsign"],
+            f"agent:{agent['agent_id']}:shotcaller-retry:{assignment_id}",
+            agent["agent_id"],
+            agent["agent_id"],
+            queue["queue_position"],
+            queue_version,
+            stable_json(required),
+            at,
+        ),
+    )
+    store.connection.execute(
+        """
+        INSERT INTO events
+          (event_id,agent_id,task_id,squad_id,entity_version,event_type,status,
+           update_text,occurred_at,detail_json,aggregate_kind,aggregate_id)
+        VALUES(?,?,NULL,NULL,3,'callsign_reserved','reserved','callsign re-reserved',?,?,
+               'agent',?)
+        """,
+        (
+            f"callsign:{assignment_id}:reserved",
+            agent["agent_id"],
+            at,
+            stable_json(
+                {
+                    "assignment_id": assignment_id,
+                    "queue_version": queue_version,
+                    "requirements": list(required),
+                    "recovered_from_assignment_id": prior["callsign_assignment_id"],
+                }
+            ),
+            agent["agent_id"],
+        ),
+    )
+    row = store.connection.execute(
+        "SELECT * FROM callsign_assignments WHERE callsign_assignment_id=?",
+        (assignment_id,),
+    ).fetchone()
+    return _assignment_value(row, idempotent=False)
+
+
 def _reserve_in_transaction(
     store: Any,
     assignment_id: str,
@@ -528,6 +772,8 @@ def _reserve_in_transaction(
     required: tuple[str, ...],
     at: str,
     fault: Optional[FaultInjector] = None,
+    recovery_baseline: Optional[Mapping[str, Any]] = None,
+    recovery_thread_id: Optional[str] = None,
 ) -> dict[str, Any]:
     existing = store.connection.execute(
         "SELECT * FROM callsign_assignments WHERE callsign_assignment_id=?",
@@ -535,7 +781,11 @@ def _reserve_in_transaction(
     ).fetchone()
     if existing is not None:
         exact = (
-            existing["subject_id"] == f"agent:{agent_id}"
+            existing["subject_id"]
+            in {
+                f"agent:{agent_id}",
+                f"agent:{agent_id}:shotcaller-retry:{assignment_id}",
+            }
             and existing["agent_id"] == agent_id
             and existing["role"] == role
             and existing["scope_kind"] == scope_kind
@@ -545,10 +795,23 @@ def _reserve_in_transaction(
         if not exact:
             raise StorageRefusal("assignment_conflict", "callsign allocation retry changed identity")
         return _assignment_value(existing, idempotent=True)
-    if store.connection.execute(
-        "SELECT 1 FROM agent_instances WHERE agent_id=?", (agent_id,)
-    ).fetchone() is not None:
-        raise StorageRefusal("agent_conflict", "callsign subject identity already exists")
+    agent = store.connection.execute(
+        "SELECT * FROM agent_instances WHERE agent_id=?", (agent_id,)
+    ).fetchone()
+    if agent is not None:
+        return _recover_retired_shotcaller_in_transaction(
+            store,
+            assignment_id,
+            agent,
+            role,
+            scope_kind,
+            scope_id,
+            required,
+            at,
+            fault,
+            recovery_baseline,
+            recovery_thread_id,
+        )
     meta = _meta(store, role)
     selected, refusal = _availability(store, role, required)
     if selected is None:
@@ -654,6 +917,8 @@ def allocate_callsign(
     at: str,
     *,
     fault: Optional[FaultInjector] = None,
+    recovery_baseline: Optional[Mapping[str, Any]] = None,
+    recovery_thread_id: Optional[str] = None,
 ) -> dict[str, Any]:
     timestamp(at, "callsign allocation time")
     if (
@@ -675,6 +940,8 @@ def allocate_callsign(
                 required,
                 at,
                 fault,
+                recovery_baseline,
+                recovery_thread_id,
             )
     except StorageRefusal:
         raise
@@ -1031,6 +1298,14 @@ def record_shotcaller_bootstrap(
                 (assignment_id,),
             ).fetchone()
             assert assignment is not None
+            agent = store.connection.execute(
+                "SELECT version FROM agent_instances WHERE agent_id=? AND retired_at IS NULL",
+                (assignment["agent_id"],),
+            ).fetchone()
+            if agent is None:
+                raise StorageRefusal(
+                    "agent_conflict", "created Shotcaller identity is not live"
+                )
             event_id = f"shotcaller:{assignment_id}:created"
             detail = {
                 "assignment_id": assignment_id,
@@ -1049,10 +1324,17 @@ def record_shotcaller_bootstrap(
                     INSERT INTO events
                       (event_id,agent_id,task_id,squad_id,entity_version,event_type,status,
                        update_text,occurred_at,detail_json,aggregate_kind,aggregate_id)
-                    VALUES(?,?,NULL,NULL,2,'shotcaller_created','working',
+                    VALUES(?,?,NULL,NULL,?,'shotcaller_created','working',
                            'Shotcaller created in the verified calling runtime',?,?,'agent',?)
                     """,
-                    (event_id, assignment["agent_id"], at, stable_json(detail), assignment["agent_id"]),
+                    (
+                        event_id,
+                        assignment["agent_id"],
+                        int(agent["version"]),
+                        at,
+                        stable_json(detail),
+                        assignment["agent_id"],
+                    ),
                 )
                 if fault:
                     fault("after_shotcaller_created_event")

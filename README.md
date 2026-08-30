@@ -48,7 +48,10 @@ Nothing here installs files, changes hooks, or connects to live Roster state.
   without creating layout/process state or overwriting a newer user title,
   source, or unrelated token. Read-only identity queries retry bounded
   transient malformed output; persistent malformed bytes still refuse before
-  callsign reservation, runtime registration, or Squad state.
+  callsign reservation, runtime registration, or Squad state. A new exact
+  create may rebind one version-2 retired unbound bootstrap residue only when
+  its prior assignment is rolled back, its current terminal/thread intent is
+  exact, and no runtime, Squad, offer, lease, or active callsign remains.
 - One active-turn semantic sideband with a 12-row/24 KiB same-owner candidate
   shortlist, version-fenced duplicate/follow-up links, and external-dispatch
   refusal when the complete candidate inventory is unavailable or changed.

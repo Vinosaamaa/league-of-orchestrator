@@ -747,6 +747,63 @@ def test_resume_capability_and_acceptance_refusals(root: Path) -> None:
     store.close()
 
 
+def test_schema17_zero_binding_refuses_archive_and_continuation_claim(
+    root: Path,
+) -> None:
+    store, _, original, manifest = _prepare_fixture(root, "unbound-archive")
+    store.connection.execute("DROP TRIGGER repository_issue_bindings_immutable_delete")
+    store.connection.execute(
+        "DELETE FROM repository_issue_bindings WHERE assignment_id=?",
+        (original.assignment_id,),
+    )
+    issue_state = {"value": "open"}
+    issue = FakeIssueAdapter(issue_state)
+    try:
+        _execute_cleanup(
+            store,
+            manifest,
+            "cleanup:unbound-archive",
+            original.assignment_id,
+            issue,
+        )
+    except StorageRefusal as exc:
+        assert exc.code == "assignment_issue_reconciliation_required"
+    else:
+        raise AssertionError("schema-17 assignment created a resumable archive")
+    assert issue.calls == [] and issue_state["value"] == "open"
+    assert store.cleanup_operation("cleanup:unbound-archive") is None
+    assert store.thread_archive("archive:unbound-archive:original") is None
+    store.close()
+
+    store, _, original, manifest = _prepare_fixture(root, "unbound-claim")
+    issue_state = {"value": "open"}
+    issue = FakeIssueAdapter(issue_state)
+    _execute_cleanup(
+        store,
+        manifest,
+        "cleanup:unbound-claim",
+        original.assignment_id,
+        issue,
+    )
+    calls_before_claim = list(issue.calls)
+    store.connection.execute("DROP TRIGGER repository_issue_bindings_immutable_delete")
+    store.connection.execute(
+        "DELETE FROM repository_issue_bindings WHERE assignment_id=?",
+        (original.assignment_id,),
+    )
+    spec = _continuation_spec(root, "unbound-claim", "archive:unbound-claim:original")
+    try:
+        store.prepare_continuation(spec)
+    except StorageRefusal as exc:
+        assert exc.code == "assignment_issue_reconciliation_required"
+    else:
+        raise AssertionError("schema-17 assignment claimed an exact-thread continuation")
+    assert issue.calls == calls_before_claim
+    assert store.continuation_status(spec["operation_id"]) is None
+    assert store.thread_archive(spec["archive_id"])["state"] == "available"
+    store.close()
+
+
 def test_provider_driver_refuses_opaque_thread(root: Path) -> None:
     opaque_thread = "opaque/provider-thread?id=17#fragment"
     store, _, original, manifest = _prepare_fixture(
@@ -950,6 +1007,7 @@ def main() -> None:
         test_cleanup_close_retries_and_already_closed_is_idempotent(root)
         test_reopen_exact_thread_new_callsign_and_final_cleanup(root)
         test_resume_capability_and_acceptance_refusals(root)
+        test_schema17_zero_binding_refuses_archive_and_continuation_claim(root)
         test_provider_driver_refuses_opaque_thread(root)
         test_unhealthy_context_refusal(root)
         test_instruction_drift_requires_reconciliation(root)

@@ -9,6 +9,13 @@ import sqlite3
 from datetime import datetime
 from typing import Any, Mapping, Optional
 
+from .issue_first import (
+    ISSUE_RECEIPT_SCHEMA,
+    issue_scope_digest,
+    normalize_issue_title,
+    task_issue_semantic_binding_digest,
+)
+from .sqlite_project_ops import canonical_repository
 from .storage_types import StorageRefusal
 from .worktree import normalized_github_repository
 
@@ -76,6 +83,126 @@ def _operation_value(store: Any, row: sqlite3.Row) -> dict[str, Any]:
         value["lineage"].pop("resume_capabilities_json")
     )
     return value
+
+
+def _require_resumable_issue_binding(
+    store: Any,
+    *,
+    task_id: str,
+    owner_agent_id: str,
+    runtime_instance_id: str,
+    repository: str,
+    issue: int,
+    callsign: str,
+) -> None:
+    binding = store.connection.execute(
+        """
+        SELECT b.task_id binding_task_id,b.assignment_id,b.request_id binding_request_id,
+               b.repository binding_repository,b.issue binding_issue,b.issue_url binding_issue_url,
+               b.issue_state binding_issue_state,b.issue_title binding_issue_title,
+               b.issue_body_digest binding_issue_body_digest,
+               b.semantic_binding_digest,b.task_scope_digest binding_task_scope_digest,
+               b.issue_selection_receipt_digest,b.reopen_action_receipt_digest binding_reopen_digest,
+               b.verifier_kind,b.verified_at,b.receipt_digest binding_receipt_digest,
+               a.task_id assignment_task_id,a.request_id assignment_request_id,
+               a.coordinator_agent_id,a.champion_agent_id,a.runtime_instance_id,
+               a.callsign assignment_callsign,
+               t.summary task_summary,t.current_owner_agent_id,
+               s.task_id selection_task_id,s.task_summary selection_task_summary,
+               s.coordinator_agent_id selection_coordinator_agent_id,
+               s.repository selection_repository,s.repository_key selection_repository_key,
+               s.issue selection_issue,s.issue_url selection_issue_url,
+               s.issue_state selection_issue_state,s.issue_title selection_issue_title,
+               s.normalized_title selection_normalized_title,
+               s.semantic_scope_digest selection_semantic_scope_digest,
+               s.issue_body_digest selection_issue_body_digest,
+               s.task_scope_digest selection_task_scope_digest,
+               s.reopen_action_receipt_digest selection_reopen_digest,
+               s.receipt_digest selection_receipt_digest
+          FROM repository_issue_bindings b
+          JOIN task_assignments a ON a.task_assignment_id=b.assignment_id
+          JOIN tasks t ON t.task_id=b.task_id
+          JOIN repository_issue_selection_receipts s
+            ON s.receipt_digest=b.issue_selection_receipt_digest
+         WHERE b.task_id=?
+        """,
+        (task_id,),
+    ).fetchone()
+    if binding is None:
+        raise StorageRefusal(
+            "assignment_issue_reconciliation_required",
+            "resumable cleanup requires the migration-18 assignment issue binding",
+        )
+    repository_key = canonical_repository(repository)[1]
+    expected_scope = issue_scope_digest(
+        repository, issue, task_id, binding["task_summary"]
+    )
+    expected_semantic_binding = task_issue_semantic_binding_digest(
+        repository,
+        issue,
+        task_id,
+        binding["task_summary"],
+        binding["selection_issue_title"],
+        binding["selection_semantic_scope_digest"],
+    )
+    receipt = {
+        "schema": ISSUE_RECEIPT_SCHEMA,
+        "repository": binding["binding_repository"],
+        "repository_key": binding["selection_repository_key"],
+        "issue": int(binding["binding_issue"]),
+        "issue_url": binding["binding_issue_url"],
+        "issue_state": binding["binding_issue_state"],
+        "issue_title": binding["binding_issue_title"],
+        "normalized_title": binding["selection_normalized_title"],
+        "issue_body_digest": binding["binding_issue_body_digest"],
+        "semantic_scope_digest": binding["selection_semantic_scope_digest"],
+        "task_scope_digest": binding["binding_task_scope_digest"],
+        "issue_selection_receipt_digest": binding[
+            "issue_selection_receipt_digest"
+        ],
+        "verifier_kind": binding["verifier_kind"],
+        "verified_at": binding["verified_at"],
+    }
+    exact = (
+        binding["binding_task_id"] == task_id
+        and binding["assignment_task_id"] == task_id
+        and binding["selection_task_id"] == task_id
+        and binding["binding_request_id"] == binding["assignment_request_id"]
+        and binding["selection_task_summary"] == binding["task_summary"]
+        and binding["current_owner_agent_id"] == owner_agent_id
+        and binding["champion_agent_id"] == owner_agent_id
+        and binding["runtime_instance_id"] == runtime_instance_id
+        and binding["assignment_callsign"] == callsign
+        and binding["selection_coordinator_agent_id"]
+        == binding["coordinator_agent_id"]
+        and binding["binding_repository"] == repository
+        and binding["selection_repository"] == repository
+        and binding["selection_repository_key"] == repository_key
+        and repository_key.partition("/")[0] == "github.com"
+        and int(binding["binding_issue"]) == issue
+        and int(binding["selection_issue"]) == issue
+        and binding["binding_issue_state"] == "open"
+        and binding["selection_issue_state"] == "open"
+        and binding["binding_issue_url"] == binding["selection_issue_url"]
+        and binding["binding_issue_title"] == binding["selection_issue_title"]
+        and binding["selection_normalized_title"]
+        == normalize_issue_title(binding["task_summary"])
+        and binding["binding_issue_body_digest"]
+        == binding["selection_issue_body_digest"]
+        and binding["binding_task_scope_digest"] == expected_scope
+        and binding["selection_task_scope_digest"] == expected_scope
+        and binding["semantic_binding_digest"] == expected_semantic_binding
+        and binding["issue_selection_receipt_digest"]
+        == binding["selection_receipt_digest"]
+        and binding["binding_reopen_digest"] == binding["selection_reopen_digest"]
+        and binding["verifier_kind"] == "github-api"
+        and binding["binding_receipt_digest"] == _digest(receipt)
+    )
+    if not exact:
+        raise StorageRefusal(
+            "assignment_issue_reverification_failed",
+            "resumable cleanup issue identity does not match its immutable assignment binding",
+        )
 
 
 def record_thread_archive_for_cleanup(store: Any, plan: Mapping[str, Any]) -> None:
@@ -173,6 +300,15 @@ def record_thread_archive_for_cleanup(store: Any, plan: Mapping[str, Any]) -> No
             "thread_identity_ambiguous",
             "thread archive does not match the exact task, Champion, and runtime binding",
         )
+    _require_resumable_issue_binding(
+        store,
+        task_id=plan["task_id"],
+        owner_agent_id=plan["owner_id"],
+        runtime_instance_id=archive["runtime_instance_id"],
+        repository=archive["repository"],
+        issue=archive["issue"],
+        callsign=archive["prior_callsign"],
+    )
     issue_actions = [
         action
         for action in plan["actions"]
@@ -442,6 +578,15 @@ def _continuation_archive_claim(
         raise StorageRefusal(
             "continuation_conflict", "thread archive is not exclusively claimable"
         )
+    _require_resumable_issue_binding(
+        store,
+        task_id=archive["task_id"],
+        owner_agent_id=archive["owner_agent_id"],
+        runtime_instance_id=archive["runtime_instance_id"],
+        repository=archive["repository"],
+        issue=int(archive["issue"]),
+        callsign=archive["prior_callsign"],
+    )
     lineage = store.connection.execute(
         "SELECT * FROM thread_lineages WHERE lineage_id=?", (archive["lineage_id"],)
     ).fetchone()

@@ -373,6 +373,7 @@ def _add_rollover_commands(groups: argparse._SubParsersAction) -> None:
     refresh_bindings.add_argument(
         "--expected-snapshot-version", type=int, required=True
     )
+    _add_mode_gate_options(refresh_bindings)
     acknowledge = commands.add_parser(
         "acknowledge", help="Acknowledge exact successor identity, capability, and snapshot coverage."
     )

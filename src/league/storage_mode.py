@@ -19,6 +19,7 @@ PROTECTED_GATE_ACTIONS = {
     "rollover.commit": "live_reconcile",
     "rollover.drain": "retire",
     "rollover.prepare": "live_reconcile",
+    "rollover.refresh-bindings": "live_reconcile",
     "rollover.reconcile-descendant": "live_reconcile",
     "rollover.reconcile-intake": "live_reconcile",
     "shotcaller.create": "shotcaller_create",

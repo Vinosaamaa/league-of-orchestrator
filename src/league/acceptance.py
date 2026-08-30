@@ -13,6 +13,7 @@ import importlib.util
 import json
 import os
 import re
+import secrets
 import shutil
 import signal
 import stat
@@ -504,13 +505,19 @@ def _directory_identity(path: Path) -> tuple[int, int]:
 def _remove_reserved_directory(
     path: Path, identity: tuple[int, int], *, recursive: bool
 ) -> None:
+    quarantine = path.with_name(
+        f".{path.name}.cleanup-{secrets.token_hex(16)}"
+    )
     try:
-        if _directory_identity(path) != identity:
+        os.rename(path, quarantine)
+        if _directory_identity(quarantine) != identity:
+            if not os.path.lexists(path):
+                os.rename(quarantine, path)
             return
         if recursive:
-            shutil.rmtree(path)
+            shutil.rmtree(quarantine)
         else:
-            path.rmdir()
+            quarantine.rmdir()
     except OSError:
         pass
 

@@ -421,8 +421,9 @@ The release-staging boundary now opens every manifest path component relative
 to one root descriptor without following symlinks, binds the opened file to one
 regular identity, and checks
 that both staged copies are regular files with exact source bytes. A staging
-crash removes only device/inode identities newly reserved by that attempt
-before retry;
+crash atomically quarantines a candidate path, verifies its recorded
+device/inode identity, and removes only identities newly reserved by that
+attempt before retry;
 focused temporary-root coverage proves VERSION regular-file identity, symlink
 refusal before mutation, byte parity, retry, guide-hash preservation, and
 rollback without changing any retained release or live pointer.

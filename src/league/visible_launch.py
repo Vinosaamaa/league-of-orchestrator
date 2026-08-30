@@ -394,6 +394,89 @@ class HerdrCodexLaunchAdapter:
             )
         return matches[0] if matches else None
 
+    def _report_verified_resume_session(
+        self,
+        spec: AssignmentSpec,
+        pane_id: str,
+    ) -> bool:
+        """Publish Herdr session metadata only after the exact Codex resume process exists."""
+
+        result, _ = self._command(
+            ("herdr", "pane", "process-info", "--pane", pane_id),
+            "Herdr Codex resume process inspection",
+        )
+        process_info = result.get("process_info")
+        processes = (
+            process_info.get("foreground_processes")
+            if isinstance(process_info, Mapping)
+            else None
+        )
+        if not isinstance(processes, list) or any(
+            not isinstance(item, Mapping) for item in processes
+        ):
+            raise StorageRefusal(
+                "launch_identity_unverified",
+                "Herdr resume process inventory is malformed",
+            )
+        codex_processes = [item for item in processes if item.get("name") == "codex"]
+        if not codex_processes:
+            return False
+        worktree = str(Path(spec.worktree).resolve())
+        expected_tail = [
+            "resume",
+            "--model",
+            self.options.model,
+            "--config",
+            f'model_reasoning_effort="{self.options.effort}"',
+            "--add-dir",
+            self.options.state_root,
+            "--cd",
+            worktree,
+            str(self.resume_thread_id),
+        ]
+        exact = []
+        for process in codex_processes:
+            arguments = process.get("argv")
+            if not isinstance(arguments, list) or any(
+                not isinstance(value, str) for value in arguments
+            ):
+                continue
+            try:
+                resume_index = arguments.index("resume")
+            except ValueError:
+                continue
+            if (
+                arguments[resume_index:] == expected_tail
+                and process.get("cwd") == worktree
+            ):
+                exact.append(process)
+        if len(codex_processes) != 1 or len(exact) != 1:
+            raise StorageRefusal(
+                "thread_identity_ambiguous",
+                "foreground Codex process is not the exact archived resume and binding",
+            )
+        self._command(
+            (
+                "herdr",
+                "pane",
+                "report-agent-session",
+                pane_id,
+                "--source",
+                "league-resume-" + _sha256(spec.assignment_id.encode("utf-8"))[:16],
+                "--agent",
+                "codex",
+                "--agent-session-id",
+                str(self.resume_thread_id),
+                "--session-start-source",
+                "codex-resume",
+                "--seq",
+                "1",
+            ),
+            "Herdr Codex resume session report",
+            allow_silent_success=True,
+        )
+        return True
+
     def _verify_agent(
         self,
         agent: Mapping[str, Any],
@@ -457,6 +540,7 @@ class HerdrCodexLaunchAdapter:
                 "new Codex endpoint did not expose one exact pre-context session identity",
             )
         if self.resume_thread_id is not None:
+            session_reported = False
             for _ in range(120):
                 published = self._get_agent(str(spec.callsign).lower())
                 if _session_id(published) == self.resume_thread_id:
@@ -468,6 +552,10 @@ class HerdrCodexLaunchAdapter:
                     or published.get("foreground_cwd") != expected_cwd
                 ):
                     break
+                if not session_reported:
+                    session_reported = self._report_verified_resume_session(
+                        spec, pane_id
+                    )
                 time.sleep(0.1)
             raise StorageRefusal(
                 "thread_identity_ambiguous",

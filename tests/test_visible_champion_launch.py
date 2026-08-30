@@ -489,10 +489,63 @@ def _adapter(options: VisibleLaunchOptions, runner: FakeHerdrRunner, store):
     return adapter
 
 
+class ResumeSessionReportRunner(FakeHerdrRunner):
+    def __init__(self, worktree: Path, options: VisibleLaunchOptions) -> None:
+        super().__init__(worktree)
+        self.options = options
+
+    def _agent(self) -> dict[str, object]:
+        agent = super()._agent()
+        if not self.session_reported:
+            agent.pop("agent_session", None)
+        return agent
+
+    def run(
+        self, arguments, *, timeout_seconds: int = 30
+    ) -> subprocess.CompletedProcess[str]:
+        command = tuple(arguments)
+        if command[:3] == ("herdr", "pane", "process-info"):
+            del timeout_seconds
+            self.calls.append(command)
+            result = {
+                "process_info": {
+                    "foreground_processes": [
+                        {
+                            "name": "codex",
+                            "cwd": self.worktree,
+                            "argv": [
+                                "/test/codex",
+                                "--no-alt-screen",
+                                "resume",
+                                "--model",
+                                self.options.model,
+                                "--config",
+                                f'model_reasoning_effort="{self.options.effort}"',
+                                "--add-dir",
+                                self.options.state_root,
+                                "--cd",
+                                self.worktree,
+                                THREAD_ID,
+                            ],
+                        }
+                    ]
+                }
+            }
+            return subprocess.CompletedProcess(
+                command, 0, json.dumps({"id": "test", "result": result}) + "\n", ""
+            )
+        if command[:3] == ("herdr", "pane", "report-agent-session"):
+            del timeout_seconds
+            self.calls.append(command)
+            self.session_reported = True
+            return subprocess.CompletedProcess(command, 0, "", "")
+        return super().run(arguments, timeout_seconds=timeout_seconds)
+
+
 def test_exact_resume_uses_declared_thread_and_skips_fresh_handshake(root: Path) -> None:
     store, _, worktree = _context(root, "exact-resume-command")
     options = _options(root)
-    runner = FakeHerdrRunner(worktree)
+    runner = ResumeSessionReportRunner(worktree, options)
     adapter = HerdrCodexLaunchAdapter(
         options,
         runner,
@@ -522,6 +575,15 @@ def test_exact_resume_uses_declared_thread_and_skips_fresh_handshake(root: Path)
         and "identity handshake" in call[4]
         for call in runner.calls
     )
+    assert any(
+        call[:3] == ("herdr", "pane", "process-info") for call in runner.calls
+    )
+    report = next(
+        call
+        for call in runner.calls
+        if call[:3] == ("herdr", "pane", "report-agent-session")
+    )
+    assert report[report.index("--agent-session-id") + 1] == THREAD_ID
     store.close()
 
 

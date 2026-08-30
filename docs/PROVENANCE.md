@@ -426,10 +426,13 @@ staging
 crash atomically quarantines a candidate path, verifies its recorded
 device/inode identity, and removes only identities newly reserved by that
 attempt before retry. Cleanup failures cannot replace the original staging
-refusal;
-focused temporary-root coverage proves VERSION regular-file identity, symlink
-refusal before mutation, byte parity, retry, guide-hash preservation, and
-rollback without changing any retained release or live pointer.
+refusal. A matching marker pair lets a later process recover only an exact
+VERSION-only partial stage with unchanged source bytes and recorded directory
+identities; all other existing candidates still refuse. Focused temporary-root
+coverage proves process-death recovery, foreign directory and symlink
+preservation, post-switch pointer rollback, VERSION regular-file identity,
+byte parity, guide-hash preservation, and rollback without changing any
+retained release or live pointer.
 
 This branch was rebased onto canonical main
 `f015a5c34efca039accc911f8995a340eb067fc7`, whose merge tree is

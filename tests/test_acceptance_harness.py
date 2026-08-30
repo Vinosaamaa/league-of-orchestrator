@@ -674,6 +674,83 @@ def test_staging_crash_cleanup_and_retry(root: Path) -> None:
     assert retry_universal.read_bytes() == universal_before
 
 
+def test_separate_process_version_crash_recovers_and_retries(root: Path) -> None:
+    root.mkdir()
+    crash_home = root / "process-crash"
+    crash_script = """
+import os
+import sys
+from pathlib import Path
+
+sys.path.insert(0, sys.argv[1])
+from league.acceptance import _staged_install
+
+def crash(event):
+    if event == "after_release_file:VERSION":
+        os._exit(73)
+
+_staged_install(Path(sys.argv[2]), Path(sys.argv[3]), fault=crash)
+"""
+    environment = {
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "LC_ALL": "C",
+    }
+    crashed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            crash_script,
+            str(ROOT / "src"),
+            str(crash_home),
+            str(ROOT),
+        ],
+        cwd=root,
+        env=environment,
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    assert crashed.returncode == 73, crashed.stdout + crashed.stderr
+    for candidate in (
+        crash_home / "release-bundle/0.2.28",
+        crash_home / "stage-prefix/releases/0.2.28",
+    ):
+        assert (candidate / ".league-staging-reservation.json").is_file()
+        assert (candidate / "VERSION").is_file()
+
+    retry_script = """
+import sys
+from pathlib import Path
+
+sys.path.insert(0, sys.argv[1])
+from league.acceptance import _staged_install
+
+_staged_install(Path(sys.argv[2]), Path(sys.argv[3]))
+"""
+    retried = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            retry_script,
+            str(ROOT / "src"),
+            str(crash_home),
+            str(ROOT),
+        ],
+        cwd=root,
+        env=environment,
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    assert retried.returncode == 0, retried.stdout + retried.stderr
+    assert (
+        crash_home / "stage-prefix/releases/0.2.28/VERSION"
+    ).read_bytes() == (ROOT / "VERSION").read_bytes()
+
+
 def test_staging_cleanup_preserves_replacements_and_original_refusal(
     root: Path,
 ) -> None:
@@ -703,6 +780,32 @@ def test_staging_cleanup_preserves_replacements_and_original_refusal(
     assert (moved_bundle / "VERSION").read_bytes() == source_version.read_bytes()
     assert not (swapped_home / "stage-prefix/releases/0.2.28").exists()
 
+    symlink_home = root / "symlink-swap"
+    displaced_bundle = root / "symlink-displaced-bundle"
+    foreign_target = root / "foreign-replacement-target"
+    foreign_target.mkdir()
+    (foreign_target / "foreign-byte").write_bytes(b"must remain\n")
+
+    def swap_reserved_bundle_to_symlink(event: str) -> None:
+        if event != "after_release_file:VERSION":
+            return
+        bundle = symlink_home / "release-bundle/0.2.28"
+        bundle.rename(displaced_bundle)
+        bundle.symlink_to(foreign_target, target_is_directory=True)
+        raise InjectedStageCrash(event)
+
+    try:
+        _staged_install(symlink_home, ROOT, fault=swap_reserved_bundle_to_symlink)
+    except InjectedStageCrash:
+        pass
+    else:
+        raise AssertionError("expected injected symlink reservation swap")
+    restored_link = symlink_home / "release-bundle/0.2.28"
+    assert restored_link.is_symlink()
+    assert restored_link.readlink() == foreign_target
+    assert (foreign_target / "foreign-byte").read_bytes() == b"must remain\n"
+    assert (displaced_bundle / "VERSION").read_bytes() == source_version.read_bytes()
+
     failure_home = root / "cleanup-failure"
 
     def fail_stage_and_cleanup(event: str) -> None:
@@ -717,6 +820,34 @@ def test_staging_cleanup_preserves_replacements_and_original_refusal(
         lambda: _staged_install(failure_home, ROOT, fault=fail_stage_and_cleanup),
         "synthetic_staging_refusal",
     )
+
+
+def test_post_switch_validation_failure_restores_prior_pointer(root: Path) -> None:
+    root.mkdir()
+    home = root / "post-switch"
+
+    def fail_launcher_validation(event: str) -> None:
+        if event == "before_staged_launcher_validation":
+            raise StorageRefusal(
+                "synthetic_launcher_failure", "synthetic launcher failure"
+            )
+
+    refused(
+        lambda: _staged_install(home, ROOT, fault=fail_launcher_validation),
+        "synthetic_launcher_failure",
+    )
+    current = home / "stage-prefix/current"
+    stable = home / "stage-prefix/bin/league"
+    assert current.readlink().as_posix() == "releases/0.0.0-legacy"
+    version = subprocess.run(
+        [str(stable), "--version"],
+        cwd=home,
+        text=True,
+        capture_output=True,
+        timeout=10,
+        check=True,
+    )
+    assert version.stdout.strip() == "league 0.0.0-legacy"
 
 
 def test_issue_23_incident_artifacts_are_complete_and_public_safe() -> None:
@@ -770,8 +901,14 @@ def main() -> None:
             root / "release-source-refusal"
         )
         test_staging_crash_cleanup_and_retry(root / "staging-crash-retry")
+        test_separate_process_version_crash_recovers_and_retries(
+            root / "separate-process-crash"
+        )
         test_staging_cleanup_preserves_replacements_and_original_refusal(
             root / "staging-cleanup"
+        )
+        test_post_switch_validation_failure_restores_prior_pointer(
+            root / "post-switch-rollback"
         )
         test_schema_and_command_inventory()
         test_issue_23_incident_artifacts_are_complete_and_public_safe()

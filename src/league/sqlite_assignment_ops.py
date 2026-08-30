@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .sqlite_request_ops import _active_claim, _bounded_public_text, _request_row, _time
-from .sqlite_project_ops import resolve_project_routing_identity
+from .sqlite_project_ops import canonical_repository, resolve_project_routing_identity
 from .sqlite_callsign_ops import (
     _reserve_in_transaction,
     _rollback_reserved_in_transaction,
@@ -23,6 +23,12 @@ from .storage_assignment import (
     PrepareAssignmentCommand,
 )
 from .storage_types import LIFECYCLE_STATES, StorageRefusal
+from .issue_first import (
+    issue_scope_digest,
+    normalize_issue_title,
+    task_issue_semantic_binding_digest,
+    validate_issue_receipt,
+)
 
 
 ASSIGNMENT_STATES = {
@@ -176,6 +182,11 @@ def _validate_assignment_command(command: PrepareAssignmentCommand) -> None:
         raise StorageRefusal(
             "invalid_assignment", "visible Champion assignment requires issue and worktree identity"
         )
+    if command.assignment_role == "champion" and command.issue_receipt is None:
+        raise StorageRefusal(
+            "issue_verification_required",
+            "visible Champion assignment requires exact owner-API issue evidence",
+        )
     if command.assignment_role == "hidden-worker" and (
         not command.dispatch_id
         or any((command.repository, command.branch, command.worktree))
@@ -225,6 +236,8 @@ def _assignment_retry(
     )
     if not exact:
         raise StorageRefusal("assignment_conflict", "assignment retry has different identity")
+    if existing["assignment_role"] == "champion":
+        _verify_assignment_issue_binding(store, existing, command)
     return {
         "assignment_id": command.assignment_id,
         "task_id": command.task_id,
@@ -233,6 +246,76 @@ def _assignment_retry(
         "callsign": existing["callsign"],
         "idempotent": True,
     }
+
+
+def _verify_assignment_issue_binding(
+    store: Any, existing: sqlite3.Row, command: PrepareAssignmentCommand
+) -> None:
+    receipt = validate_issue_receipt(command.issue_receipt or {})
+    binding = store.connection.execute(
+        """
+        SELECT b.*,s.task_id selection_task_id,s.task_summary selection_task_summary,
+               s.repository selection_repository,s.repository_key selection_repository_key,
+               s.issue selection_issue,s.issue_url selection_issue_url,
+               s.issue_state selection_issue_state,s.issue_title selection_issue_title,
+               s.normalized_title selection_normalized_title,
+               s.semantic_scope_digest selection_semantic_scope_digest,
+               s.issue_body_digest selection_issue_body_digest,
+               s.task_scope_digest selection_task_scope_digest
+          FROM repository_issue_bindings b
+          JOIN repository_issue_selection_receipts s
+            ON s.receipt_digest=b.issue_selection_receipt_digest
+         WHERE b.assignment_id=?
+        """,
+        (command.assignment_id,),
+    ).fetchone()
+    if binding is None:
+        raise StorageRefusal(
+            "assignment_issue_reconciliation_required",
+            "active Champion assignment predates its migration-18 issue binding",
+        )
+    semantic_binding = task_issue_semantic_binding_digest(
+        command.repository,
+        command.issue,
+        command.task_id,
+        existing["task_summary"],
+        binding["issue_title"],
+        binding["selection_semantic_scope_digest"],
+    )
+    stable_exact = (
+        binding["task_id"] == command.task_id
+        and binding["assignment_id"] == command.assignment_id
+        and binding["request_id"] == command.request_id
+        and binding["repository"] == command.repository
+        and int(binding["issue"]) == command.issue
+        and binding["issue_state"] == "open"
+        and binding["semantic_binding_digest"] == semantic_binding
+        and binding["selection_task_id"] == command.task_id
+        and binding["selection_task_summary"] == existing["task_summary"]
+        and binding["selection_repository"] == command.repository
+        and binding["selection_repository_key"] == receipt["repository_key"]
+        and int(binding["selection_issue"]) == command.issue
+        and binding["selection_issue_state"] == "open"
+        and binding["selection_normalized_title"]
+        == normalize_issue_title(existing["task_summary"])
+        and binding["selection_task_scope_digest"] == binding["task_scope_digest"]
+        and receipt["repository"] == binding["repository"]
+        and receipt["issue"] == int(binding["issue"])
+        and receipt["issue_url"] == binding["issue_url"]
+        and receipt["issue_title"] == binding["issue_title"]
+        and receipt["issue_body_digest"] == binding["issue_body_digest"]
+        and receipt["semantic_scope_digest"]
+        == binding["selection_semantic_scope_digest"]
+        and receipt["task_scope_digest"] == binding["task_scope_digest"]
+        and receipt["issue_selection_receipt_digest"]
+        == binding["issue_selection_receipt_digest"]
+        and receipt["verifier_kind"] == binding["verifier_kind"]
+    )
+    if not stable_exact:
+        raise StorageRefusal(
+            "assignment_issue_reverification_failed",
+            "active Champion issue no longer matches its canonical migration-18 binding",
+        )
 
 
 def _validate_assignment_reservation(
@@ -384,7 +467,100 @@ def _persist_assignment_reservation(
             """,
             (command.assignment_id, command.at, command.promoted_from_assignment_id),
         )
+    if command.issue_receipt is not None:
+        _insert_issue_binding(store, command)
     return str(selected["callsign"])
+
+
+def _insert_issue_binding(store: Any, command: PrepareAssignmentCommand) -> None:
+    receipt = validate_issue_receipt(command.issue_receipt or {})
+    expected_scope = issue_scope_digest(
+        command.repository, command.issue, command.task_id, command.task_summary
+    )
+    exact = (
+        receipt["repository_key"] == canonical_repository(command.repository)[1]
+        and int(receipt["issue"]) == command.issue
+        and receipt["task_scope_digest"] == expected_scope
+    )
+    if not exact:
+        raise StorageRefusal(
+            "issue_scope_mismatch",
+            "verified repository issue does not match the canonical task scope",
+        )
+    selection = store.connection.execute(
+        """
+        SELECT * FROM repository_issue_selection_receipts WHERE receipt_digest=?
+        """,
+        (receipt["issue_selection_receipt_digest"],),
+    ).fetchone()
+    selection_exact = selection is not None and (
+        selection["task_id"] == command.task_id
+        and selection["task_summary"] == command.task_summary
+        and normalize_issue_title(selection["issue_title"])
+        == normalize_issue_title(command.task_summary)
+        and selection["coordinator_agent_id"] == command.coordinator_agent_id
+        and selection["repository"] == receipt["repository"]
+        and selection["repository_key"] == canonical_repository(command.repository)[1]
+        and int(selection["issue"]) == command.issue
+        and selection["issue_url"] == receipt["issue_url"]
+        and selection["issue_state"] == "open"
+        and selection["issue_title"] == receipt["issue_title"]
+        and selection["normalized_title"] == receipt["normalized_title"]
+        and selection["semantic_scope_digest"] == receipt["semantic_scope_digest"]
+        and selection["issue_body_digest"] == receipt["issue_body_digest"]
+        and selection["task_scope_digest"] == receipt["task_scope_digest"]
+    )
+    if not selection_exact:
+        raise StorageRefusal(
+            "issue_selection_unproven",
+            "assignment has no exact durable duplicate-preflight selection receipt",
+        )
+    assert selection is not None
+    semantic_binding = task_issue_semantic_binding_digest(
+        command.repository,
+        command.issue,
+        command.task_id,
+        command.task_summary,
+        receipt["issue_title"],
+        receipt["semantic_scope_digest"],
+    )
+    if (
+        receipt["verifier_kind"] == "synthetic-fixture"
+        and not receipt["repository_key"].partition("/")[0].endswith(".invalid")
+    ):
+        raise StorageRefusal(
+            "issue_selection_unproven",
+            "synthetic issue evidence cannot bind a live repository",
+        )
+    reopen_digest = selection["reopen_action_receipt_digest"]
+    store.connection.execute(
+        """
+        INSERT INTO repository_issue_bindings
+          (task_id,assignment_id,request_id,repository,issue,issue_url,issue_state,
+           issue_title,issue_body_digest,semantic_binding_digest,task_scope_digest,
+           issue_selection_receipt_digest,
+           reopen_action_receipt_digest,verifier_kind,verified_at,receipt_digest)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            command.task_id,
+            command.assignment_id,
+            command.request_id,
+            command.repository,
+            command.issue,
+            receipt["issue_url"],
+            receipt["issue_state"],
+            receipt["issue_title"],
+            receipt["issue_body_digest"],
+            semantic_binding,
+            receipt["task_scope_digest"],
+            receipt["issue_selection_receipt_digest"],
+            reopen_digest,
+            receipt["verifier_kind"],
+            receipt["verified_at"],
+            receipt["receipt_digest"],
+        ),
+    )
 
 
 def _insert_pending_assignment_event(

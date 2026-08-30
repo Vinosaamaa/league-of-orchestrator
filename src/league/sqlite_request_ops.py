@@ -51,6 +51,13 @@ PROMPT_ITEM_DISPOSITIONS = {
     "deferred",
 }
 CHAMPION_WORK_KINDS = {
+    "benchmark",
+    "bug-fix",
+    "debugging",
+    "durable-research",
+    "operational",
+    "release",
+    "repository-reproduction",
     "repository-initialize",
     "repository-write",
     "configuration-write",
@@ -1256,6 +1263,11 @@ def classify_dispatch(
         raise StorageRefusal("invalid_dispatch", "work kind is not part of the bounded classifier contract")
     if requested_mode == "hidden" and not hidden_supported:
         raise StorageRefusal("hidden_unavailable", "hidden advisory support is unavailable")
+    if work_kind in CHAMPION_WORK_KINDS and requested_mode in {"direct", "hidden"}:
+        raise StorageRefusal(
+            "champion_required",
+            "repository, durable research, benchmark, release, operational, and debugging work requires a visible Champion",
+        )
     force_local_champion = requested_mode == "champion"
     force_local_direct = requested_mode == "direct"
     decision = decide_orchestration_route(
@@ -1272,6 +1284,8 @@ def classify_dispatch(
         )
     if force_local_champion:
         decision = decision.__class__(LOCAL_CHAMPION, "explicit_champion", None, True)
+    elif work_kind in CHAMPION_WORK_KINDS:
+        decision = decision.__class__(LOCAL_CHAMPION, "worker_required", None, True)
     if force_local_direct and decision.route != LOCAL_DIRECT:
         raise StorageRefusal(
             "champion_required",

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import sys
 import tempfile
 from pathlib import Path
@@ -18,7 +19,8 @@ from league.sqlite_store import (  # noqa: E402
     SQLiteStorage,
     journal_policy,
 )
-from league.storage import StorageRefusal  # noqa: E402
+from league.issue_first import issue_scope_digest, normalize_issue_title  # noqa: E402
+from league.storage import PrepareAssignmentCommand, StorageRefusal  # noqa: E402
 from storage_test_support import migrated_state  # noqa: E402
 
 
@@ -107,6 +109,11 @@ def test_transactional_upgrade_backup_and_rollback(root: Path) -> None:
             "ix_thread_archives_issue",
             "ix_thread_incarnations_lineage",
             "ix_continuation_state",
+            "ix_mode_actions_goal_state",
+            "ix_mode_actions_reopen_receipt",
+            "ix_mode_repairs_goal_state",
+            "ix_issue_selection_receipts_repository_issue",
+            "ix_issue_bindings_repository_issue",
         } <= indexes
         assert [migration.version for migration in MIGRATIONS] == list(
             range(1, CURRENT_SCHEMA_VERSION + 1)
@@ -125,6 +132,7 @@ def test_transactional_upgrade_backup_and_rollback(root: Path) -> None:
             (15, "exact-stop-feedback-suppression", "5c7fed923ba5684c209350dab248d813fa313647229be2d373ff8cef78e91574"),
             (16, "issue-coupled-cleanup-and-exact-thread-continuation", "a7fee02de43dbbde897b67e44c00e37805bf82790917d2f5392be70e4143ef3f"),
             (17, "immutable-switched-rollover-snapshot-revisions", "69dabdd22e3a4d099eb574ff11833681188e53ccf0d6ac9d787d7ed1e9764b26"),
+            (18, "scoped-autonomous-delivery-and-issue-first-assignment", "b517b9103fedcc0db8a1f0dd7d06d475f309f3a135d87356209ab34dbd957631"),
         ]
         assert store.connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
 
@@ -281,6 +289,121 @@ def test_v15_to_v16_rolls_back_before_thread_lineage_cutover(root: Path) -> None
         assert store.integrity()["ok"]
 
 
+def test_v17_active_assignment_requires_migration18_issue_reconciliation(
+    root: Path,
+) -> None:
+    state, _ = migrated_state(root, "v17-active-assignment", target_version=17)
+    at = "2026-01-01T00:00:00Z"
+    repository = "https://example.invalid/repo.git"
+    task_id = "task:v17-active"
+    task_summary = "Implement authentication"
+    with SQLiteStorage.for_migration(state) as store:
+        store.connection.executemany(
+            "INSERT INTO callsigns(callsign,pool_role,enabled,pool_position) VALUES(?,'champion',1,?)",
+            (("Ashe", 1), ("Lux", 2)),
+        )
+        store.connection.execute(
+            """
+            INSERT INTO agent_instances
+              (agent_id,callsign,role,kind,status,version,updated_at,update_text,next_action)
+            VALUES('agent:ashe','Ashe','shotcaller','codex','working',1,?,'working','coordinate')
+            """,
+            (at,),
+        )
+        store.connection.execute(
+            """
+            INSERT INTO requests
+              (request_id,summary,requester_agent_id,owner_agent_id,execution_mode,state,
+               version,created_at,updated_at)
+            VALUES('request:v17',?,'agent:ashe','agent:ashe','champion','in_progress',2,?,?)
+            """,
+            (task_summary, at, at),
+        )
+        store.connection.execute(
+            "INSERT INTO tasks(task_id,summary,state,version,updated_at,request_id) VALUES(?,?,'working',3,?,'request:v17')",
+            (task_id, task_summary, at),
+        )
+        store.connection.execute(
+            """
+            INSERT INTO agent_instances
+              (agent_id,callsign,role,shotcaller_agent_id,task_id,kind,repository,issue,
+               branch,worktree,status,version,updated_at,update_text,next_action)
+            VALUES('agent:lux','Lux','champion','agent:ashe',?,'codex',?,81,
+                   'agent/synthetic/81','/synthetic/worktree','working',1,?,'working','implement')
+            """,
+            (task_id, repository, at),
+        )
+        store.connection.execute(
+            """
+            INSERT INTO callsign_assignments
+              (callsign_assignment_id,callsign,subject_id,agent_id,role,scope_kind,scope_id,
+               state,queue_version,requirements_json,version,reserved_at,activated_at)
+            VALUES('callsign-assignment:assignment:v17','Lux',?,'agent:lux','champion',
+                   'task',?,'active',1,'[]',2,?,?)
+            """,
+            (task_id, task_id, at, at),
+        )
+        store.connection.execute(
+            """
+            INSERT INTO task_assignments
+              (task_assignment_id,task_id,request_id,coordinator_agent_id,champion_agent_id,
+               callsign,assignment_role,state,acceptance_receipt_json,version,created_at,updated_at)
+            VALUES('assignment:v17',?,'request:v17','agent:ashe','agent:lux','Lux',
+                   'champion','active','{}',4,?,?)
+            """,
+            (task_id, at, at),
+        )
+        migrated = store.migrate(
+            backup_name="backups/pre-v18.sqlite3", target_version=18
+        )
+        assert migrated["from_version"] == 17 and migrated["applied"] == [18]
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM repository_issue_bindings"
+        ).fetchone()[0] == 0
+
+        receipt = {
+            "schema": "league.repository-issue.v1",
+            "repository": repository,
+            "repository_key": "example.invalid/repo",
+            "issue": 81,
+            "issue_url": "https://example.invalid/repo/issues/81",
+            "issue_state": "open",
+            "issue_title": task_summary,
+            "normalized_title": normalize_issue_title(task_summary),
+            "issue_body_digest": "a" * 64,
+            "semantic_scope_digest": "b" * 64,
+            "task_scope_digest": issue_scope_digest(
+                repository, 81, task_id, task_summary
+            ),
+            "issue_selection_receipt_digest": "c" * 64,
+            "verifier_kind": "synthetic-fixture",
+            "verified_at": at,
+        }
+        receipt["receipt_digest"] = hashlib.sha256(
+            json.dumps(receipt, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        refused(
+            lambda: store.prepare_assignment(
+                PrepareAssignmentCommand(
+                    assignment_id="assignment:v17",
+                    request_id="request:v17",
+                    claim_token="claim:v17",
+                    task_id=task_id,
+                    task_summary=task_summary,
+                    coordinator_agent_id="agent:ashe",
+                    champion_agent_id="agent:lux",
+                    repository=repository,
+                    issue=81,
+                    branch="agent/synthetic/81",
+                    worktree="/synthetic/worktree",
+                    at=at,
+                    issue_receipt=receipt,
+                )
+            ),
+            "assignment_issue_reconciliation_required",
+        )
+
+
 def test_v3_upgrade_preserves_cleanup_and_indexes_legacy_project(root: Path) -> None:
     state, _ = migrated_state(root, "v3-cleanup", target_version=3)
     with SQLiteStorage.for_migration(state) as store:
@@ -361,6 +484,7 @@ def main() -> None:
         test_v6_to_v7_rolls_back_and_applies_privacy_defaults(root)
         test_schema_refusals_without_test_sql(root)
         test_v15_to_v16_rolls_back_before_thread_lineage_cutover(root)
+        test_v17_active_assignment_requires_migration18_issue_reconciliation(root)
         test_v3_upgrade_preserves_cleanup_and_indexes_legacy_project(root)
         test_backup_collision_and_corruption(root)
     print("PASS: SQLite runtime gate, migrations, verified backup, rollback, drift, and corruption refusal")

@@ -12,6 +12,8 @@ from .storage_assignment import (
 from .storage_callsign import CallsignQueueStorage
 from .storage_delivery import DeliveryStorage
 from .storage_lifecycle import LifecycleStorage
+from .storage_issue import IssueStorage
+from .storage_mode import ModeStorage, SettleModeActionCommand
 from .storage_outbox import OutboxDispatchIdentity, OutboxStorage
 from .storage_project import ProjectStorage
 from .storage_reporting import ReportingStorage
@@ -51,6 +53,8 @@ class Storage(
     RosterStorage,
     CallsignQueueStorage,
     RolloverStorage,
+    ModeStorage,
+    IssueStorage,
 ):
     """The only domain-facing persistence interface.
 
@@ -72,6 +76,7 @@ __all__ = [
     "PrepareAssignmentCommand",
     "RequestResultCommand",
     "RuntimeRegistrationCommand",
+    "SettleModeActionCommand",
     "Storage",
     "StorageRefusal",
 ]

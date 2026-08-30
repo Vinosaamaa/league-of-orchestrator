@@ -20,6 +20,7 @@ class PrepareAssignmentCommand:
     branch: str
     worktree: str
     at: str
+    issue_receipt: Optional[dict[str, Any]]
     required_capabilities: tuple[str, ...] = ()
     assignment_role: str = "champion"
     dispatch_id: Optional[str] = None

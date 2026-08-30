@@ -68,7 +68,7 @@ def main() -> None:
         champion_runner = FakeHerdrRunner(champion_worktree)
         VisibleChampionLaunchService(
             champion_store,
-            champion_adapter(options, champion_runner),
+            champion_adapter(options, champion_runner, champion_store),
             options,
             champion_clock,
         ).launch(champion_spec(champion_worktree, "placement"))

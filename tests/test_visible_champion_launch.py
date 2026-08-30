@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import subprocess
 import tempfile
 from pathlib import Path
@@ -18,7 +19,18 @@ from league.storage import (  # noqa: E402
     LegacyDisplayReconciliationCommand,
     StorageRefusal,
 )
+from league.issue_first import (  # noqa: E402
+    GitHubIssueVerifier,
+    issue_scope_digest,
+    normalize_issue_title,
+    semantic_scope_digest,
+)
+from league.sqlite_project_ops import canonical_repository  # noqa: E402
 import league.visible_launch as visible_launch  # noqa: E402
+from league.storage_issue import (  # noqa: E402
+    BeginIssueSelectionCommand,
+    CompleteIssueSelectionCommand,
+)
 from league.visible_launch import (  # noqa: E402
     HerdrCodexLaunchAdapter,
     VisibleChampionLaunchService,
@@ -43,6 +55,15 @@ from storage_fixture import REPOSITORY, SHOTCALLER_ID  # noqa: E402
 
 THREAD_ID = "33333333-3333-4333-8333-333333333333"
 SHOTCALLER_PANE_ID = "w1:p1"
+ISSUE_BODY = """## Objective
+Perform one tiny synthetic Champion task.
+
+## Verification
+Verify the synthetic launch lifecycle.
+
+## Hard boundaries
+Use only synthetic adapters and temporary state.
+"""
 
 
 def _context(root: Path, name: str):
@@ -77,6 +98,7 @@ def _spec(worktree: Path, suffix: str) -> AssignmentSpec:
         issue=23,
         branch=f"agent/synthetic/{suffix}",
         worktree=str(worktree),
+        issue_receipt=None,
     )
 
 
@@ -150,7 +172,7 @@ def test_task_label_defaults_and_explicit_labels_stay_two_words(root: Path) -> N
         state_root=options.state_root,
     )
     try:
-        _adapter(too_many_words, FakeHerdrRunner(root))
+        _adapter(too_many_words, FakeHerdrRunner(root), None)
     except StorageRefusal as exc:
         assert exc.code == "launch_scope_invalid"
     else:
@@ -360,19 +382,119 @@ class FakeHerdrRunner:
         return subprocess.CompletedProcess(command, 0, stdout, "")
 
 
-def _adapter(options: VisibleLaunchOptions, runner: FakeHerdrRunner):
-    return HerdrCodexLaunchAdapter(
+class FakeIssueVerifier:
+    def __init__(
+        self,
+        *,
+        store=None,
+        repository: str | None = None,
+        state: str = "open",
+        persist_selection: bool = True,
+        receipt_scope_digest: str | None = None,
+    ) -> None:
+        self.store = store
+        self.repository = repository
+        self.state = state
+        self.persist_selection = persist_selection
+        self.receipt_scope_digest = receipt_scope_digest
+        self.calls = 0
+
+    def verify(self, spec: AssignmentSpec, at: str) -> dict[str, object]:
+        self.calls += 1
+        repository = self.repository or spec.repository
+        repository_key = canonical_repository(repository)[1]
+        issue_url = f"https://{repository_key}/issues/{spec.issue}"
+        issue_title = spec.task_summary
+        normalized_title = normalize_issue_title(issue_title)
+        scope_digest = semantic_scope_digest(ISSUE_BODY)
+        selection_identity = "\0".join(
+            (repository_key, normalized_title, scope_digest)
+        ).encode("utf-8")
+        selection_key = f"issue-scope:{hashlib.sha256(selection_identity).hexdigest()}"
+        selection_digest = "d" * 64
+        if self.persist_selection and self.store is not None:
+            acquired = self.store.begin_issue_selection(
+                BeginIssueSelectionCommand(
+                    selection_key=selection_key,
+                    task_id=spec.task_id,
+                    task_summary=spec.task_summary,
+                    coordinator_agent_id=spec.coordinator_agent_id,
+                    repository=repository,
+                    repository_key=repository_key,
+                    normalized_title=normalized_title,
+                    semantic_scope_digest=scope_digest,
+                    owner_attempt_id=f"attempt:{spec.task_id}",
+                    lease_expires_at="2099-01-01T00:00:00Z",
+                    at=at,
+                )
+            )
+            if acquired["state"] == "completed":
+                selected = acquired["receipt"]
+            else:
+                selected = self.store.complete_issue_selection(
+                    CompleteIssueSelectionCommand(
+                        selection_key=selection_key,
+                        expected_version=acquired["version"],
+                        owner_attempt_id=f"attempt:{spec.task_id}",
+                        task_id=spec.task_id,
+                        task_summary=spec.task_summary,
+                        coordinator_agent_id=spec.coordinator_agent_id,
+                        repository=repository,
+                        repository_key=repository_key,
+                        normalized_title=normalized_title,
+                        semantic_scope_digest=scope_digest,
+                        decision="reuse_open",
+                        issue=spec.issue,
+                        issue_url=issue_url,
+                        issue_title=issue_title,
+                        issue_body_digest=hashlib.sha256(ISSUE_BODY.encode()).hexdigest(),
+                        duplicate_matches=1,
+                        reopen_action_receipt_digest=None,
+                        at=at,
+                    )
+                )
+            selection_digest = selected["receipt_digest"]
+        receipt: dict[str, object] = {
+            "schema": "league.repository-issue.v1",
+            "repository": repository,
+            "repository_key": repository_key,
+            "issue": spec.issue,
+            "issue_url": issue_url,
+            "issue_state": self.state,
+            "issue_title": issue_title,
+            "normalized_title": normalized_title,
+            "issue_body_digest": hashlib.sha256(ISSUE_BODY.encode()).hexdigest(),
+            "semantic_scope_digest": self.receipt_scope_digest or scope_digest,
+            "task_scope_digest": issue_scope_digest(
+                repository, spec.issue, spec.task_id, spec.task_summary
+            ),
+            "issue_selection_receipt_digest": selection_digest,
+            "verifier_kind": "synthetic-fixture",
+            "verified_at": at,
+        }
+        receipt["receipt_digest"] = hashlib.sha256(
+            json.dumps(receipt, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        return receipt
+
+
+def _adapter(options: VisibleLaunchOptions, runner: FakeHerdrRunner, store):
+    adapter = HerdrCodexLaunchAdapter(
         options,
         runner,
         environment={"HERDR_ENV": "1", "HERDR_WORKSPACE_ID": "w1"},
     )
+    adapter.issue_verifier = FakeIssueVerifier(store=store)
+    return adapter
 
 
 def test_real_adapter_one_command_success_and_retry(root: Path) -> None:
     store, clock, worktree = _context(root, "success")
     options = _options(root)
     runner = FakeHerdrRunner(worktree, delayed_context_title_reads=2)
-    service = VisibleChampionLaunchService(store, _adapter(options, runner), options, clock)
+    adapter = _adapter(options, runner, store)
+    verifier = adapter.issue_verifier
+    service = VisibleChampionLaunchService(store, adapter, options, clock)
     spec = _spec(worktree, "success")
     result = service.launch(spec)
     assert result["state"] == "active" and result["version"] == 4
@@ -422,12 +544,16 @@ def test_real_adapter_one_command_success_and_retry(root: Path) -> None:
         (spec.assignment_id,),
     ).fetchone()
     assert tuple(row) == ("active", 4, f"runtime:{LUX_ID}")
+    assert verifier.calls == 1
     retry_runner = runner.active_copy()
     contexts_before_retry = len(runner.contexts)
+    retry_adapter = _adapter(options, retry_runner, store)
+    retry_verifier = retry_adapter.issue_verifier
     retry = VisibleChampionLaunchService(
-        store, _adapter(options, retry_runner), options, clock
+        store, retry_adapter, options, clock
     ).launch(spec)
     assert retry["idempotent"] is True
+    assert retry_verifier.calls == 1
     retry_calls = retry_runner.calls
     assert retry_calls
     assert all(call[:3] == ("herdr", "agent", "get") for call in retry_calls)
@@ -457,6 +583,7 @@ def test_real_adapter_one_command_success_and_retry(root: Path) -> None:
             if call[:3] == ("herdr", "pane", "report-metadata")
         ]
     ) == 1
+
     assert not any(
         call[:3] == ("herdr", "agent", "prompt") for call in restore_retry_calls
     )
@@ -514,6 +641,61 @@ def test_real_adapter_one_command_success_and_retry(root: Path) -> None:
     store.close()
 
 
+def test_active_retry_requires_migration18_issue_binding(root: Path) -> None:
+    store, clock, worktree = _context(root, "active-missing-issue-binding")
+    options = _options(root)
+    runner = FakeHerdrRunner(worktree, delayed_context_title_reads=2)
+    adapter = _adapter(options, runner, store)
+    verifier = adapter.issue_verifier
+    service = VisibleChampionLaunchService(store, adapter, options, clock)
+    spec = _spec(worktree, "active-missing-issue-binding")
+    assert service.launch(spec)["state"] == "active"
+    assert verifier.calls == 1
+
+    store.connection.execute("DROP TRIGGER repository_issue_bindings_immutable_delete")
+    store.connection.execute(
+        "DELETE FROM repository_issue_bindings WHERE assignment_id=?",
+        (spec.assignment_id,),
+    )
+    try:
+        service.launch(spec)
+    except StorageRefusal as exc:
+        assert exc.code == "assignment_issue_reconciliation_required"
+    else:
+        raise AssertionError("a migrated schema-17 active assignment bypassed issue binding")
+    assert verifier.calls == 2
+    store.close()
+
+
+def test_active_retry_refuses_changed_owner_issue_before_title_read(root: Path) -> None:
+    store, clock, worktree = _context(root, "active-changed-owner-issue")
+    options = _options(root)
+    runner = FakeHerdrRunner(worktree, delayed_context_title_reads=2)
+    service = VisibleChampionLaunchService(
+        store, _adapter(options, runner, store), options, clock
+    )
+    spec = _spec(worktree, "active-changed-owner-issue")
+    assert service.launch(spec)["state"] == "active"
+
+    retry_runner = runner.active_copy()
+    changed = FakeIssueVerifier(store=store, receipt_scope_digest="a" * 64)
+    try:
+        VisibleChampionLaunchService(
+            store,
+            _adapter(options, retry_runner, store),
+            options,
+            clock,
+            issue_verifier=changed,
+        ).launch(spec)
+    except StorageRefusal as exc:
+        assert exc.code == "assignment_issue_reverification_failed"
+    else:
+        raise AssertionError("active retry accepted a changed owner issue")
+    assert changed.calls == 1
+    assert retry_runner.calls == []
+    store.close()
+
+
 def test_legacy_active_champion_display_is_reconciled_once_with_exact_receipt(
     root: Path,
 ) -> None:
@@ -528,7 +710,7 @@ def test_legacy_active_champion_display_is_reconciled_once_with_exact_receipt(
     options = _options(root)
     launch_runner = FakeHerdrRunner(worktree, routing_name="shaco")
     launch = VisibleChampionLaunchService(
-        store, _adapter(options, launch_runner), options, clock
+        store, _adapter(options, launch_runner, store), options, clock
     ).launch(_spec(worktree, "legacy-display"))
     assignment_id = launch["assignment_id"]
     receipt = store.assignment_launch_context(assignment_id)["acceptance_receipt"]
@@ -727,7 +909,7 @@ def test_legacy_display_reconciliation_refuses_user_title_race_before_write(
     options = _options(root)
     launched_runner = FakeHerdrRunner(worktree)
     launch = VisibleChampionLaunchService(
-        store, _adapter(options, launched_runner), options, clock
+        store, _adapter(options, launched_runner, store), options, clock
     ).launch(_spec(worktree, "legacy-user-race"))
     assignment_id = str(launch["assignment_id"])
     receipt = store.assignment_launch_context(assignment_id)["acceptance_receipt"]
@@ -783,7 +965,7 @@ def test_legacy_display_compare_and_set_does_not_overwrite_last_window_user_titl
     options = _options(root)
     launched_runner = FakeHerdrRunner(worktree)
     launch = VisibleChampionLaunchService(
-        store, _adapter(options, launched_runner), options, clock
+        store, _adapter(options, launched_runner, store), options, clock
     ).launch(_spec(worktree, "legacy-cas-race"))
     assignment_id = str(launch["assignment_id"])
     receipt = store.assignment_launch_context(assignment_id)["acceptance_receipt"]
@@ -845,7 +1027,7 @@ def test_legacy_display_reconciliation_refuses_modern_receipt_before_live_write(
     options = _options(root)
     runner = FakeHerdrRunner(worktree)
     launch = VisibleChampionLaunchService(
-        store, _adapter(options, runner), options, clock
+        store, _adapter(options, runner, store), options, clock
     ).launch(_spec(worktree, "modern-display"))
     receipt = store.assignment_launch_context(str(launch["assignment_id"]))[
         "acceptance_receipt"
@@ -880,7 +1062,7 @@ def test_legacy_display_reconciliation_refuses_ambiguous_runtime_and_wrong_route
     options = _options(root)
     launched_runner = FakeHerdrRunner(worktree)
     launch = VisibleChampionLaunchService(
-        store, _adapter(options, launched_runner), options, clock
+        store, _adapter(options, launched_runner, store), options, clock
     ).launch(_spec(worktree, "legacy-ambiguous"))
     assignment_id = str(launch["assignment_id"])
     receipt = store.assignment_launch_context(assignment_id)["acceptance_receipt"]
@@ -958,7 +1140,7 @@ def _prepared_legacy_display(
     options = _options(root)
     launched_runner = FakeHerdrRunner(worktree)
     launch = VisibleChampionLaunchService(
-        store, _adapter(options, launched_runner), options, clock
+        store, _adapter(options, launched_runner, store), options, clock
     ).launch(_spec(worktree, name))
     assignment_id = str(launch["assignment_id"])
     receipt = store.assignment_launch_context(assignment_id)["acceptance_receipt"]
@@ -1259,7 +1441,7 @@ def test_post_context_title_restoration_refuses_unowned_metadata(root: Path) -> 
     options = _options(root)
     runner = UnownedContextTitleRunner(worktree)
     result = VisibleChampionLaunchService(
-        store, _adapter(options, runner), options, clock
+        store, _adapter(options, runner, store), options, clock
     ).launch(_spec(worktree, "unowned-title"))
     assert result["state"] == "blocked" and result["version"] == 5
     assert store.connection.execute(
@@ -1284,7 +1466,7 @@ def test_active_retry_refuses_newer_user_metadata(root: Path) -> None:
     options = _options(root)
     runner = FakeHerdrRunner(worktree, delayed_context_title_reads=2)
     service = VisibleChampionLaunchService(
-        store, _adapter(options, runner), options, clock
+        store, _adapter(options, runner, store), options, clock
     )
     spec = _spec(worktree, "retry-unowned-title")
     first = service.launch(spec)
@@ -1318,6 +1500,132 @@ def test_active_retry_refuses_newer_user_metadata(root: Path) -> None:
     store.close()
 
 
+def test_issue_first_refuses_missing_and_mismatched_scope_before_launch(root: Path) -> None:
+    store, clock, worktree = _context(root, "issue-first-refusal")
+    options = _options(root)
+    runner = FakeHerdrRunner(worktree)
+    adapter = _adapter(options, runner, store)
+    del adapter.issue_verifier
+    try:
+        VisibleChampionLaunchService(store, adapter, options, clock).launch(
+            _spec(worktree, "issue-first-refusal")
+        )
+    except StorageRefusal as exc:
+        assert exc.code == "issue_verification_required"
+    else:
+        raise AssertionError("visible launch accepted missing issue verification")
+    assert runner.calls == []
+    assert store.connection.execute(
+        "SELECT COUNT(*) FROM task_assignments WHERE task_assignment_id='assignment:issue-first-refusal'"
+    ).fetchone()[0] == 0
+
+    unproven_reopen = FakeIssueVerifier(store=store, persist_selection=False)
+    try:
+        VisibleChampionLaunchService(
+            store, adapter, options, clock, issue_verifier=unproven_reopen
+        ).launch(_spec(worktree, "issue-first-refusal"))
+    except StorageRefusal as exc:
+        assert exc.code == "issue_selection_unproven"
+    else:
+        raise AssertionError("visible launch accepted an unproven issue-selection receipt")
+    assert runner.calls == []
+
+    changed_scope = FakeIssueVerifier(store=store, receipt_scope_digest="a" * 64)
+    try:
+        VisibleChampionLaunchService(
+            store, adapter, options, clock, issue_verifier=changed_scope
+        ).launch(_spec(worktree, "issue-first-changed"))
+    except StorageRefusal as exc:
+        assert exc.code == "issue_selection_unproven"
+    else:
+        raise AssertionError("visible launch accepted a changed semantic issue scope")
+    assert runner.calls == []
+
+    mismatch = FakeIssueVerifier(
+        store=store, repository="https://example.invalid/different.git"
+    )
+    try:
+        VisibleChampionLaunchService(
+            store, adapter, options, clock, issue_verifier=mismatch
+        ).launch(_spec(worktree, "issue-first-mismatch"))
+    except StorageRefusal as exc:
+        assert exc.code == "issue_scope_mismatch"
+    else:
+        raise AssertionError("visible launch accepted a mismatched issue scope")
+    assert runner.calls == []
+    assert store.connection.execute(
+        "SELECT COUNT(*) FROM task_assignments WHERE task_assignment_id LIKE 'assignment:issue-first-%'"
+    ).fetchone()[0] == 0
+    store.close()
+
+
+class FakeGitHubRunner:
+    def __init__(self, payload: dict[str, object] | None, *, returncode: int = 0) -> None:
+        self.payload = payload
+        self.returncode = returncode
+
+    def run(self, arguments, *, timeout_seconds: int = 30):
+        del timeout_seconds
+        return subprocess.CompletedProcess(
+            tuple(arguments),
+            self.returncode,
+            "" if self.payload is None else json.dumps(self.payload),
+            "synthetic failure" if self.returncode else "",
+        )
+
+
+def test_github_issue_verifier_refuses_missing_wrong_repository_and_closed_issue(root: Path) -> None:
+    del root
+    spec = AssignmentSpec(
+        assignment_id="assignment:github",
+        request_id="request:github",
+        claim_token="claim:github",
+        task_id="task:github",
+        task_summary="Implement the exact GitHub issue",
+        coordinator_agent_id=SHOTCALLER_ID,
+        champion_agent_id=LUX_ID,
+        repository="https://github.com/example/league.git",
+        issue=81,
+        branch="agent/example/81",
+        worktree="/synthetic/worktree",
+        issue_receipt=None,
+    )
+    try:
+        GitHubIssueVerifier(
+            FakeGitHubRunner(None, returncode=1), selection_receipt_digest="f" * 64
+        ).verify(spec, "2026-01-01T00:00:00Z")
+    except StorageRefusal as exc:
+        assert exc.code == "issue_verification_failed"
+    else:
+        raise AssertionError("missing repository issue was accepted")
+    payload: dict[str, object] = {
+        "number": 81,
+        "state": "open",
+        "title": "Implement the exact GitHub issue",
+        "body": "## Objective\nImplement.\n## Verification\nTest.\n## Hard boundaries\nStay scoped.",
+        "html_url": "https://github.com/example/league/issues/81",
+        "repository_url": "https://api.github.com/repos/example/wrong",
+    }
+    try:
+        GitHubIssueVerifier(
+            FakeGitHubRunner(payload), selection_receipt_digest="f" * 64
+        ).verify(spec, "2026-01-01T00:00:00Z")
+    except StorageRefusal as exc:
+        assert exc.code == "issue_identity_refused"
+    else:
+        raise AssertionError("wrong-repository issue was accepted")
+    payload["repository_url"] = "https://api.github.com/repos/example/league"
+    payload["state"] = "closed"
+    try:
+        GitHubIssueVerifier(
+            FakeGitHubRunner(payload), selection_receipt_digest="f" * 64
+        ).verify(spec, "2026-01-01T00:00:00Z")
+    except StorageRefusal as exc:
+        assert exc.code == "issue_closed"
+    else:
+        raise AssertionError("closed issue without reopen authority was accepted")
+
+
 class DeferredSessionRunner(FakeHerdrRunner):
     def _agent(self) -> dict[str, object]:
         agent = super()._agent()
@@ -1339,7 +1647,7 @@ def test_real_adapter_persists_exact_initial_codex_session(root: Path) -> None:
     options = _options(root)
     runner = DeferredSessionRunner(worktree)
     result = VisibleChampionLaunchService(
-        store, _adapter(options, runner), options, clock
+        store, _adapter(options, runner, store), options, clock
     ).launch(_spec(worktree, "deferred-session"))
     assert result["state"] == "active"
     launch = store.assignment_launch_context("assignment:deferred-session")
@@ -1410,7 +1718,7 @@ def test_pre_session_launch_failure_closes_exact_pending_pane(root: Path) -> Non
     store, clock, worktree = _context(root, "pending-start-cleanup")
     options = _options(root)
     runner = PendingStartFailureRunner(worktree)
-    service = VisibleChampionLaunchService(store, _adapter(options, runner), options, clock)
+    service = VisibleChampionLaunchService(store, _adapter(options, runner, store), options, clock)
     result = service.launch(_spec(worktree, "pending-start-cleanup"))
     assert result["state"] == "blocked"
     assert runner.closed is True
@@ -1427,7 +1735,7 @@ def test_metadata_silent_success_is_exact_and_failure_stays_closed(root: Path) -
     options = _options(root)
     runner = FailedMetadataRunner(worktree)
     result = VisibleChampionLaunchService(
-        store, _adapter(options, runner), options, clock
+        store, _adapter(options, runner, store), options, clock
     ).launch(_spec(worktree, "metadata-failure"))
     assert result["state"] == "blocked"
     assert result["failure_class"] == "launch_adapter_failed"
@@ -1449,10 +1757,11 @@ def test_linked_worktree_trust_binds_owning_repository(root: Path) -> None:
 
 
 class FailingAdapter:
-    def __init__(self, base: FakeLaunchAdapter, *, cleanup: bool) -> None:
+    def __init__(self, store, base: FakeLaunchAdapter, *, cleanup: bool) -> None:
         self.base = base
         self._created = {"pane_id": "synthetic:pane"}
         self.cleanup_result = cleanup
+        self.issue_verifier = FakeIssueVerifier(store=store)
 
     def launch(self, spec: AssignmentSpec):
         raise LaunchAdapterError(
@@ -1468,7 +1777,7 @@ def test_unproven_partial_launch_stays_cleanup_pending(root: Path) -> None:
     store, clock, worktree = _context(root, "partial")
     options = _options(root)
     result = VisibleChampionLaunchService(
-        store, FailingAdapter(FakeLaunchAdapter(), cleanup=False), options, clock  # type: ignore[arg-type]
+        store, FailingAdapter(store, FakeLaunchAdapter(), cleanup=False), options, clock  # type: ignore[arg-type]
     ).launch(_spec(worktree, "partial"))
     assert result["state"] == "cleanup_pending"
     assert store.connection.execute(
@@ -1478,10 +1787,11 @@ def test_unproven_partial_launch_stays_cleanup_pending(root: Path) -> None:
 
 
 class ContextFailureAdapter:
-    def __init__(self, *, cleanup: bool) -> None:
+    def __init__(self, store, *, cleanup: bool) -> None:
         self.base = FakeLaunchAdapter()
         self._created = {"pane_id": "herdr:lux"}
         self.cleanup_result = cleanup
+        self.issue_verifier = FakeIssueVerifier(store=store)
 
     def launch(self, spec: AssignmentSpec):
         return self.base.launch(spec)
@@ -1501,7 +1811,7 @@ def test_context_failure_records_pending_when_cleanup_is_unproven(root: Path) ->
     store, clock, worktree = _context(root, "context-pending")
     options = _options(root)
     result = VisibleChampionLaunchService(
-        store, ContextFailureAdapter(cleanup=False), options, clock  # type: ignore[arg-type]
+        store, ContextFailureAdapter(store, cleanup=False), options, clock  # type: ignore[arg-type]
     ).launch(_spec(worktree, "context-pending"))
     assert result["state"] == "cleanup_pending" and result["version"] == 4
     assignment = store.connection.execute(
@@ -1518,7 +1828,7 @@ def test_context_failure_exact_cleanup_blocks_and_releases(root: Path) -> None:
     store, clock, worktree = _context(root, "context-clean")
     options = _options(root)
     result = VisibleChampionLaunchService(
-        store, ContextFailureAdapter(cleanup=True), options, clock  # type: ignore[arg-type]
+        store, ContextFailureAdapter(store, cleanup=True), options, clock  # type: ignore[arg-type]
     ).launch(_spec(worktree, "context-clean"))
     assert result["state"] == "blocked" and result["version"] == 5
     assert store.connection.execute(
@@ -1542,7 +1852,7 @@ def test_generated_thread_mismatch_closes_owned_tab_and_blocks(root: Path) -> No
     options = _options(root)
     runner = FakeHerdrRunner(worktree, wrong_thread=True)
     result = VisibleChampionLaunchService(
-        store, _adapter(options, runner), options, clock
+        store, _adapter(options, runner, store), options, clock
     ).launch(_spec(worktree, "wrong-thread"))
     assert result["state"] == "blocked"
     assert result["failure_class"] == "launch_identity_unverified"
@@ -1566,7 +1876,7 @@ def test_post_launch_activation_refusal_closes_owned_tab_and_blocks(root: Path) 
 
     store.activate_assignment = refuse_activation  # type: ignore[method-assign]
     result = VisibleChampionLaunchService(
-        store, _adapter(options, runner), options, clock
+        store, _adapter(options, runner, store), options, clock
     ).launch(_spec(worktree, "activation-refusal"))
     assert result["state"] == "blocked"
     assert result["failure_class"] == "launch_busy"
@@ -1587,6 +1897,8 @@ def main() -> None:
         test_legacy_display_command_exposes_exact_owner_cas_inputs()
         test_task_label_defaults_and_explicit_labels_stay_two_words(root)
         test_real_adapter_one_command_success_and_retry(root)
+        test_active_retry_requires_migration18_issue_binding(root)
+        test_active_retry_refuses_changed_owner_issue_before_title_read(root)
         test_legacy_active_champion_display_is_reconciled_once_with_exact_receipt(root)
         test_legacy_display_reconciliation_refuses_user_title_race_before_write(root)
         test_legacy_display_compare_and_set_does_not_overwrite_last_window_user_title(root)
@@ -1601,6 +1913,8 @@ def main() -> None:
         test_legacy_display_refuses_missing_acceptance_worktree(root)
         test_post_context_title_restoration_refuses_unowned_metadata(root)
         test_active_retry_refuses_newer_user_metadata(root)
+        test_issue_first_refuses_missing_and_mismatched_scope_before_launch(root)
+        test_github_issue_verifier_refuses_missing_wrong_repository_and_closed_issue(root)
         test_real_adapter_persists_exact_initial_codex_session(root)
         test_pre_session_launch_failure_closes_exact_pending_pane(root)
         test_metadata_silent_success_is_exact_and_failure_stays_closed(root)

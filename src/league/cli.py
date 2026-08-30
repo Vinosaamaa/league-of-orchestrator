@@ -8,6 +8,7 @@ import json
 import os
 import sqlite3
 import sys
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, BinaryIO, Callable, Optional
@@ -62,6 +63,7 @@ from .rollover_snapshot import (
 )
 from .visible_launch import (
     HerdrCodexLaunchAdapter,
+    SubprocessRunner,
     VisibleChampionLaunchService,
     VisibleLaunchOptions,
     derived_assignment_id,
@@ -72,6 +74,12 @@ from .legacy_display_reconciliation import (
     HerdrLegacyDisplayAdapter,
     LegacyDisplayReconciliationService,
     LegacyDisplayReconciliationSpec,
+)
+from .issue_first import (
+    MAX_ISSUE_BODY_BYTES,
+    GitHubIssueSelectionService,
+    GitHubIssueVerifier,
+    IssueSelectionSpec,
 )
 
 
@@ -977,7 +985,7 @@ def _add_assignment_commands(groups: argparse._SubParsersAction) -> None:
     commands = assignment.add_subparsers(dest="action", required=True)
     prepare = commands.add_parser(
         "prepare",
-        help="Reserve one role-specific visible Champion or hidden-scientist assignment.",
+        help="Reserve one hidden-scientist assignment; visible Champions must use assign run.",
     )
     for name in (
         "assignment-id",
@@ -1029,6 +1037,7 @@ def _add_assignment_commands(groups: argparse._SubParsersAction) -> None:
     launch.add_argument("--league-command")
     launch.add_argument("--requires", action="append", default=[])
     launch.add_argument("--startup-timeout-ms", type=int, default=120_000)
+    launch.add_argument("--issue-selection-receipt-digest", required=True)
     launching = commands.add_parser("launching", help="Commit launch intent before adapter work.")
     launching.add_argument("--assignment-id", required=True)
     launching.add_argument("--expected-version", type=int, required=True)
@@ -1151,6 +1160,95 @@ def _add_hook_commands(groups: argparse._SubParsersAction) -> None:
         stop.add_argument(f"--{name}", required=True)
 
 
+def _add_mode_commands(groups: argparse._SubParsersAction) -> None:
+    mode = groups.add_parser(
+        "mode",
+        help="Authorize and account for one durable scoped autonomous-delivery goal.",
+    )
+    commands = mode.add_subparsers(dest="action", required=True)
+    authorize = commands.add_parser(
+        "authorize", help="Create one immutable Summoner grant revision and bind its exact goal."
+    )
+    authorize.add_argument("--grant", type=Path, required=True)
+    authorize.add_argument("--expected-goal-version", type=int, required=True)
+    authorize.add_argument("--at", required=True)
+    status = commands.add_parser(
+        "status", help="Show manual or autonomous mode, exact authority, usage, and goal state."
+    )
+    status.add_argument("--goal-id", required=True)
+    status.add_argument("--at", required=True)
+    use = commands.add_parser(
+        "use", help="Authorize and record one exact external action atomically."
+    )
+    use.add_argument("--action", dest="action_spec", type=Path, required=True)
+    use.add_argument("--expected-goal-version", type=int, required=True)
+    use.add_argument("--at", required=True)
+    settle = commands.add_parser(
+        "settle", help="Settle one exact in-progress action or create its repair obligation."
+    )
+    for name in (
+        "action-use-id",
+        "goal-id",
+        "use-receipt-digest",
+        "result-receipt-digest",
+        "at",
+    ):
+        settle.add_argument(f"--{name}", required=True)
+    settle.add_argument("--expected-goal-version", type=int, required=True)
+    settle.add_argument("--outcome", choices=("succeeded", "failed"), required=True)
+    settle.add_argument("--failure-class")
+    transition = commands.add_parser(
+        "transition", help="Perform one checked non-external delivery-goal transition."
+    )
+    transition.add_argument("--goal-id", required=True)
+    transition.add_argument("--expected-goal-version", type=int, required=True)
+    transition.add_argument(
+        "--state",
+        choices=(
+            "awaiting_authority",
+            "implementing",
+            "ready_to_land",
+            "landing",
+            "deploying",
+            "verifying",
+            "repair_pending",
+            "delivered",
+            "cleanup_pending",
+            "cleaned",
+        ),
+        required=True,
+    )
+    transition.add_argument("--at", required=True)
+    revoke = commands.add_parser(
+        "revoke", help="Revoke one grant immediately while retaining in-progress evidence."
+    )
+    for name in ("grant-id", "revoked-by", "reason", "at"):
+        revoke.add_argument(f"--{name}", required=True)
+    revoke.add_argument("--expected-goal-version", type=int, required=True)
+
+
+def _add_issue_commands(groups: argparse._SubParsersAction) -> None:
+    issue = groups.add_parser(
+        "issue", help="Select, reopen, or create one issue after durable duplicate preflight."
+    )
+    commands = issue.add_subparsers(dest="action", required=True)
+    select = commands.add_parser(
+        "select",
+        help="Search open and closed issues, then reuse, reopen, or create only distinct scope.",
+    )
+    for name in (
+        "task-id",
+        "task-summary",
+        "coordinator-agent-id",
+        "repository",
+        "issue-title",
+        "at",
+    ):
+        select.add_argument(f"--{name}", required=True)
+    select.add_argument("--issue-body", type=Path, required=True)
+    select.add_argument("--reopen-action-receipt-digest")
+
+
 def _add_help_commands(groups: argparse._SubParsersAction) -> None:
     help_group = groups.add_parser("help", help="Emit machine-readable command and schema inventory.")
     commands = help_group.add_subparsers(dest="action", required=True)
@@ -1208,6 +1306,8 @@ def _parser() -> argparse.ArgumentParser:
         _add_request_commands,
         _add_assignment_commands,
         _add_hook_commands,
+        _add_mode_commands,
+        _add_issue_commands,
         _add_help_commands,
         _add_acceptance_commands,
     ):
@@ -1751,6 +1851,19 @@ def _read_json_object(path: Path) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise StorageRefusal("input_invalid", "JSON input must be an object")
     return value
+
+
+def _read_bounded_text(path: Path, maximum: int, label: str) -> str:
+    try:
+        with path.open("rb") as stream:
+            payload = stream.read(maximum + 1)
+        if not payload or len(payload) > maximum or b"\x00" in payload:
+            raise StorageRefusal("input_invalid", f"{label} is empty or exceeds its bound")
+        return payload.decode("utf-8")
+    except StorageRefusal:
+        raise
+    except (OSError, UnicodeError) as exc:
+        raise StorageRefusal("input_invalid", f"{label} could not be read") from exc
 
 
 def _runtime_matrix(_: Storage, __: argparse.Namespace) -> CommandResult:
@@ -2443,6 +2556,11 @@ def _request_untriaged(store: Storage, args: argparse.Namespace) -> CommandResul
 
 
 def _assign_prepare(store: Storage, args: argparse.Namespace) -> CommandResult:
+    if args.role == "champion":
+        raise StorageRefusal(
+            "issue_verification_required",
+            "visible repository work must use assign run for owner-API issue verification",
+        )
     return store.prepare_assignment(
         PrepareAssignmentCommand(
             assignment_id=args.assignment_id,
@@ -2457,6 +2575,7 @@ def _assign_prepare(store: Storage, args: argparse.Namespace) -> CommandResult:
             branch=args.branch,
             worktree=args.worktree,
             at=args.at,
+            issue_receipt=None,
             required_capabilities=tuple(args.requires),
             assignment_role=args.role,
             dispatch_id=args.dispatch_id,
@@ -2501,10 +2620,18 @@ def _assign_launch(store: Storage, args: argparse.Namespace) -> CommandResult:
         issue=args.issue,
         branch=args.branch,
         worktree=str(Path(args.worktree).resolve()),
+        issue_receipt=None,
         required_capabilities=tuple(args.requires),
     )
-    adapter = HerdrCodexLaunchAdapter(options)
-    return VisibleChampionLaunchService(store, adapter, options).launch(spec), None
+    runner = SubprocessRunner()
+    adapter = HerdrCodexLaunchAdapter(options, runner)
+    verifier = GitHubIssueVerifier(
+        runner,
+        selection_receipt_digest=args.issue_selection_receipt_digest,
+    )
+    return VisibleChampionLaunchService(
+        store, adapter, options, issue_verifier=verifier
+    ).launch(spec), None
 
 
 def _assign_launching(store: Storage, args: argparse.Namespace) -> CommandResult:
@@ -2710,6 +2837,75 @@ def _hook_stop(store: Storage, args: argparse.Namespace) -> CommandResult:
     ), None
 
 
+def _mode_authorize(store: Storage, args: argparse.Namespace) -> CommandResult:
+    return store.authorize_mode(
+        _read_json_object(args.grant), args.expected_goal_version, args.at
+    ), None
+
+
+def _mode_status(store: Storage, args: argparse.Namespace) -> CommandResult:
+    return store.mode_status(args.goal_id, args.at), None
+
+
+def _mode_use(store: Storage, args: argparse.Namespace) -> CommandResult:
+    return store.use_mode_action(
+        _read_json_object(args.action_spec), args.expected_goal_version, args.at
+    ), None
+
+
+def _mode_settle(store: Storage, args: argparse.Namespace) -> CommandResult:
+    from .storage_mode import SettleModeActionCommand
+
+    return store.settle_mode_action(
+        SettleModeActionCommand(
+            action_use_id=args.action_use_id,
+            goal_id=args.goal_id,
+            expected_goal_version=args.expected_goal_version,
+            use_receipt_digest=args.use_receipt_digest,
+            outcome=args.outcome,
+            result_receipt_digest=args.result_receipt_digest,
+            failure_class=args.failure_class,
+            at=args.at,
+        )
+    ), None
+
+
+def _mode_transition(store: Storage, args: argparse.Namespace) -> CommandResult:
+    return store.transition_mode_goal(
+        args.goal_id, args.expected_goal_version, args.state, args.at
+    ), None
+
+
+def _mode_revoke(store: Storage, args: argparse.Namespace) -> CommandResult:
+    return store.revoke_mode_grant(
+        args.grant_id,
+        args.revoked_by,
+        args.reason,
+        args.expected_goal_version,
+        args.at,
+    ), None
+
+
+def _issue_select(store: Storage, args: argparse.Namespace) -> CommandResult:
+    runner = SubprocessRunner()
+    service = GitHubIssueSelectionService(store, runner)
+    return service.select(
+        IssueSelectionSpec(
+            task_id=args.task_id,
+            task_summary=args.task_summary,
+            coordinator_agent_id=args.coordinator_agent_id,
+            repository=args.repository,
+            issue_title=args.issue_title,
+            issue_body=_read_bounded_text(
+                args.issue_body, MAX_ISSUE_BODY_BYTES, "repository issue body"
+            ),
+        ),
+        f"issue-attempt:{uuid.uuid4()}",
+        args.at,
+        reopen_action_receipt_digest=args.reopen_action_receipt_digest,
+    ), None
+
+
 HANDLERS: dict[str, CommandHandler] = {
     "storage.integrity": _storage_integrity,
     "storage.backup": _storage_backup,
@@ -2801,6 +2997,13 @@ HANDLERS: dict[str, CommandHandler] = {
     "hook.rearm": _hook_rearm,
     "hook.allow-stop-once": _hook_allow_stop_once,
     "hook.stop": _hook_stop,
+    "mode.authorize": _mode_authorize,
+    "mode.status": _mode_status,
+    "mode.use": _mode_use,
+    "mode.settle": _mode_settle,
+    "mode.transition": _mode_transition,
+    "mode.revoke": _mode_revoke,
+    "issue.select": _issue_select,
 }
 
 
@@ -2835,6 +3038,12 @@ SCHEMA_INVENTORY = (
     "league-activity-evidence.schema.json",
     "league-report.schema.json",
     "league-outbound-receipt.schema.json",
+    "league-autonomous-grant.schema.json",
+    "league-autonomous-action.schema.json",
+    "league-mode-status.schema.json",
+    "league-mode-action-receipt.schema.json",
+    "league-repository-issue.schema.json",
+    "league-issue-selection-receipt.schema.json",
 )
 
 CONFIG_ONLY_COMMANDS = {

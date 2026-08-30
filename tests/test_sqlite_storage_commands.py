@@ -56,7 +56,7 @@ def test_launcher_help_and_schemas() -> None:
     )
     assert "SQL is not exposed" in " ".join(launcher.stdout.split())
     assert (
-        "{storage,agent,callsign,shotcaller,rollover,delivery,project,roster,evidence,artifact,report,squad,task,runtime,skill,routing,resource,cleanup,request,assign,hook,help,acceptance}"
+        "{storage,agent,callsign,shotcaller,rollover,delivery,project,roster,evidence,artifact,report,squad,task,runtime,skill,routing,resource,cleanup,request,assign,hook,mode,issue,help,acceptance}"
         in launcher.stdout
     )
     parser = cli._parser()
@@ -98,6 +98,10 @@ def test_launcher_help_and_schemas() -> None:
     )
     assignment_help = groups.choices["assign"].format_help()
     assert all(name in assignment_help for name in ("run", "reconcile-runtime", "finish-hidden"))
+    mode_help = groups.choices["mode"].format_help()
+    assert all(name in mode_help for name in ("authorize", "status", "use", "settle", "transition", "revoke"))
+    issue_help = groups.choices["issue"].format_help()
+    assert "select" in issue_help
     request_help = groups.choices["request"].format_help()
     assert "untriaged" in request_help and "turn" in request_help
     for name in (

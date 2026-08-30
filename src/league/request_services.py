@@ -37,6 +37,7 @@ class AssignmentSpec:
     issue: int
     branch: str
     worktree: str
+    issue_receipt: Optional[dict[str, Any]]
     required_capabilities: tuple[str, ...] = ()
     callsign: Optional[str] = None
 
@@ -75,6 +76,11 @@ class AssignmentService:
         self.ids = ids
 
     def assign(self, spec: AssignmentSpec) -> dict[str, Any]:
+        if spec.issue_receipt is None:
+            raise StorageRefusal(
+                "issue_verification_required",
+                "visible Champion assignment requires exact owner-API issue evidence",
+            )
         prepared = self.store.prepare_assignment(
             PrepareAssignmentCommand(
                 assignment_id=spec.assignment_id,
@@ -90,6 +96,7 @@ class AssignmentService:
                 worktree=spec.worktree,
                 at=self.clock.now(),
                 required_capabilities=spec.required_capabilities,
+                issue_receipt=spec.issue_receipt,
             )
         )
         if prepared["state"] == "active":

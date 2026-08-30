@@ -27,7 +27,7 @@ Nothing here installs files, changes hooks, or connects to live Roster state.
 - Synthetic examples, authoring schemas, and focused local regression tests.
 - One standard-library SQLite implementation behind a `Storage` protocol and
   stable `league` command facade.
-- Seventeen contiguous checksummed schema migrations, a loaded-runtime WAL gate, verified
+- Eighteen contiguous checksummed schema migrations, a loaded-runtime WAL gate, verified
   backups, integrity checks, expected-version writes, and bounded contention.
 - A strict manifest importer covering every canonical issue-#18 artifact
   family, with dry-run digest confirmation before apply.
@@ -84,6 +84,14 @@ Nothing here installs files, changes hooks, or connects to live Roster state.
   acknowledgement-gated transfer, safe Squad registration, parent-request
   progress coalescing, versioned provider routing, and one evidence-triggered
   model escalation.
+- One immutable scoped `autonomous_delivery` grant lifecycle (owner alias:
+  **YOLO mode**) with exact goal/action receipts, expiry, revocation, configured
+  usage limits, bounded repair, backup/export coverage, and Shotcaller-only
+  external-action ownership.
+- Issue-first visible delegation with duplicate preflight across open and
+  closed GitHub issues, durable reuse/reopen/create selection receipts, and an
+  exact binding before assignment or tab mutation; durable work kinds cannot
+  route direct or hide implementation ownership.
 
 The proven watcher remains one deep module. The new storage slice is a small
 modular monolith: one composite `Storage` interface with cohesive administrative,
@@ -177,6 +185,53 @@ The [privacy contract](docs/PRIVACY.md) records the guide ownership split:
 terminal-environment-toolkit alone owns the universal guide, while League may
 install only its orchestration supplement. Toolkit issue #45 owns the universal
 trigger; League issue #90 changes no toolkit or installed guide.
+The owner/operator model, grant state machine, issue-first boundary, migration,
+and remaining limits are documented in
+[scoped autonomous delivery](docs/design/scoped-autonomous-delivery.md).
+
+## Scoped autonomous delivery
+
+Manual remains the default. A Summoner authorizes one exact goal from a strict
+grant document, and the Shotcaller checks status before each irreversible step:
+
+```sh
+./bin/league --state-root /absolute/state mode authorize \
+  --grant /absolute/grant.json --expected-goal-version 0 \
+  --at 2026-01-01T00:00:00Z
+./bin/league --state-root /absolute/state mode status \
+  --goal-id goal:example --at 2026-01-01T00:00:01Z
+./bin/league --state-root /absolute/state mode use \
+  --action /absolute/action.json --expected-goal-version 2 \
+  --at 2026-01-01T00:00:02Z
+```
+
+`mode settle`, `mode transition`, and `mode revoke` finish the checked flow.
+Grant and action input schemas are
+[authorization](schema/league-autonomous-grant.schema.json) and
+[action use](schema/league-autonomous-action.schema.json); status, action, and
+issue-first receipts have separate public schemas. An autonomous grant never
+makes repository implementation direct: `request dispatch` still requires a
+visible Champion, and `assign run` verifies the issue against GitHub before any
+canonical assignment or terminal mutation.
+
+Before `assign run`, select the issue through the duplicate-preflight command:
+
+```sh
+./bin/league --state-root /absolute/state issue select \
+  --task-id task:example --task-summary "Implement the exact task" \
+  --coordinator-agent-id <shotcaller-agent-id> \
+  --repository https://github.com/owner/repository.git \
+  --issue-title "Implement the exact issue" --issue-body /absolute/issue.md \
+  --at 2026-01-01T00:00:00Z
+```
+
+The command searches all open and closed issues by normalized title and the
+normalized Objective/Scope section. It reuses an open equivalent, recognizes a
+closed recurrence only after the supported `issue_reopen` action is settled and
+the owner API reports it open on exact retry, and creates only distinct scope.
+Pass its `receipt_digest` to `assign run` as
+`--issue-selection-receipt-digest`; an absent, stale, or mismatched receipt
+refuses before assignment or terminal mutation.
 
 ## Repository-local SQLite implementation; cutover still gated
 
@@ -237,6 +292,7 @@ fake adapters.
 - [Outbound privacy boundary](docs/PRIVACY.md)
 - [Research-backed orchestration and model routing policy](docs/research/orchestration-model-routing-policy-evidence.md)
 - [Terminal-first Project Ledger design](docs/design/terminal-roster-ui.md)
+- [Scoped autonomous delivery and issue-first delegation](docs/design/scoped-autonomous-delivery.md)
 - [Baseline versus planned issues](docs/ROADMAP.md)
 
 ## Non-goals for this implementation PR

@@ -553,3 +553,37 @@ races while preserving unrelated tokens; exact retry returns the same stored
 receipt without another metadata write. In-place Shotcaller identity inspection also
 retries only transient malformed read-only Herdr results, with persistent
 malformation still refusing before reservation or publication.
+
+## Scoped autonomous-delivery provenance
+
+Issue #81 adds original League-only migration v18, `ModeStorage`, the six
+`league mode` commands, strict grant/action/receipt schemas, issue-first GitHub
+verification, source-managed guidance, and focused synthetic tests. It derives
+no authority from prompt text and imports no external implementation.
+
+The deliberate baseline differences are durable immutable Summoner grant
+revisions, Shotcaller-owned external-action uses, checked limits and goal
+transitions, revocation, bounded repair obligations, and one immutable
+repository-issue binding before visible launch mutation. Repository,
+configuration, migration, test, benchmark, durable research, release,
+operational, reproduction, debugging, and bug-fix work now force visible
+Champion execution; the prior direct-tiny answer/check path is preserved.
+
+The owner-found duplicate-issue regression deliberately extends v17 with
+a normalized repository/title/semantic-scope lease and immutable per-task issue
+selection receipts. Open equivalents are reused, genuine closed recurrence
+requires the existing settled Shotcaller reopen authority and preserves prior
+Champion/runtime session linkage, distinct work creates once, and concurrent
+creators fail closed behind the SQLite owner fence. `assign run` now requires
+that receipt in addition to the fresh owner-API issue verification. The task
+summary and issue title share one normalized duplicate identity while the
+selection and owner-API receipt retain exact title-byte equality.
+
+Migration v18 is named
+`scoped-autonomous-delivery-and-issue-first-assignment`, checksum
+`b517b9103fedcc0db8a1f0dd7d06d475f309f3a135d87356209ab34dbd957631`.
+Existing migrations remain byte-for-byte unchanged. Focused tests use only
+temporary roots and fake GitHub/Herdr boundaries; they perform no live grant,
+merge, release, installation, deployment, production action, or teardown.
+The rules live in the League supplement; the toolkit-owned universal guide and
+the supplement's existing 16 KiB fail-closed staging bound remain unchanged.

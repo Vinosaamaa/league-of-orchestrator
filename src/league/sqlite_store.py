@@ -17,6 +17,8 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
 
 from . import sqlite_runtime_ops
+from . import sqlite_mode_ops
+from . import sqlite_issue_ops
 from .sqlite_artifact_ops import declare as declare_repository_artifact_operation
 from .sqlite_artifact_ops import publish as record_repository_publication_operation
 from .sqlite_artifact_ops import status as task_artifacts_operation
@@ -162,10 +164,14 @@ from .sqlite_rollover_snapshot_schema import (
 from .sqlite_rollover_snapshot_schema import (
     STATEMENTS as ROLLOVER_SNAPSHOT_MIGRATION_STATEMENTS,
 )
+from .sqlite_autonomous_schema import MIGRATION_NAME as AUTONOMOUS_MIGRATION_NAME
+from .sqlite_autonomous_schema import STATEMENTS as AUTONOMOUS_MIGRATION_STATEMENTS
+from .storage_issue import BeginIssueSelectionCommand, CompleteIssueSelectionCommand
+from .storage_mode import SettleModeActionCommand
 
 
 WAL_MINIMUM = (3, 51, 3)
-CURRENT_SCHEMA_VERSION = 17
+CURRENT_SCHEMA_VERSION = 18
 DATABASE_NAME = "league.sqlite3"
 DEFAULT_BUSY_TIMEOUT_MS = 500
 MAX_BUSY_TIMEOUT_MS = 10_000
@@ -1180,6 +1186,7 @@ MIGRATIONS = (
         ROLLOVER_SNAPSHOT_MIGRATION_STATEMENTS,
         rebuilds_foreign_keys=True,
     ),
+    Migration(18, AUTONOMOUS_MIGRATION_NAME, AUTONOMOUS_MIGRATION_STATEMENTS),
 )
 
 
@@ -1329,6 +1336,57 @@ _IMPORT_COLUMNS: dict[str, tuple[str, ...]] = {
         "from_inclusive", "scope_kind", "scope_id", "event_watermark", "source_watermark", "created_at",
         "spec_hash", "content_hash", "fact_count",
     ),
+    "authorization_grants": (
+        "grant_id", "goal_id", "revision", "issuer_kind", "issuer_id",
+        "shotcaller_agent_id", "exact_goal", "scope_json", "allowed_actions_json",
+        "exclusions_json", "sensitive_inclusions_json", "resource_boundary_json",
+        "starts_at", "expires_at", "limits_json", "canonical_digest", "version",
+        "created_at",
+    ),
+    "delivery_goals": (
+        "goal_id", "active_grant_id", "state", "next_irreversible_action",
+        "attempts_used", "cost_microunits_used", "changed_files_used",
+        "duration_seconds_used", "in_progress_actions", "version", "created_at",
+        "updated_at",
+    ),
+    "authorization_revocations": (
+        "grant_id", "revoked_by", "reason", "revoked_at", "receipt_digest",
+    ),
+    "autonomous_action_uses": (
+        "action_use_id", "idempotency_key", "goal_id", "grant_id",
+        "grant_revision", "external_owner_agent_id", "action_kind",
+        "action_scope_json", "risk_categories_json", "sensitive_categories_json",
+        "resource_use_json", "attempt_count", "cost_microunits", "changed_files",
+        "duration_seconds", "state", "use_receipt_digest", "result_receipt_digest",
+        "failure_class", "started_at", "settled_at",
+    ),
+    "autonomous_repair_obligations": (
+        "repair_id", "goal_id", "failed_action_use_id", "state", "attempts_used",
+        "max_attempts", "failure_class", "version", "created_at", "updated_at",
+    ),
+    "repository_issue_selection_leases": (
+        "selection_key", "repository", "repository_key", "normalized_title",
+        "semantic_scope_digest", "state", "owner_attempt_id", "current_task_id",
+        "current_task_summary", "current_coordinator_agent_id", "lease_expires_at",
+        "version", "created_at", "updated_at",
+    ),
+    "repository_issue_selection_receipts": (
+        "selection_receipt_id", "selection_key", "selection_version", "task_id",
+        "task_summary", "coordinator_agent_id", "repository", "repository_key",
+        "normalized_title", "semantic_scope_digest", "decision", "issue",
+        "issue_url", "issue_state", "issue_title", "issue_body_digest",
+        "duplicate_matches", "prior_task_id", "prior_assignment_id",
+        "prior_champion_agent_id", "prior_runtime_instance_id", "prior_session_ref",
+        "reopen_action_receipt_digest", "task_scope_digest", "receipt_digest",
+        "created_at",
+    ),
+    "repository_issue_bindings": (
+        "task_id", "assignment_id", "request_id", "repository", "issue",
+        "issue_url", "issue_state", "issue_title", "issue_body_digest",
+        "semantic_binding_digest", "task_scope_digest", "issue_selection_receipt_digest",
+        "reopen_action_receipt_digest", "verifier_kind", "verified_at",
+        "receipt_digest",
+    ),
 }
 
 _IMPORT_ORDER = tuple(_IMPORT_COLUMNS)
@@ -1400,6 +1458,14 @@ _EXPORT_TABLES = (
     "activity_evidence",
     "report_specs",
     "repository_artifacts",
+    "authorization_grants",
+    "delivery_goals",
+    "authorization_revocations",
+    "autonomous_action_uses",
+    "autonomous_repair_obligations",
+    "repository_issue_selection_leases",
+    "repository_issue_selection_receipts",
+    "repository_issue_bindings",
 )
 
 _EXPORT_ORDER = {
@@ -1470,6 +1536,14 @@ _EXPORT_ORDER = {
     "activity_evidence": "occurred_at,evidence_id",
     "report_specs": "created_at,report_id",
     "repository_artifacts": "task_id,artifact_id",
+    "authorization_grants": "goal_id,revision,grant_id",
+    "delivery_goals": "goal_id",
+    "authorization_revocations": "revoked_at,grant_id",
+    "autonomous_action_uses": "started_at,action_use_id",
+    "autonomous_repair_obligations": "created_at,repair_id",
+    "repository_issue_selection_leases": "repository_key,normalized_title,selection_key",
+    "repository_issue_selection_receipts": "created_at,selection_receipt_id",
+    "repository_issue_bindings": "repository,issue,task_id",
 }
 
 _INSPECTION_REDACTIONS = {
@@ -1542,6 +1616,41 @@ _INSPECTION_REDACTIONS = {
     "cleanup_action_receipts": {"before_json", "after_json", "adapter_receipt_json"},
     "activity_evidence": {"local_evidence_ref", "local_evidence_json"},
     "repository_artifacts": {"worktree"},
+    "authorization_grants": {
+        "issuer_id",
+        "exact_goal",
+        "scope_json",
+        "resource_boundary_json",
+    },
+    "authorization_revocations": {"revoked_by", "reason"},
+    "autonomous_action_uses": {
+        "action_scope_json",
+        "risk_categories_json",
+        "sensitive_categories_json",
+        "resource_use_json",
+        "failure_class",
+    },
+    "autonomous_repair_obligations": {"failure_class"},
+    "repository_issue_selection_leases": {
+        "repository",
+        "current_task_id",
+        "current_task_summary",
+        "current_coordinator_agent_id",
+        "owner_attempt_id",
+    },
+    "repository_issue_selection_receipts": {
+        "task_id",
+        "task_summary",
+        "coordinator_agent_id",
+        "repository",
+        "issue_title",
+        "prior_task_id",
+        "prior_assignment_id",
+        "prior_champion_agent_id",
+        "prior_runtime_instance_id",
+        "prior_session_ref",
+    },
+    "repository_issue_bindings": {"issue_title"},
 }
 
 
@@ -1966,6 +2075,82 @@ class SQLiteStorage(SQLiteTransactionCore):
         receipt = self._verified_backup(self._resolve_output(name), fault=fault)
         receipt["policy"] = self._policy_result()
         return receipt
+
+    def authorize_mode(
+        self, grant: dict[str, Any], expected_goal_version: int, at: str
+    ) -> dict[str, Any]:
+        return sqlite_mode_ops.authorize_mode(
+            self, grant, expected_goal_version, at
+        )
+
+    def mode_status(self, goal_id: str, at: str) -> dict[str, Any]:
+        return sqlite_mode_ops.mode_status(self, goal_id, at)
+
+    def use_mode_action(
+        self, action: dict[str, Any], expected_goal_version: int, at: str
+    ) -> dict[str, Any]:
+        return sqlite_mode_ops.use_mode_action(
+            self, action, expected_goal_version, at
+        )
+
+    def settle_mode_action(self, command: SettleModeActionCommand) -> dict[str, Any]:
+        return sqlite_mode_ops.settle_mode_action(self, command)
+
+    def transition_mode_goal(
+        self, goal_id: str, expected_goal_version: int, state: str, at: str
+    ) -> dict[str, Any]:
+        return sqlite_mode_ops.transition_mode_goal(
+            self, goal_id, expected_goal_version, state, at
+        )
+
+    def revoke_mode_grant(
+        self,
+        grant_id: str,
+        revoked_by: str,
+        reason: str,
+        expected_goal_version: int,
+        at: str,
+    ) -> dict[str, Any]:
+        return sqlite_mode_ops.revoke_mode_grant(
+            self,
+            grant_id,
+            revoked_by,
+            reason,
+            expected_goal_version,
+            at,
+        )
+
+    def begin_issue_selection(
+        self, command: BeginIssueSelectionCommand
+    ) -> dict[str, Any]:
+        return sqlite_issue_ops.begin_issue_selection(self, command)
+
+    def complete_issue_selection(
+        self, command: CompleteIssueSelectionCommand
+    ) -> dict[str, Any]:
+        return sqlite_issue_ops.complete_issue_selection(self, command)
+
+    def release_issue_selection(
+        self,
+        selection_key: str,
+        owner_attempt_id: str,
+        expected_version: int,
+        at: str,
+    ) -> dict[str, Any]:
+        return sqlite_issue_ops.release_issue_selection(
+            self, selection_key, owner_attempt_id, expected_version, at
+        )
+
+    def verify_issue_reopen_authority(
+        self,
+        receipt_digest: str,
+        coordinator_agent_id: str,
+        repository: str,
+        issue: int,
+    ) -> dict[str, Any]:
+        return sqlite_issue_ops.verify_issue_reopen_authority(
+            self, receipt_digest, coordinator_agent_id, repository, issue
+        )
 
     def agent_status(self, agent_id: str) -> Optional[dict[str, Any]]:
         return agent_status_operation(self, agent_id)

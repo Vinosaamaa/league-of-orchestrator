@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / "src"), str(ROOT / "tests")]
 
 from league.orchestration import OrchestrationSignals  # noqa: E402
+from league.request_services import AssignmentSpec  # noqa: E402
 from league.storage import StorageRefusal  # noqa: E402
 from league.storage_assignment import (  # noqa: E402
     FinishHiddenAssignmentCommand,
@@ -25,6 +26,7 @@ from request_lifecycle_fixture import (  # noqa: E402
     capture_p100,
     create_context,
 )
+from lifecycle_fakes import issue_bound_spec  # noqa: E402
 from storage_fixture import REPOSITORY, SHOTCALLER_ID  # noqa: E402
 
 
@@ -64,6 +66,7 @@ def _activate_hidden(root: Path, name: str):
             branch="",
             worktree="",
             at=clock.now(),
+            issue_receipt=None,
             assignment_role="hidden-worker",
             dispatch_id="dispatch-hidden",
         )
@@ -203,8 +206,9 @@ def test_persistence_terminal_delivery_and_roster_exclusion(root: Path) -> None:
 def test_scope_expansion_promotes_to_new_visible_champion(root: Path) -> None:
     store, clock, _ = _activate_hidden(root, "hidden-promote")
     try:
-        promoted = store.prepare_assignment(
-            PrepareAssignmentCommand(
+        bound = issue_bound_spec(
+            store,
+            AssignmentSpec(
                 assignment_id="assignment-visible",
                 request_id="R1",
                 claim_token="claim-hidden",
@@ -216,6 +220,13 @@ def test_scope_expansion_promotes_to_new_visible_champion(root: Path) -> None:
                 issue=36,
                 branch="agent/synthetic/visible",
                 worktree="/synthetic/worktrees/visible",
+                issue_receipt=None,
+            ),
+            clock.now(),
+        )
+        promoted = store.prepare_assignment(
+            PrepareAssignmentCommand(
+                **{key: value for key, value in vars(bound).items() if key != "callsign"},
                 at=clock.now(),
                 assignment_role="champion",
                 promoted_from_assignment_id="assignment-hidden",

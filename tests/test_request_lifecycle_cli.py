@@ -62,6 +62,13 @@ def test_help_inventory_and_schemas() -> None:
         "skill.validate",
         "skill.audit",
         "skill.matrix",
+        "mode.authorize",
+        "mode.status",
+        "mode.use",
+        "mode.settle",
+        "mode.transition",
+        "mode.revoke",
+        "issue.select",
     }
     assert required <= set(inventory["commands"])
     assert {f"request.{name}" for name in cli.REQUEST_STATE_COMMANDS} <= set(
@@ -78,6 +85,12 @@ def test_help_inventory_and_schemas() -> None:
         "league-skill-validation.schema.json",
         "league-skill-audit.schema.json",
         "league-skill-matrix.schema.json",
+        "league-autonomous-grant.schema.json",
+        "league-autonomous-action.schema.json",
+        "league-mode-status.schema.json",
+        "league-mode-action-receipt.schema.json",
+        "league-repository-issue.schema.json",
+        "league-issue-selection-receipt.schema.json",
     } <= set(inventory["schemas"])
     for name in inventory["schemas"]:
         schema = json.loads((ROOT / "schema" / name).read_text(encoding="utf-8"))

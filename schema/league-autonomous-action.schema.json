@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Vinosaamaa/league-of-orchestrator/schema/league-autonomous-action.schema.json",
+  "title": "Exact autonomous external-action use",
+  "type": "object",
+  "required": ["schema", "action_use_id", "idempotency_key", "goal_id", "grant_id", "actor_agent_id", "action_kind", "scope", "risk_categories", "sensitive_categories", "resources", "usage"],
+  "properties": {
+    "schema": {"const": "league.autonomous-action.v1"},
+    "action_use_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "idempotency_key": {"type": "string", "minLength": 1, "maxLength": 256},
+    "goal_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "grant_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "actor_agent_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "action_kind": {"enum": ["land", "merge", "release", "publish", "install", "deploy", "verify", "smoke", "repair", "cleanup", "issue_reopen"]},
+    "scope": {
+      "type": "object",
+      "required": ["project_id", "repository", "environment", "deployment_target"],
+      "anyOf": [
+        {"properties": {"project_id": {"type": "string", "minLength": 1}}},
+        {"properties": {"repository": {"type": "string", "minLength": 1}}}
+      ],
+      "properties": {
+        "project_id": {"type": ["string", "null"], "maxLength": 256},
+        "repository": {"type": ["string", "null"], "maxLength": 256},
+        "environment": {"type": ["string", "null"], "maxLength": 256},
+        "deployment_target": {"type": ["string", "null"], "maxLength": 256}
+      },
+      "additionalProperties": false
+    },
+    "risk_categories": {"type": "array", "maxItems": 128, "items": {"type": "string", "minLength": 1, "maxLength": 256}, "uniqueItems": true},
+    "sensitive_categories": {"type": "array", "maxItems": 128, "items": {"type": "string", "minLength": 1, "maxLength": 256}, "uniqueItems": true},
+    "resources": {"$ref": "#/$defs/resourceObject"},
+    "usage": {
+      "type": "object",
+      "required": ["attempts", "cost_microunits", "changed_files", "duration_seconds"],
+      "properties": {
+        "attempts": {"type": "integer", "minimum": 1},
+        "cost_microunits": {"type": "integer", "minimum": 0},
+        "changed_files": {"type": "integer", "minimum": 0},
+        "duration_seconds": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    }
+  },
+  "$defs": {
+    "resourceObject": {
+      "type": "object",
+      "maxProperties": 128,
+      "propertyNames": {"minLength": 1, "maxLength": 256},
+      "additionalProperties": {"$ref": "#/$defs/resourceValue"}
+    },
+    "resourceValue": {
+      "anyOf": [
+        {"type": "string", "maxLength": 4096},
+        {"type": "number"},
+        {"type": "boolean"},
+        {"type": "null"},
+        {"type": "array", "maxItems": 128, "items": {"$ref": "#/$defs/resourceValue"}},
+        {"$ref": "#/$defs/resourceObject"}
+      ]
+    }
+  },
+  "additionalProperties": false
+}

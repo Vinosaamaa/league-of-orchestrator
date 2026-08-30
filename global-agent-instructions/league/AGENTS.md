@@ -64,15 +64,21 @@ $HOME/.local/bin/league --state-root "$HOME/.local/state/league" request turn \
 
 - A captured prompt is evidence, not the durable work container and not a
   substitute for a repository issue.
-- Before repository work is assigned, the Shotcaller creates or selects the
-  exact repository issue and binds its scope, acceptance, and authority to the
-  canonical task. A positive issue number alone is not proof.
+- Before repository work is assigned, run `league issue select`: search open
+  and closed target-repository issues by normalized title and semantic scope,
+  reuse an open equivalent, use only the supported authorized and settled
+  reopen path for genuine closed recurrence with prior linkage, and create a
+  new issue only for distinct work. Bind the immutable selection receipt to the
+  canonical task; a positive issue number alone is not proof.
 - Tiny direct work must satisfy the universal bounded-read-only rule. Durable
   research, benchmarks, release or operational work, confirmed debugging,
   fixtures, tests, and repository changes require an issue-bound visible
-  Champion.
+  Champion. Shotcallers do not implement repository work directly by default.
 - Hidden workers stop at their bounded advisory perimeter and never own work
   that requires a visible Champion.
+- One issue assignment creates exactly one visible Champion. Do not add a
+  hidden implementation owner or a second visible Champion for the same issue
+  worktree.
 - Independently fixable work may run in parallel only through separate issues,
   tasks, assignments, branches, and worktrees.
 - The Shotcaller remains the user-facing owner for prioritization,
@@ -87,8 +93,10 @@ $HOME/.local/bin/league --state-root "$HOME/.local/state/league" request turn \
   it never splits or reuses the Shotcaller pane.
 - Display labels contain one or two words. Routing identity remains separate
   from the human-visible label.
-- Dispatch, claim, execution mode, and exact issue binding precede launch. Do
-  not manually chain prepare, launching, and activation.
+- Dispatch, claim, execution mode, and the exact duplicate-preflight selection
+  receipt precede launch. `league assign run` re-verifies the exact open issue
+  and canonical task scope before mutation. Do not manually chain prepare,
+  launching, and activation.
 - Launch failure rolls back only the exact partial reservation and endpoint.
   Unproven cleanup remains `cleanup_pending`.
 - League never accepts a directory-trust prompt for the user.

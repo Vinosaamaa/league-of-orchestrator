@@ -17,10 +17,11 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / "src"), str(ROOT / "tests")]
 
-from storage_fixture import AT2, CHAMPION_ID, SHOTCALLER_ID  # noqa: E402
+from storage_fixture import AT2, CHAMPION_ID, SHOTCALLER_ID, TASK_ID  # noqa: E402
 from storage_test_support import seeded_state  # noqa: E402
 from league.sqlite_store import SQLiteStorage  # noqa: E402
 from league.sqlite_watcher_ops import _obligation_counts  # noqa: E402
+from league.canonical_watcher import _supervision_snapshot  # noqa: E402
 
 
 WATCHER = ROOT / "bin/agent-watcher"
@@ -270,6 +271,24 @@ def test_supervise_wakes_and_stop_allows_after_settlement(root: Path) -> None:
         },
     )
     assert allowed == {}, allowed
+
+
+def test_working_and_progress_tasks_remain_supervised(root: Path) -> None:
+    _, state, _ = seeded_state(root, "working-task-supervision")
+    with SQLiteStorage(state) as store:
+        for task_state in ("working", "progress"):
+            with store._transaction():
+                store.connection.execute(
+                    "UPDATE tasks SET state=? WHERE task_id=?", (task_state, TASK_ID)
+                )
+            counts = _obligation_counts(store, SHOTCALLER_ID)
+            snapshot = _supervision_snapshot(
+                store, "watcher:Garen", SHOTCALLER_ID
+            )
+            assert counts["active_champions"] >= 1
+            assert any(
+                row["agent_id"] == CHAMPION_ID for row in snapshot["champions"]
+            )
 
 
 def test_supervise_user_priority(root: Path) -> None:
@@ -1322,6 +1341,7 @@ def main() -> None:
         root = Path(temporary)
         test_explicit_and_session_stop_dispatch(root)
         test_supervise_wakes_and_stop_allows_after_settlement(root)
+        test_working_and_progress_tasks_remain_supervised(root)
         test_supervise_user_priority(root)
         test_long_lived_supervisor_allows_concurrent_prompt_and_stop(root)
         test_codex_and_cursor_prompt_capture_exactly_once(root)

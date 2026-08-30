@@ -15,7 +15,11 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / "src"), str(ROOT / "tests")]
 
 from league.cleanup import CleanupPlanner, cleanup_action_digest  # noqa: E402
-from league.production_cleanup import ProductionCleanup, SystemProcessPort  # noqa: E402
+from league.production_cleanup import (  # noqa: E402
+    ProductionCleanup,
+    SystemProcessPort,
+    _validate_runtime_context,
+)
 from league.real_cleanup import SubprocessRunner  # noqa: E402
 from league.real_canary import (  # noqa: E402
     CHAMPION_ID,
@@ -407,9 +411,49 @@ def test_stable_execute_command_refuses_unknown_operation(root: Path) -> None:
     assert result["error"]["code"] == "cleanup_operation_unknown"
 
 
+def test_production_cleanup_accepts_visible_codex_thread_runtime() -> None:
+    actions = [
+        {
+            "action_kind": "session_exit",
+            "expected_identity": {
+                "agent_name": "lux",
+                "pane_id": "w1:p99",
+                "session_id": "00000000-0000-4000-8000-000000000099",
+            },
+        },
+        {
+            "action_kind": "endpoint_close",
+            "expected_identity": {
+                "pane_id": "w1:p99",
+                "terminal_id": "terminal:99",
+                "runtime_instance_id": "runtime:lux",
+                "runtime_generation": "generation:99",
+            },
+        },
+    ]
+    context = {
+        "runtime_instances": [
+            {
+                "runtime_instance_id": "runtime:lux",
+                "harness_kind": "codex-thread",
+                "backend_kind": "herdr",
+                "session_ref": "00000000-0000-4000-8000-000000000099",
+                "endpoint": "w1:p99",
+                "runtime_generation": "generation:99",
+                "status": "active",
+                "verified": True,
+            }
+        ]
+    }
+    identity = _validate_runtime_context(context, actions)
+    assert identity["agent_name"] == "lux"
+    assert identity["session_id"] == "00000000-0000-4000-8000-000000000099"
+
+
 def main() -> None:
     test_rollover_predecessor_requires_exact_switch_and_emits_drain_receipt()
     test_process_inspection_uses_one_exact_query()
+    test_production_cleanup_accepts_visible_codex_thread_runtime()
     with tempfile.TemporaryDirectory(prefix="league-production-cleanup-") as temporary:
         root = Path(temporary)
         test_production_cleanup_crash_resume_and_lease_scope(root / "e2e")

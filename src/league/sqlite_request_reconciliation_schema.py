@@ -1,4 +1,4 @@
-"""Reviewed v16 schema for agent-authored duplicate-request reconciliation."""
+"""Reviewed v18 schema for agent-authored duplicate-request reconciliation."""
 
 MIGRATION_NAME = "agent-authored-request-reconciliation"
 

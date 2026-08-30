@@ -146,7 +146,7 @@ Stop is omission detection only. It returns bounded unresolved request
 summaries and makes no semantic state change. If two requests were created for
 one intent, the Shotcaller may explicitly run
 `league request reconcile-duplicate` to supersede request B with request A.
-That schema-16 transition:
+That schema-18 transition:
 
 - requires the same current owner and Squad plus both expected versions;
 - preserves both prompt/source histories and creates no task, work, or result;
@@ -277,7 +277,7 @@ SQLite boundary is not the dominant source of latency.
   observations and the configured grace.
 - Stop alone changes no request semantics; explicit reconciliation closes only
   B, preserves provenance, is idempotent, and removes B from unfinished work.
-- Schema 16 migration, backup, rollback, foreign keys, integrity, command
+- Schema 18 migration, backup, rollback, foreign keys, integrity, command
   schemas, deterministic export, and import/export parity pass focused tests.
 
 ### Still required under #66 and #23

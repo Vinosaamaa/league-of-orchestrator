@@ -812,7 +812,11 @@ was cleared, a successor-owned row, or any non-null partial identity refuses.
 The Herdr adapter must find exactly one live interactive Codex endpoint by the
 combined canonical pane, exact thread/session, and normalized callsign. The
 top-level Herdr name must equal the lowercase callsign; terminal titles,
-sidebar tokens, and other display metadata are not routing evidence. Exact
+sidebar tokens, and other display metadata are not routing evidence. Optional
+explicit `routing_name` and `routing_alias` fields may be absent, null, or the
+empty string; every non-empty explicit route field must exactly equal the same
+lowercase callsign, while non-string, whitespace, or conflicting values refuse.
+Exact
 pane, route, session, cwd, foreground cwd, terminal, state sequence, live
 status, and deterministic runtime generation are observed twice. Any missing,
 mismatched, closed, unready, or overlapping endpoint refuses before mutation.

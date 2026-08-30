@@ -709,6 +709,8 @@ def test_snapshot_refresh_adopts_eight_exact_imported_null_routes(root: Path) ->
                 (seed["prepared"]["snapshot"]["snapshot_id"],),
             )
         }
+        seed["agents"][0]["routing_name"] = ""
+        seed["agents"][1]["routing_alias"] = None
         runner = FakeHerdrInventory(seed["agents"])
         service = RolloverSnapshotRefreshService(
             store, HerdrRolloverSnapshotAdapter(runner)
@@ -767,6 +769,7 @@ def test_snapshot_refresh_null_route_refuses_live_guess_or_overlap(root: Path) -
     cases = (
         ("title-only", "snapshot_refresh_live_mismatch"),
         ("mismatched-name", "snapshot_refresh_live_mismatch"),
+        ("conflicting-explicit-route", "snapshot_refresh_live_mismatch"),
         ("route-overlap", "snapshot_refresh_live_ambiguous"),
         ("pane-overlap", "snapshot_refresh_live_ambiguous"),
         ("session-overlap", "snapshot_refresh_live_ambiguous"),
@@ -782,6 +785,8 @@ def test_snapshot_refresh_null_route_refuses_live_guess_or_overlap(root: Path) -
                 agent["name"] = None
             elif label == "mismatched-name":
                 agent["name"] = "wrong-route"
+            elif label == "conflicting-explicit-route":
+                agent["routing_alias"] = "foreign"
             else:
                 duplicate = dict(agent)
                 duplicate["pane_id"] = f"pane:duplicate:{label}"

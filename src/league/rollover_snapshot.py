@@ -21,6 +21,26 @@ class RolloverSnapshotAdapter(Protocol):
     def observe(self, descendants: list[dict[str, Any]]) -> list[dict[str, Any]]: ...
 
 
+_EXPLICIT_ROUTE_FIELDS = ("name", "routing_name", "routing_alias")
+
+
+def _explicit_routes(agent: Mapping[str, Any]) -> set[str]:
+    """Return non-empty explicit routes; absent, null, and empty mean unset."""
+
+    routes: set[str] = set()
+    for field in _EXPLICIT_ROUTE_FIELDS:
+        value = agent.get(field)
+        if value is None or value == "":
+            continue
+        if not isinstance(value, str):
+            raise StorageRefusal(
+                "snapshot_refresh_live_mismatch",
+                "Herdr explicit route evidence is malformed",
+            )
+        routes.add(value)
+    return routes
+
+
 class HerdrRolloverSnapshotAdapter:
     """Verify every descendant against one bounded Herdr inventory read."""
 
@@ -50,11 +70,14 @@ class HerdrRolloverSnapshotAdapter:
         for index, agent in enumerate(inventory):
             for value, lookup in (
                 (agent.get("pane_id"), by_pane),
-                (agent.get("name"), by_route),
                 (_session(agent), by_session),
             ):
                 if isinstance(value, str) and value:
                     lookup.setdefault(value, set()).add(index)
+            for field in _EXPLICIT_ROUTE_FIELDS:
+                value = agent.get(field)
+                if isinstance(value, str) and value:
+                    by_route.setdefault(value, set()).add(index)
         observations: list[dict[str, Any]] = []
         used_panes: set[str] = set()
         used_routes: set[str] = set()
@@ -107,6 +130,7 @@ class HerdrRolloverSnapshotAdapter:
             worktree = Path(str(target.get("worktree", "")))
             terminal_id = agent.get("terminal_id")
             state_change_seq = agent.get("state_change_seq")
+            explicit_routes = _explicit_routes(agent)
             exact = (
                 target.get("kind") == "codex-thread"
                 and target.get("backend") == "herdr"
@@ -114,6 +138,7 @@ class HerdrRolloverSnapshotAdapter:
                 and agent.get("interactive_ready") is True
                 and agent.get("pane_id") == pane
                 and agent.get("name") == route
+                and explicit_routes == {route}
                 and _session(agent) == thread
                 and worktree.is_absolute()
                 and worktree.is_dir()

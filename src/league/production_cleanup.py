@@ -24,6 +24,7 @@ from .real_cleanup import (
     HerdrHarnessAdapter,
     SubprocessRunner,
 )
+from .provider_lifecycle import profile_for_runtime_kind
 from .storage import Storage, StorageRefusal
 
 
@@ -212,9 +213,15 @@ def _validate_runtime_context(context: Mapping[str, Any], actions: Sequence[Mapp
     if len(matches) != 1:
         raise StorageRefusal("cleanup_identity_mismatch", "canonical runtime identity is missing or ambiguous")
     runtime = matches[0]
+    try:
+        profile = profile_for_runtime_kind(str(runtime["harness_kind"]))
+    except StorageRefusal as exc:
+        raise StorageRefusal(
+            "cleanup_adapter_unsupported",
+            "canonical runtime has no supported production harness cleanup policy",
+        ) from exc
     if (
-        runtime["harness_kind"] not in {"codex", "codex-thread"}
-        or runtime["backend_kind"] != "herdr"
+        runtime["backend_kind"] != "herdr"
         or runtime["session_ref"] != harness["session_id"]
         or runtime["endpoint"] != backend["pane_id"]
         or runtime["runtime_generation"] != backend["runtime_generation"]
@@ -223,7 +230,7 @@ def _validate_runtime_context(context: Mapping[str, Any], actions: Sequence[Mapp
     ):
         raise StorageRefusal(
             "cleanup_adapter_unsupported",
-            "canonical runtime is not the supported verified Codex+Herdr cleanup policy",
+            "canonical runtime is not a supported verified provider+Herdr cleanup policy",
         )
     workspace_id = str(backend["pane_id"]).split(":", 1)[0]
     if not workspace_id or workspace_id == backend["pane_id"]:
@@ -236,6 +243,8 @@ def _validate_runtime_context(context: Mapping[str, Any], actions: Sequence[Mapp
         "session_id": harness["session_id"],
         "runtime_instance_id": backend["runtime_instance_id"],
         "runtime_generation": backend["runtime_generation"],
+        "provider_kind": profile.kind,
+        "exit_prompt": profile.exit_prompt,
     }
 
 

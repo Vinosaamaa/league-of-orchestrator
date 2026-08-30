@@ -290,10 +290,16 @@ opaque runtime bindings, typed resources, cleanup operations/actions/receipts,
 and durable routing evidence; it does not duplicate request claims,
 assignments, delivery outbox, watcher, or Stop state machines.
 
-Codex+Herdr and Codex+tmux are named adapter contracts. Pi and all destructive
-cleanup adapters in the suite are deterministic isolated doubles, not
-real-runtime evidence. Installed drivers, a genuine isolated canary, global
-installation, live migration, cutover, and rollback remain issue-#23 gates.
+Codex+Herdr and Codex+tmux were the original named adapter contracts. Issue #84
+deliberately adds Cursor+Herdr and Pi+Herdr to the production visible-assignment
+and cleanup driver while leaving the generic `RuntimeLifecycle` backend
+contract-only. Provider session values remain opaque to core storage; the
+provider boundary owns exact validation and resume arguments. Pi prompt/Stop
+capture and shell confinement are a release-local, per-process extension and
+sandbox profile, not a global Pi configuration rewrite. Focused fake-adapter
+tests cover Codex, Cursor, and Pi; they are not live-provider evidence. Merge,
+installation, live provider canaries, cutover, rollback, and teardown remain
+separate gates.
 
 ## Skill-contract implementation provenance
 

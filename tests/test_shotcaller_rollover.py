@@ -1383,13 +1383,35 @@ def _seed_partially_reconciled_refresh(
     *,
     outbox_count: int = 0,
     preexisting_assignment: bool = False,
+    imported_legacy_partial: bool = False,
 ) -> dict:
     context = seed_rollover(store, champion_count=2)
     champion_id = context["champion_ids"][0]
     task_id = "task:champion:0"
-    terminal_id = _bind_exact_herdr_runtime_with_capabilities(
-        store, root, champion_id, ["hook.capture", "task.execute"]
-    )
+    if imported_legacy_partial:
+        assert preexisting_assignment is False
+        mark_exact_imported_legacy_partial(store, champion_id, task_id)
+        worktree = (root / f"partial-refresh-imported-{label}").resolve()
+        worktree.mkdir()
+        store.connection.execute(
+            """
+            UPDATE agent_instances
+               SET kind='codex-thread',thread_id=?,backend='herdr',routing_name='annie',
+                   display_agent='codex',address=?,worktree=?
+             WHERE agent_id=?
+            """,
+            (
+                f"11111111-2222-4333-8444-{hashlib.sha256(label.encode()).hexdigest()[:12]}",
+                f"pane:partial-refresh-imported:{label}",
+                str(worktree),
+                champion_id,
+            ),
+        )
+        terminal_id = f"terminal:{champion_id}"
+    else:
+        terminal_id = _bind_exact_herdr_runtime_with_capabilities(
+            store, root, champion_id, ["hook.capture", "task.execute"]
+        )
     assignment_version = 0
     if preexisting_assignment:
         champion = store.agent_status(champion_id)
@@ -1465,13 +1487,22 @@ def _seed_partially_reconciled_refresh(
         assignment_version,
         callsign_version,
     )
-    runtime_id = target["runtime"]["runtime_instance_id"]
+    runtime_id = (
+        target["runtime"]["runtime_instance_id"]
+        if target["runtime"] is not None
+        else f"runtime:partial-refresh-imported:{label}"
+    )
     runtime_receipt_value = descendant_runtime_receipt(
         target, runtime_id, terminal_id
     )
-    runtime_receipt_value["runtime_generation"] = target["runtime"][
-        "runtime_generation"
-    ]
+    if target["runtime"] is not None:
+        runtime_receipt_value["runtime_generation"] = target["runtime"][
+            "runtime_generation"
+        ]
+    else:
+        runtime_receipt_value["runtime_generation"] = "herdr:" + hashlib.sha256(
+            f"{terminal_id}\0{target['thread_id']}".encode("utf-8")
+        ).hexdigest()[:24]
     reconciled = store.reconcile_rollover_descendant(
         prepared["operation_id"],
         f"reconciliation:partial-refresh:{label}",
@@ -1515,6 +1546,281 @@ def _partial_refresh_inputs(partial: dict, label: str) -> dict:
         "expires_at": "2026-01-01T03:00:00Z",
         "at": "2026-01-01T02:00:00Z",
     }
+
+
+def _rewrite_created_reconciliation_as_historical_imported_receipt(
+    store: SQLiteStorage, partial: dict
+) -> dict:
+    """Reproduce the exact receipt emitted before runtime capability evidence landed."""
+
+    event = store.connection.execute(
+        "SELECT detail_json FROM events WHERE event_id=?",
+        (partial["reconciliation_id"],),
+    ).fetchone()
+    detail = json.loads(event["detail_json"])
+    receipt = dict(detail["receipt"])
+    assert receipt["created_assignment"] is True
+    assert receipt["source_shape"] == "imported_legacy_partial"
+    del receipt["required_capabilities"]
+    del receipt["runtime_capabilities"]
+    receipt_digest = hashlib.sha256(
+        json.dumps(receipt, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    historical_detail = {"receipt": receipt, "receipt_digest": receipt_digest}
+    store.connection.execute(
+        "UPDATE events SET detail_json=? WHERE event_id=?",
+        (
+            json.dumps(historical_detail, sort_keys=True, separators=(",", ":")),
+            partial["reconciliation_id"],
+        ),
+    )
+    store.connection.execute(
+        "UPDATE task_assignments SET acceptance_receipt_json=? WHERE task_assignment_id=?",
+        (
+            json.dumps(receipt, sort_keys=True, separators=(",", ":")),
+            receipt["task_assignment_id"],
+        ),
+    )
+    return {"receipt": receipt, "receipt_digest": receipt_digest}
+
+
+def test_snapshot_refresh_accepts_exact_historical_imported_progress(
+    root: Path,
+) -> None:
+    state, _ = migrated_state(root, "refresh-historical-imported-progress")
+    with SQLiteStorage(state) as store:
+        partial = _seed_partially_reconciled_refresh(
+            store,
+            root,
+            "historical-imported",
+            outbox_count=2,
+            imported_legacy_partial=True,
+        )
+        historical = _rewrite_created_reconciliation_as_historical_imported_receipt(
+            store, partial
+        )
+        runtime_before = dict(
+            store.connection.execute(
+                "SELECT * FROM runtime_instances WHERE actor_agent_id=?",
+                (partial["champion_id"],),
+            ).fetchone()
+        )
+        assignment_before = dict(
+            store.connection.execute(
+                "SELECT * FROM task_assignments WHERE task_assignment_id=?",
+                (historical["receipt"]["task_assignment_id"],),
+            ).fetchone()
+        )
+
+        refreshed = RolloverSnapshotRefreshService(
+            store, ExactSnapshotInventory()
+        ).refresh(**_partial_refresh_inputs(partial, "historical-imported"))
+
+        assert refreshed["progress_bindings"][0] == {
+            "champion_agent_id": partial["champion_id"],
+            "task_id": partial["task_id"],
+            "state": "successor_reconciled",
+            "reconciliation_id": partial["reconciliation_id"],
+            "receipt_digest": historical["receipt_digest"],
+        }
+        assert dict(
+            store.connection.execute(
+                "SELECT * FROM runtime_instances WHERE actor_agent_id=?",
+                (partial["champion_id"],),
+            ).fetchone()
+        ) == runtime_before
+        assert dict(
+            store.connection.execute(
+                "SELECT * FROM task_assignments WHERE task_assignment_id=?",
+                (historical["receipt"]["task_assignment_id"],),
+            ).fetchone()
+        ) == assignment_before
+
+
+def test_snapshot_refresh_refuses_inexact_historical_imported_receipts(
+    root: Path,
+) -> None:
+    mutations = (
+        ("missing", lambda receipt: receipt.pop("runtime_receipt_digest")),
+        (
+            "modern-incomplete",
+            lambda receipt: receipt.__setitem__("required_capabilities", []),
+        ),
+        ("type", lambda receipt: receipt.__setitem__("pending_delivery_count", "0")),
+    )
+    for label, mutate in mutations:
+        state, _ = migrated_state(root, f"refresh-historical-inexact-{label}")
+        with SQLiteStorage(state) as store:
+            partial = _seed_partially_reconciled_refresh(
+                store,
+                root,
+                f"historical-inexact-{label}",
+                imported_legacy_partial=True,
+            )
+            historical = _rewrite_created_reconciliation_as_historical_imported_receipt(
+                store, partial
+            )
+            receipt = dict(historical["receipt"])
+            mutate(receipt)
+            detail = {
+                "receipt": receipt,
+                "receipt_digest": hashlib.sha256(
+                    json.dumps(receipt, sort_keys=True, separators=(",", ":")).encode(
+                        "utf-8"
+                    )
+                ).hexdigest(),
+            }
+            store.connection.execute(
+                "UPDATE events SET detail_json=? WHERE event_id=?",
+                (
+                    json.dumps(detail, sort_keys=True, separators=(",", ":")),
+                    partial["reconciliation_id"],
+                ),
+            )
+            store.connection.execute(
+                "UPDATE task_assignments SET acceptance_receipt_json=? WHERE task_assignment_id=?",
+                (
+                    json.dumps(receipt, sort_keys=True, separators=(",", ":")),
+                    historical["receipt"]["task_assignment_id"],
+                ),
+            )
+            before = store.rollover_status(partial["prepared"]["operation_id"])
+            try:
+                RolloverSnapshotRefreshService(
+                    store, ExactSnapshotInventory()
+                ).refresh(**_partial_refresh_inputs(partial, f"historical-inexact-{label}"))
+            except StorageRefusal as exc:
+                assert exc.code == "snapshot_refresh_identity_changed"
+            else:
+                raise AssertionError(f"{label} historical receipt refreshed snapshot")
+            after = store.rollover_status(partial["prepared"]["operation_id"])
+            assert after["snapshot"] == before["snapshot"]
+            assert after["version"] == before["version"]
+
+
+def test_snapshot_refresh_refuses_historical_unenumerated_pending_delivery(
+    root: Path,
+) -> None:
+    state, _ = migrated_state(root, "refresh-historical-pending-overcount")
+    with SQLiteStorage(state) as store:
+        partial = _seed_partially_reconciled_refresh(
+            store,
+            root,
+            "historical-pending-overcount",
+            outbox_count=2,
+            imported_legacy_partial=True,
+        )
+        historical = _rewrite_created_reconciliation_as_historical_imported_receipt(
+            store, partial
+        )
+        receipt = dict(historical["receipt"])
+        assert receipt["pending_delivery_count"] == 2
+        assert len(receipt["retargeted_outbox_ids"]) == 2
+        receipt["pending_delivery_count"] = 3
+        detail = {
+            "receipt": receipt,
+            "receipt_digest": hashlib.sha256(
+                json.dumps(receipt, sort_keys=True, separators=(",", ":")).encode(
+                    "utf-8"
+                )
+            ).hexdigest(),
+        }
+        store.connection.execute(
+            "UPDATE events SET detail_json=? WHERE event_id=?",
+            (
+                json.dumps(detail, sort_keys=True, separators=(",", ":")),
+                partial["reconciliation_id"],
+            ),
+        )
+        store.connection.execute(
+            "UPDATE task_assignments SET acceptance_receipt_json=? WHERE task_assignment_id=?",
+            (
+                json.dumps(receipt, sort_keys=True, separators=(",", ":")),
+                receipt["task_assignment_id"],
+            ),
+        )
+        before = store.rollover_status(partial["prepared"]["operation_id"])
+
+        try:
+            RolloverSnapshotRefreshService(
+                store, ExactSnapshotInventory()
+            ).refresh(
+                **_partial_refresh_inputs(partial, "historical-pending-overcount")
+            )
+        except StorageRefusal as exc:
+            assert exc.code == "snapshot_refresh_identity_changed"
+        else:
+            raise AssertionError("historical pending-delivery overcount refreshed snapshot")
+
+        after = store.rollover_status(partial["prepared"]["operation_id"])
+        assert after["snapshot"] == before["snapshot"]
+        assert after["version"] == before["version"]
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM events WHERE event_type='rollover_snapshot_refreshed'"
+        ).fetchone()[0] == 0
+
+
+def test_snapshot_refresh_refuses_ambiguous_historical_receipt_or_missing_acceptance(
+    root: Path,
+) -> None:
+    for label in ("ambiguous", "missing-acceptance"):
+        state, _ = migrated_state(root, f"refresh-historical-{label}")
+        with SQLiteStorage(state) as store:
+            partial = _seed_partially_reconciled_refresh(
+                store,
+                root,
+                f"historical-{label}",
+                imported_legacy_partial=True,
+            )
+            historical = _rewrite_created_reconciliation_as_historical_imported_receipt(
+                store, partial
+            )
+            if label == "ambiguous":
+                event = store.connection.execute(
+                    "SELECT * FROM events WHERE event_id=?",
+                    (partial["reconciliation_id"],),
+                ).fetchone()
+                store.connection.execute(
+                    """
+                    INSERT INTO events
+                      (event_id,agent_id,task_id,squad_id,entity_version,event_type,status,
+                       update_text,occurred_at,detail_json,aggregate_kind,aggregate_id,
+                       source_event_id)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    (
+                        f"{partial['reconciliation_id']}:duplicate",
+                        event["agent_id"],
+                        event["task_id"],
+                        event["squad_id"],
+                        event["entity_version"],
+                        event["event_type"],
+                        event["status"],
+                        event["update_text"],
+                        event["occurred_at"],
+                        event["detail_json"],
+                        event["aggregate_kind"],
+                        event["aggregate_id"],
+                        event["source_event_id"],
+                    ),
+                )
+            else:
+                store.connection.execute(
+                    "UPDATE task_assignments SET acceptance_receipt_json='{}' WHERE task_assignment_id=?",
+                    (historical["receipt"]["task_assignment_id"],),
+                )
+            before = store.rollover_status(partial["prepared"]["operation_id"])
+            try:
+                RolloverSnapshotRefreshService(
+                    store, ExactSnapshotInventory()
+                ).refresh(**_partial_refresh_inputs(partial, f"historical-{label}"))
+            except StorageRefusal as exc:
+                assert exc.code == "snapshot_refresh_identity_changed"
+            else:
+                raise AssertionError(f"{label} historical proof refreshed snapshot")
+            after = store.rollover_status(partial["prepared"]["operation_id"])
+            assert after["snapshot"] == before["snapshot"]
+            assert after["version"] == before["version"]
 
 
 def test_snapshot_refresh_preserves_exact_mixed_progress_and_terminal_marker(
@@ -3893,6 +4199,10 @@ def main() -> None:
         test_snapshot_refresh_refuses_before_expiry_without_live_observation(root)
         test_snapshot_refresh_refuses_a_changed_descendant_set(root)
         test_snapshot_refresh_retry_returns_the_identical_receipt(root)
+        test_snapshot_refresh_accepts_exact_historical_imported_progress(root)
+        test_snapshot_refresh_refuses_inexact_historical_imported_receipts(root)
+        test_snapshot_refresh_refuses_historical_unenumerated_pending_delivery(root)
+        test_snapshot_refresh_refuses_ambiguous_historical_receipt_or_missing_acceptance(root)
         test_snapshot_refresh_preserves_exact_mixed_progress_and_terminal_marker(root)
         test_snapshot_refresh_refuses_forged_or_missing_successor_receipt(root)
         test_snapshot_refresh_requires_complete_exact_existing_assignment_receipt(root)

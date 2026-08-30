@@ -763,3 +763,28 @@ proved successor entries as terminal markers. Missing, duplicate, forged,
 stale, partially retargeted, or concurrently changed proof refuses before the
 snapshot pointer CAS. This changes no schema, release, installation, or live
 rollover state.
+
+### Historical imported-descendant receipt compatibility
+
+The first source release that reconciled imported legacy task shells wrote an
+exact durable receipt before minimum and actual runtime capability lists were
+added to that receipt schema. Issue #23 keeps that historical evidence usable
+without treating arbitrary missing fields as compatible. The compatibility
+profile is generic to imported legacy descendants and requires the exact old
+field set, `source_shape=imported_legacy_partial`, and atomically created runtime
+and assignment. The reconciliation event digest and the created assignment's
+unchanged acceptance receipt must agree exactly with that historical receipt.
+
+Refresh then re-proves the original immutable snapshot row and current task,
+assignment, callsign, verified runtime, callsign-capability subset, and complete
+pending-outbox transfer. The actual canonical runtime capability superset is
+retained in the refreshed binding and receipt; it is never replaced by the
+historical receipt's absent fields. A current receipt with deleted fields, a
+pre-existing assignment, a missing or duplicate event, a changed acceptance
+copy, malformed types, extra fields, or canonical/outbox drift still refuses
+before any refreshed snapshot row or pointer mutation. This source-only fix
+adds no schema migration and performs no live refresh or reconciliation. For
+the historical profile, `pending_delivery_count` must equal the sorted unique
+`retargeted_outbox_ids` count. Older receipts that counted unenumerated
+successor-pending deliveries remain unverifiable and refuse instead of being
+guessed from current state.

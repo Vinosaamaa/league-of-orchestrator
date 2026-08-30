@@ -93,6 +93,39 @@ DESCENDANT_RECONCILIATION_RECEIPT_KEYS = {
     "result",
     "at",
 }
+HISTORICAL_IMPORTED_DESCENDANT_RECONCILIATION_RECEIPT_KEYS = {
+    "schema",
+    "operation_id",
+    "reconciliation_id",
+    "snapshot_id",
+    "snapshot_digest",
+    "snapshot_row_digest",
+    "squad_id",
+    "predecessor_agent_id",
+    "successor_agent_id",
+    "champion_agent_id",
+    "task_id",
+    "runtime_instance_id",
+    "runtime_generation",
+    "runtime_receipt_digest",
+    "created_runtime",
+    "callsign_assignment_id",
+    "task_assignment_id",
+    "created_assignment",
+    "source_shape",
+    "import_provenance_digest",
+    "expected_rollover_version",
+    "expected_agent_version",
+    "expected_task_version",
+    "expected_assignment_version",
+    "expected_callsign_assignment_version",
+    "task_version",
+    "retargeted_outbox_ids",
+    "pending_delivery_count",
+    "reason",
+    "result",
+    "at",
+}
 
 
 def _descendant_reconciliation_receipt_exact(receipt: Any) -> bool:
@@ -209,6 +242,33 @@ def _descendant_reconciliation_receipt_exact(receipt: Any) -> bool:
             )
         )
     )
+
+
+def _historical_imported_descendant_reconciliation_receipt_exact(
+    receipt: Any,
+) -> bool:
+    """Recognize only the exact pre-capability imported reconciliation profile.
+
+    Those releases could create both the missing runtime and assignment for an
+    imported legacy task shell, but did not copy the verified capability lists
+    into the outer reconciliation receipt.  The snapshot refresh caller must
+    additionally prove the immutable assignment acceptance copy and all live
+    canonical/runtime/outbox state before relying on this profile.
+    """
+
+    if (
+        not isinstance(receipt, dict)
+        or set(receipt)
+        != HISTORICAL_IMPORTED_DESCENDANT_RECONCILIATION_RECEIPT_KEYS
+        or receipt.get("created_runtime") is not True
+        or receipt.get("created_assignment") is not True
+        or receipt.get("source_shape") != "imported_legacy_partial"
+    ):
+        return False
+    expanded = dict(receipt)
+    expanded["required_capabilities"] = []
+    expanded["runtime_capabilities"] = []
+    return _descendant_reconciliation_receipt_exact(expanded)
 
 
 def _runtime_capability_contract(

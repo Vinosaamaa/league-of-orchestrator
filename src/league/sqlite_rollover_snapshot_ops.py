@@ -41,6 +41,142 @@ def _snapshot_value(snapshot: Any) -> dict[str, Any]:
     }
 
 
+def _descendant_context(
+    store: Any,
+    squad_id: str,
+    predecessor_agent_id: str,
+    current_rows: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    identities = store.connection.execute(
+        """
+        SELECT a.*,t.state AS task_state
+          FROM squad_champions sc
+          JOIN agent_instances a ON a.agent_id=sc.champion_agent_id
+          LEFT JOIN tasks t ON t.task_id=a.task_id
+         WHERE sc.squad_id=? ORDER BY a.agent_id
+        """,
+        (squad_id,),
+    ).fetchall()
+    runtime_rows = store.connection.execute(
+        """
+        SELECT r.* FROM squad_champions sc
+          JOIN runtime_instances r ON r.actor_agent_id=sc.champion_agent_id
+         WHERE sc.squad_id=? ORDER BY r.actor_agent_id,r.runtime_instance_id
+        """,
+        (squad_id,),
+    ).fetchall()
+    callsign_rows = store.connection.execute(
+        """
+        SELECT c.* FROM squad_champions sc
+          JOIN agent_instances a ON a.agent_id=sc.champion_agent_id
+          JOIN callsign_assignments c
+            ON c.agent_id=a.agent_id AND c.callsign=a.callsign
+           AND c.role='champion' AND c.scope_kind='task' AND c.scope_id=a.task_id
+           AND c.state='active'
+         WHERE sc.squad_id=? ORDER BY c.agent_id,c.callsign_assignment_id
+        """,
+        (squad_id,),
+    ).fetchall()
+    identity_by_agent = {row["agent_id"]: row for row in identities}
+    runtimes_by_agent: dict[str, list[Any]] = {}
+    callsigns_by_agent: dict[str, list[Any]] = {}
+    for row in runtime_rows:
+        runtimes_by_agent.setdefault(row["actor_agent_id"], []).append(row)
+    for row in callsign_rows:
+        callsigns_by_agent.setdefault(row["agent_id"], []).append(row)
+
+    descendants: list[dict[str, Any]] = []
+    for current_row in current_rows:
+        champion_agent_id = current_row["champion_agent_id"]
+        task_id = current_row["task_id"]
+        champion = identity_by_agent.get(champion_agent_id)
+        runtimes = runtimes_by_agent.get(champion_agent_id, [])
+        callsigns = callsigns_by_agent.get(champion_agent_id, [])
+        if len(runtimes) > 1:
+            raise StorageRefusal(
+                "snapshot_refresh_ambiguous",
+                "descendant has multiple canonical runtime identities",
+            )
+        if len(callsigns) != 1:
+            raise StorageRefusal(
+                "snapshot_refresh_ambiguous",
+                "descendant callsign identity is missing or ambiguous",
+            )
+        if (
+            champion is None
+            or champion["retired_at"] is not None
+            or champion["role"] != "champion"
+            or champion["task_id"] != task_id
+            or champion["callsign"] != current_row["callsign"]
+            or champion["shotcaller_agent_id"] != predecessor_agent_id
+            or champion["task_state"] is None
+            or champion["task_state"]
+            in {"completed", "complete", "failed", "cancelled", "canceled", "rejected"}
+        ):
+            raise StorageRefusal(
+                "snapshot_refresh_identity_changed",
+                "descendant identity no longer matches the switched predecessor boundary",
+            )
+        try:
+            required_capabilities = json.loads(callsigns[0]["requirements_json"])
+        except (json.JSONDecodeError, TypeError) as exc:
+            raise StorageRefusal(
+                "snapshot_refresh_runtime_mismatch",
+                "descendant capability identity is malformed",
+            ) from exc
+        runtime = None
+        if runtimes:
+            runtime = runtimes[0]
+            try:
+                runtime_capabilities = json.loads(runtime["capabilities_json"])
+            except (json.JSONDecodeError, TypeError) as exc:
+                raise StorageRefusal(
+                    "snapshot_refresh_runtime_mismatch",
+                    "canonical descendant runtime capabilities are malformed",
+                ) from exc
+            if (
+                not bool(runtime["verified"])
+                or runtime["status"] not in {"active", "idle"}
+                or runtime["harness_kind"] != champion["kind"]
+                or runtime["backend_kind"] != champion["backend"]
+                or runtime["session_ref"] != champion["thread_id"]
+                or runtime["endpoint"] != champion["address"]
+                or not isinstance(runtime["runtime_generation"], str)
+                or not runtime["runtime_generation"]
+                or runtime_capabilities != required_capabilities
+            ):
+                raise StorageRefusal(
+                    "snapshot_refresh_runtime_mismatch",
+                    "canonical descendant runtime differs from the exact agent binding",
+                )
+        descendants.append(
+            {
+                "champion_agent_id": champion_agent_id,
+                "task_id": task_id,
+                "callsign": current_row["callsign"],
+                "kind": champion["kind"],
+                "thread_id": champion["thread_id"],
+                "backend": champion["backend"],
+                "routing_name": champion["routing_name"],
+                "display_agent": champion["display_agent"],
+                "address": champion["address"],
+                "worktree": champion["worktree"],
+                "canonical_row_digest": current_row["row_digest"],
+                "capabilities": required_capabilities,
+                "runtime": (
+                    None
+                    if runtime is None
+                    else {
+                        "runtime_instance_id": runtime["runtime_instance_id"],
+                        "runtime_generation": runtime["runtime_generation"],
+                        "status": runtime["status"],
+                    }
+                ),
+            }
+        )
+    return descendants
+
+
 def _retry(
     store: Any,
     event_id: str,
@@ -227,111 +363,9 @@ def _context(
             "snapshot_refresh_set_changed",
             "current active descendants differ from the expired frozen set",
         )
-    descendants: list[dict[str, Any]] = []
-    for current_row in current_rows:
-        champion_agent_id = current_row["champion_agent_id"]
-        task_id = current_row["task_id"]
-        champion = store.connection.execute(
-            "SELECT * FROM agent_instances WHERE agent_id=? AND retired_at IS NULL",
-            (champion_agent_id,),
-        ).fetchone()
-        task = store.connection.execute(
-            "SELECT * FROM tasks WHERE task_id=?", (task_id,)
-        ).fetchone()
-        runtimes = store.connection.execute(
-            "SELECT * FROM runtime_instances WHERE actor_agent_id=? ORDER BY runtime_instance_id",
-            (champion_agent_id,),
-        ).fetchall()
-        callsigns = store.connection.execute(
-            """
-            SELECT * FROM callsign_assignments
-             WHERE agent_id=? AND callsign=? AND role='champion'
-               AND scope_kind='task' AND scope_id=? AND state='active'
-             ORDER BY callsign_assignment_id
-            """,
-            (champion_agent_id, current_row["callsign"], task_id),
-        ).fetchall()
-        if len(runtimes) > 1:
-            raise StorageRefusal(
-                "snapshot_refresh_ambiguous",
-                "descendant has multiple canonical runtime identities",
-            )
-        if len(callsigns) != 1:
-            raise StorageRefusal(
-                "snapshot_refresh_ambiguous",
-                "descendant callsign identity is missing or ambiguous",
-            )
-        if (
-            champion is None
-            or champion["role"] != "champion"
-            or champion["task_id"] != task_id
-            or champion["callsign"] != current_row["callsign"]
-            or champion["shotcaller_agent_id"] != predecessor_agent_id
-            or task is None
-            or task["state"]
-            in {"completed", "complete", "failed", "cancelled", "canceled", "rejected"}
-        ):
-            raise StorageRefusal(
-                "snapshot_refresh_identity_changed",
-                "descendant identity no longer matches the switched predecessor boundary",
-            )
-        try:
-            required_capabilities = json.loads(callsigns[0]["requirements_json"])
-        except (json.JSONDecodeError, TypeError) as exc:
-            raise StorageRefusal(
-                "snapshot_refresh_runtime_mismatch",
-                "descendant capability identity is malformed",
-            ) from exc
-        runtime = None
-        if runtimes:
-            runtime = runtimes[0]
-            try:
-                runtime_capabilities = json.loads(runtime["capabilities_json"])
-            except (json.JSONDecodeError, TypeError) as exc:
-                raise StorageRefusal(
-                    "snapshot_refresh_runtime_mismatch",
-                    "canonical descendant runtime capabilities are malformed",
-                ) from exc
-            if (
-                not bool(runtime["verified"])
-                or runtime["status"] not in {"active", "idle"}
-                or runtime["harness_kind"] != champion["kind"]
-                or runtime["backend_kind"] != champion["backend"]
-                or runtime["session_ref"] != champion["thread_id"]
-                or runtime["endpoint"] != champion["address"]
-                or not isinstance(runtime["runtime_generation"], str)
-                or not runtime["runtime_generation"]
-                or runtime_capabilities != required_capabilities
-            ):
-                raise StorageRefusal(
-                    "snapshot_refresh_runtime_mismatch",
-                    "canonical descendant runtime differs from the exact agent binding",
-                )
-        descendants.append(
-            {
-                "champion_agent_id": champion_agent_id,
-                "task_id": task_id,
-                "callsign": current_row["callsign"],
-                "kind": champion["kind"],
-                "thread_id": champion["thread_id"],
-                "backend": champion["backend"],
-                "routing_name": champion["routing_name"],
-                "display_agent": champion["display_agent"],
-                "address": champion["address"],
-                "worktree": champion["worktree"],
-                "canonical_row_digest": current_row["row_digest"],
-                "capabilities": required_capabilities,
-                "runtime": (
-                    None
-                    if runtime is None
-                    else {
-                        "runtime_instance_id": runtime["runtime_instance_id"],
-                        "runtime_generation": runtime["runtime_generation"],
-                        "status": runtime["status"],
-                    }
-                ),
-            }
-        )
+    descendants = _descendant_context(
+        store, squad_id, predecessor_agent_id, current_rows
+    )
     canonical_digest = digest(
         {
             "operation_id": operation_id,

@@ -43,19 +43,42 @@ class HerdrRolloverSnapshotAdapter:
                 "snapshot_refresh_live_unverified",
                 "Herdr agent inventory refused snapshot refresh verification",
             )
+        inventory = [dict(agent) for agent in agents]
+        by_pane: dict[str, set[int]] = {}
+        by_route: dict[str, set[int]] = {}
+        by_session: dict[str, set[int]] = {}
+        for index, agent in enumerate(inventory):
+            for value, lookup in (
+                (agent.get("pane_id"), by_pane),
+                (agent.get("name"), by_route),
+                (_session(agent), by_session),
+            ):
+                if isinstance(value, str) and value:
+                    lookup.setdefault(value, set()).add(index)
         observations: list[dict[str, Any]] = []
         used_panes: set[str] = set()
         for target in descendants:
             pane = target.get("address")
             route = target.get("routing_name")
             thread = target.get("thread_id")
-            related = [
-                dict(agent)
-                for agent in agents
-                if agent.get("pane_id") == pane
-                or agent.get("name") == route
-                or _session(agent) == thread
-            ]
+            if (
+                not isinstance(pane, str)
+                or not pane
+                or not isinstance(route, str)
+                or not route
+                or not isinstance(thread, str)
+                or THREAD_UUID.fullmatch(thread) is None
+            ):
+                raise StorageRefusal(
+                    "snapshot_refresh_live_mismatch",
+                    "canonical Herdr pane, route, or thread identity is missing",
+                )
+            related_indexes = (
+                by_pane.get(pane, set())
+                | by_route.get(route, set())
+                | by_session.get(thread, set())
+            )
+            related = [inventory[index] for index in sorted(related_indexes)]
             if len(related) > 1:
                 raise StorageRefusal(
                     "snapshot_refresh_live_ambiguous",
@@ -84,8 +107,6 @@ class HerdrRolloverSnapshotAdapter:
                 and agent.get("pane_id") == pane
                 and agent.get("name") == route
                 and _session(agent) == thread
-                and isinstance(thread, str)
-                and THREAD_UUID.fullmatch(thread) is not None
                 and worktree.is_absolute()
                 and worktree.is_dir()
                 and not worktree.is_symlink()

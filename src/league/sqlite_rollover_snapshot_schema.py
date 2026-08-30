@@ -54,6 +54,5 @@ STATEMENTS = (
     """,
     "DROP TABLE active_champion_snapshot_rows_v16",
     "DROP TABLE active_champion_snapshots_v16",
-    "CREATE INDEX ix_rollover_snapshot_revisions ON active_champion_snapshots(operation_id,snapshot_version)",
     "PRAGMA legacy_alter_table=OFF",
 )

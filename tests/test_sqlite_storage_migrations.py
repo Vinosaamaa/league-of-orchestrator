@@ -107,7 +107,6 @@ def test_transactional_upgrade_backup_and_rollback(root: Path) -> None:
             "ix_thread_archives_issue",
             "ix_thread_incarnations_lineage",
             "ix_continuation_state",
-            "ix_rollover_snapshot_revisions",
         } <= indexes
         assert [migration.version for migration in MIGRATIONS] == list(
             range(1, CURRENT_SCHEMA_VERSION + 1)
@@ -125,7 +124,7 @@ def test_transactional_upgrade_backup_and_rollback(root: Path) -> None:
             (14, "immutable-prompt-provenance-current-owner", "e9afa0921c02d7464453b6fc24a4c73defb952d6cfc6d7829a7b502e81ff178c"),
             (15, "exact-stop-feedback-suppression", "5c7fed923ba5684c209350dab248d813fa313647229be2d373ff8cef78e91574"),
             (16, "issue-coupled-cleanup-and-exact-thread-continuation", "a7fee02de43dbbde897b67e44c00e37805bf82790917d2f5392be70e4143ef3f"),
-            (17, "immutable-switched-rollover-snapshot-revisions", "1035d2ed3daca62ddbc52f3bb6d1333114f40efb6ceb20cda5829ebb5358570c"),
+            (17, "immutable-switched-rollover-snapshot-revisions", "69dabdd22e3a4d099eb574ff11833681188e53ccf0d6ac9d787d7ed1e9764b26"),
         ]
         assert store.connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
 

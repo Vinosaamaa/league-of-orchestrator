@@ -739,6 +739,18 @@ def test_snapshot_refresh_adapter_requires_one_exact_live_identity(root: Path) -
             assert exc.code == code
         else:
             raise AssertionError(f"Herdr refusal {code} was not enforced")
+    for changed, malformed_agent in (
+        ({**target, "address": None}, {**exact, "pane_id": None}),
+        ({**target, "routing_name": None}, {**exact, "name": None}),
+    ):
+        try:
+            HerdrRolloverSnapshotAdapter(Inventory([malformed_agent])).observe(
+                [changed]
+            )
+        except StorageRefusal as exc:
+            assert exc.code == "snapshot_refresh_live_mismatch"
+        else:
+            raise AssertionError("missing canonical Herdr locator passed refresh")
 
 
 def test_snapshot_refresh_refuses_a_mismatched_canonical_runtime(root: Path) -> None:

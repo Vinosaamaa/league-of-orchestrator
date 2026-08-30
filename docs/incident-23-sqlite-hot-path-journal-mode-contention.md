@@ -703,7 +703,7 @@ those earlier releases.
   incomplete or changed inventory fences external dispatch.
 - SQLite provides exact source-event idempotency, not fuzzy matching. Duplicate,
   follow-up, and deferred decisions cite one supplied candidate/version.
-- Stop only reports bounded unresolved summaries. An explicit schema-18
+- Stop only reports bounded unresolved summaries. An explicit schema-19
   compare-and-swap transition lets the active Shotcaller supersede one
   same-owner duplicate while preserving both sources and refusing any request
   with external execution evidence.

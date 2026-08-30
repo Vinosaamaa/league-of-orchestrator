@@ -40,7 +40,12 @@ from league.sqlite_watcher_ops import (  # noqa: E402
 )
 from league.storage import RuntimeRegistrationCommand, StorageRefusal  # noqa: E402
 from league.storage_outbox import OutboxDispatchIdentity  # noqa: E402
-from lifecycle_fakes import FakeDeliveryAdapter, FakeIds, FakeLaunchAdapter  # noqa: E402
+from lifecycle_fakes import (  # noqa: E402
+    FakeDeliveryAdapter,
+    FakeIds,
+    FakeLaunchAdapter,
+    issue_bound_spec,
+)
 from request_lifecycle_fixture import (  # noqa: E402
     GAREN_RUNTIME,
     GAREN_RUNTIME_TWO,
@@ -160,21 +165,23 @@ def _active_champion(
     dispatch_request(
         store, clock, "R3", "claim-r3", "dispatch-r3", "repository-write", "champion"
     )
+    assignment = AssignmentSpec(
+        assignment_id="assignment:calm",
+        request_id="R3",
+        claim_token="claim-r3",
+        task_id="task:calm",
+        task_summary="Synthetic Calm supervision task",
+        coordinator_agent_id=SHOTCALLER_ID,
+        champion_agent_id=LUX_ID,
+        callsign="Lux",
+        repository=REPOSITORY,
+        issue=66,
+        branch="agent/synthetic/calm",
+        worktree="/synthetic/worktrees/calm",
+        issue_receipt=None,
+    )
     active = AssignmentService(store, FakeLaunchAdapter(), clock, FakeIds()).assign(
-        AssignmentSpec(
-            assignment_id="assignment:calm",
-            request_id="R3",
-            claim_token="claim-r3",
-            task_id="task:calm",
-            task_summary="Synthetic Calm supervision task",
-            coordinator_agent_id=SHOTCALLER_ID,
-            champion_agent_id=LUX_ID,
-            callsign="Lux",
-            repository=REPOSITORY,
-            issue=66,
-            branch="agent/synthetic/calm",
-            worktree="/synthetic/worktrees/calm",
-        )
+        issue_bound_spec(store, assignment, clock.now())
     )
     store.register_runtime(
         RuntimeRegistrationCommand(

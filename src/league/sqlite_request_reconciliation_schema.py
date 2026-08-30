@@ -1,4 +1,4 @@
-"""Reviewed v18 schema for agent-authored duplicate-request reconciliation."""
+"""Reviewed v19 schema for agent-authored duplicate-request reconciliation."""
 
 MIGRATION_NAME = "agent-authored-request-reconciliation"
 
@@ -17,4 +17,7 @@ STATEMENTS = (
     """,
     "CREATE INDEX ix_request_reconciliations_canonical ON request_reconciliations(canonical_request_id,duplicate_request_id)",
     "CREATE INDEX ix_requests_owner_updated ON requests(owner_agent_id,updated_at DESC,request_id) WHERE state NOT IN ('answered','cancelled')",
+    "CREATE INDEX ix_tasks_request_routing ON tasks(request_id,task_id)",
+    "CREATE INDEX ix_prompts_recovery ON prompts(triage_state,created_at,prompt_id,current_owner_agent_id)",
+    "CREATE INDEX ix_runtime_owner_health ON runtime_instances(actor_agent_id,status,verified)",
 )

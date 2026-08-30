@@ -1080,6 +1080,7 @@ def stop_supervisor(state_root: Path, callsign: str | None = None) -> dict[str, 
         str(registration["wake_locator"]), {"kind": "stop"}, timeout_seconds=1
     )
     deadline = time.monotonic() + 5
+    retry_delay = 0.1
     while time.monotonic() < deadline:
         current = supervisor_status(state_root, callsign)
         if not current["live"]:
@@ -1090,7 +1091,10 @@ def stop_supervisor(state_root: Path, callsign: str | None = None) -> dict[str, 
                 "live": False,
                 "stopped": True,
             }
-        time.sleep(0.02)
+        remaining = deadline - time.monotonic()
+        if remaining > 0:
+            time.sleep(min(retry_delay, remaining))
+            retry_delay = min(retry_delay * 2, 0.5)
     raise StorageRefusal(
         "supervisor_stop_timeout", "persistent supervisor did not stop within its bound"
     )

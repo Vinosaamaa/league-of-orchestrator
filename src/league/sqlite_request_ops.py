@@ -2407,21 +2407,25 @@ def _candidate_request_inventory(
         routing_rows = store.connection.execute(
             f"""
             SELECT t.request_id,t.project_id,p.repository,t.task_id
-              FROM tasks t LEFT JOIN projects p ON p.project_id=t.project_id
-             WHERE t.request_id IN ({placeholders})
-             ORDER BY t.request_id,t.task_id
+              FROM tasks t
+              JOIN (
+                    SELECT request_id,MIN(task_id) AS task_id
+                      FROM tasks
+                     WHERE request_id IN ({placeholders})
+                     GROUP BY request_id
+                   ) selected
+                ON selected.request_id=t.request_id AND selected.task_id=t.task_id
+              LEFT JOIN projects p ON p.project_id=t.project_id
+             ORDER BY t.request_id
             """,
             tuple(request_ids),
         ).fetchall()
         for row in routing_rows:
-            routing_by_request.setdefault(
-                str(row["request_id"]),
-                {
-                    key: str(row[key])
-                    for key in ("project_id", "repository")
-                    if row[key] is not None
-                },
-            )
+            routing_by_request[str(row["request_id"])] = {
+                key: str(row[key])
+                for key in ("project_id", "repository")
+                if row[key] is not None
+            }
     prompt_terms = {
         term
         for text in prompt_texts
@@ -2616,11 +2620,17 @@ def semantic_recovery_backlog(store: Any, *, limit: int = 20) -> dict[str, Any]:
 
     if not 1 <= limit <= 100:
         raise StorageRefusal("invalid_limit", "semantic recovery backlog limit is invalid")
-    rows = store.connection.execute(
+    quarantined = store.connection.execute(
         """
         SELECT prompt_id,created_at FROM prompt_quarantine
          WHERE state='quarantined'
-        UNION ALL
+         ORDER BY created_at,prompt_id
+         LIMIT ?
+        """,
+        (limit + 1,),
+    ).fetchall()
+    orphaned = store.connection.execute(
+        """
         SELECT p.prompt_id,p.created_at FROM prompts p
          WHERE p.triage_state='untriaged'
            AND NOT EXISTS (
@@ -2628,11 +2638,15 @@ def semantic_recovery_backlog(store: Any, *, limit: int = 20) -> dict[str, Any]:
               WHERE r.actor_agent_id=p.current_owner_agent_id
                 AND r.status IN ('active','idle') AND r.verified=1
            )
-         ORDER BY created_at,prompt_id
+         ORDER BY p.created_at,p.prompt_id
          LIMIT ?
         """,
         (limit + 1,),
     ).fetchall()
+    rows = sorted(
+        (*quarantined, *orphaned),
+        key=lambda row: (str(row["created_at"]), str(row["prompt_id"])),
+    )[: limit + 1]
     return {
         "returned_count": min(len(rows), limit),
         "truncated": len(rows) > limit,

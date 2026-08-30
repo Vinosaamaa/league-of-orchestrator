@@ -114,6 +114,9 @@ def test_transactional_upgrade_backup_and_rollback(root: Path) -> None:
             "ix_mode_repairs_goal_state",
             "ix_issue_selection_receipts_repository_issue",
             "ix_issue_bindings_repository_issue",
+            "ix_tasks_request_routing",
+            "ix_prompts_recovery",
+            "ix_runtime_owner_health",
         } <= indexes
         assert [migration.version for migration in MIGRATIONS] == list(
             range(1, CURRENT_SCHEMA_VERSION + 1)
@@ -133,7 +136,7 @@ def test_transactional_upgrade_backup_and_rollback(root: Path) -> None:
             (16, "issue-coupled-cleanup-and-exact-thread-continuation", "a7fee02de43dbbde897b67e44c00e37805bf82790917d2f5392be70e4143ef3f"),
             (17, "immutable-switched-rollover-snapshot-revisions", "69dabdd22e3a4d099eb574ff11833681188e53ccf0d6ac9d787d7ed1e9764b26"),
             (18, "scoped-autonomous-delivery-and-issue-first-assignment", "b517b9103fedcc0db8a1f0dd7d06d475f309f3a135d87356209ab34dbd957631"),
-            (19, "agent-authored-request-reconciliation", "7d6a996b94d60e632b9e973882dceb631d68b11d7bdf9364956e601af8661442"),
+            (19, "agent-authored-request-reconciliation", "038abf84401775c692954c5eea8f12e2f19a23d6b67ab727245f651751f438c0"),
         ]
         assert store.connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
 

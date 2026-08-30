@@ -655,7 +655,7 @@ version-links, and commits locally; no ordinary turn starts a second model.
 
 The deliberate source differences are a 12-row/24,576-byte deterministic
 same-owner candidate shortlist, complete-snapshot fencing before external
-dispatch, deterministic off-path candidate pages, schema-18 agent-authored
+dispatch, deterministic off-path candidate pages, schema-19 agent-authored
 duplicate reconciliation, and one persistent event-driven supervisor runtime
 with renewable/fenced ownership. Stop remains an omission backstop and does not
 merge requests. A source launchd template declares the intended owner boundary
@@ -692,10 +692,11 @@ claim active-model split quality, installed prompt capture, live supervision,
 or the #23 owner-visible E2E. No global file, hook, service, model route,
 canonical database, or live runtime is changed.
 
-Current main's issue-coupled continuation and rollover-snapshot migrations
-remain canonical schemas 16 and 17. Issue #66 appends agent-authored request
-reconciliation as schema 18; it does not renumber, replace, or mutate either
-main migration. The deterministic acceptance dry-run report receipt is refreshed
-for that schema-18 target. Its legacy-source digest and exact
+Current main's issue-coupled continuation, rollover-snapshot, and scoped
+autonomous-delivery migrations remain canonical schemas 16, 17, and 18.
+Issue #66 appends agent-authored request reconciliation as schema 19; it does
+not renumber, replace, or mutate any main migration. The deterministic
+acceptance dry-run report receipt is refreshed for that schema-19 target. Its
+legacy-source digest and exact
 post-import parity digest remain unchanged; only the truthful target-version
 report digest changes.

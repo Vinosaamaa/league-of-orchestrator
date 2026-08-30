@@ -270,6 +270,62 @@ class HerdrCodexLaunchAdapter:
             "routing_name": str(spec.callsign).lower(),
         }
 
+    def _await_initial_session(
+        self,
+        agent: Mapping[str, Any],
+        spec: AssignmentSpec,
+        pane_id: str,
+        terminal_id: str,
+    ) -> dict[str, Any]:
+        """Persist a just-started Codex thread before assignment activation."""
+        if _session_id(agent) is not None:
+            return dict(agent)
+        expected_cwd = str(Path(spec.worktree).resolve())
+        exact_private_launch = (
+            agent.get("name") == str(spec.callsign).lower()
+            and agent.get("agent") == "codex"
+            and agent.get("workspace_id") == self.options.workspace_id
+            and agent.get("pane_id") == pane_id
+            and agent.get("terminal_id") == terminal_id
+            and agent.get("cwd") == expected_cwd
+            and agent.get("foreground_cwd") == expected_cwd
+            and agent.get("interactive_ready") is True
+        )
+        if not exact_private_launch:
+            raise StorageRefusal(
+                "launch_identity_unverified",
+                "new Codex endpoint did not expose one exact pre-context session identity",
+            )
+        nonce = _sha256(spec.assignment_id.encode("utf-8"))[:12]
+        self._command(
+            (
+                "herdr",
+                "agent",
+                "prompt",
+                str(spec.callsign).lower(),
+                f"League launch identity handshake {nonce} only. "
+                "Do not inspect or change files. Reply exactly READY.",
+            ),
+            "Herdr Codex identity handshake",
+        )
+        for _ in range(120):
+            published = self._get_agent(str(spec.callsign).lower())
+            session_id = _session_id(published)
+            if isinstance(session_id, str) and THREAD_UUID.fullmatch(session_id):
+                return published
+            if (
+                published.get("pane_id") != pane_id
+                or published.get("terminal_id") != terminal_id
+                or published.get("cwd") != expected_cwd
+                or published.get("foreground_cwd") != expected_cwd
+            ):
+                break
+            time.sleep(0.1)
+        raise StorageRefusal(
+            "launch_identity_unverified",
+            "Codex did not publish one authoritative session after the launch handshake",
+        )
+
     def _verify_title(self, routing_name: str, callsign: str) -> None:
         expected = f"{callsign} · {self.options.task_label}"
         for _ in range(50):
@@ -367,19 +423,38 @@ class HerdrCodexLaunchAdapter:
                 "Herdr Codex start",
                 timeout_seconds=(self.options.startup_timeout_ms // 1000) + 10,
             )
-            identity = self._verify_agent(
+            agent = self._await_initial_session(
                 self._get_agent(routing_name), spec, str(pane_id), str(terminal_id)
             )
+            identity = self._verify_agent(
+                agent, spec, str(pane_id), str(terminal_id)
+            )
             self._created.update(identity)
+            title = f"{spec.callsign} · {self.options.task_label}"
             self._command(
                 (
                     "herdr",
-                    "agent",
-                    "prompt",
-                    routing_name,
-                    f"/rename {spec.callsign} · {self.options.task_label}",
+                    "pane",
+                    "report-metadata",
+                    str(pane_id),
+                    "--source",
+                    "league-launch-" + _sha256(spec.assignment_id.encode("utf-8"))[:16],
+                    "--agent",
+                    "codex",
+                    "--display-agent",
+                    "codex",
+                    "--title",
+                    title,
+                    "--token",
+                    f"sidebar_name={spec.callsign}",
+                    "--token",
+                    f"task_label={self.options.task_label}",
+                    "--token",
+                    f"thread_title={title}",
+                    "--seq",
+                    "2",
                 ),
-                "Herdr Codex rename",
+                "Herdr Champion metadata",
             )
             self._verify_title(routing_name, str(spec.callsign))
         except LaunchAdapterError:

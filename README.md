@@ -43,7 +43,8 @@ Nothing here installs files, changes hooks, or connects to live Roster state.
 - One role-aware bounded Shotcaller Stop decision with ordinary-message
   priority and separate request, dispatch, and watcher leases, plus in-place
   Shotcaller bootstrap that waits for a stable source-owned callsign title
-  without creating layout/process state or overwriting newer user metadata.
+  without creating layout/process state or overwriting a newer user title,
+  source, or unrelated token.
 - Opaque capability-based harness/backend bindings, typed task resources, and
   canonical SQLite-backed recoverable teardown with immutable per-action/final
   receipts, exact shared-lease release, and persistent-resource retention.

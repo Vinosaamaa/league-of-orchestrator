@@ -130,8 +130,8 @@ class RecordingHerdr:
                     )
             self.source_sequences[source] = sequence
             self.state_change_seq += 1
-            self.metadata_source = source
             if "--title" in command:
+                self.metadata_source = source
                 title = command[command.index("--title") + 1]
                 if not self.publish_mismatch or not title:
                     self.title = title
@@ -996,6 +996,7 @@ def test_bootstrap_rolls_back_without_overwriting_newer_user_title(root: Path) -
     worktree.mkdir()
     clock = FakeClock()
     runner = UserTitleAfterPublishHerdr(worktree, delayed_auto_title_reads=2)
+    runner.tokens = {"user_badge": "favorite"}
     with SQLiteStorage(state) as store:
         _seed_available_ashe(store, clock)
         service = ShotcallerBootstrapService(
@@ -1034,13 +1035,21 @@ def test_bootstrap_rolls_back_without_overwriting_newer_user_title(root: Path) -
     assert runner.name is None
     assert runner.metadata_source == "user-selected"
     assert runner.title == "User selected title"
-    assert len(
-        [
-            call
-            for call in runner.calls
-            if call[:3] == ("herdr", "pane", "report-metadata")
-        ]
-    ) == 1
+    assert runner.tokens == {"user_badge": "favorite"}
+    metadata_calls = [
+        call
+        for call in runner.calls
+        if call[:3] == ("herdr", "pane", "report-metadata")
+    ]
+    assert len(metadata_calls) == 2
+    rollback_metadata = metadata_calls[-1]
+    assert "--title" not in rollback_metadata
+    rollback_tokens = {
+        rollback_metadata[index + 1]
+        for index, value in enumerate(rollback_metadata)
+        if value == "--token"
+    }
+    assert rollback_tokens == {"sidebar_name=", "thread_title="}
     assert not any(
         call[:3]
         in {

@@ -438,6 +438,60 @@ class HerdrShotcallerBootstrapAdapter:
             )
             if preserve_newer_presentation:
                 pane, agent = self._current()
+                current_tokens = agent.get("tokens")
+                sequence = agent.get("state_change_seq")
+                authority_source = _session_source(agent)
+                if (
+                    not self._exact_placeholder(pane, agent)
+                    or agent.get("name") not in {None, ""}
+                    or agent.get("metadata_source") != protected["metadata_source"]
+                    or (
+                        agent.get(
+                            "terminal_title_stripped",
+                            agent.get("terminal_title", ""),
+                        )
+                        or ""
+                    )
+                    != protected["title"]
+                    or not isinstance(current_tokens, Mapping)
+                    or not isinstance(sequence, int)
+                    or not isinstance(authority_source, str)
+                ):
+                    return False
+                expected_tokens = dict(current_tokens)
+                for key, value in (
+                    ("sidebar_name", previous_sidebar),
+                    ("thread_title", previous_thread_title),
+                ):
+                    if value:
+                        expected_tokens[key] = value
+                    else:
+                        expected_tokens.pop(key, None)
+                self._run(
+                    (
+                        "herdr",
+                        "pane",
+                        "report-metadata",
+                        self.options.pane_id,
+                        "--source",
+                        "league-shotcaller-rollback",
+                        "--applies-to-source",
+                        authority_source,
+                        "--agent",
+                        "codex",
+                        "--display-agent",
+                        "codex",
+                        "--token",
+                        f"sidebar_name={previous_sidebar}",
+                        "--token",
+                        f"thread_title={previous_thread_title}",
+                        "--seq",
+                        str(sequence + 1),
+                    ),
+                    "Herdr Shotcaller display-token rollback",
+                    silent=True,
+                )
+                pane, agent = self._current()
                 return bool(
                     self._exact_placeholder(pane, agent)
                     and agent.get("name") in {None, ""}
@@ -450,7 +504,7 @@ class HerdrShotcallerBootstrapAdapter:
                         or ""
                     )
                     == protected["title"]
-                    and agent.get("tokens") == protected["tokens"]
+                    and agent.get("tokens") == expected_tokens
                 )
             pane, agent = self._current()
             authority_source = _session_source(agent)

@@ -458,5 +458,6 @@ live runtime. The same provenance rule now covers in-place Shotcaller bootstrap:
 the allocated callsign title must settle for two effective-source and sequence
 observations, exact retry may restore same-authority drift once without a
 prompt, and rollback preserves newer user-owned presentation metadata while
-releasing only the League route and callsign reservation. Focused fakes prove
-zero layout/process creation and no Squad registration.
+restoring only League-owned sidebar/thread tokens to baseline and releasing the
+League route and callsign reservation. Focused fakes prove unrelated user
+tokens remain exact, zero layout/process creation, and no Squad registration.

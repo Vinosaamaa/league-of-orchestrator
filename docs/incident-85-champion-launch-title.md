@@ -42,7 +42,9 @@ Codex authority or the bootstrap source, and requires two matching source and
 state-sequence observations before activation. Exact retry re-observes the pane
 and creates no layout or process. A newer user-owned presentation source is
 never overwritten; rollback clears only the League route, preserves that title,
-releases the exact reservation, and registers no Squad.
+restores only League-owned sidebar/thread tokens to the durable baseline,
+preserves unrelated user tokens, releases the exact reservation, and registers
+no Squad.
 
 An exact completed retry sends no handshake or context prompt. It re-observes
 the live endpoint and either accepts the stable title or performs one

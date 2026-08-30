@@ -396,7 +396,9 @@ activation requires two matching source/sequence observations after any owner
 prompt auto-title settles, with at most one same-authority restoration. Exact
 retry sends no prompt and creates no layout or process. A newer user-owned
 presentation source refuses metadata mutation; rollback clears the League route
-while preserving that title, releases the reservation, and creates no Squad.
+while preserving that title/source and unrelated tokens, restores only the
+League-owned sidebar/thread tokens to baseline, releases the reservation, and
+creates no Squad.
 
 The release gate is one installed disposable flow: exact capture, one-process
 semantic begin, Champion `assign run`, Champion working and terminal

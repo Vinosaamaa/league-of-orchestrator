@@ -791,6 +791,7 @@ def test_switched_rollover_reconciles_exact_imported_descendant(root: Path) -> N
                     "agent": "codex",
                     "agent_session": {"value": thread_id},
                     "agent_status": "working",
+                    "interactive_ready": True,
                     "cwd": str(worktree),
                     "foreground_cwd": str(worktree),
                     "name": "annie",
@@ -1809,6 +1810,7 @@ def test_descendant_runtime_adapter_refuses_missing_closed_mismatch_and_ambiguit
         "agent": "codex",
         "agent_session": {"value": thread_id},
         "agent_status": "working",
+        "interactive_ready": True,
         "cwd": str(worktree),
         "foreground_cwd": str(worktree),
         "name": "annie",
@@ -1830,6 +1832,9 @@ def test_descendant_runtime_adapter_refuses_missing_closed_mismatch_and_ambiguit
     cases = (
         ([], "descendant_runtime_missing"),
         ([{**exact, "agent_status": "closed"}], "descendant_runtime_closed"),
+        ([{**exact, "interactive_ready": False}], "descendant_runtime_mismatch"),
+        ([{key: value for key, value in exact.items() if key != "interactive_ready"}],
+         "descendant_runtime_mismatch"),
         ([{**exact, "cwd": str(worktree / "other")}], "descendant_runtime_mismatch"),
         ([exact, {**exact, "pane_id": "pane:other"}], "descendant_runtime_ambiguous"),
     )
@@ -1868,6 +1873,7 @@ def test_descendant_runtime_adapter_normalizes_exact_done_to_idle_only_after_ide
         "agent": "codex",
         "agent_session": {"value": thread_id},
         "agent_status": "done",
+        "interactive_ready": True,
         "cwd": str(worktree),
         "foreground_cwd": str(worktree),
         "name": "annie",
@@ -1891,6 +1897,18 @@ def test_descendant_runtime_adapter_normalizes_exact_done_to_idle_only_after_ide
         target, "runtime:synthetic:done"
     )
     assert receipt["status"] == "idle"
+    for unready in (
+        {**exact, "interactive_ready": False},
+        {key: value for key, value in exact.items() if key != "interactive_ready"},
+    ):
+        try:
+            HerdrDescendantRuntimeAdapter(Inventory(unready)).verify(
+                target, "runtime:synthetic:done"
+            )
+        except StorageRefusal as exc:
+            assert exc.code == "descendant_runtime_mismatch"
+        else:
+            raise AssertionError("unready done endpoint was normalized to idle")
     try:
         HerdrDescendantRuntimeAdapter(
             Inventory({**exact, "foreground_cwd": str(worktree / "other")})

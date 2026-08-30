@@ -88,6 +88,7 @@ class HerdrDescendantRuntimeAdapter:
             target.get("kind") == "codex-thread"
             and target.get("backend") == "herdr"
             and agent.get("agent") == "codex"
+            and agent.get("interactive_ready") is True
             and agent.get("pane_id") == expected_pane
             and agent.get("name") == expected_route
             and _session(agent) == expected_thread

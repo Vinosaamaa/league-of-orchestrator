@@ -485,6 +485,47 @@ def test_small_shortlist_does_not_block_direct_and_pages_off_path(root: Path) ->
     assert process.wait(timeout=10) == 0 and committed["result"]["phase"] == "committed"
 
 
+def test_candidate_routing_key_comes_from_one_exact_task(root: Path) -> None:
+    _, store, clock = create_context(root, "turn-routing-pair")
+    _seed_request(store, clock, 1, "Route one existing request")
+    for project_id, repository in (
+        ("project:z", "https://github.com/example/project-a"),
+        ("project:a", "https://github.com/example/project-z"),
+    ):
+        store.connection.execute(
+            """
+            INSERT INTO projects(project_id,repository,state,version,updated_at)
+            VALUES(?,?,'active',1,?)
+            """,
+            (project_id, repository, clock.now()),
+        )
+    for task_id, project_id in (
+        ("task:route:a", "project:z"),
+        ("task:route:b", "project:a"),
+    ):
+        store.connection.execute(
+            """
+            INSERT INTO tasks
+              (task_id,project_id,summary,state,version,updated_at,request_id,coordinator_agent_id)
+            VALUES(?,?,?,'active',1,?,?,?)
+            """,
+            (
+                task_id,
+                project_id,
+                "Synthetic routing candidate",
+                clock.now(),
+                "request:seed:001",
+                SHOTCALLER_ID,
+            ),
+        )
+    candidate = store.untriaged_intake(SHOTCALLER_ID)["candidate_inventory"]["requests"][0]
+    assert candidate["routing_key"] == {
+        "project_id": "project:z",
+        "repository": "https://github.com/example/project-a",
+    }
+    store.close()
+
+
 def test_turn_limit_refuses_before_intake(root: Path) -> None:
     state, store, clock = create_context(root, "turn-limit-refusal")
     _capture(store, clock, "prompt:limit", "Prompt must remain unconsumed")
@@ -556,6 +597,7 @@ def main() -> None:
         test_partial_duplicate_or_reordered_decisions_refuse(root)
         test_one_process_persists_all_dispositions_without_minting_deferred_requests(root)
         test_small_shortlist_does_not_block_direct_and_pages_off_path(root)
+        test_candidate_routing_key_comes_from_one_exact_task(root)
         test_truncated_candidates_fence_only_external_dispatch(root)
         test_changed_candidates_fence_external_dispatch(root)
         test_turn_limit_refuses_before_intake(root)

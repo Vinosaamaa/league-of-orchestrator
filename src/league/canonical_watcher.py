@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import ExitStack, contextmanager
 import fcntl
 import hashlib
 import json
@@ -11,7 +12,7 @@ import sys
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from .sqlite_store import DEFAULT_BUSY_TIMEOUT_MS, SQLiteStorage
 from .sqlite_watcher_ops import _obligation_counts, stop_feedback_reason
@@ -528,7 +529,12 @@ def handle_brokered_hook(
     }
 
 
-def _broker_hook(args: argparse.Namespace, payload: dict[str, Any]) -> dict[str, Any]:
+def _broker_hook(
+    args: argparse.Namespace,
+    payload: dict[str, Any],
+    *,
+    timeout_seconds: float = 0.1,
+) -> dict[str, Any]:
     locator = f"unix:{PersistentSupervisor(_state_root()).socket_path}"
     return send_supervisor_message(
         locator,
@@ -541,42 +547,86 @@ def _broker_hook(args: argparse.Namespace, payload: dict[str, Any]) -> dict[str,
                 "payload": payload,
             },
         },
-        timeout_seconds=0.1,
+        timeout_seconds=timeout_seconds,
     )
 
 
-def _direct_hook_fallback_safe(
+def _persistent_service_lock_held(state_root: Path) -> bool:
+    supervisor = PersistentSupervisor(state_root)
+    supervisor.lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock = supervisor.lock_path.open("a+")
+    try:
+        try:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+        return False
+    finally:
+        lock.close()
+
+
+@contextmanager
+def _direct_hook_fallback_store(
     args: argparse.Namespace, payload: dict[str, Any]
-) -> bool:
-    """Permit direct storage only when no live or starting service can own the hook."""
+) -> Iterator[SQLiteStorage]:
+    """Open one direct-hook store behind the shared service-start fence."""
 
     state_root = _state_root()
-    socket_path = PersistentSupervisor(state_root).socket_path
-    if socket_path.exists():
-        return False
-    with SQLiteStorage(
-        state_root,
-        busy_timeout_ms=_hook_busy_timeout(args.command),
-    ) as store:
-        actor = _actor(store, args, payload)
-        if actor is None:
-            return True
-        registration = store.watcher_registration(str(actor[0]))
-    if registration is None:
-        return True
-    if str(registration["wake_locator"]).startswith("sqlite-supervise:"):
-        # The legacy bounded waiter is woken by the direct capture's canonical
-        # generation update; it is not a second writer or persistent broker.
-        return True
+    supervisor = PersistentSupervisor(state_root)
+    supervisor.lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock = supervisor.lock_path.open("a+")
+    acquired = False
     try:
-        leased_until = datetime.fromisoformat(str(registration["leased_until"]))
-    except (TypeError, ValueError) as exc:
-        raise StorageRefusal(
-            "supervisor_ownership_uncertain",
-            "persistent supervisor lease ownership could not be verified",
-            retryable=True,
-        ) from exc
-    return leased_until <= datetime.now().astimezone()
+        try:
+            # Direct hooks may run concurrently, but a persistent supervisor's
+            # exclusive service lock fences every direct fallback boundary.
+            fcntl.flock(lock.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)
+            acquired = True
+        except BlockingIOError as exc:
+            raise StorageRefusal(
+                "supervisor_ownership_uncertain",
+                "persistent supervisor owns or may be starting this hook boundary",
+                retryable=True,
+            ) from exc
+        if supervisor.socket_path.exists():
+            raise StorageRefusal(
+                "supervisor_ownership_uncertain",
+                "persistent supervisor socket exists without a verified broker response",
+                retryable=True,
+            )
+        with SQLiteStorage(
+            state_root,
+            busy_timeout_ms=_hook_busy_timeout(args.command),
+        ) as store:
+            actor = _actor(store, args, payload)
+            registration = (
+                None if actor is None else store.watcher_registration(str(actor[0]))
+            )
+            if registration is not None and not str(
+                registration["wake_locator"]
+            ).startswith("sqlite-supervise:"):
+                try:
+                    leased_until = datetime.fromisoformat(
+                        str(registration["leased_until"])
+                    )
+                except (TypeError, ValueError) as exc:
+                    raise StorageRefusal(
+                        "supervisor_ownership_uncertain",
+                        "persistent supervisor lease ownership could not be verified",
+                        retryable=True,
+                    ) from exc
+                if leased_until > datetime.now().astimezone():
+                    raise StorageRefusal(
+                        "supervisor_ownership_uncertain",
+                        "persistent supervisor still owns the hook boundary",
+                        retryable=True,
+                    )
+            yield store
+    finally:
+        if acquired:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+        lock.close()
 
 
 def _supervision_snapshot(
@@ -829,27 +879,37 @@ def main(argv: list[str] | None = None) -> int:
         _emit(pause_supervisor(_state_root(), args.shotcaller))
         return 0
     payload = _payload() if args.command.endswith("-hook") else {}
+    fallback_store = None
     if args.command in BROKERED_HOOK_COMMANDS:
         try:
             response = _broker_hook(args, payload)
         except StorageRefusal:
             raise
-        except SupervisorUnavailable as exc:
-            if not _direct_hook_fallback_safe(args, payload):
-                raise StorageRefusal(
-                    "supervisor_ownership_uncertain",
-                    "persistent supervisor owns or may be starting this hook boundary",
-                    retryable=True,
-                ) from exc
+        except SupervisorUnavailable:
+            if _persistent_service_lock_held(_state_root()):
+                try:
+                    response = _broker_hook(args, payload, timeout_seconds=0.4)
+                except SupervisorUnavailable:
+                    pass
+                else:
+                    _emit(response["hook_output"])
+                    return 0
+            fallback_store = _direct_hook_fallback_store(args, payload)
         else:
             _emit(response["hook_output"])
             return 0
+    stack = ExitStack()
     try:
-        store_context = SQLiteStorage(
-            _state_root(),
-            busy_timeout_ms=_hook_busy_timeout(args.command),
+        store = stack.enter_context(
+            fallback_store
+            if fallback_store is not None
+            else SQLiteStorage(
+                _state_root(),
+                busy_timeout_ms=_hook_busy_timeout(args.command),
+            )
         )
     except StorageRefusal as exc:
+        stack.close()
         if exc.code == "busy" and args.command in {
             "codex-stop-hook",
             "cursor-stop-hook",
@@ -857,7 +917,7 @@ def main(argv: list[str] | None = None) -> int:
             _emit(_busy_stop_result(args, payload))
             return 0
         raise
-    with store_context as store:
+    with stack:
         actor = _actor(store, args, payload)
         actor_id = None if actor is None else str(actor[0])
         callsign = None if actor is None else str(actor[1])

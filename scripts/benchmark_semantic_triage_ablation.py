@@ -390,18 +390,38 @@ def _model_prompt(cases: Sequence[dict[str, Any]]) -> str:
     )
 
 
-def _read_process_line(process: subprocess.Popen[bytes], deadline: float) -> tuple[bytes, int]:
-    if process.stdout is None:
-        raise RuntimeError("subprocess output pipe is unavailable")
-    remaining = deadline - time.monotonic()
-    readable, _, _ = select.select([process.stdout], [], [], max(0.0, remaining))
-    if not readable:
-        raise RuntimeError("subprocess output timed out")
-    line = process.stdout.readline(MAX_LINE_BYTES + 1)
-    observed_ns = time.perf_counter_ns()
-    if not line or len(line) > MAX_LINE_BYTES:
-        raise RuntimeError("subprocess output is missing or exceeds its bound")
-    return line, observed_ns
+class ProcessLineReader:
+    """Read bounded newline frames without blocking past the process deadline."""
+
+    def __init__(self, process: subprocess.Popen[bytes]) -> None:
+        if process.stdout is None:
+            raise RuntimeError("subprocess output pipe is unavailable")
+        self.process = process
+        self.output = process.stdout
+        self.buffer = bytearray()
+
+    def read(self, deadline: float) -> tuple[bytes, int]:
+        while b"\n" not in self.buffer:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise RuntimeError("subprocess output timed out")
+            readable, _, _ = select.select(
+                [self.output.fileno()], [], [], remaining
+            )
+            if not readable:
+                raise RuntimeError("subprocess output timed out")
+            chunk = os.read(
+                self.output.fileno(),
+                min(65_536, MAX_LINE_BYTES + 1 - len(self.buffer)),
+            )
+            if not chunk:
+                raise RuntimeError("subprocess output is missing")
+            self.buffer.extend(chunk)
+            if len(self.buffer) > MAX_LINE_BYTES:
+                raise RuntimeError("subprocess output exceeds its bound")
+        line, _, remainder = self.buffer.partition(b"\n")
+        self.buffer = bytearray(remainder)
+        return line + b"\n", time.perf_counter_ns()
 
 
 def _codex_model_runner(
@@ -450,12 +470,13 @@ def _codex_model_runner(
                 raise RuntimeError("Codex input pipe is unavailable")
             deadline = time.monotonic() + PROCESS_TIMEOUT_SECONDS
             _write_process_input(process, prompt, deadline, close=True)
+            reader = ProcessLineReader(process)
             turn_started_ns: int | None = None
             message_ns: int | None = None
             completed_ns: int | None = None
             message: str | None = None
             while True:
-                line, observed_ns = _read_process_line(process, deadline)
+                line, observed_ns = reader.read(deadline)
                 event = json.loads(line)
                 event_type = event.get("type")
                 if event_type == "turn.started":
@@ -676,9 +697,9 @@ def _fixture_snapshot(
 
 
 def _read_turn_response(
-    process: subprocess.Popen[bytes], deadline: float
+    reader: ProcessLineReader, deadline: float
 ) -> tuple[dict[str, Any], int, int]:
-    line, observed_ns = _read_process_line(process, deadline)
+    line, observed_ns = reader.read(deadline)
     parse_started_ns = time.perf_counter_ns()
     payload = json.loads(line)
     parse_completed_ns = time.perf_counter_ns()
@@ -777,7 +798,8 @@ def _turn(
             if process.stdin is None:
                 raise RuntimeError("League turn input pipe is unavailable")
             deadline = time.monotonic() + PROCESS_TIMEOUT_SECONDS
-            intake, intake_ns, intake_parse_ns = _read_turn_response(process, deadline)
+            reader = ProcessLineReader(process)
+            intake, intake_ns, intake_parse_ns = _read_turn_response(reader, deadline)
             if intake["result"]["returned_count"] != len(cases):
                 raise RuntimeError("League turn intake count differs from the frozen batch")
             if [row["body"] for row in intake["result"]["prompts"]] != [
@@ -799,7 +821,7 @@ def _turn(
                 handoff_started_ns,
                 handoff_completed_ns,
             ) = _write_turn_payload(process, league_semantic, deadline)
-            begun, begun_ns, begun_parse_ns = _read_turn_response(process, deadline)
+            begun, begun_ns, begun_parse_ns = _read_turn_response(reader, deadline)
             if not begun.get("ok"):
                 error_value = begun.get("error", {})
                 raise RuntimeError(
@@ -822,7 +844,7 @@ def _turn(
                 _commit_handoff_completed_ns,
             ) = _write_turn_payload(process, actions, deadline)
             committed, committed_ns, committed_parse_ns = _read_turn_response(
-                process, deadline
+                reader, deadline
             )
             returncode = process.wait(timeout=max(0.0, deadline - time.monotonic()))
             completed_ns = time.perf_counter_ns()

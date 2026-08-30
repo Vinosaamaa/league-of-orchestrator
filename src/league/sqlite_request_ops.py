@@ -2406,21 +2406,22 @@ def _candidate_request_inventory(
         placeholders = ",".join("?" for _ in request_ids)
         routing_rows = store.connection.execute(
             f"""
-            SELECT t.request_id,MIN(t.project_id) project_id,MIN(p.repository) repository
+            SELECT t.request_id,t.project_id,p.repository,t.task_id
               FROM tasks t LEFT JOIN projects p ON p.project_id=t.project_id
              WHERE t.request_id IN ({placeholders})
-             GROUP BY t.request_id
+             ORDER BY t.request_id,t.task_id
             """,
             tuple(request_ids),
         ).fetchall()
-        routing_by_request = {
-            str(row["request_id"]): {
-                key: str(row[key])
-                for key in ("project_id", "repository")
-                if row[key] is not None
-            }
-            for row in routing_rows
-        }
+        for row in routing_rows:
+            routing_by_request.setdefault(
+                str(row["request_id"]),
+                {
+                    key: str(row[key])
+                    for key in ("project_id", "repository")
+                    if row[key] is not None
+                },
+            )
     prompt_terms = {
         term
         for text in prompt_texts

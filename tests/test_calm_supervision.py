@@ -39,6 +39,7 @@ from league.sqlite_watcher_ops import (  # noqa: E402
     _attention_reason,
 )
 from league.storage import RuntimeRegistrationCommand, StorageRefusal  # noqa: E402
+from league.storage_outbox import OutboxDispatchIdentity  # noqa: E402
 from lifecycle_fakes import FakeDeliveryAdapter, FakeIds, FakeLaunchAdapter  # noqa: E402
 from request_lifecycle_fixture import (  # noqa: E402
     GAREN_RUNTIME,
@@ -264,6 +265,60 @@ def test_final_policy_and_timer_matrix() -> None:
     assert "StartInterval" not in launchd
 
 
+def test_in_flight_attention_delivery_is_not_dispatched_twice(root: Path) -> None:
+    _, store, active = _active_champion(root, "calm-in-flight")
+    attention = _transition(store, active, 3, "ready_to_land", "in-flight")
+    identity = OutboxDispatchIdentity(
+        str(attention["outbox_id"]),
+        str(attention["event_id"]),
+        SHOTCALLER_ID,
+        "dispatcher:synthetic",
+        "attempt:synthetic",
+    )
+    store.claim_outbox(identity, _future(60), _at())
+    adapter = FakeDeliveryAdapter()
+    receipt = dispatch_event(
+        store,
+        outbox_id=identity.outbox_id,
+        event_id=identity.event_id,
+        recipient_agent_id=identity.recipient_agent_id,
+        at=_at(),
+        adapter=adapter,
+    )
+    assert receipt["state"] == "in_flight"
+    assert receipt["reason"] == "delivery_in_flight" and receipt["idempotent"]
+    assert adapter.sent == []
+    store.close()
+
+
+def test_registration_and_silent_reconciliation_are_atomic(root: Path) -> None:
+    _, store, _ = _active_champion(root, "calm-registration-atomic")
+    try:
+        binding = store.supervisor_binding("Garen")
+        store.connection.execute(
+            "UPDATE watcher_scopes SET metadata_json=? WHERE scope_id=?",
+            ('{"supervision":"malformed"}', binding["scope_id"]),
+        )
+        try:
+            store.register_watcher(
+                str(binding["scope_id"]),
+                "watcher:atomic",
+                SHOTCALLER_ID,
+                GAREN_RUNTIME,
+                "unix:/synthetic/atomic.sock",
+                _future(60),
+                1,
+                _at(),
+            )
+        except StorageRefusal as exc:
+            assert exc.code == "supervision_policy_invalid"
+        else:
+            raise AssertionError("malformed reconciliation committed a watcher registration")
+        assert store.watcher_registration(SHOTCALLER_ID) is None
+    finally:
+        store.close()
+
+
 def test_calm_event_ipc_pause_resume_and_recovery(root: Path) -> None:
     state, store, active = _active_champion(root)
     first_wakes = FakeWakeAdapter()
@@ -375,6 +430,7 @@ def test_calm_event_ipc_pause_resume_and_recovery(root: Path) -> None:
     lost = _transition(store, active, 6, "ready_to_land", "lost-notification")
     assert first_wakes.wait_for(str(lost["event_id"]), timeout=2)
     deadline = time.monotonic() + 2
+    delay = 0.01
     while True:
         recovered = store.connection.execute(
             "SELECT state FROM delivery_outbox WHERE outbox_id=?", (lost["outbox_id"],)
@@ -382,7 +438,8 @@ def test_calm_event_ipc_pause_resume_and_recovery(root: Path) -> None:
         if recovered["state"] == "delivered":
             break
         assert time.monotonic() < deadline
-        time.sleep(0.01)
+        time.sleep(delay)
+        delay = min(delay * 2, 0.1)
     assert recovered["state"] == "delivered"
 
     stop_supervisor(state, "Garen")
@@ -411,16 +468,30 @@ def test_paused_stop_and_unreachable_are_bounded(root: Path) -> None:
         binding = store.supervisor_binding("Garen")
         scope = str(binding["scope_id"])
         store.configure_supervision_policy(scope, SHOTCALLER_ID, "calm", 5, _at())
+        lease = _future(60)
+        registered_at = _at()
         store.register_watcher(
             scope,
             "watcher:paused-stop",
             SHOTCALLER_ID,
             GAREN_RUNTIME,
             "unix:/synthetic/calm-paused-stop.sock",
-            _future(60),
+            lease,
             1,
-            _at(),
+            registered_at,
         )
+        retry = store.register_watcher(
+            scope,
+            "watcher:paused-stop",
+            SHOTCALLER_ID,
+            GAREN_RUNTIME,
+            "unix:/synthetic/calm-paused-stop.sock",
+            lease,
+            1,
+            registered_at,
+        )
+        assert retry["idempotent"] and retry["mode"] == "calm"
+        assert retry["runtime_state"] == "supervising"
         store.pause_calm_supervision(
             SHOTCALLER_ID, "watcher:paused-stop", 1, _at()
         )
@@ -476,7 +547,12 @@ def test_paused_stop_and_unreachable_are_bounded(root: Path) -> None:
     monitor_thread, monitor_errors = _start(monitor)
     paused = pause_supervisor(liveness_state, "Garen")
     assert paused["wake_policy"] == "calm_paused" and monitor_thread.is_alive()
-    time.sleep(1.1)
+    deadline = time.monotonic() + 2
+    delay_seconds = 0.01
+    while missing.calls < 2:
+        assert time.monotonic() < deadline
+        time.sleep(delay_seconds)
+        delay_seconds = min(delay_seconds * 2, 0.1)
     with SQLiteStorage(liveness_state) as observer:
         current = observer.watcher_registration(SHOTCALLER_ID)
         current_binding = observer.supervisor_binding("Garen")
@@ -579,6 +655,8 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="league-calm-supervision-") as temporary:
         root = Path(temporary)
         test_final_policy_and_timer_matrix()
+        test_in_flight_attention_delivery_is_not_dispatched_twice(root)
+        test_registration_and_silent_reconciliation_are_atomic(root)
         test_calm_event_ipc_pause_resume_and_recovery(root)
         test_paused_stop_and_unreachable_are_bounded(root)
         test_runtime_loss_grace_cancels_on_recovery(root)

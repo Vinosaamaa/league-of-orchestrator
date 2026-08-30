@@ -131,6 +131,15 @@ def dispatch_event(
             "reason": policy["reason"],
             "idempotent": policy["idempotent"],
         }
+    if policy["action"] == "defer":
+        return {
+            "outbox_id": outbox_id,
+            "event_id": event_id,
+            "recipient_agent_id": recipient_agent_id,
+            "state": policy["state"],
+            "reason": policy["reason"],
+            "idempotent": policy["idempotent"],
+        }
     service = DeliveryService(
         store,
         adapter or InstalledDeliveryAdapter(),

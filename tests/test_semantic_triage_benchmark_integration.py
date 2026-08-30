@@ -65,6 +65,26 @@ def main() -> None:
     finally:
         BENCHMARK.terminate_and_reap(stalled)
 
+    partial = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import sys,time; sys.stdout.write('{'); sys.stdout.flush(); time.sleep(30)",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        reader = BENCHMARK.ProcessLineReader(partial)
+        try:
+            reader.read(time.monotonic() + 0.05)
+        except RuntimeError as exc:
+            assert "timed out" in str(exc)
+        else:
+            raise AssertionError("partial subprocess line bypassed the deadline")
+    finally:
+        BENCHMARK.terminate_and_reap(partial)
+
     corpus = ROOT / "tests" / "fixtures" / "semantic_triage_corpus.v1.json"
     cases, _ = BENCHMARK.load_corpus(corpus)
     selected = BENCHMARK.select_batch(cases, 25, 0, BENCHMARK.DEFAULT_SEED)

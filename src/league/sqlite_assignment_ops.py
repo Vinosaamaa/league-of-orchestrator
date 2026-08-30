@@ -2877,13 +2877,6 @@ def _persist_task_transition(
     )
     store.connection.execute(
         """
-        UPDATE runtime_instances SET last_seen_at=?
-         WHERE runtime_instance_id=? AND runtime_generation=?
-        """,
-        (at, runtime_instance_id, runtime["runtime_generation"]),
-    )
-    store.connection.execute(
-        """
         INSERT INTO task_transitions
           (transition_id,transition_key,task_id,from_state,to_state,update_text,next_action,
            blocker,created_at,event_id)

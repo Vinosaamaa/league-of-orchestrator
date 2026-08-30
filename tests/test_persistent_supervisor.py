@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -23,7 +24,9 @@ from request_lifecycle_fixture import GAREN_RUNTIME, GAREN_RUNTIME_TWO, create_c
 from storage_fixture import SHOTCALLER_ID  # noqa: E402
 from league.canonical_delivery import InstalledDeliveryAdapter  # noqa: E402
 from league.persistent_supervisor import (  # noqa: E402
+    BoundedRuntimeCommandRunner,
     PersistentSupervisor,
+    SupervisorUnavailable,
     notify_user_message,
     send_supervisor_message,
     stop_supervisor,
@@ -40,6 +43,12 @@ class FakeWakeAdapter:
 
     def send(self, binding, envelope) -> None:
         self.calls.append((dict(binding), dict(envelope)))
+
+
+class ExplodingWakeAdapter:
+    def send(self, binding, envelope) -> None:
+        del binding, envelope
+        raise KeyError("synthetic malformed adapter result")
 
 
 class FakeRecoveryAdapter:
@@ -125,7 +134,24 @@ def _close_secondary_runtime(store: SQLiteStorage, at: str) -> None:
     )
 
 
+def test_runtime_inventory_output_is_bounded() -> None:
+    runner = BoundedRuntimeCommandRunner(max_output_bytes=32)
+    try:
+        runner(
+            [sys.executable, "-c", "print('x' * 64)"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except StorageRefusal as exc:
+        assert exc.code == "runtime_observation_refused" and exc.retryable
+    else:
+        raise AssertionError("oversized runtime inventory output was retained")
+
+
 def main() -> None:
+    test_runtime_inventory_output_is_bounded()
     with tempfile.TemporaryDirectory(prefix="l66-supervisor-") as temporary:
         root = Path(temporary)
         state, store, clock = create_context(root, "state")
@@ -146,6 +172,22 @@ def main() -> None:
         thread, errors = _start(runtime)
         first = supervisor_status(state, "Garen")
         assert first["live"] and first["event_driven"] and first["lease_valid"], first
+        runtime.wake_adapter = ExplodingWakeAdapter()
+        try:
+            send_supervisor_message(
+                f"unix:{runtime.socket_path}",
+                {
+                    "kind": "champion-event",
+                    "fence": first["fence"],
+                    "runtime_generation": binding["runtime_generation"],
+                    "envelope": {"event_id": "event:adapter-error"},
+                },
+            )
+        except SupervisorUnavailable:
+            pass
+        else:
+            raise AssertionError("unexpected adapter failure did not return a refusal")
+        runtime.wake_adapter = fake
 
         hook_environment = {
             **os.environ,
@@ -394,6 +436,43 @@ def main() -> None:
             timeout=10,
             check=False,
         )
+        assert refused.returncode == 2
+        assert "supervisor_ownership_uncertain" in refused.stderr
+        with SQLiteStorage(state) as observer:
+            assert observer.untriaged_intake(SHOTCALLER_ID)["returned_count"] == 0
+
+    with tempfile.TemporaryDirectory(prefix="l66-supervisor-start-race-") as temporary:
+        state, store, clock = create_context(Path(temporary), "state")
+        _close_secondary_runtime(store, clock.now())
+        store.close()
+        runtime = PersistentSupervisor(state, callsign="Garen")
+        runtime.lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock = runtime.lock_path.open("a+")
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            refused = subprocess.run(
+                [str(ROOT / "bin/agent-watcher"), "codex-user-prompt-hook"],
+                input=json.dumps(
+                    {
+                        "session_id": f"session:{GAREN_RUNTIME}",
+                        "turn_id": "turn:starting-owner",
+                        "hook_event_name": "UserPromptSubmit",
+                        "prompt": "Synthetic prompt fenced during supervisor startup",
+                    }
+                ),
+                capture_output=True,
+                text=True,
+                env={
+                    **os.environ,
+                    "LEAGUE_STATE_ROOT": str(state),
+                    "PYTHONDONTWRITEBYTECODE": "1",
+                },
+                timeout=10,
+                check=False,
+            )
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+            lock.close()
         assert refused.returncode == 2
         assert "supervisor_ownership_uncertain" in refused.stderr
         with SQLiteStorage(state) as observer:

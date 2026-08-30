@@ -7,6 +7,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -30,6 +31,22 @@ def main() -> None:
         stream is None or stream.closed
         for stream in (sleeper.stdin, sleeper.stdout, sleeper.stderr)
     )
+
+    stalled = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        BENCHMARK.read_process_json(stalled, time.monotonic() + 0.05)
+    except RuntimeError as exc:
+        assert "timed out" in str(exc)
+    else:
+        raise AssertionError("stalled benchmark child bypassed the output deadline")
+    finally:
+        BENCHMARK.terminate_and_reap(stalled)
+    assert stalled.poll() is not None
 
     with tempfile.TemporaryDirectory(prefix="league-inline-shape-test-") as temporary:
         output = Path(temporary) / "receipt.json"

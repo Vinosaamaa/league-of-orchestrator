@@ -6,7 +6,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
+import select
 import statistics
 import subprocess
 import sys
@@ -71,6 +73,44 @@ def terminate_and_reap(process: subprocess.Popen[Any]) -> None:
     """Stable focused-test contract for bounded benchmark child cleanup."""
 
     _terminate_and_reap(process)
+
+
+def _read_process_json(
+    process: subprocess.Popen[Any], deadline: float, *, max_bytes: int = 1_100_000
+) -> dict[str, Any]:
+    """Read one bounded JSON line without allowing a child to hang the benchmark."""
+
+    assert process.stdout is not None
+    chunks = bytearray()
+    descriptor = process.stdout.fileno()
+    while b"\n" not in chunks:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeError("inline request-turn child timed out before emitting JSON")
+        readable, _, _ = select.select((descriptor,), (), (), remaining)
+        if not readable:
+            raise RuntimeError("inline request-turn child timed out before emitting JSON")
+        chunk = os.read(descriptor, min(65_536, max_bytes + 1 - len(chunks)))
+        if not chunk:
+            raise RuntimeError("inline request-turn child exited before emitting JSON")
+        chunks.extend(chunk)
+        if len(chunks) > max_bytes:
+            raise RuntimeError("inline request-turn child exceeded the JSON output bound")
+    line, separator, remainder = chunks.partition(b"\n")
+    if not separator or remainder:
+        raise RuntimeError("inline request-turn child emitted an invalid response frame")
+    value = json.loads(line)
+    if not isinstance(value, dict):
+        raise RuntimeError("inline request-turn child emitted a non-object response")
+    return value
+
+
+def read_process_json(
+    process: subprocess.Popen[Any], deadline: float, *, max_bytes: int = 1_100_000
+) -> dict[str, Any]:
+    """Stable focused-test contract for deadline-bounded child output."""
+
+    return _read_process_json(process, deadline, max_bytes=max_bytes)
 
 
 def _load(path: Path) -> tuple[list[dict[str, Any]], str]:
@@ -225,9 +265,10 @@ def _one(case: dict[str, Any], arm: str, sample: int, league: Path) -> dict[str,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
+        deadline = time.monotonic() + 20
         try:
             assert process.stdin is not None and process.stdout is not None
-            intake = json.loads(process.stdout.readline())
+            intake = _read_process_json(process, deadline)
             intake_completed = time.perf_counter_ns()
             if not intake.get("ok") or intake["result"]["returned_count"] != 1:
                 raise RuntimeError("inline request-turn intake failed")
@@ -240,7 +281,7 @@ def _one(case: dict[str, Any], arm: str, sample: int, league: Path) -> dict[str,
             begin_started = time.perf_counter_ns()
             process.stdin.write(encoded)
             process.stdin.flush()
-            begun = json.loads(process.stdout.readline())
+            begun = _read_process_json(process, deadline)
             begin_completed = time.perf_counter_ns()
             if not begun.get("ok"):
                 raise RuntimeError(
@@ -260,8 +301,8 @@ def _one(case: dict[str, Any], arm: str, sample: int, league: Path) -> dict[str,
             commit_started = time.perf_counter_ns()
             process.stdin.write((_json(commit) + "\n").encode("utf-8"))
             process.stdin.flush()
-            committed = json.loads(process.stdout.readline())
-            process.wait(timeout=20)
+            committed = _read_process_json(process, deadline)
+            process.wait(timeout=max(0.001, deadline - time.monotonic()))
             completed = time.perf_counter_ns()
             if process.returncode != 0 or not committed.get("ok"):
                 assert process.stderr is not None

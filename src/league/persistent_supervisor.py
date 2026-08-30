@@ -13,6 +13,7 @@ import socket
 import stat
 import struct
 import subprocess
+import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -33,6 +34,56 @@ DEFAULT_RENEW_SECONDS = 20
 DEFAULT_RECOVERY_SECONDS = 300
 SOCKET_NAME = ".league-supervisor.sock"
 LOCK_NAME = ".league-supervisor.lock"
+MAX_RUNTIME_INVENTORY_OUTPUT_BYTES = 1_000_000
+
+
+class BoundedRuntimeCommandRunner:
+    """Run one runtime inventory command and retain only bounded output."""
+
+    def __init__(self, max_output_bytes: int = MAX_RUNTIME_INVENTORY_OUTPUT_BYTES) -> None:
+        if max_output_bytes < 1:
+            raise ValueError("runtime command output bound must be positive")
+        self.max_output_bytes = max_output_bytes
+
+    def __call__(
+        self,
+        arguments: list[str],
+        *,
+        check: bool,
+        capture_output: bool,
+        text: bool,
+        timeout: float,
+    ) -> subprocess.CompletedProcess[str]:
+        if check or not capture_output or not text:
+            raise ValueError("runtime command runner requires bounded text capture")
+        with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
+            process = subprocess.run(
+                arguments,
+                stdout=stdout,
+                stderr=stderr,
+                timeout=timeout,
+                check=False,
+            )
+            outputs: list[str] = []
+            for stream in (stdout, stderr):
+                if stream.tell() > self.max_output_bytes:
+                    raise StorageRefusal(
+                        "runtime_observation_refused",
+                        "Herdr runtime inventory exceeded its output bound",
+                        retryable=True,
+                    )
+                stream.seek(0)
+                try:
+                    outputs.append(stream.read().decode("utf-8"))
+                except UnicodeDecodeError as exc:
+                    raise StorageRefusal(
+                        "runtime_observation_refused",
+                        "Herdr runtime inventory was not UTF-8",
+                        retryable=True,
+                    ) from exc
+        return subprocess.CompletedProcess(
+            arguments, process.returncode, outputs[0], outputs[1]
+        )
 
 
 class SupervisorUnavailable(RuntimeError):
@@ -60,9 +111,9 @@ class HerdrRuntimeObservationAdapter:
 
     def __init__(
         self,
-        runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+        runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
     ) -> None:
-        self.runner = runner
+        self.runner = runner or BoundedRuntimeCommandRunner()
 
     @staticmethod
     def _session(agent: Mapping[str, Any]) -> str | None:
@@ -458,6 +509,7 @@ class PersistentSupervisor:
                     f"{binding['actor_agent_id']}\0{self.state_root}".encode("utf-8")
                 ).hexdigest()[:24]
                 self._watcher_id = f"watcher:persistent:{watcher_digest}"
+                self._binding = binding
                 receipt = store.register_watcher(
                     binding["scope_id"],
                     self._watcher_id,
@@ -469,7 +521,6 @@ class PersistentSupervisor:
                     _at(),
                     block_on_obligations=True,
                 )
-            self._binding = binding
             return receipt
 
     def _assert_fenced_registration(self, store: Any, fence: int) -> None:
@@ -645,6 +696,15 @@ class PersistentSupervisor:
             )
         except (SupervisorUnavailable, json.JSONDecodeError, UnicodeDecodeError, OSError):
             self._response(connection, {"ok": False, "error": "supervisor_wake_refused"})
+        except Exception:
+            # This is the worker thread boundary: never leave a broker client
+            # hanging on an unexpected adapter or malformed-message failure.
+            try:
+                self._response(
+                    connection, {"ok": False, "error": "supervisor_internal_error"}
+                )
+            except OSError:
+                connection.close()
 
     def _recover_pending(self) -> None:
         from .canonical_delivery import dispatch_event

@@ -146,7 +146,8 @@ evidence.
 | SQLite busy | Long-lived supervisor plus prompt or Stop returned bounded `busy`. | Every hot open requested DELETE against established WAL, requiring an exclusive mode-change lock. | Only migration establishes journal mode; hot paths read and validate it without mutation. |
 | Sandbox access | A visible Champion could not open canonical state. | Workspace-write granted only the repository worktree. | Launcher adds only the exact canonical League root as a writable root; generic open errors identify this boundary. |
 | Missing launcher | Legacy launch was correctly fenced but no stable one-command replacement existed. | Assignment phases existed without the real Herdr/Codex adapter composition. | `league assign run` owns reserve, launch, generated UUID observation, verification, activation, context, and failure cleanup. |
-| Installed launch pending | The first installed visible E2E returned `cleanup_pending` and left one exact pre-session pane blocked in `launch_pending`. | The launcher did not pass a narrow trust override for the new worktree, and rollback required `/exit` even though no Codex session existed yet. | The launch supplies exact per-process worktree trust; pre-session rollback verifies routing name, pane, terminal, cwd, and pending state before closing the exact pane without inventing a session. |
+| Installed launch pending | The first installed visible E2E returned `cleanup_pending` and left one exact pre-session pane blocked in `launch_pending`; after exact rollback was fixed, later probes exposed `agent_not_ready` and a startup timeout. | Rollback required `/exit` even though no Codex session existed. Startup encoded root access as an unsupported configuration key, attempted to manufacture repository trust through a command-line config override that the persisted trust gate intentionally ignores, and then combined Herdr's `--approve-for-me` mode with an incompatible explicit `--sandbox` argument. | Pre-session rollback verifies routing name, pane, terminal, cwd, and pending state before closing the exact pane. Launch validates the linked Git back-reference without bypassing trust, relies on Herdr's workspace-write approval mode, and adds only the exact League root with the supported `--add-dir` flag. Untrusted repositories refuse and clean up. |
+| Launch identity observation | Codex started and exposed its generated UUID in the exact terminal title before Herdr populated `agent_session`; rename then exposed the display title before parsed title tokens. | The adapter assumed all equivalent Herdr identity views became visible atomically. | Launch accepts only the UUID-shaped initial Codex title, exact endpoint/cwd/terminal, and stable Herdr state-change sequence; rename accepts the exact displayed title. Later context and cleanup require that same launch generation when session metadata is absent. |
 | Context delivery residue | Successful context delivery could leave the assignment-activation outbox pending. | The context receipt and activation outbox were stored by separate mechanisms without an atomic recipient receipt. | Context delivery now atomically records the exact recipient effect and marks only the matching activation outbox delivered; conflicts refuse. |
 | Chatty turn latency | Six serialized triage operations took seconds; a cold command cost roughly two hundred milliseconds locally. | Each semantic item started a new Python process, reopened SQLite, reparsed CLI arguments, and re-ran policy setup. | One `request turn` process spans exact intake, atomic begin, model work, atomic commit, and final boundary. |
 | Benchmark provenance | The prior result called 26 repeated SQLite commands a “legacy” turn. | The benchmark compared command choreography but did not execute the retired JSON watcher. | The reproducible comparison now invokes the preserved JSON command on temporary record pairs and the installed SQLite command on temporary canonical state; it reports median/p95 by phase and command count. |
@@ -176,6 +177,8 @@ evidence.
 | Guide retirement | The final JSON-era orchestration excerpt was archived with its full source hash; the installable source guide and generated Champion context removed active record-pair and retired-writer instructions. |
 | Documentation gate | The owning incident/design report was expanded to record architecture, failure history, decisions, commands, performance, recovery, acceptance, and remaining limits before release. |
 | First installed lifecycle attempt | Prompt capture and one-process triage passed, but visible launch stopped at `cleanup_pending`. Stable reporting proved the reserved assignment and cleanup obligation; Herdr proved one exact pre-session `launch_pending` pane. The pane was closed before correction. |
+| Second installed lifecycle attempt | Exact pre-session rollback passed and exposed `agent_not_ready`; later pane receipts exposed both the ignored command-line trust override and Codex's exact `--approve-for-me` versus `--sandbox` parser conflict. The successor validates the linked worktree, preserves the persisted trust boundary, relies on Herdr's workspace-write approval mode, and adds one exact `--add-dir`. |
+| Corrected real candidate launch | A disposable worktree of an already trusted repository started Codex, observed the generated UUID and exact display title, delivered bounded context, exited the exact agent, closed the pane, removed the linked worktree, and returned `cleaned=true`. |
 
 ## Technical root cause
 
@@ -258,7 +261,9 @@ Prompt rejected; no capture        Stop safely asks to retry
    task, agent, assignment, and cleanup-obligation state.
 3. A second transaction marks launching before any external effect.
 4. The adapter creates one unfocused visible tab in the exact issue worktree,
-   starts Codex in workspace-write with exact per-process worktree trust, adds only the canonical state root, observes
+   starts Codex through Herdr's workspace-write approval mode with one exact
+   canonical-root `--add-dir`, while preserving Codex's persisted repository-trust
+   boundary, then observes
    the generated thread UUID, and verifies workspace, pane, terminal, cwd,
    routing name, backend kind, and display title.
 5. If startup fails before a Codex session exists, rollback closes only an exact
@@ -568,7 +573,7 @@ adapter while preserving one external Garen process and SQLite.
 | Installed release | Tested merge tree and exact source-managed guide installed with prior release retained | Pending |
 | Whole direct turn | One exact PID emits two prompt bodies, atomically begins triage/claims/routing, remains alive, atomically commits answer/result and delivery, returns full unresolved/cleanup boundary, then exits without a second League spawn | Passed in focused synthetic test |
 | Turn latency | Cold CLI, 26-process prior choreography, one-process whole turn, and open-connection batch phases measured separately | Passed; exact table above |
-| Visible launch | One command reserves, starts, observes generated UUID, verifies, activates, and briefs a fake Herdr/Codex runtime | Passed in focused synthetic test |
+| Visible launch | One command reserves, starts, observes generated UUID, verifies, activates, and briefs the exact Herdr/Codex runtime | Passed in focused test and disposable real candidate adapter gate |
 | Sandbox access | Launched Codex receives only the exact canonical League root as an added writable root and can use stable commands | Pending real gate |
 | Failure cleanup | Unproven cleanup remains pending; proven endpoint/runtime/callsign cleanup settles blocked with zero active lease | Passed in focused synthetic test |
 | Disposable installed E2E | Capture, explicit triage, assign run, transition, Garen watcher delivery, terminal cleanup, zero residue, integrity | Pending and required for resolution |
@@ -619,8 +624,8 @@ The final installed gate must bind rather than narrate each effect:
 - Cross-Squad acknowledgement routing and explicit defer/block/cancel remain
   dedicated commands instead of being folded into the ordinary direct-turn
   batch. This preserves semantic authority.
-- Writable-root syntax is mechanically covered but remains unproven against the
-  installed Champion sandbox until the real launch gate.
+- Writable-root syntax and real startup passed the candidate adapter gate but
+  remain unproven in the installed full lifecycle until the final E2E.
 - UserPromptSubmit remains owner-disabled until the exact installed acceptance
   is ready; the implementation does not re-enable it.
 

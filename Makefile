@@ -65,7 +65,7 @@ test:
 
 test-baseline:
 	@set -eu; for test in $(BASELINE_TESTS); do \
-		PYTHONDONTWRITEBYTECODE=1 $(PYTHON) $$test; \
+		LEAGUE_WRITER_POINTER="$(CURDIR)/tests/fixtures/absent-writer-pointer.json" PYTHONDONTWRITEBYTECODE=1 $(PYTHON) $$test; \
 	done
 
 test-storage:

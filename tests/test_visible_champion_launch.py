@@ -19,6 +19,7 @@ from league.visible_launch import (  # noqa: E402
     HerdrCodexLaunchAdapter,
     VisibleChampionLaunchService,
     VisibleLaunchOptions,
+    _codex_trust_root,
 )
 from lifecycle_fakes import FakeLaunchAdapter  # noqa: E402
 from request_lifecycle_fixture import (  # noqa: E402
@@ -49,6 +50,7 @@ def _context(root: Path, name: str):
     )
     worktree = root / name / "worktree"
     worktree.mkdir(parents=True)
+    (worktree / ".git").mkdir()
     return store, clock, worktree
 
 
@@ -81,9 +83,12 @@ def _options(root: Path) -> VisibleLaunchOptions:
 
 
 class FakeHerdrRunner:
-    def __init__(self, worktree: Path, *, wrong_thread: bool = False) -> None:
+    def __init__(
+        self, worktree: Path, *, wrong_thread: bool = False, title_only: bool = False
+    ) -> None:
         self.worktree = str(worktree.resolve())
         self.wrong_thread = wrong_thread
+        self.title_only = title_only
         self.started = False
         self.renamed = False
         self.closed = False
@@ -101,19 +106,27 @@ class FakeHerdrRunner:
             if self.renamed
             else {}
         )
-        return {
+        agent = {
             "agent": "codex",
-            "agent_session": {"value": thread},
             "agent_status": "idle",
             "cwd": self.worktree,
             "foreground_cwd": self.worktree,
             "name": "lux",
             "pane_id": "w1:p99",
+            "state_change_seq": 99,
             "tab_id": "w1:t99",
             "terminal_id": "term_test_99",
             "tokens": tokens,
             "workspace_id": "w1",
         }
+        if self.title_only:
+            if self.renamed:
+                tokens["identity_thread_id"] = thread
+            else:
+                agent["terminal_title_stripped"] = f"{thread} | codex"
+        else:
+            agent["agent_session"] = {"value": thread}
+        return agent
 
     def run(
         self, arguments, *, timeout_seconds: int = 30
@@ -182,15 +195,13 @@ def test_real_adapter_one_command_success_and_retry(root: Path) -> None:
     context_index = max(i for i, call in enumerate(runner.calls) if call[:3] == ("herdr", "agent", "prompt"))
     assert tab_index < start_index < context_index
     start = runner.calls[start_index]
-    assert 'sandbox_mode="workspace-write"' in start
-    assert (
-        "sandbox_workspace_write.writable_roots="
-        + json.dumps([str(root / "league")], separators=(",", ":"))
-    ) in start
-    assert (
-        f"projects.{json.dumps(str(worktree.resolve()))}.trust_level=\"trusted\""
-        in start
+    assert start[start.index("--add-dir") + 1] == str(root / "league")
+    assert "--sandbox" not in start
+    assert not any(value.startswith("sandbox_mode=") for value in start)
+    assert not any(
+        value.startswith("sandbox_workspace_write.writable_roots=") for value in start
     )
+    assert not any("trust_level=" in value for value in start)
     row = store.connection.execute(
         "SELECT state,version,runtime_instance_id FROM task_assignments WHERE task_assignment_id=?",
         (spec.assignment_id,),
@@ -223,6 +234,21 @@ def test_real_adapter_one_command_success_and_retry(root: Path) -> None:
         "assignment_context",
     )
     assert activation_delivery["effect_id"] == result["context_delivery"]["effect_sha256"]
+    store.close()
+
+
+def test_real_adapter_observes_generated_thread_before_session_metadata(root: Path) -> None:
+    store, clock, worktree = _context(root, "title-session")
+    options = _options(root)
+    runner = FakeHerdrRunner(worktree, title_only=True)
+    service = VisibleChampionLaunchService(store, _adapter(options, runner), options, clock)
+    spec = _spec(worktree, "title-session")
+    result = service.launch(spec)
+    assert result["state"] == "active"
+    assert store.assignment_launch_context(spec.assignment_id)["acceptance_receipt"][
+        "thread_id"
+    ] == THREAD_ID
+    assert len(runner.contexts) == 1
     store.close()
 
 
@@ -272,6 +298,18 @@ def test_pre_session_launch_failure_closes_exact_pending_pane(root: Path) -> Non
     )
     assert any(call[:3] == ("herdr", "pane", "close") for call in runner.calls)
     store.close()
+
+
+def test_linked_worktree_trust_binds_owning_repository(root: Path) -> None:
+    repository = root / "linked-trust/repository"
+    worktree = root / "linked-trust/worktree"
+    git_dir = repository / ".git/worktrees/canary"
+    git_dir.mkdir(parents=True)
+    worktree.mkdir(parents=True)
+    marker = worktree / ".git"
+    marker.write_text(f"gitdir: {git_dir}\n", encoding="utf-8")
+    (git_dir / "gitdir").write_text(f"{marker}\n", encoding="utf-8")
+    assert _codex_trust_root(worktree) == repository.resolve()
 
 
 class FailingAdapter:
@@ -410,7 +448,9 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="league-visible-launch-") as temporary:
         root = Path(temporary)
         test_real_adapter_one_command_success_and_retry(root)
+        test_real_adapter_observes_generated_thread_before_session_metadata(root)
         test_pre_session_launch_failure_closes_exact_pending_pane(root)
+        test_linked_worktree_trust_binds_owning_repository(root)
         test_unproven_partial_launch_stays_cleanup_pending(root)
         test_context_failure_records_pending_when_cleanup_is_unproven(root)
         test_context_failure_exact_cleanup_blocks_and_releases(root)

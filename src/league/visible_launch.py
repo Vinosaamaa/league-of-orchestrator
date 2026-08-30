@@ -148,7 +148,18 @@ def _agent_object(result: Mapping[str, Any]) -> dict[str, Any]:
 def _session_id(agent: Mapping[str, Any]) -> str | None:
     session = agent.get("agent_session")
     value = session.get("value") if isinstance(session, Mapping) else None
-    return str(value) if isinstance(value, str) else None
+    if isinstance(value, str):
+        return value
+    tokens = agent.get("tokens")
+    token_value = tokens.get("identity_thread_id") if isinstance(tokens, Mapping) else None
+    if isinstance(token_value, str):
+        return token_value
+    title = agent.get("terminal_title_stripped", agent.get("terminal_title"))
+    if isinstance(title, str) and title.endswith(" | codex"):
+        title_value = title.removesuffix(" | codex")
+        if THREAD_UUID.fullmatch(title_value) is not None:
+            return title_value
+    return None
 
 
 def _validate_options(options: VisibleLaunchOptions) -> None:
@@ -182,6 +193,54 @@ def _validate_options(options: VisibleLaunchOptions) -> None:
         )
     if not 1_000 <= options.startup_timeout_ms <= 300_000:
         raise StorageRefusal("launch_scope_invalid", "Herdr startup timeout is invalid")
+
+
+def _codex_trust_root(worktree: Path) -> Path:
+    marker = worktree / ".git"
+    if marker.is_dir() and not marker.is_symlink():
+        return worktree.resolve()
+    if not marker.is_file() or marker.is_symlink() or marker.stat().st_size > 4096:
+        raise StorageRefusal(
+            "launch_scope_invalid", "visible launch worktree has no exact Git identity"
+        )
+    try:
+        line = marker.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeError) as exc:
+        raise StorageRefusal(
+            "launch_scope_invalid", "visible launch Git identity could not be read"
+        ) from exc
+    if not line.startswith("gitdir: ") or "\n" in line or "\0" in line:
+        raise StorageRefusal(
+            "launch_scope_invalid", "visible launch Git identity is malformed"
+        )
+    supplied = Path(line.removeprefix("gitdir: "))
+    git_dir = (
+        supplied if supplied.is_absolute() else marker.parent / supplied
+    ).resolve(strict=False)
+    common_dir = git_dir.parent.parent
+    repository = common_dir.parent
+    backref = git_dir / "gitdir"
+    try:
+        recorded_marker = Path(backref.read_text(encoding="utf-8").strip()).resolve()
+    except (OSError, UnicodeError) as exc:
+        raise StorageRefusal(
+            "launch_scope_invalid", "visible launch worktree registration is incomplete"
+        ) from exc
+    exact = (
+        git_dir.is_dir()
+        and git_dir.parent.name == "worktrees"
+        and common_dir.name == ".git"
+        and common_dir.is_dir()
+        and not common_dir.is_symlink()
+        and repository.is_dir()
+        and not repository.is_symlink()
+        and recorded_marker == marker.resolve()
+    )
+    if not exact:
+        raise StorageRefusal(
+            "launch_scope_invalid", "visible launch worktree registration is not exact"
+        )
+    return repository.resolve()
 
 
 class HerdrCodexLaunchAdapter:
@@ -246,6 +305,7 @@ class HerdrCodexLaunchAdapter:
         terminal_id: str,
     ) -> dict[str, str]:
         thread_id = _session_id(agent)
+        state_change_seq = agent.get("state_change_seq")
         expected_cwd = str(Path(spec.worktree).resolve())
         exact = (
             agent.get("name") == str(spec.callsign).lower()
@@ -257,6 +317,8 @@ class HerdrCodexLaunchAdapter:
             and agent.get("foreground_cwd") == expected_cwd
             and isinstance(thread_id, str)
             and THREAD_UUID.fullmatch(thread_id) is not None
+            and isinstance(state_change_seq, int)
+            and state_change_seq >= 0
         )
         if not exact:
             raise StorageRefusal(
@@ -268,6 +330,7 @@ class HerdrCodexLaunchAdapter:
             "terminal_id": terminal_id,
             "thread_id": thread_id,
             "routing_name": str(spec.callsign).lower(),
+            "state_change_seq": str(state_change_seq),
         }
 
     def _verify_title(self, routing_name: str, callsign: str) -> None:
@@ -275,11 +338,14 @@ class HerdrCodexLaunchAdapter:
         for _ in range(50):
             agent = self._get_agent(routing_name)
             tokens = agent.get("tokens")
+            title = agent.get("terminal_title_stripped", agent.get("terminal_title"))
             if isinstance(tokens, Mapping) and (
                 tokens.get("sidebar_name") == callsign
                 and tokens.get("task_label") == self.options.task_label
                 and tokens.get("thread_title") == expected
             ):
+                return
+            if title == f"{expected} | codex":
                 return
             time.sleep(0.1)
         raise StorageRefusal(
@@ -295,6 +361,7 @@ class HerdrCodexLaunchAdapter:
             or spec.callsign is None
         ):
             raise LaunchAdapterError("invalid_launch_worktree")
+        _codex_trust_root(worktree)
         routing_name = str(spec.callsign).lower()
         if not SAFE_ROUTING_NAME.fullmatch(routing_name):
             raise LaunchAdapterError("invalid_launch_routing_name")
@@ -336,9 +403,6 @@ class HerdrCodexLaunchAdapter:
                 "routing_name": routing_name,
                 "worktree": str(worktree.resolve()),
             }
-            trust_override = (
-                f"projects.{json.dumps(str(worktree.resolve()))}.trust_level=\"trusted\""
-            )
             self._command(
                 (
                     "herdr",
@@ -356,13 +420,8 @@ class HerdrCodexLaunchAdapter:
                     self.options.model,
                     "--config",
                     f'model_reasoning_effort="{self.options.effort}"',
-                    "--config",
-                    "sandbox_mode=\"workspace-write\"",
-                    "--config",
-                    "sandbox_workspace_write.writable_roots="
-                    + json.dumps([self.options.state_root], separators=(",", ":")),
-                    "--config",
-                    trust_override,
+                    "--add-dir",
+                    self.options.state_root,
                 ),
                 "Herdr Codex start",
                 timeout_seconds=(self.options.startup_timeout_ms // 1000) + 10,
@@ -432,10 +491,23 @@ class HerdrCodexLaunchAdapter:
             raise LaunchAdapterError("launch_context_invalid", cleanup_required=True)
         routing_name = str(receipt.get("routing_name", ""))
         agent = self._get_agent(routing_name)
+        observed_thread = _session_id(agent)
+        exact_generation = (
+            self._created is not None
+            and agent.get("pane_id") == self._created.get("pane_id")
+            and agent.get("terminal_id") == self._created.get("terminal_id")
+            and agent.get("cwd") == self._created.get("worktree")
+            and agent.get("foreground_cwd") == self._created.get("worktree")
+            and str(agent.get("state_change_seq"))
+            == self._created.get("state_change_seq")
+        )
         if (
             agent.get("pane_id") != receipt.get("endpoint")
-            or _session_id(agent) != receipt.get("thread_id")
             or agent.get("agent") != "codex"
+            or (
+                observed_thread != receipt.get("thread_id")
+                and not (observed_thread is None and exact_generation)
+            )
         ):
             raise LaunchAdapterError("launch_context_identity_mismatch", cleanup_required=True)
         try:
@@ -470,14 +542,24 @@ class HerdrCodexLaunchAdapter:
                 if agent.get("pane_id") != pane_id:
                     return False
                 observed_thread = _session_id(agent)
+                expected_sequence = identity.get("state_change_seq")
                 exact_endpoint = (
                     agent.get("terminal_id") == identity.get("terminal_id")
                     and agent.get("cwd") == identity.get("worktree")
                     and agent.get("foreground_cwd") == identity.get("worktree")
+                    and (
+                        expected_sequence is None
+                        or str(agent.get("state_change_seq")) == expected_sequence
+                    )
                 )
                 if expected_thread or observed_thread is not None:
-                    if not exact_endpoint or (
-                        expected_thread and observed_thread != expected_thread
+                    if (
+                        not exact_endpoint
+                        or (
+                            expected_thread
+                            and observed_thread is not None
+                            and observed_thread != expected_thread
+                        )
                     ):
                         return False
                     completed = self.runner.run(

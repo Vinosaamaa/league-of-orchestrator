@@ -1,5 +1,20 @@
 # Source provenance
 
+## Schema-16 release compatibility repair
+
+Issue #90 restores the already-canonical schema-16 migration omitted from the
+merged 0.2.28 release candidate. The exact migration source comes from public
+commit `c0bc88412a5be2db66030f43f5fe9e35c0d77877`; the source file SHA-256 is
+`5fbe8039100354ac8c7ad4a3b0add87ed41b5e4b9c01fc86678d404146637d45`.
+Migration v16 remains named
+`issue-coupled-cleanup-and-exact-thread-continuation` with checksum
+`a7fee02de43dbbde897b67e44c00e37805bf82790917d2f5392be70e4143ef3f`.
+
+This compatibility repair copies only the migration definition, migration
+ledger entry, release-receipt schema declarations, and rollback coverage. It
+does not import continuation runtime operations or duplicate the semantic
+request-reconciliation and supervisor changes under review in PR #94.
+
 ## Verified source snapshot
 
 - Repository: https://github.com/Vinosaamaa/terminal-environment-toolkit

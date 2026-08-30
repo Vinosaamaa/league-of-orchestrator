@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import sys
 import tempfile
 from pathlib import Path
@@ -101,6 +102,11 @@ def test_transactional_upgrade_backup_and_rollback(root: Path) -> None:
             "ix_activity_evidence_time",
             "ix_report_specs_created",
             "ix_repository_artifacts_task",
+            "ux_live_runtime_session_identity",
+            "ux_active_continuation_archive",
+            "ix_thread_archives_issue",
+            "ix_thread_incarnations_lineage",
+            "ix_continuation_state",
         } <= indexes
         assert [migration.version for migration in MIGRATIONS] == list(
             range(1, CURRENT_SCHEMA_VERSION + 1)
@@ -117,6 +123,7 @@ def test_transactional_upgrade_backup_and_rollback(root: Path) -> None:
             (13, "standalone-shotcaller-callsign-scope", "f429a924be1e26331d6f5535410bc390cd66bcd92f2890f231f4c2f08f3ef1cc"),
             (14, "immutable-prompt-provenance-current-owner", "e9afa0921c02d7464453b6fc24a4c73defb952d6cfc6d7829a7b502e81ff178c"),
             (15, "exact-stop-feedback-suppression", "5c7fed923ba5684c209350dab248d813fa313647229be2d373ff8cef78e91574"),
+            (16, "issue-coupled-cleanup-and-exact-thread-continuation", "a7fee02de43dbbde897b67e44c00e37805bf82790917d2f5392be70e4143ef3f"),
         ]
         assert store.connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
 
@@ -220,6 +227,53 @@ def test_schema_refusals_without_test_sql(root: Path) -> None:
     refused(lambda: SQLiteStorage(drift), "migration_drift")
 
 
+def test_v15_to_v16_rolls_back_before_thread_lineage_cutover(root: Path) -> None:
+    source = ROOT / "src/league/sqlite_continuation_schema.py"
+    assert hashlib.sha256(source.read_bytes()).hexdigest() == (
+        "5fbe8039100354ac8c7ad4a3b0add87ed41b5e4b9c01fc86678d404146637d45"
+    )
+    state, _ = migrated_state(root, "v15-to-v16", target_version=15)
+    with SQLiteStorage.for_migration(state) as store:
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM sqlite_master "
+            "WHERE type='index' AND name='ux_runtime_session_identity'"
+        ).fetchone()[0] == 1
+
+        def crash(point: str) -> None:
+            if point == "after_migration_16":
+                raise InjectedCrash(point)
+
+        try:
+            store.migrate(backup_name="backups/pre-v16.sqlite3", fault=crash)
+        except InjectedCrash:
+            pass
+        else:
+            raise AssertionError("v16 migration crash was not injected")
+        assert store.connection.execute("PRAGMA user_version").fetchone()[0] == 15
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM sqlite_master "
+            "WHERE type='index' AND name='ux_runtime_session_identity'"
+        ).fetchone()[0] == 1
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM sqlite_master "
+            "WHERE type='table' AND name='thread_lineages'"
+        ).fetchone()[0] == 0
+
+        receipt = store.migrate(backup_name="backups/pre-v16-retry.sqlite3")
+        assert receipt["from_version"] == 15
+        assert receipt["to_version"] == 16
+        assert receipt["applied"] == [16]
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM sqlite_master "
+            "WHERE type='index' AND name='ux_live_runtime_session_identity'"
+        ).fetchone()[0] == 1
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM sqlite_master "
+            "WHERE type='table' AND name='thread_lineages'"
+        ).fetchone()[0] == 1
+        assert store.integrity()["ok"]
+
+
 def test_v3_upgrade_preserves_cleanup_and_indexes_legacy_project(root: Path) -> None:
     state, _ = migrated_state(root, "v3-cleanup", target_version=3)
     with SQLiteStorage.for_migration(state) as store:
@@ -299,6 +353,7 @@ def main() -> None:
         test_v5_to_v6_rebuild_rolls_back_and_initializes_shuffled_order(root)
         test_v6_to_v7_rolls_back_and_applies_privacy_defaults(root)
         test_schema_refusals_without_test_sql(root)
+        test_v15_to_v16_rolls_back_before_thread_lineage_cutover(root)
         test_v3_upgrade_preserves_cleanup_and_indexes_legacy_project(root)
         test_backup_collision_and_corruption(root)
     print("PASS: SQLite runtime gate, migrations, verified backup, rollback, drift, and corruption refusal")

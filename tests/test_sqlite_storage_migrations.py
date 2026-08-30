@@ -245,7 +245,11 @@ def test_v15_to_v16_rolls_back_before_thread_lineage_cutover(root: Path) -> None
                 raise InjectedCrash(point)
 
         try:
-            store.migrate(backup_name="backups/pre-v16.sqlite3", fault=crash)
+            store.migrate(
+                backup_name="backups/pre-v16.sqlite3",
+                target_version=16,
+                fault=crash,
+            )
         except InjectedCrash:
             pass
         else:
@@ -260,7 +264,9 @@ def test_v15_to_v16_rolls_back_before_thread_lineage_cutover(root: Path) -> None
             "WHERE type='table' AND name='thread_lineages'"
         ).fetchone()[0] == 0
 
-        receipt = store.migrate(backup_name="backups/pre-v16-retry.sqlite3")
+        receipt = store.migrate(
+            backup_name="backups/pre-v16-retry.sqlite3", target_version=16
+        )
         assert receipt["from_version"] == 15
         assert receipt["to_version"] == 16
         assert receipt["applied"] == [16]

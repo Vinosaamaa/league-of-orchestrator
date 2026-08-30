@@ -149,14 +149,34 @@ can advance it; League does not reuse that global value as Herdr's source-local
 metadata sequence. Retry skips the duplicate rename, applies an explicitly
 owner-tagged League overlay, and accepts only the exact first post-effect global
 fence followed by two stable observations. A later provider or user
-presentation is never reasserted over. Any mismatch clears the League-owned
-alias and restores only baseline display tokens before rolling back the new
-reservation, leaving newer presentation metadata unchanged. If an interleaved
-thread or terminal-generation change prevents exact external restoration,
-League leaves the new reservation, lease, agent baseline, publication attempt,
-and history intact as a recoverable cleanup obligation. Canonical rollback
-waits until a later exact-identity retry proves the alias and owned-token
-cleanup.
+presentation is never reasserted over. A mismatch after the exact admission
+fence clears the League-owned alias and restores only baseline display tokens
+before rolling back the new reservation when that cleanup is provable. If an
+interleaved thread or terminal-generation change prevents exact external
+restoration, League leaves the new reservation, lease, agent baseline,
+publication attempt, and history intact as a recoverable cleanup obligation.
+A later create proceeds only if the original exact presentation returns;
+otherwise the retained reservation requires the dedicated cleanup lifecycle.
+
+Installed 0.2.36 revealed that Herdr may publish the route alias and its route
+tokens while retaining the provider's original command title and identity
+tokens. That state is not an arbitrary prebound pane: League may pass the
+initial inspection only when the existing reserved assignment, v2 baseline,
+and immutable publication attempt all match the alias, agent, thread, terminal
+generation, worktree, provider source/title/sidebar/thread envelope, and a
+non-regressing global observation. After this read-only proof, League records
+one immutable runtime binding before any additional Herdr effect. A future
+runtime mismatch refuses. The second pre-effect read must keep the exact first
+observation sequence, although a global advance that occurred before retry
+remains allowed relative to the older publication attempt.
+
+An arbitrary route, missing baseline/publication, changed provider
+title/source/tokens, different assignment, endpoint drift, or an interleaved
+sequence refuses without a rename, metadata report, prompt, layout, process, or
+Squad action. The existing alias and reservation remain paired as the truthful
+cleanup obligation. When a race occurs only after admission, canonical rollback
+still waits for proven external alias cleanup; an exact unchanged provider
+baseline needs no metadata rewrite after the alias is cleared.
 
 One installed pre-baseline generation retained exactly
 `scope_kind=squad` and a historical Squad `scope_id` instead of empty metadata.

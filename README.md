@@ -73,7 +73,12 @@ Nothing here installs files, changes hooks, or connects to live Roster state.
   Herdr's provider-source authority without borrowing its source-local sequence;
   a later provider or user presentation refuses and is preserved. Rollback
   either proves the exact external restoration before releasing the reservation
-  or leaves that reservation as the durable retry obligation.
+  or leaves that reservation as the durable retry obligation. A reserved pane
+  whose route provider also exposes route tokens is admitted only through the
+  same exact baseline/publication proof; the initial read binds the immutable
+  runtime before any further Herdr effect. Missing receipts, changed endpoint,
+  provider presentation, assignment, runtime, or the second-observation fence
+  refuse without treating an arbitrary prebound route as recoverable.
 - One active-turn semantic sideband with a 12-row/24 KiB same-owner candidate
   shortlist, version-fenced duplicate/follow-up links, and external-dispatch
   refusal when the complete candidate inventory is unavailable or changed.

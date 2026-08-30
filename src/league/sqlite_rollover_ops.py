@@ -297,6 +297,21 @@ def _snapshot_digest(rows: Sequence[Mapping[str, Any]]) -> str:
     return digest(list(rows))
 
 
+def _snapshot_row_digest(
+    snapshot_id: str, snapshot_version: int, row: Mapping[str, Any]
+) -> str:
+    value = dict(row)
+    if snapshot_version == 1:
+        return digest(value)
+    return digest(
+        {
+            "snapshot_id": snapshot_id,
+            "snapshot_version": snapshot_version,
+            "row": value,
+        }
+    )
+
+
 def _cursor(snapshot_id: str, offset: int, snapshot_digest: str) -> str:
     value = {
         "offset": offset,
@@ -1485,13 +1500,15 @@ def reconcile_rollover_descendant(
                 snapshot_row is None
                 or snapshot_row["task_id"] != task_id
                 or snapshot_row["row_digest"] != snapshot_row_digest
-                or digest(
+                or _snapshot_row_digest(
+                    snapshot["snapshot_id"],
+                    int(snapshot["snapshot_version"]),
                     {
                         "champion_agent_id": snapshot_row["champion_agent_id"],
                         "task_id": snapshot_row["task_id"],
                         "callsign": snapshot_row["callsign"],
                         "binding_digest": snapshot_row["binding_digest"],
-                    }
+                    },
                 )
                 != snapshot_row["row_digest"]
             ):

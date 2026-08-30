@@ -203,6 +203,18 @@ before accepting the acknowledgement. Missing/repeated rows, cursor/version
 changes, expiry, digest/count mismatch, or a changed owner fence invalidates the
 acknowledgement and requires a fresh snapshot; no partial map may be accepted.
 
+After the owner switch, expiry never permits an old page, cursor, row digest, or
+acknowledgement to be reused. `league rollover refresh-bindings` may point the
+same `switched` operation to one new immutable snapshot revision only when the
+caller supplies the exact operation, Squad, predecessor, successor, rollover
+version, source snapshot version/digest, and a later expiry. League re-reads the
+complete canonical descendant set, observes every exact live Herdr identity in
+one inventory, and CAS-updates only the operation snapshot pointer/version plus
+one receipt event. A changed set, owner/fence, runtime ambiguity, missing or
+unready endpoint, or concurrent canonical mutation refuses without replacing
+the expired revision. The original revision remains immutable evidence; refresh
+does not repeat acknowledgement or switch ownership.
+
 ## Crash, rollback, and callsign behavior
 
 The rollover operation is fenced and recoverable:
@@ -290,6 +302,7 @@ state machine.
 | #8 | `league continuation decide|status` | Record/read one evidence snapshot and `resume`, `fresh`, `rollover`, `awaiting_authority`, or `refuse` outcome. `decide` is side-effect free outside canonical state. |
 | #8 | `league rollover prepare|acknowledge|commit|abort|status` | One fenced two-phase replacement for either role. `commit` requires exact acknowledgement and performs the single owner change; `abort` is pre-commit only. |
 | #8 | `league rollover bindings OPERATION_ID [--cursor CURSOR] [--limit COUNT]` | Read one frozen Shotcaller active-Champion snapshot in bounded stable pages. Each page repeats snapshot version/count/digest/expiry and returns an opaque next cursor; acknowledgement verifies the fully retrieved digest against the owner fence. |
+| #23 | `league rollover refresh-bindings` | Replace only an expired snapshot for the exact already-switched operation after one full canonical and Herdr re-observation. The operation version and snapshot pointer move by CAS; the prior revision and owner switch remain immutable. |
 | #13 | `league callsign allocate|status` | Select and reserve the first compatible queue entry atomically; return queue version and bounded refusal counts. |
 | #13 | existing `league callsign release` | Append an activated released assignment to the tail under an exact lease/version precondition. Failed unactivated reservations restore their recorded queue position. |
 
@@ -321,7 +334,7 @@ state machine.
 State changes emit bounded public-safe events in the same transaction as their
 canonical effect: `continuation_decided`, `thread_resumed`,
 `rollover_prepared`, `rollover_acknowledged`, exactly one `owner_changed`,
-`rollover_aborted`, `callsign_reserved`, `callsign_activated`, and
+`rollover_aborted`, `rollover_snapshot_refreshed`, `callsign_reserved`, `callsign_activated`, and
 `callsign_released`. Payloads contain stable IDs, versions, digests, outcomes,
 and reason codes—not transcript text or adapter-private locators.
 `rollover_prepared` carries only the active-Champion snapshot reference and
@@ -337,7 +350,10 @@ At minimum, clients may rely on these refusal codes:
 `workspace_binding_unsafe`, `continuation_conflict`,
 `instruction_drift_unreconciled`, `rollover_authority_required`,
 `handoff_ack_mismatch`, `active_champion_snapshot_stale`,
-`active_champion_snapshot_incomplete`, and `callsign_unavailable`.
+`active_champion_snapshot_incomplete`, `snapshot_refresh_not_expired`,
+`snapshot_refresh_set_changed`, `snapshot_refresh_live_missing`,
+`snapshot_refresh_live_ambiguous`, `snapshot_refresh_concurrent_mutation`, and
+`callsign_unavailable`.
 
 ## Focused future acceptance
 

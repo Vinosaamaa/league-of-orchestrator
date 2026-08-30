@@ -229,11 +229,18 @@ exact League-emitted feedback for the same scope/turn/generation is suppressed
 from rearming. Genuine native steering remains provider-owned and always
 rearms.
 
-Migrations 12 through 15 are contiguous and named
+Migrations 12 through 17 are contiguous and named
 `nullable-request-rollover-descendant-assignments`,
 `standalone-shotcaller-callsign-scope`,
 `immutable-prompt-provenance-current-owner`, and
-`exact-stop-feedback-suppression`. Focused tests use temporary roots and
+`exact-stop-feedback-suppression`, followed by
+`issue-coupled-cleanup-and-exact-thread-continuation` and
+`immutable-switched-rollover-snapshot-revisions`. The final migration preserves
+every prior snapshot revision while allowing the exact switched operation to
+CAS-point at one refreshed immutable revision. The source-only refresh observes
+one fake Herdr inventory through the production adapter boundary and records
+only identity/receipt digests; it does not reuse an expired page or row input.
+Focused tests use temporary roots and
 recording fake Herdr adapters for no-runtime import, closed/mismatched/ambiguous
 refusal, exact CAS and delivery-claim races, repeatable intake paging,
 A-to-B-to-C provenance, current-pane publish/rollback fault injection, the

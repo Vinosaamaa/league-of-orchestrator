@@ -56,6 +56,10 @@ from .rollover_descendant import (
     HerdrDescendantRuntimeAdapter,
     RolloverDescendantService,
 )
+from .rollover_snapshot import (
+    HerdrRolloverSnapshotAdapter,
+    RolloverSnapshotRefreshService,
+)
 from .visible_launch import (
     HerdrCodexLaunchAdapter,
     VisibleChampionLaunchService,
@@ -292,6 +296,27 @@ def _add_rollover_commands(groups: argparse._SubParsersAction) -> None:
         help="Page size; defaults to the immutable snapshot page bound.",
     )
     bindings.add_argument("--at", required=True)
+    refresh_bindings = commands.add_parser(
+        "refresh-bindings",
+        help="Replace one expired switched-rollover snapshot after exact live verification.",
+    )
+    for name in (
+        "operation-id",
+        "refresh-id",
+        "squad-id",
+        "predecessor-agent-id",
+        "successor-agent-id",
+        "expected-snapshot-digest",
+        "expires-at",
+        "at",
+    ):
+        refresh_bindings.add_argument(f"--{name}", required=True)
+    refresh_bindings.add_argument(
+        "--expected-rollover-version", type=int, required=True
+    )
+    refresh_bindings.add_argument(
+        "--expected-snapshot-version", type=int, required=True
+    )
     acknowledge = commands.add_parser(
         "acknowledge", help="Acknowledge exact successor identity, capability, and snapshot coverage."
     )
@@ -1349,6 +1374,25 @@ def _rollover_prepare(store: Storage, args: argparse.Namespace) -> CommandResult
 def _rollover_bindings(store: Storage, args: argparse.Namespace) -> CommandResult:
     return store.rollover_bindings(
         args.operation_id, args.at, cursor=args.cursor, limit=args.limit
+    ), None
+
+
+def _rollover_refresh_bindings(
+    store: Storage, args: argparse.Namespace
+) -> CommandResult:
+    return RolloverSnapshotRefreshService(
+        store, HerdrRolloverSnapshotAdapter()
+    ).refresh(
+        operation_id=args.operation_id,
+        refresh_id=args.refresh_id,
+        squad_id=args.squad_id,
+        predecessor_agent_id=args.predecessor_agent_id,
+        successor_agent_id=args.successor_agent_id,
+        expected_rollover_version=args.expected_rollover_version,
+        expected_snapshot_version=args.expected_snapshot_version,
+        expected_snapshot_digest=args.expected_snapshot_digest,
+        expires_at=args.expires_at,
+        at=args.at,
     ), None
 
 
@@ -2605,6 +2649,7 @@ HANDLERS: dict[str, CommandHandler] = {
     "shotcaller.create": _shotcaller_create,
     "rollover.prepare": _rollover_prepare,
     "rollover.bindings": _rollover_bindings,
+    "rollover.refresh-bindings": _rollover_refresh_bindings,
     "rollover.acknowledge": _rollover_acknowledge,
     "rollover.commit": _rollover_commit,
     "rollover.reconcile-descendant": _rollover_reconcile_descendant,

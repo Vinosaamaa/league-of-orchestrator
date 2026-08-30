@@ -51,7 +51,11 @@ Nothing here installs files, changes hooks, or connects to live Roster state.
   callsign reservation, runtime registration, or Squad state. A new exact
   create may rebind one version-2 retired unbound bootstrap residue only when
   its prior assignment is rolled back, its current terminal/thread intent is
-  exact, and no runtime, Squad, offer, lease, or active callsign remains.
+  exact, and no runtime, Squad, offer, lease, or active callsign remains. A
+  baseline-less legacy residue is eligible only when its metadata is exactly
+  empty and two exact current observations prove an unbound, callsign-free
+  presentation; League atomically upgrades that row with the observed source,
+  title, token, generation, and sequence baseline before publication.
 - One active-turn semantic sideband with a 12-row/24 KiB same-owner candidate
   shortlist, version-fenced duplicate/follow-up links, and external-dispatch
   refusal when the complete candidate inventory is unavailable or changed.

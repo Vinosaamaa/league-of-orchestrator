@@ -37,7 +37,7 @@ RUNTIME_RECEIPT_KEYS = {
     "capabilities",
 }
 SHOTCALLER_BASELINE_KEY = "shotcaller_bootstrap_baseline"
-SHOTCALLER_BASELINE_KEYS = {
+SHOTCALLER_BASELINE_V1_KEYS = {
     "schema",
     "terminal_id",
     "endpoint_generation",
@@ -47,6 +47,7 @@ SHOTCALLER_BASELINE_KEYS = {
     "thread_title",
     "title",
 }
+SHOTCALLER_BASELINE_V2_KEYS = SHOTCALLER_BASELINE_V1_KEYS | {"presentation_source"}
 
 
 def stable_json(value: Any) -> str:
@@ -84,10 +85,17 @@ def capabilities(values: Sequence[str]) -> tuple[str, ...]:
 
 
 def _shotcaller_baseline(value: Mapping[str, Any]) -> dict[str, Any]:
+    schema = value.get("schema") if isinstance(value, Mapping) else None
+    keys = (
+        SHOTCALLER_BASELINE_V1_KEYS
+        if schema == "league.shotcaller-bootstrap-baseline.v1"
+        else SHOTCALLER_BASELINE_V2_KEYS
+        if schema == "league.shotcaller-bootstrap-baseline.v2"
+        else set()
+    )
     if (
         not isinstance(value, Mapping)
-        or set(value) != SHOTCALLER_BASELINE_KEYS
-        or value.get("schema") != "league.shotcaller-bootstrap-baseline.v1"
+        or set(value) != keys
         or value.get("routing_name") is not None
         or type(value.get("state_change_seq")) is not int
         or value["state_change_seq"] < 0
@@ -107,6 +115,15 @@ def _shotcaller_baseline(value: Mapping[str, Any]) -> dict[str, Any]:
         raise StorageRefusal(
             "bootstrap_baseline_unverified",
             "Shotcaller bootstrap baseline endpoint is incomplete",
+        )
+    if schema == "league.shotcaller-bootstrap-baseline.v2" and (
+        not isinstance(value.get("presentation_source"), str)
+        or not value["presentation_source"]
+        or len(value["presentation_source"].encode("utf-8")) > 1024
+    ):
+        raise StorageRefusal(
+            "bootstrap_baseline_unverified",
+            "Shotcaller bootstrap baseline presentation source is invalid",
         )
     return dict(value)
 
@@ -572,26 +589,50 @@ def _recover_retired_shotcaller_in_transaction(
         metadata = json.loads(agent["metadata_json"])
     except (TypeError, json.JSONDecodeError) as exc:
         raise StorageRefusal("agent_conflict", "retired Shotcaller residue is malformed") from exc
-    if not isinstance(metadata, dict) or set(metadata) != {
-        "scope_kind",
-        "scope_id",
-        SHOTCALLER_BASELINE_KEY,
-    }:
+    if not isinstance(metadata, dict):
+        raise StorageRefusal("agent_conflict", "retired Shotcaller residue is malformed")
+    legacy_without_baseline = metadata == {}
+    modern_keys = {"scope_kind", "scope_id", SHOTCALLER_BASELINE_KEY}
+    if not legacy_without_baseline and set(metadata) != modern_keys:
         raise StorageRefusal("agent_conflict", "retired identity is not a bootstrap residue")
-    if metadata["scope_kind"] != "shotcaller" or metadata["scope_id"] != agent["agent_id"]:
-        raise StorageRefusal("agent_conflict", "retired bootstrap scope is not exact")
-    stored_baseline = _shotcaller_baseline(metadata[SHOTCALLER_BASELINE_KEY])
     observed_baseline = _shotcaller_baseline(recovery_baseline)
     expected_generation = "herdr:" + hashlib.sha256(
         f"{observed_baseline['terminal_id']}\0{recovery_thread_id}".encode("utf-8")
     ).hexdigest()[:24]
-    if (
-        observed_baseline["terminal_id"] != stored_baseline["terminal_id"]
-        or observed_baseline["endpoint_generation"]
-        != stored_baseline["endpoint_generation"]
-        or observed_baseline["endpoint_generation"] != expected_generation
-    ):
+    if observed_baseline["endpoint_generation"] != expected_generation:
         raise StorageRefusal("agent_conflict", "retired bootstrap belongs to another thread")
+    if legacy_without_baseline:
+        callsign = str(agent["callsign"])
+        presentation_source = observed_baseline.get("presentation_source")
+        if (
+            observed_baseline.get("schema")
+            != "league.shotcaller-bootstrap-baseline.v2"
+            or str(presentation_source).startswith("league-shotcaller-")
+            or any(
+                callsign.casefold() in str(observed_baseline[key]).casefold()
+                for key in ("sidebar_name", "thread_title", "title")
+            )
+        ):
+            raise StorageRefusal(
+                "agent_conflict",
+                "legacy Shotcaller presentation is not a clean recovery baseline",
+            )
+        recovered_metadata = {
+            "scope_kind": "shotcaller",
+            "scope_id": agent["agent_id"],
+            SHOTCALLER_BASELINE_KEY: observed_baseline,
+        }
+    else:
+        if metadata["scope_kind"] != "shotcaller" or metadata["scope_id"] != agent["agent_id"]:
+            raise StorageRefusal("agent_conflict", "retired bootstrap scope is not exact")
+        stored_baseline = _shotcaller_baseline(metadata[SHOTCALLER_BASELINE_KEY])
+        if (
+            observed_baseline["terminal_id"] != stored_baseline["terminal_id"]
+            or observed_baseline["endpoint_generation"]
+            != stored_baseline["endpoint_generation"]
+        ):
+            raise StorageRefusal("agent_conflict", "retired bootstrap belongs to another thread")
+        recovered_metadata = metadata
 
     assignments = store.connection.execute(
         "SELECT * FROM callsign_assignments WHERE agent_id=? "
@@ -700,8 +741,9 @@ def _recover_retired_shotcaller_in_transaction(
         fault("after_callsign_queue_reservation")
     changed = store.connection.execute(
         "UPDATE agent_instances SET version=3,updated_at=?,update_text='callsign re-reserved',"
-        "retired_at=NULL WHERE agent_id=? AND version=2 AND retired_at IS NOT NULL",
-        (at, agent["agent_id"]),
+        "retired_at=NULL,metadata_json=? WHERE agent_id=? AND version=2 "
+        "AND retired_at IS NOT NULL AND metadata_json=?",
+        (at, stable_json(recovered_metadata), agent["agent_id"], agent["metadata_json"]),
     )
     if changed.rowcount != 1:
         raise StorageRefusal("agent_conflict", "retired Shotcaller identity changed concurrently")

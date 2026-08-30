@@ -88,6 +88,7 @@ class HerdrShotcallerBootstrapAdapter:
         self._observed: dict[str, Any] | None = None
         self._restore_baseline: dict[str, Any] | None = None
         self._published_source: str | None = None
+        self._resume_owned_route = False
         worktree = Path(options.worktree)
         if (
             self.environment.get("HERDR_ENV") != "1"
@@ -196,7 +197,13 @@ class HerdrShotcallerBootstrapAdapter:
             else agent.get("name") == expected_alias
             or (allow_unpublished and agent.get("name") in {None, ""})
         )
-        if not self._exact(spec, pane, agent) or not routing_exact:
+        if (
+            not self._exact(spec, pane, agent)
+            or not routing_exact
+            or not isinstance(tokens, Mapping)
+            or not isinstance(agent.get("metadata_source"), str)
+            or not agent["metadata_source"]
+        ):
             raise StorageRefusal(
                 "shotcaller_identity_unverified",
                 "calling Codex must be exact, current, and not already routing-bound",
@@ -207,6 +214,7 @@ class HerdrShotcallerBootstrapAdapter:
             "tokens": dict(tokens) if isinstance(tokens, Mapping) else {},
             "title": agent.get("terminal_title_stripped", agent.get("terminal_title", "")),
             "routing_name": agent.get("name") or None,
+            "presentation_source": agent.get("metadata_source"),
             "endpoint_generation": "herdr:"
             + hashlib.sha256(
                 f"{agent['terminal_id']}\0{spec.thread_id}".encode("utf-8")
@@ -215,6 +223,12 @@ class HerdrShotcallerBootstrapAdapter:
         if self._observed["routing_name"] is None:
             self._restore_baseline = self.restoration_baseline()
         return dict(self._observed)
+
+    def recovery_baseline(self) -> dict[str, Any]:
+        baseline = self.restoration_baseline()
+        baseline["schema"] = "league.shotcaller-bootstrap-baseline.v2"
+        baseline["presentation_source"] = self._observed["presentation_source"]
+        return baseline
 
     def restoration_baseline(self) -> dict[str, Any]:
         if self._observed is None:
@@ -236,7 +250,11 @@ class HerdrShotcallerBootstrapAdapter:
     def use_restoration_baseline(self, baseline: Mapping[str, Any]) -> None:
         if (
             self._observed is None
-            or baseline.get("schema") != "league.shotcaller-bootstrap-baseline.v1"
+            or baseline.get("schema")
+            not in {
+                "league.shotcaller-bootstrap-baseline.v1",
+                "league.shotcaller-bootstrap-baseline.v2",
+            }
             or baseline.get("routing_name") is not None
             or baseline.get("terminal_id") != self._observed["terminal_id"]
             or baseline.get("endpoint_generation") != self._observed["endpoint_generation"]
@@ -247,16 +265,56 @@ class HerdrShotcallerBootstrapAdapter:
             )
         self._restore_baseline = dict(baseline)
 
+    def require_current_recovery_baseline(
+        self,
+        spec: ShotcallerBootstrapSpec,
+        baseline: Mapping[str, Any],
+        callsign: str,
+    ) -> None:
+        """Fence a legacy recovery against writes after its first observation."""
+
+        pane, agent = self._current()
+        tokens = agent.get("tokens")
+        title = agent.get("terminal_title_stripped", agent.get("terminal_title", "")) or ""
+        common_exact = bool(
+            baseline.get("schema") == "league.shotcaller-bootstrap-baseline.v2"
+            and self._exact(spec, pane, agent)
+            and isinstance(tokens, Mapping)
+            and agent.get("terminal_id") == baseline.get("terminal_id")
+            and agent.get("metadata_source") == baseline.get("presentation_source")
+            and str(tokens.get("sidebar_name", "")) == baseline.get("sidebar_name")
+            and str(tokens.get("thread_title", "")) == baseline.get("thread_title")
+            and str(title) == baseline.get("title")
+        )
+        unpublished = bool(
+            common_exact
+            and agent.get("name") in {None, ""}
+            and agent.get("state_change_seq") == baseline.get("state_change_seq")
+        )
+        route_only_publication = bool(
+            common_exact
+            and agent.get("name") == callsign.lower()
+            and agent.get("state_change_seq") == baseline.get("state_change_seq") + 1
+        )
+        if not unpublished and not route_only_publication:
+            raise StorageRefusal(
+                "shotcaller_metadata_unverified",
+                "legacy Shotcaller presentation changed before publication",
+            )
+        self._resume_owned_route = route_only_publication
+
     def publish(self, spec: ShotcallerBootstrapSpec, callsign: str) -> dict[str, Any]:
         if self._observed is None:
             raise StorageRefusal(
                 "shotcaller_identity_unverified", "calling identity was not inspected"
             )
         alias = callsign.lower()
-        self._run(
-            ("herdr", "agent", "rename", self.options.pane_id, alias),
-            "Herdr Shotcaller routing rename",
-        )
+        if not self._resume_owned_route:
+            self._run(
+                ("herdr", "agent", "rename", self.options.pane_id, alias),
+                "Herdr Shotcaller routing rename",
+            )
+        self._resume_owned_route = False
         pane, agent = self._current()
         if not self._exact(spec, pane, agent) or agent.get("name") != alias:
             raise StorageRefusal(
@@ -650,10 +708,10 @@ class ShotcallerBootstrapService:
             spec.agent_id,
             spec.capabilities,
             at,
-            recovery_baseline=self.adapter.restoration_baseline(),
+            recovery_baseline=self.adapter.recovery_baseline(),
             recovery_thread_id=spec.thread_id,
         )
-        published = False
+        published = observed.get("routing_name") == str(reserved["callsign"]).lower()
         try:
             if baseline is None:
                 baseline = self.store.shotcaller_bootstrap_baseline(spec.assignment_id)
@@ -662,6 +720,12 @@ class ShotcallerBootstrapService:
                         spec.assignment_id, 1, self.adapter.restoration_baseline()
                     )["baseline"]
                 self.adapter.use_restoration_baseline(baseline)
+            if baseline.get("schema") == "league.shotcaller-bootstrap-baseline.v2":
+                if fault:
+                    fault("after_shotcaller_recovery_reserved")
+                self.adapter.require_current_recovery_baseline(
+                    spec, baseline, str(reserved["callsign"])
+                )
             if existing is not None and existing["state"] == "active":
                 receipt = self.adapter.current_receipt(spec, str(reserved["callsign"]))
             else:
@@ -686,13 +750,14 @@ class ShotcallerBootstrapService:
                 }
             )
             canonical_restored = False
-            try:
-                rolled_back = self.store.rollback_callsign(
-                    spec.assignment_id, 1, failure_digest, at
-                )
-                canonical_restored = rolled_back["state"] == "rolled_back"
-            except StorageRefusal:
-                canonical_restored = False
+            if restored:
+                try:
+                    rolled_back = self.store.rollback_callsign(
+                        spec.assignment_id, 1, failure_digest, at
+                    )
+                    canonical_restored = rolled_back["state"] == "rolled_back"
+                except StorageRefusal:
+                    canonical_restored = False
             if not restored or not canonical_restored:
                 raise StorageRefusal(
                     "shotcaller_creation_cleanup_unproven",

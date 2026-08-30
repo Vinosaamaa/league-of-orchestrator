@@ -560,11 +560,23 @@ rename and reports the League overlay without supplying that global value as a
 Herdr source sequence. Explicit owner/source tokens identify the completed
 overlay, followed by an exact first post-effect global fence and two stable
 observations. Any later provider or user presentation refuses and is preserved.
-Any other routed partial effect restores the owned alias and baseline tokens
-before canonical rollback. If endpoint identity changes before restoration can
-be proven, League retains the reservation, lease, rebound agent, baseline, and
-publication attempt as the cleanup obligation; canonical rollback occurs only
-after an exact retry proves and completes the external cleanup.
+Installed 0.2.36 exposed one more provider shape: the routing rename can publish
+the exact alias and corresponding route tokens while leaving the prompt-derived
+provider title, callsign, sidebar, thread, and identity title unchanged. Initial
+inspection now treats that routed presentation only as a candidate. It is
+admitted when an exact reserved canonical assignment and v2 baseline/publication
+attempt bind the callsign, endpoint, thread, terminal generation, physical
+worktree, provider source/title/tokens, and a non-regressing observation. The
+read-only proof is followed by one immutable runtime binding; future attempts
+with another runtime refuse. The later pre-effect observation must equal the
+initial sequence, so an interleaved write cannot use the admission window.
+Missing or malformed proof, arbitrary routing, assignment/runtime drift, and
+changed endpoint or provider presentation refuse before Herdr mutation while
+retaining the alias reservation as the truthful cleanup obligation. A race
+after admission restores the exact provider baseline and clears the owned alias
+before canonical rollback only when that external cleanup is proven. Otherwise
+League retains the reservation, lease, rebound agent, baseline, publication
+attempt, and runtime binding as the cleanup obligation.
 One still-older frozen profile contains exactly two metadata keys. It is
 eligible only when `scope_kind=squad`, `scope_id` exactly equals the sole prior
 rolled-back assignment's historical Squad scope, and the currently verified

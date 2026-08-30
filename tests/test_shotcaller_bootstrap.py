@@ -327,6 +327,31 @@ class CrashAfterRenameHerdr(RecordingHerdr):
         return result
 
 
+class CrashAfterProviderRouteOnlyRenameHerdr(CrashAfterRenameHerdr):
+    """Herdr publishes route tokens while retaining the provider prompt display."""
+
+    def run(
+        self, arguments, *, timeout_seconds: int = 30
+    ) -> subprocess.CompletedProcess[str]:
+        command = tuple(arguments)
+        if command[:3] != ("herdr", "agent", "rename"):
+            return super().run(arguments, timeout_seconds=timeout_seconds)
+        crash = self.crash_after_rename and command[-1] != "--clear"
+        if crash:
+            self.crash_after_rename = False
+        result = super().run(arguments, timeout_seconds=timeout_seconds)
+        assert isinstance(self.tokens, dict)
+        if command[-1] == "--clear":
+            self.tokens.pop("routing_alias", None)
+            self.tokens.pop("orchestrator_identity", None)
+        else:
+            self.tokens["routing_alias"] = command[-1]
+            self.tokens["orchestrator_identity"] = f"codex · {command[-1]}"
+        if crash:
+            raise InjectedBootstrapCrash("after_shotcaller_routing_rename")
+        return result
+
+
 class TransientMalformedCurrentHerdr(RecordingHerdr):
     """The exact in-place pane briefly returns non-JSON before a valid read."""
 
@@ -1424,6 +1449,7 @@ def test_legacy_rolled_back_bootstrap_residue_captures_clean_live_baseline(
             "scope_id": original.agent_id,
             "shotcaller_bootstrap_baseline": expected_baseline,
             "shotcaller_bootstrap_publication": publication,
+            "shotcaller_bootstrap_runtime_id": retry.runtime_instance_id,
         }
         assert store.connection.execute(
             "SELECT COUNT(*) FROM squads WHERE shotcaller_agent_id=?", (AGENT_ID,)
@@ -2005,6 +2031,7 @@ def test_historical_squad_residue_finalization_failure_restores_v2_baseline(
             "scope_id": original.agent_id,
             "shotcaller_bootstrap_baseline": baseline,
             "shotcaller_bootstrap_publication": publication,
+            "shotcaller_bootstrap_runtime_id": retry.runtime_instance_id,
         }
         assert store.connection.execute(
             "SELECT COUNT(*) FROM runtime_instances WHERE actor_agent_id=?",
@@ -2705,7 +2732,358 @@ def test_historical_route_only_retry_accepts_unrelated_global_sequence_advance(
         )
 
 
-def test_legacy_route_crash_with_newer_user_write_restores_before_rollback(
+def _make_installed_route_only_provider_residue(
+    store: SQLiteStorage,
+    clock: FakeClock,
+    worktree: Path,
+    runner: CrashAfterProviderRouteOnlyRenameHerdr,
+    suffix: str,
+) -> tuple[
+    ShotcallerBootstrapSpec,
+    dict[str, object],
+    ShotcallerBootstrapSpec,
+    dict[str, object],
+]:
+    _seed_available_ashe(store, clock)
+    service = _service(store, clock, worktree, runner)
+    original, original_assignment = _make_historical_squad_bootstrap_residue(
+        store, service, runner
+    )
+    retry = ShotcallerBootstrapSpec(
+        assignment_id=f"callsign-assignment:bootstrap:ashe:{suffix}",
+        agent_id=original.agent_id,
+        runtime_instance_id=original.runtime_instance_id,
+        thread_id=original.thread_id,
+        capabilities=original.capabilities,
+    )
+    prompt_title = "Execute shotcaller command"
+    runner.expose_metadata_source = False
+    runner.agent_status = "done"
+    runner.title = f"{prompt_title} | codex"
+    runner.tokens = {
+        "callsign": prompt_title,
+        "harness": "codex",
+        "identity_thread_id": original.thread_id,
+        "identity_title": f"Codex | {prompt_title}",
+        "sidebar_name": prompt_title,
+        "thread_title": prompt_title,
+    }
+    runner.state_change_seq += 1
+    runner.crash_after_rename = True
+    try:
+        service.bootstrap(retry)
+    except InjectedBootstrapCrash:
+        pass
+    else:
+        raise AssertionError("installed recovery did not crash after route publication")
+    publication = store.shotcaller_bootstrap_publication(retry.assignment_id)
+    assert publication is not None
+    return original, original_assignment, retry, publication
+
+
+def test_installed_route_only_provider_tokens_resume_exact_reserved_publication(
+    root: Path,
+) -> None:
+    state, _ = migrated_state(root, "shotcaller-installed-route-only-provider-retry")
+    worktree = root / "shotcaller-installed-route-only-provider-retry" / "worktree"
+    worktree.mkdir()
+    clock = FakeClock()
+    runner = CrashAfterProviderRouteOnlyRenameHerdr(worktree, publish_mismatch=True)
+    with SQLiteStorage(state) as store:
+        original, original_assignment, retry, publication = (
+            _make_installed_route_only_provider_residue(
+                store, clock, worktree, runner, "installed-route-only"
+            )
+        )
+        assert store.callsign_assignment_status(retry.assignment_id)["state"] == "reserved"
+        calls_before_retry = len(runner.calls)
+
+        created = _service(store, clock, worktree, runner).bootstrap(retry)
+        calls_before_exact_retry = len(runner.calls)
+        retried = _service(store, clock, worktree, runner).bootstrap(retry)
+
+        assert created["state"] == "active"
+        assert retried == {**created, "idempotent": True}
+        assert store.shotcaller_bootstrap_status(retry.assignment_id) == retried
+        assert store.shotcaller_bootstrap_publication(retry.assignment_id) == publication
+        assert store.callsign_assignment_status(original.assignment_id) == original_assignment
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM squads WHERE shotcaller_agent_id=?", (AGENT_ID,)
+        ).fetchone()[0] == 0
+
+    retry_calls = runner.calls[calls_before_retry:]
+    assert runner.name == "ashe"
+    assert runner.title == "Ashe"
+    assert runner.tokens["sidebar_name"] == "Ashe"
+    assert runner.tokens["thread_title"] == "Ashe"
+    assert runner.tokens["routing_alias"] == "ashe"
+    assert runner.tokens["orchestrator_identity"] == "codex · ashe"
+    assert not any(
+        call[:3] == ("herdr", "agent", "rename") for call in retry_calls
+    )
+    assert sum(
+        call[:3] == ("herdr", "pane", "report-metadata")
+        for call in retry_calls
+    ) == 1
+    assert not any(
+        call[:3]
+        in {
+            ("herdr", "agent", "rename"),
+            ("herdr", "pane", "report-metadata"),
+            ("herdr", "agent", "prompt"),
+            ("herdr", "tab", "create"),
+            ("herdr", "pane", "split"),
+            ("herdr", "workspace", "create"),
+            ("herdr", "agent", "start"),
+        }
+        for call in runner.calls[calls_before_exact_retry:]
+    )
+
+
+def test_installed_route_only_provider_tokens_refuse_different_runtime(
+    root: Path,
+) -> None:
+    state, _ = migrated_state(root, "shotcaller-installed-route-only-runtime-refusal")
+    worktree = root / "shotcaller-installed-route-only-runtime-refusal" / "worktree"
+    worktree.mkdir()
+    clock = FakeClock()
+    runner = CrashAfterProviderRouteOnlyRenameHerdr(worktree, publish_mismatch=True)
+    with SQLiteStorage(state) as store:
+        original, original_assignment, retry, publication = (
+            _make_installed_route_only_provider_residue(
+                store, clock, worktree, runner, "route-runtime-refusal"
+            )
+        )
+        reserved = store.callsign_assignment_status(retry.assignment_id)
+        assert reserved is not None and reserved["state"] == "reserved"
+        before_tokens = dict(runner.tokens)
+        before_title = runner.title
+        calls_before_retry = len(runner.calls)
+        changed = ShotcallerBootstrapSpec(
+            assignment_id=retry.assignment_id,
+            agent_id=retry.agent_id,
+            runtime_instance_id="runtime:shotcaller:foreign",
+            thread_id=retry.thread_id,
+            capabilities=retry.capabilities,
+        )
+
+        try:
+            _service(store, clock, worktree, runner).bootstrap(changed)
+        except StorageRefusal as exc:
+            assert exc.code == "runtime_conflict"
+        else:
+            raise AssertionError("route-only recovery accepted a different runtime")
+
+        assert store.callsign_assignment_status(retry.assignment_id) == reserved
+        assert store.shotcaller_bootstrap_publication(retry.assignment_id) == publication
+        assert store.callsign_assignment_status(original.assignment_id) == original_assignment
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM runtime_instances WHERE actor_agent_id=?", (AGENT_ID,)
+        ).fetchone()[0] == 0
+
+    assert runner.name == "ashe"
+    assert runner.title == before_title
+    assert runner.tokens == before_tokens
+    assert not any(
+        call[:3]
+        in {
+            ("herdr", "agent", "rename"),
+            ("herdr", "pane", "report-metadata"),
+            ("herdr", "agent", "prompt"),
+            ("herdr", "tab", "create"),
+            ("herdr", "pane", "split"),
+            ("herdr", "workspace", "create"),
+            ("herdr", "agent", "start"),
+        }
+        for call in runner.calls[calls_before_retry:]
+    )
+
+
+def test_installed_route_only_provider_tokens_refuse_interleaved_sequence(
+    root: Path,
+) -> None:
+    state, _ = migrated_state(root, "shotcaller-installed-route-only-sequence-race")
+    worktree = root / "shotcaller-installed-route-only-sequence-race" / "worktree"
+    worktree.mkdir()
+    clock = FakeClock()
+    runner = CrashAfterProviderRouteOnlyRenameHerdr(worktree, publish_mismatch=True)
+    with SQLiteStorage(state) as store:
+        original, original_assignment, retry, publication = (
+            _make_installed_route_only_provider_residue(
+                store, clock, worktree, runner, "route-sequence-race"
+            )
+        )
+        prompt_title = "Execute shotcaller command"
+        allocate = store.allocate_callsign
+
+        def interleaved_allocate(*args, **kwargs):
+            result = allocate(*args, **kwargs)
+            runner.state_change_seq += 1
+            return result
+
+        store.allocate_callsign = interleaved_allocate  # type: ignore[method-assign]
+        calls_before_retry = len(runner.calls)
+
+        try:
+            _service(store, clock, worktree, runner).bootstrap(retry)
+        except StorageRefusal as exc:
+            assert exc.code == "shotcaller_metadata_unverified"
+        else:
+            raise AssertionError("route-only recovery accepted an interleaved sequence")
+
+        attempted = store.callsign_assignment_status(retry.assignment_id)
+        assert attempted is not None and attempted["state"] == "rolled_back"
+        assert store.shotcaller_bootstrap_publication(retry.assignment_id) == publication
+        assert store.callsign_assignment_status(original.assignment_id) == original_assignment
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM runtime_instances WHERE actor_agent_id=?", (AGENT_ID,)
+        ).fetchone()[0] == 0
+
+    retry_calls = runner.calls[calls_before_retry:]
+    assert runner.name is None
+    assert runner.metadata_source == "herdr:codex"
+    assert runner.title == f"{prompt_title} | codex"
+    assert runner.tokens == {
+        "callsign": prompt_title,
+        "harness": "codex",
+        "identity_thread_id": original.thread_id,
+        "identity_title": f"Codex | {prompt_title}",
+        "sidebar_name": prompt_title,
+        "thread_title": prompt_title,
+    }
+    assert sum(
+        call[:3] == ("herdr", "agent", "rename") and call[-1] == "--clear"
+        for call in retry_calls
+    ) == 1
+    assert not any(
+        call[:3]
+        in {
+            ("herdr", "pane", "report-metadata"),
+            ("herdr", "agent", "prompt"),
+            ("herdr", "tab", "create"),
+            ("herdr", "pane", "split"),
+            ("herdr", "workspace", "create"),
+            ("herdr", "agent", "start"),
+        }
+        for call in retry_calls
+    )
+
+
+def test_installed_route_only_provider_tokens_refuse_missing_or_changed_proof(
+    root: Path,
+) -> None:
+    for case in (
+        "missing-baseline",
+        "missing-publication",
+        "provider-title",
+        "provider-source",
+        "provider-token",
+        "endpoint",
+        "different-assignment",
+    ):
+        state, _ = migrated_state(root, f"shotcaller-route-only-proof-{case}")
+        worktree = root / f"shotcaller-route-only-proof-{case}" / "worktree"
+        worktree.mkdir()
+        clock = FakeClock()
+        runner = CrashAfterProviderRouteOnlyRenameHerdr(
+            worktree, publish_mismatch=True
+        )
+        with SQLiteStorage(state) as store:
+            original, original_assignment, retry, _ = (
+                _make_installed_route_only_provider_residue(
+                    store, clock, worktree, runner, f"proof-{case}"
+                )
+            )
+            reserved = store.callsign_assignment_status(retry.assignment_id)
+            assert reserved is not None and reserved["state"] == "reserved"
+            if case in {"missing-baseline", "missing-publication"}:
+                row = store.connection.execute(
+                    "SELECT metadata_json FROM agent_instances WHERE agent_id=?",
+                    (retry.agent_id,),
+                ).fetchone()
+                metadata = json.loads(row["metadata_json"])
+                metadata.pop(
+                    "shotcaller_bootstrap_baseline"
+                    if case == "missing-baseline"
+                    else "shotcaller_bootstrap_publication"
+                )
+                store.connection.execute(
+                    "UPDATE agent_instances SET metadata_json=? WHERE agent_id=?",
+                    (json.dumps(metadata, sort_keys=True), retry.agent_id),
+                )
+            elif case == "provider-title":
+                changed = "Changed provider title"
+                runner.title = f"{changed} | codex"
+                runner.tokens.update(
+                    {
+                        "callsign": changed,
+                        "identity_title": f"Codex | {changed}",
+                        "sidebar_name": changed,
+                        "thread_title": changed,
+                    }
+                )
+                runner.state_change_seq += 1
+            elif case == "provider-source":
+                runner.expose_metadata_source = True
+                runner.metadata_source = "user-selected"
+                runner.state_change_seq += 1
+            elif case == "provider-token":
+                runner.tokens["sidebar_name"] = "Changed sidebar"
+                runner.state_change_seq += 1
+            elif case == "endpoint":
+                runner.terminal_id = "terminal:foreign"
+                runner.state_change_seq += 1
+
+            attempted_spec = retry
+            if case == "different-assignment":
+                attempted_spec = ShotcallerBootstrapSpec(
+                    assignment_id="callsign-assignment:bootstrap:ashe:foreign",
+                    agent_id=retry.agent_id,
+                    runtime_instance_id=retry.runtime_instance_id,
+                    thread_id=retry.thread_id,
+                    capabilities=retry.capabilities,
+                )
+            before_name = runner.name
+            before_title = runner.title
+            before_tokens = dict(runner.tokens)
+            calls_before_retry = len(runner.calls)
+
+            try:
+                _service(store, clock, worktree, runner).bootstrap(attempted_spec)
+            except StorageRefusal as exc:
+                assert exc.code in {
+                    "receipt_conflict",
+                    "shotcaller_identity_unverified",
+                }
+            else:
+                raise AssertionError(f"route-only recovery accepted {case}")
+
+            assert store.callsign_assignment_status(retry.assignment_id) == reserved
+            assert store.callsign_assignment_status(original.assignment_id) == original_assignment
+            assert store.connection.execute(
+                "SELECT COUNT(*) FROM runtime_instances WHERE actor_agent_id=?",
+                (AGENT_ID,),
+            ).fetchone()[0] == 0
+
+        assert runner.name == before_name
+        assert runner.title == before_title
+        assert runner.tokens == before_tokens
+        assert not any(
+            call[:3]
+            in {
+                ("herdr", "agent", "rename"),
+                ("herdr", "pane", "report-metadata"),
+                ("herdr", "agent", "prompt"),
+                ("herdr", "tab", "create"),
+                ("herdr", "pane", "split"),
+                ("herdr", "workspace", "create"),
+                ("herdr", "agent", "start"),
+            }
+            for call in runner.calls[calls_before_retry:]
+        )
+
+
+def test_legacy_route_crash_with_newer_user_write_refuses_before_mutation(
     root: Path,
 ) -> None:
     state, _ = migrated_state(root, "shotcaller-legacy-route-crash-user-write")
@@ -2743,13 +3121,13 @@ def test_legacy_route_crash_with_newer_user_write_restores_before_rollback(
         try:
             service.bootstrap(retry)
         except StorageRefusal as exc:
-            assert exc.code == "shotcaller_metadata_unverified"
+            assert exc.code == "shotcaller_identity_unverified"
         else:
             raise AssertionError("route-only recovery overwrote a newer user presentation")
 
         assert store.callsign_assignment_status(original.assignment_id) == original_assignment
         attempted = store.callsign_assignment_status(retry.assignment_id)
-        assert attempted is not None and attempted["state"] == "rolled_back"
+        assert attempted is not None and attempted["state"] == "reserved"
         assert store.connection.execute(
             "SELECT COUNT(*) FROM runtime_instances WHERE actor_agent_id=?", (AGENT_ID,)
         ).fetchone()[0] == 0
@@ -2762,24 +3140,15 @@ def test_legacy_route_crash_with_newer_user_write_restores_before_rollback(
         ).fetchone()[0] == 0
 
     retry_calls = runner.calls[calls_before_retry:]
-    assert runner.name is None
+    assert runner.name == "ashe"
     assert runner.metadata_source == "user-selected"
     assert runner.title == "User selected title"
     assert runner.tokens == {"user_theme": "newer"}
-    assert any(
-        call[:3] == ("herdr", "agent", "rename") and call[-1] == "--clear"
-        for call in retry_calls
-    )
-    rollback_reports = [
-        call
-        for call in retry_calls
-        if call[:3] == ("herdr", "pane", "report-metadata")
-    ]
-    assert len(rollback_reports) == 1
-    assert "--title" not in rollback_reports[0]
     assert not any(
         call[:3]
         in {
+            ("herdr", "agent", "rename"),
+            ("herdr", "pane", "report-metadata"),
             ("herdr", "agent", "prompt"),
             ("herdr", "tab", "create"),
             ("herdr", "pane", "split"),
@@ -2898,41 +3267,33 @@ def test_legacy_route_crash_identity_race_preserves_reservation_until_cleanup(
             try:
                 service.bootstrap(retry)
             except StorageRefusal as exc:
-                assert exc.code == "shotcaller_metadata_unverified"
+                assert exc.code == "shotcaller_identity_unverified"
             else:
                 raise AssertionError(f"{case} cleanup retry unexpectedly activated")
 
-            rolled_back = store.callsign_assignment_status(retry.assignment_id)
-            assert rolled_back is not None and rolled_back["state"] == "rolled_back"
+            retained = store.callsign_assignment_status(retry.assignment_id)
+            assert retained is not None and retained["state"] == "reserved"
             assert tuple(
                 store.connection.execute(
                     "SELECT state,reservation_assignment_id FROM callsign_queue "
                     "WHERE callsign='Ashe'"
                 ).fetchone()
-            ) == ("available", None)
+            ) == ("reserved", retry.assignment_id)
             assert store.connection.execute(
                 "SELECT COUNT(*) FROM callsign_leases WHERE callsign='Ashe' AND agent_id=?",
                 (AGENT_ID,),
-            ).fetchone()[0] == 0
+            ).fetchone()[0] == 1
 
         completed_cleanup_calls = runner.calls[calls_before_completed_cleanup:]
-        assert runner.name is None
+        assert runner.name == "ashe"
         assert runner.metadata_source == "user-selected"
         assert runner.title == "User selected title"
         assert runner.tokens == {"user_theme": "newer"}
-        assert any(
-            call[:3] == ("herdr", "agent", "rename") and call[-1] == "--clear"
-            for call in completed_cleanup_calls
-        )
-        reports = [
-            call
-            for call in completed_cleanup_calls
-            if call[:3] == ("herdr", "pane", "report-metadata")
-        ]
-        assert len(reports) == 1 and "--title" not in reports[0]
         assert not any(
             call[:3]
             in {
+                ("herdr", "agent", "rename"),
+                ("herdr", "pane", "report-metadata"),
                 ("herdr", "agent", "prompt"),
                 ("herdr", "tab", "create"),
                 ("herdr", "pane", "split"),
@@ -3669,7 +4030,11 @@ def main() -> None:
         test_legacy_residue_crash_after_baseline_retries_exactly_once(root)
         test_legacy_residue_crash_after_routing_rename_resumes_owned_publication(root)
         test_historical_route_only_retry_accepts_unrelated_global_sequence_advance(root)
-        test_legacy_route_crash_with_newer_user_write_restores_before_rollback(root)
+        test_installed_route_only_provider_tokens_resume_exact_reserved_publication(root)
+        test_installed_route_only_provider_tokens_refuse_different_runtime(root)
+        test_installed_route_only_provider_tokens_refuse_interleaved_sequence(root)
+        test_installed_route_only_provider_tokens_refuse_missing_or_changed_proof(root)
+        test_legacy_route_crash_with_newer_user_write_refuses_before_mutation(root)
         test_legacy_route_crash_identity_race_preserves_reservation_until_cleanup(root)
         test_legacy_residue_finalization_failure_restores_captured_presentation(root)
         test_recovered_bootstrap_exact_retry_is_receipt_identical_and_read_only(root)

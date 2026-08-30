@@ -808,6 +808,13 @@ canonical route and display identity null may adopt a route only when its task,
 callsign assignment, and import run/artifact/legacy-event linkage still match
 the exact `imported_legacy_partial` production shape. A modern task whose route
 was cleared, a successor-owned row, or any non-null partial identity refuses.
+The frozen binding may equal the current null-route binding exactly, or it may
+equal that same current non-runtime identity with every runtime field null when
+the sole later change is exactly one verified active/idle canonical runtime.
+That runtime must match agent kind, backend, thread/session, endpoint, required
+capabilities, and the live Herdr observation. A prior frozen runtime change,
+any non-runtime identity change, multiple/unverified/inactive runtimes, or a
+capability gap refuses.
 
 The Herdr adapter must find exactly one live interactive Codex endpoint by the
 combined canonical pane, exact thread/session, and normalized callsign. The
@@ -825,7 +832,9 @@ After the final stable observation, League rechecks the frozen source binding,
 agent version, callsign assignment/version/requirements, and zero-or-one exact
 runtime identity/generation/status/capabilities. It then CAS-updates only the
 null route plus `display_agent=codex`, increments that agent version, and emits
-one immutable hash-bound adoption event/receipt. The refreshed snapshot rows
+one immutable hash-bound adoption event/receipt. The receipt binds the frozen
+source, pre-adoption current, and resulting binding digests plus the actual
+runtime id, generation, status, and capability set. The refreshed snapshot rows
 are constructed from the post-adoption canonical bindings, and the enclosing
 refresh receipt binds every adopted descendant's prior and resulting agent
 version. Route events,

@@ -110,9 +110,12 @@ Nothing here installs files, changes hooks, or connects to live Roster state.
   During that same switched refresh, an exact predecessor-owned imported row
   whose canonical route and display identity are both null may adopt only the
   unique live Herdr top-level name equal to its normalized callsign. League
-  records the agent/runtime/callsign/snapshot CAS receipt and builds the new
-  snapshot from the incremented canonical agent version; modern clears,
-  successor rows, title-only guesses, overlaps, and identity drift refuse.
+  also accepts an exact frozen no-runtime binding when the only current change
+  is one verified active/idle runtime matching the same agent and live endpoint.
+  League records both binding digests plus the full runtime evidence in the
+  agent/runtime/callsign/snapshot CAS receipt and builds the new snapshot from
+  the incremented canonical agent version; modern clears, successor rows,
+  title-only guesses, overlaps, capability gaps, and identity drift refuse.
 - Deterministic bounded activity reports with stable JSON, exact range/timezone
   and scope, immutable show/since specifications, completion gates, indexed
   pagination, and JSON-derived Markdown/portable HTML.

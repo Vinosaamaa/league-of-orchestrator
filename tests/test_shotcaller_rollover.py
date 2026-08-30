@@ -600,6 +600,7 @@ def _seed_legacy_null_route_refresh(
     *,
     champion_count: int = 1,
     imported: bool = True,
+    materialize_runtime_after_snapshot: bool = False,
 ) -> dict:
     context = seed_rollover(store, champion_count=champion_count)
     agents = []
@@ -636,7 +637,7 @@ def _seed_legacy_null_route_refresh(
                 """,
                 (thread_id, pane_id, generation, champion_id),
             )
-        elif ordinal % 2:
+        elif ordinal % 2 and not materialize_runtime_after_snapshot:
             store.connection.execute(
                 """
                 INSERT INTO runtime_instances
@@ -669,6 +670,30 @@ def _seed_legacy_null_route_refresh(
             }
         )
     prepared, switched = switch_rollover(store, context)
+    if materialize_runtime_after_snapshot:
+        for ordinal, champion_id in enumerate(context["champion_ids"]):
+            agent = agents[ordinal]
+            thread_id = agent["agent_session"]["value"]
+            pane_id = agent["pane_id"]
+            generation = "herdr:" + hashlib.sha256(
+                f"{agent['terminal_id']}\0{thread_id}".encode("utf-8")
+            ).hexdigest()[:24]
+            store.connection.execute(
+                """
+                INSERT INTO runtime_instances
+                  (runtime_instance_id,actor_agent_id,harness_kind,backend_kind,session_ref,
+                   endpoint,runtime_generation,status,verified,last_seen_at,capabilities_json)
+                VALUES(?,?,'codex-thread','herdr',?,?,?,'idle',1,?,'["hook.capture"]')
+                """,
+                (
+                    f"runtime:materialized:{label}:{ordinal}",
+                    champion_id,
+                    thread_id,
+                    pane_id,
+                    generation,
+                    AT5,
+                ),
+            )
     return {
         "context": context,
         "prepared": prepared,
@@ -765,6 +790,72 @@ def test_snapshot_refresh_adopts_eight_exact_imported_null_routes(root: Path) ->
         ).fetchone()[0] == 8
 
 
+def test_snapshot_refresh_adopts_exact_post_snapshot_imported_runtimes(
+    root: Path,
+) -> None:
+    state, _ = migrated_state(root, "refresh-five-materialized-runtimes")
+    with SQLiteStorage(state) as store:
+        seed = _seed_legacy_null_route_refresh(
+            store,
+            root,
+            "five-materialized",
+            champion_count=5,
+            materialize_runtime_after_snapshot=True,
+        )
+        source_rows = {
+            row["champion_agent_id"]: dict(row)
+            for row in store.connection.execute(
+                """
+                SELECT * FROM active_champion_snapshot_rows WHERE snapshot_id=?
+                 ORDER BY champion_agent_id
+                """,
+                (seed["prepared"]["snapshot"]["snapshot_id"],),
+            )
+        }
+        refreshed = RolloverSnapshotRefreshService(
+            store,
+            HerdrRolloverSnapshotAdapter(FakeHerdrInventory(seed["agents"])),
+        ).refresh(**_legacy_null_route_inputs(seed, "five-materialized"))
+        refreshed_rows = {
+            row["champion_agent_id"]: dict(row)
+            for row in store.connection.execute(
+                """
+                SELECT * FROM active_champion_snapshot_rows WHERE snapshot_id=?
+                 ORDER BY champion_agent_id
+                """,
+                (refreshed["snapshot"]["snapshot_id"],),
+            )
+        }
+
+        assert len(refreshed["route_adoptions"]) == 5
+        for adoption in refreshed["route_adoptions"]:
+            champion_id = adoption["champion_agent_id"]
+            event = store.connection.execute(
+                "SELECT detail_json FROM events WHERE event_id=?",
+                (adoption["event_id"],),
+            ).fetchone()
+            receipt = json.loads(event["detail_json"])["receipt"]
+            runtime = store.connection.execute(
+                "SELECT * FROM runtime_instances WHERE actor_agent_id=?",
+                (champion_id,),
+            ).fetchone()
+            assert receipt["runtime_materialized_after_snapshot"] is True
+            assert receipt["source_binding_digest"] == source_rows[champion_id][
+                "binding_digest"
+            ]
+            assert receipt["pre_adoption_binding_digest"] not in {
+                receipt["source_binding_digest"],
+                refreshed_rows[champion_id]["binding_digest"],
+            }
+            assert receipt["resulting_binding_digest"] == refreshed_rows[champion_id][
+                "binding_digest"
+            ]
+            assert receipt["runtime_instance_id"] == runtime["runtime_instance_id"]
+            assert receipt["runtime_generation"] == runtime["runtime_generation"]
+            assert receipt["runtime_status"] == runtime["status"]
+            assert receipt["runtime_capabilities"] == ["hook.capture"]
+
+
 def test_snapshot_refresh_null_route_refuses_live_guess_or_overlap(root: Path) -> None:
     cases = (
         ("title-only", "snapshot_refresh_live_mismatch"),
@@ -858,10 +949,120 @@ def test_snapshot_refresh_null_route_refuses_modern_or_successor_owner(
             ).fetchone()[0] == 0
 
 
+def test_snapshot_refresh_materialized_runtime_refusals(root: Path) -> None:
+    cases = (
+        ("non-runtime-change", "snapshot_refresh_identity_changed"),
+        ("prior-runtime-change", "snapshot_refresh_identity_changed"),
+        ("unverified", "snapshot_refresh_runtime_mismatch"),
+        ("inactive", "snapshot_refresh_runtime_mismatch"),
+        ("capability-missing", "snapshot_refresh_runtime_mismatch"),
+        ("ambiguous", "snapshot_refresh_ambiguous"),
+    )
+    for label, expected_code in cases:
+        state, _ = migrated_state(root, f"refresh-materialized-{label}")
+        with SQLiteStorage(state) as store:
+            prior_runtime = label == "prior-runtime-change"
+            seed = _seed_legacy_null_route_refresh(
+                store,
+                root,
+                f"materialized-{label}",
+                champion_count=2 if prior_runtime else 1,
+                materialize_runtime_after_snapshot=not prior_runtime,
+            )
+            champion_id = seed["context"]["champion_ids"][1 if prior_runtime else 0]
+            if label == "non-runtime-change":
+                store.connection.execute(
+                    "UPDATE agent_instances SET branch='changed-after-snapshot' WHERE agent_id=?",
+                    (champion_id,),
+                )
+            elif label == "prior-runtime-change":
+                store.connection.execute(
+                    "UPDATE runtime_instances SET runtime_generation='herdr:changed' WHERE actor_agent_id=?",
+                    (champion_id,),
+                )
+            elif label == "unverified":
+                store.connection.execute(
+                    "UPDATE runtime_instances SET verified=0 WHERE actor_agent_id=?",
+                    (champion_id,),
+                )
+            elif label == "inactive":
+                store.connection.execute(
+                    "UPDATE runtime_instances SET status='closed' WHERE actor_agent_id=?",
+                    (champion_id,),
+                )
+            elif label == "capability-missing":
+                store.connection.execute(
+                    "UPDATE callsign_assignments SET requirements_json='[\"required\"]' WHERE agent_id=? AND role='champion'",
+                    (champion_id,),
+                )
+            else:
+                runtime = store.connection.execute(
+                    "SELECT * FROM runtime_instances WHERE actor_agent_id=?",
+                    (champion_id,),
+                ).fetchone()
+                store.connection.execute(
+                    """
+                    INSERT INTO runtime_instances
+                      (runtime_instance_id,actor_agent_id,harness_kind,backend_kind,session_ref,
+                       endpoint,runtime_generation,status,verified,last_seen_at,capabilities_json)
+                    VALUES(?,?,?,?,?,?,?,'closed',1,?,?)
+                    """,
+                    (
+                        f"runtime:ambiguous:{champion_id}",
+                        champion_id,
+                        runtime["harness_kind"],
+                        runtime["backend_kind"],
+                        runtime["session_ref"],
+                        runtime["endpoint"],
+                        runtime["runtime_generation"] + ":other",
+                        AT5,
+                        runtime["capabilities_json"],
+                    ),
+                )
+            before_agents = {
+                row["agent_id"]: dict(row)
+                for row in store.connection.execute(
+                    "SELECT * FROM agent_instances WHERE role='champion' ORDER BY agent_id"
+                )
+            }
+            before = store.rollover_status(seed["prepared"]["operation_id"])
+            event_count = store.connection.execute(
+                "SELECT COUNT(*) FROM events"
+            ).fetchone()[0]
+            try:
+                RolloverSnapshotRefreshService(
+                    store,
+                    HerdrRolloverSnapshotAdapter(FakeHerdrInventory(seed["agents"])),
+                ).refresh(
+                    **_legacy_null_route_inputs(seed, f"materialized-{label}")
+                )
+            except StorageRefusal as exc:
+                assert exc.code == expected_code
+            else:
+                raise AssertionError(f"{label} materialized runtime was accepted")
+            assert {
+                row["agent_id"]: dict(row)
+                for row in store.connection.execute(
+                    "SELECT * FROM agent_instances WHERE role='champion' ORDER BY agent_id"
+                )
+            } == before_agents
+            assert store.rollover_status(seed["prepared"]["operation_id"]) == before
+            assert store.connection.execute(
+                "SELECT COUNT(*) FROM events"
+            ).fetchone()[0] == event_count
+
+
 def test_snapshot_refresh_null_route_cas_and_fault_restore_exact_state(
     root: Path,
 ) -> None:
-    for label in ("agent-cas", "runtime-cas", "callsign-cas", "fault"):
+    for label in (
+        "agent-cas",
+        "runtime-cas",
+        "callsign-cas",
+        "fault",
+        "materialized-runtime-cas",
+        "materialized-fault",
+    ):
         state, _ = migrated_state(root, f"refresh-null-route-{label}")
         with SQLiteStorage(state) as store:
             seed = _seed_legacy_null_route_refresh(
@@ -869,6 +1070,7 @@ def test_snapshot_refresh_null_route_cas_and_fault_restore_exact_state(
                 root,
                 label,
                 champion_count=2 if label == "runtime-cas" else 1,
+                materialize_runtime_after_snapshot=label.startswith("materialized-"),
             )
             champion_id = seed["context"]["champion_ids"][
                 1 if label == "runtime-cas" else 0
@@ -897,7 +1099,7 @@ def test_snapshot_refresh_null_route_cas_and_fault_restore_exact_state(
                         "UPDATE agent_instances SET version=version+1 WHERE agent_id=?",
                         (champion_id,),
                     )
-                elif label == "runtime-cas":
+                elif label in {"runtime-cas", "materialized-runtime-cas"}:
                     store.connection.execute(
                         """
                         UPDATE runtime_instances SET runtime_generation='herdr:changed'
@@ -916,7 +1118,7 @@ def test_snapshot_refresh_null_route_cas_and_fault_restore_exact_state(
                 return observations
 
             def fault(point: str) -> None:
-                if label == "fault" and point == "after_refresh_route_adoptions":
+                if label in {"fault", "materialized-fault"} and point == "after_refresh_route_adoptions":
                     raise InjectedCrash(point)
 
             try:
@@ -928,7 +1130,7 @@ def test_snapshot_refresh_null_route_cas_and_fault_restore_exact_state(
                     fault=fault,
                 )
             except (StorageRefusal, InjectedCrash) as exc:
-                if label != "fault":
+                if label not in {"fault", "materialized-fault"}:
                     assert isinstance(exc, StorageRefusal)
                     assert exc.code == "snapshot_refresh_concurrent_mutation"
                 else:
@@ -4575,8 +4777,10 @@ def main() -> None:
         test_snapshot_refresh_cli_requires_the_exact_switched_identity()
         test_snapshot_refresh_cli_runs_two_stable_herdr_inventories(root)
         test_snapshot_refresh_adopts_eight_exact_imported_null_routes(root)
+        test_snapshot_refresh_adopts_exact_post_snapshot_imported_runtimes(root)
         test_snapshot_refresh_null_route_refuses_live_guess_or_overlap(root)
         test_snapshot_refresh_null_route_refuses_modern_or_successor_owner(root)
+        test_snapshot_refresh_materialized_runtime_refusals(root)
         test_snapshot_refresh_null_route_cas_and_fault_restore_exact_state(root)
         test_snapshot_refresh_adapter_requires_one_exact_live_identity(root)
         test_snapshot_refresh_refuses_a_mismatched_canonical_runtime(root)

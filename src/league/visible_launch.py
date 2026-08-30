@@ -258,9 +258,21 @@ class HerdrCodexLaunchAdapter:
             )
 
     def _command(
-        self, arguments: Sequence[str], label: str, *, timeout_seconds: int = 30
+        self,
+        arguments: Sequence[str],
+        label: str,
+        *,
+        timeout_seconds: int = 30,
+        allow_silent_success: bool = False,
     ) -> tuple[dict[str, Any], subprocess.CompletedProcess[str]]:
         completed = self.runner.run(arguments, timeout_seconds=timeout_seconds)
+        if (
+            allow_silent_success
+            and completed.returncode == 0
+            and completed.stdout == ""
+            and completed.stderr == ""
+        ):
+            return {}, completed
         return _result_object(completed, label), completed
 
     def _agent_list(self) -> list[dict[str, Any]]:
@@ -503,6 +515,7 @@ class HerdrCodexLaunchAdapter:
                     "2",
                 ),
                 "Herdr Champion metadata",
+                allow_silent_success=True,
             )
             self._verify_title(routing_name, str(spec.callsign))
         except LaunchAdapterError:

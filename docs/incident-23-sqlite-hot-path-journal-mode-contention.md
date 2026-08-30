@@ -3,7 +3,7 @@
 **Issue:** [#23](https://github.com/Vinosaamaa/league-of-orchestrator/issues/23)  
 **Date:** 2026-08-29  
 **Severity:** P0  
-**Status:** Journal mode and owner-visible turn latency accepted; final installed lifecycle gate pending
+**Status:** Open; installed 0.2.21 revalidation found one launcher receipt defect, and the 0.2.22 candidate passes pending merge and installation
 
 **Scope:** Local League prompt intake, Stop handling, supervision, visible Champion launch, and cleanup
 
@@ -54,10 +54,17 @@ once in the corrected comparison table below. The active source guide now
 contains only SQLite instructions; the retired record contract is preserved as
 a non-installable historical artifact.
 
-This report does **not** declare issue #23 resolved. Resolution requires the
-exact installed disposable flow from capture and explicit triage through launch,
-transition, Shotcaller delivery, proof-gated cleanup, callsign release, zero
-active residue, and SQLite integrity.
+Installed 0.2.20 completed the exact disposable flow from capture and explicit
+triage through launch, transition, Shotcaller delivery, proof-gated cleanup,
+callsign release, zero active residue, and SQLite integrity. The stable release
+then advanced to 0.2.21. Fresh revalidation found that its new authoritative
+session bootstrap succeeded, but the launcher rejected Herdr's documented
+silent-success metadata command because League required JSON from every
+adapter command. The 0.2.22 candidate accepts only exit-zero with exactly empty
+stdout and stderr for that one metadata command; all other malformed, noisy, or
+nonzero results remain fail-closed. The complete staged candidate lifecycle
+passes, but issue #23 remains open until those exact bytes are merged, installed,
+and accepted without changing the owner-controlled UserPromptSubmit setting.
 
 ## Original SQLite architecture
 
@@ -148,11 +155,13 @@ evidence.
 | Missing launcher | Legacy launch was correctly fenced but no stable one-command replacement existed. | Assignment phases existed without the real Herdr/Codex adapter composition. | `league assign run` owns reserve, launch, generated UUID observation, verification, activation, context, and failure cleanup. |
 | Installed launch pending | The first installed visible E2E returned `cleanup_pending` and left one exact pre-session pane blocked in `launch_pending`; after exact rollback was fixed, later probes exposed `agent_not_ready` and a startup timeout. | Rollback required `/exit` even though no Codex session existed. Startup encoded root access as an unsupported configuration key, attempted to manufacture repository trust through a command-line config override that the persisted trust gate intentionally ignores, and then combined Herdr's `--approve-for-me` mode with an incompatible explicit `--sandbox` argument. | Pre-session rollback verifies routing name, pane, terminal, cwd, and pending state before closing the exact pane. Launch validates the linked Git back-reference without bypassing trust, relies on Herdr's workspace-write approval mode, and adds only the exact League root with the supported `--add-dir` flag. Untrusted repositories refuse and clean up. |
 | Launch identity observation | Codex started and exposed its generated UUID in the exact terminal title before Herdr populated `agent_session`; rename then exposed the display title before parsed title tokens. | The adapter assumed all equivalent Herdr identity views became visible atomically. | Launch accepts only the UUID-shaped initial Codex title, exact endpoint/cwd/terminal, and stable Herdr state-change sequence; rename accepts the exact displayed title. Later context and cleanup require that same launch generation when session metadata is absent. |
+| Silent metadata receipt | Installed 0.2.21 obtained the authoritative Codex session, then returned `launch_adapter_failed` even though `pane report-metadata` exited zero and applied the exact title/tokens. | The generic adapter parser required a JSON `result` from a Herdr command whose successful contract is intentionally silent. | Only this metadata call accepts exact exit-zero with empty stdout and stderr. Nonzero, noisy, or malformed results still refuse and run exact cleanup. |
 | Production cleanup runtime kind | The installed visible launcher records the canonical Champion harness as `codex-thread`, while production cleanup accepted only the older `codex` spelling. | Launch and cleanup independently narrowed the same supported Codex runtime identity to different enum values. | Production cleanup accepts only `codex` or `codex-thread`, still requires Herdr, the exact session/pane/runtime generation, verified active/idle state, and the unchanged proof-gated action plan. |
 | Working task supervision | The first full installed E2E launched Lux, but its `working` task transition woke the watcher as `champions-idle`. | Watcher task filters included `accepted` and `in_progress` but omitted canonical task states `working` and `progress`, so the active Champion disappeared from the supervision snapshot. | Both obligation and supervision queries include the full active task-state vocabulary; the exact working Champion remains visible and emits a material update. |
 | Watcher delivery race | After the task-state filter fix, the next full E2E woke on a transient pending-delivery count before the transition dispatcher recorded the watcher receipt. | Supervision inferred delivery from agent/obligation snapshots instead of observing the canonical `watcher_event` recipient receipt. | The watcher stays registered through transient pending-outbox changes and wakes only after the exact recipient receipt; it returns that event ID/status/update. Non-delivery obligation changes remain wakeable. |
 | Task transition delivery omission | After receipt-based supervision landed, the next full E2E durably recorded a working task event and pending outbox but the watcher correctly waited until timeout. | The stable `agent transition` command invoked installed delivery after commit, while the stable `task transition` command returned immediately after creating its outbox. | Both stable transition commands now dispatch their exact committed outbox through the same installed delivery adapter; unavailable recipients still leave the outbox pending. |
 | Cleanup branch deletion depended on the primary checkout | The next full lifecycle passed launch, both transition wakes, and turn commit, then cleanup stopped after closing the endpoint and removing the worktree. | Cleanup proved the canary head was contained by its explicit base ref, but `git branch -d` independently compared it with the shared repository's unrelated checked-out branch. | After the explicit ancestry or squash-tree proof, cleanup deletes only the exact expected local ref with Git's compare-and-delete operation; a moved ref still refuses. |
+| Acceptance BEGIN mismatch | A later disposable run launched correctly but Lux replied that it was still waiting for `BEGIN`; no task transition was written. | The acceptance context required the literal `BEGIN` sentinel, while the follow-up command omitted it. | The disposable harness sends the required sentinel explicitly. This was a harness-input defect, not a League storage or delivery failure. |
 | Context delivery residue | Successful context delivery could leave the assignment-activation outbox pending. | The context receipt and activation outbox were stored by separate mechanisms without an atomic recipient receipt. | Context delivery now atomically records the exact recipient effect and marks only the matching activation outbox delivered; conflicts refuse. |
 | Chatty turn latency | Six serialized triage operations took seconds; a cold command cost roughly two hundred milliseconds locally. | Each semantic item started a new Python process, reopened SQLite, reparsed CLI arguments, and re-ran policy setup. | One `request turn` process spans exact intake, atomic begin, model work, atomic commit, and final boundary. |
 | Benchmark provenance | The prior result called 26 repeated SQLite commands a “legacy” turn. | The benchmark compared command choreography but did not execute the retired JSON watcher. | The reproducible comparison now invokes the preserved JSON command on temporary record pairs and the installed SQLite command on temporary canonical state; it reports median/p95 by phase and command count. |
@@ -189,6 +198,9 @@ evidence.
 | Second full installed lifecycle | Lux remained active, but supervision returned `obligations-changed` while the transition outbox was briefly pending; stable reporting showed the exact task event durable and its outbox still pending after the watcher unregistered. Rollback again removed all external disposable resources. |
 | Third full installed lifecycle | Receipt-based supervision waited safely, exposing that `task transition` never called the installed dispatcher. The exact working event and pending outbox remained durable; the disposable endpoint and Git resources rolled back before the symmetric dispatch fix. |
 | Fourth full installed lifecycle | The supported retry passed capture, one-process semantic triage, visible launch, working/completed delivery, and turn commit. Production cleanup closed the endpoint and removed the worktree, then refused local branch deletion because the shared primary checkout was unrelated; fallback removed the exact remaining branch. |
+| Final installed lifecycle | After the exact-ref cleanup fix and explicit acceptance `BEGIN`, League 0.2.20 completed capture, same-process triage/routing/commit, visible Lux launch, working and completed watcher delivery, cleanup, callsign release, integrity, and zero residue. |
+| Installed 0.2.21 revalidation | Source and installed bytes matched across all 104 release files and canonical WAL integrity passed. The visible launch obtained the authoritative Codex session, then misclassified Herdr's successful empty metadata response as `launch_adapter_failed`; exact cleanup removed the disposable endpoint and Git resources. The stable pointer remained unchanged. |
+| Staged 0.2.22 candidate | The exact silent-success contract and nonzero failure regression passed. A fresh disposable candidate completed two captures, one-process triage/routing/commit, visible launch, working/completed delivery, cleanup, callsign release, integrity, and zero residue. Merge, installation, and installed acceptance remain pending. |
 
 ## Technical root cause
 
@@ -517,16 +529,16 @@ independently.
 
 | Corrected path/phase | Commands per turn | Median | p95 |
 | --- | ---: | ---: | ---: |
-| Retired JSON process startup | 7 | 17.530 ms | 18.930 ms |
-| Retired JSON intake | same 7-command turn | 234.995 ms | 268.874 ms |
+| Retired JSON process startup | 7 | 18.432 ms | 19.923 ms |
+| Retired JSON intake | same 7-command turn | 234.224 ms | 286.239 ms |
 | Retired JSON begin | unsupported; no fabricated write | 0.000 ms | 0.000 ms |
-| Retired JSON commit | 6 per-item transition commands | 1,413.798 ms | 1,516.760 ms |
-| Retired JSON total | 7 | 1,694.151 ms | 1,782.884 ms |
-| Installed one-process SQLite startup | 1 | 3.101 ms | 3.799 ms |
-| Installed one-process SQLite intake | same process | 183.118 ms | 194.061 ms |
-| Installed one-process SQLite begin | same process | 3.653 ms | 4.038 ms |
-| Installed one-process SQLite commit/boundary/exit | same process | 21.926 ms | 22.740 ms |
-| Installed one-process SQLite total | 1 | 211.236 ms | 222.712 ms |
+| Retired JSON commit | 6 per-item transition commands | 1,449.399 ms | 1,575.075 ms |
+| Retired JSON total | 7 | 1,696.567 ms | 1,865.879 ms |
+| Installed 0.2.21 one-process SQLite startup | 1 | 2.911 ms | 4.134 ms |
+| Installed 0.2.21 one-process SQLite intake | same process | 162.527 ms | 186.899 ms |
+| Installed 0.2.21 one-process SQLite begin | same process | 3.670 ms | 4.161 ms |
+| Installed 0.2.21 one-process SQLite commit/boundary/exit | same process | 22.463 ms | 22.914 ms |
+| Installed 0.2.21 one-process SQLite total | 1 | 191.289 ms | 216.914 ms |
 
 The largest observed SQLite phase output was 8,854 bytes under a 1,100,000-byte
 bound. The normal-turn budget is exactly one `request turn` process and zero
@@ -548,10 +560,15 @@ the dominant local cost. The release target is one Shotcaller League process
 for an ordinary direct turn. UserPromptSubmit and Stop remain separate automatic
 boundary-hook processes, each performing one bounded in-process storage
 operation; they are not extra commands invoked by Garen.
-The installed E2E measures the combined infrastructure path as a separate
-fourth result. It does not add mock, candidate, or model reasoning numbers.
-Multi-second installed handoffs fail the gate and require an in-process League
-adapter while preserving one external Garen process and SQLite.
+The prior installed 0.2.20 E2E remains historical proof: one stable turn PID,
+170.582 ms turn infrastructure, 39,168.040 ms complete lifecycle, and receipt
+SHA-256 `b8d5e1f9359116f93459dd82ee4206f921b3a0138b155018f3b97f6b65c9bd5d`.
+Fresh installed 0.2.21 revalidation stopped at the silent metadata receipt and
+cleaned up exactly. The staged 0.2.22 candidate then used one stable PID for two
+prompts: intake 155.247 ms, begin 4.069 ms, commit 4.132 ms, and 163.448 ms turn
+infrastructure. Its complete visible lifecycle took 39,374.893 ms and left zero
+residue. Candidate receipt SHA-256:
+`4de78bf3e3028edd05ed6248cfa57ccfa58d29396bdcd524b4ea2c4ce1c25ff9`.
 
 ### Installed command inventory and deferred surfaces
 
@@ -579,14 +596,14 @@ adapter while preserving one external Garen process and SQLite.
 | Stop safety | Concurrent Stop returns a normal block, never raw `ERROR: busy` | Passed in synthetic focused test |
 | Supervisor wake | The same foreground wait exits for user priority | Passed in synthetic focused test |
 | Focused affected suites | Watcher, migration, concurrency, request, acceptance, live-cutover, and public-safety gates | Passed locally; public-safety reruns on committed bytes |
-| Exact-head CI | Hosted checks bind to the published successor PR head | Pending |
-| Installed release | Tested merge tree and exact source-managed guide installed with prior release retained | Pending |
+| Exact-head CI | Hosted checks bind to the published successor PR head | Pending for the refreshed PR #77 head |
+| Installed release | Tested merge tree and exact source-managed guide installed with prior release retained | Current 0.2.21 matches all 104 source release files; 0.2.22 installation is pending and the stable pointer was not changed |
 | Whole direct turn | One exact PID emits two prompt bodies, atomically begins triage/claims/routing, remains alive, atomically commits answer/result and delivery, returns full unresolved/cleanup boundary, then exits without a second League spawn | Passed in focused synthetic test |
 | Turn latency | Cold CLI, 26-process prior choreography, one-process whole turn, and open-connection batch phases measured separately | Passed; exact table above |
-| Visible launch | One command reserves, starts, observes generated UUID, verifies, activates, and briefs the exact Herdr/Codex runtime | Passed in focused test and disposable real candidate adapter gate |
-| Sandbox access | Launched Codex receives only the exact canonical League root as an added writable root and can use stable commands | Pending real gate |
+| Visible launch | One command reserves, starts, observes generated UUID, verifies, activates, and briefs the exact Herdr/Codex runtime | Installed 0.2.21 failed on the silent metadata receipt; focused and staged 0.2.22 candidate passed |
+| Sandbox access | Launched Codex receives only the exact canonical League root as an added writable root and can use stable commands | Passed in installed E2E |
 | Failure cleanup | Unproven cleanup remains pending; proven endpoint/runtime/callsign cleanup settles blocked with zero active lease | Passed in focused synthetic test |
-| Disposable installed E2E | Capture, explicit triage, assign run, transition, Garen watcher delivery, terminal cleanup, zero residue, integrity | Pending and required for resolution |
+| Disposable installed E2E | Capture, explicit triage, assign run, transition, Garen watcher delivery, terminal cleanup, zero residue, integrity | 0.2.21 failed and cleaned exactly; staged 0.2.22 passed; installed 0.2.22 gate pending |
 
 ## Rollback
 
@@ -619,14 +636,12 @@ The final installed gate must bind rather than narrate each effect:
 ## Remaining risks
 
 - A supervisor process started before installation continues running its already
-  loaded code until the owner replaces it for the acceptance gate.
+  loaded code until the owner replaces it.
 - Unsupported or externally altered journal modes must remain fail-closed.
 - WAL safety still depends on the loaded SQLite runtime meeting the pinned
   minimum version.
 - Hook success alone still does not prove canonical prompt capture; acceptance
   must inspect the stable League storage surface.
-- The operational launcher and guide have not yet passed exact-head CI,
-  installation, or the one disposable real E2E.
 - The one-process turn is bounded by count/bytes and transaction phases, but a
   model that never sends its commit line leaves the process waiting; Stop and
   owner interruption remain the recovery boundary. No permanent daemon is
@@ -634,10 +649,11 @@ The final installed gate must bind rather than narrate each effect:
 - Cross-Squad acknowledgement routing and explicit defer/block/cancel remain
   dedicated commands instead of being folded into the ordinary direct-turn
   batch. This preserves semantic authority.
-- Writable-root syntax and real startup passed the candidate adapter gate but
-  remain unproven in the installed full lifecycle until the final E2E.
-- UserPromptSubmit remains owner-disabled until the exact installed acceptance
-  is ready; the implementation does not re-enable it.
+- UserPromptSubmit remained owner-disabled during release and acceptance. The
+  implementation does not change that owner-controlled hook setting.
+- The passing 0.2.22 lifecycle is staged-candidate evidence, not installed
+  proof. The stable pointer remains 0.2.21 until separately authorized release
+  installation and rollback verification.
 
 ## Action items
 
@@ -645,23 +661,23 @@ The final installed gate must bind rather than narrate each effect:
 | --- | --- | --- | --- | --- |
 | P0 | Make normal connections validate rather than change established journal mode | Issue #23 implementer | Issue #23 | Installed and accepted |
 | P0 | Add long-lived supervisor plus concurrent prompt/Stop regression | Issue #23 implementer | Issue #23 | Installed and accepted |
-| P0 | Add one-process exact-body intake, atomic semantic begin, atomic answer/result commit, and full obligation boundary without prompt injection | Issue #23 implementer | Issue #23 | Candidate complete |
-| P0 | Add adapter-backed `league assign run` with narrow canonical-root access | Issue #23 implementer | Issue #23 | Candidate complete |
-| P0 | Archive the retired JSON-era guide contract and install only SQLite-native guidance from exact merged source bytes | Issue #23 implementer | Issue #23 | Candidate complete; install pending |
-| P0 | Publish Markdown and self-contained HTML incident artifacts | Issue #23 implementer | Issue #23 | Candidate complete |
-| P0 | Run focused tests, public-safety scan, and exact-head CI | Issue #23 implementer | Issue #23 | Local tests passed; CI pending |
-| P0 | Install the exact tested release with rollback retained | Release owner | Issue #23 | Pending |
-| P0 | Run one installed disposable capture-to-cleanup E2E and prove zero residue/integrity | Issue #23 implementer | Issue #23 | Pending |
-| P0 | Publish corrected retired-JSON versus installed one-process median/p95 and command-count evidence | Issue #23 implementer | Issue #23 | Installed comparison passed; final E2E timing pending |
-| P0 | Re-enable UserPromptSubmit only after the installed disposable gate | Owner | Issue #23 | Pending |
+| P0 | Add one-process exact-body intake, atomic semantic begin, atomic answer/result commit, and full obligation boundary without prompt injection | Issue #23 implementer | Issue #23 | Installed and accepted |
+| P0 | Add adapter-backed `league assign run` with narrow canonical-root access | Issue #23 implementer | Issue #23 | Installed and accepted |
+| P0 | Archive the retired JSON-era guide contract and install only SQLite-native guidance from exact merged source bytes | Issue #23 implementer | Issue #23 | Installed with byte parity |
+| P0 | Publish Markdown and self-contained HTML incident artifacts | Issue #23 implementer | Issue #23 | Complete |
+| P0 | Run focused tests, public-safety scan, and exact-head CI | Issue #23 implementer | Issue #23 | Refreshed PR #77 head pending |
+| P0 | Install the exact tested release with rollback retained | Release owner | Issue #23 | 0.2.22 pending; pointer preserved at 0.2.21 |
+| P0 | Run one installed disposable capture-to-cleanup E2E and prove zero residue/integrity | Issue #23 implementer | Issue #23 | Staged 0.2.22 passed; installed gate pending |
+| P0 | Publish corrected retired-JSON versus installed one-process median/p95 and command-count evidence | Issue #23 implementer | Issue #23 | Complete |
+| P0 | Re-enable UserPromptSubmit only after the installed disposable gate | Owner | Issue #23 | Not yet safe; not changed by this work |
 | P1 | Keep journal-mode mutation restricted to explicit maintenance commands | League maintainers | Storage contract | Ongoing invariant |
 
 ## Resolution criterion
 
-Issue #23 remains open. The incident may be called resolved only after the exact
-installed disposable gate proves: two prompts capture and the same one-process
-turn receives explicit model-authored triage/routing and commits without
-conflict or busy; `league assign run` launches one
-verified visible Champion that can access canonical League state; the Champion
-transitions working and wakes Garen; terminal cleanup closes only that endpoint,
-releases the callsign, leaves zero active residue, and passes SQLite integrity.
+Issue #23 does not yet meet its final installed resolution criterion. The
+staged 0.2.22 candidate proved two exact prompt captures; one stable turn PID
+for model-authored triage, routing, and commit; one verified visible Champion
+with canonical-root access; working and completed watcher delivery; exact
+endpoint/worktree/branch cleanup; callsign release; no unresolved obligations;
+zero residue; and SQLite integrity. The same proof must run after the exact
+tested bytes are merged and installed with rollback retained.

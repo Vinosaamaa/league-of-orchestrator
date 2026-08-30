@@ -731,7 +731,7 @@ def test_mode_records_survive_verified_backup_and_bounded_export(root: Path) -> 
     authorized = _authorize(state, root)
     with SQLiteStorage(state) as source:
         backup = source.backup("backups/mode.sqlite3")
-        assert backup["database_schema_version"] == 18
+        assert backup["database_schema_version"] == 19
         inspection = json.loads(
             source.export_bytes(
                 format_name="json", purpose="inspection", max_records=10_000

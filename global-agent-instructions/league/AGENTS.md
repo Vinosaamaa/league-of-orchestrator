@@ -94,8 +94,9 @@ $HOME/.local/bin/league --state-root "$HOME/.local/state/league" request turn \
 - Display labels contain one or two words. Routing identity remains separate
   from the human-visible label.
 - Dispatch, claim, execution mode, and the exact duplicate-preflight selection
-  receipt precede launch. `league assign run` re-verifies the exact open issue
-  and canonical task scope before mutation. Do not manually chain prepare,
+  receipt precedes launch. Before launch, `league assign run` re-verifies the
+  exact repository issue is open and matches the canonical task scope. Do not
+  manually chain prepare,
   launching, and activation.
 - Launch failure rolls back only the exact partial reservation and endpoint.
   Unproven cleanup remains `cleanup_pending`.

@@ -2777,10 +2777,16 @@ def _task_transition_retry(
         "transition_history_malformed",
         "stored transition retry history is malformed",
     )
+    stored_attention = detail.get("attention_required", False)
+    if not isinstance(stored_attention, bool):
+        raise StorageRefusal(
+            "transition_history_malformed",
+            "stored transition retry attention metadata is malformed",
+        )
     if (
         duplicate["task_id"] != task_id
         or duplicate["to_state"] != state
-        or bool(detail.get("attention_required", False)) != attention_required
+        or stored_attention != attention_required
     ):
         raise StorageRefusal("transition_conflict", "transition key has different task content")
     outbox = store.connection.execute(

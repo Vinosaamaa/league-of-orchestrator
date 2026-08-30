@@ -1125,8 +1125,7 @@ def _validated_reconciliation_requests(
         )
     evidence_queries = (
         (
-            "SELECT 1 FROM request_dispatches "
-            "WHERE request_id=? AND execution_mode<>'direct' LIMIT 1"
+            "SELECT 1 FROM request_dispatches WHERE request_id=? LIMIT 1"
         ),
         "SELECT 1 FROM tasks WHERE request_id=? LIMIT 1",
         "SELECT 1 FROM request_results WHERE request_id=? LIMIT 1",

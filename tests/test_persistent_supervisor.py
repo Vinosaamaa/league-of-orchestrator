@@ -15,6 +15,7 @@ import threading
 import time
 import sys
 import subprocess
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -307,6 +308,13 @@ def main() -> None:
             assert target is not None and target["channel"] == "watcher"
             assert str(target["locator"]).startswith("unix:")
             assert notify_user_message(observer, SHOTCALLER_ID, "prompt:synthetic")
+            with patch(
+                "league.persistent_supervisor.send_supervisor_message",
+                side_effect=StorageRefusal("watcher_fenced", "synthetic stale fence"),
+            ):
+                assert not notify_user_message(
+                    observer, SHOTCALLER_ID, "prompt:synthetic-stale"
+                )
 
         envelope = {
             "outbox_id": "outbox:synthetic-supervisor",

@@ -397,7 +397,7 @@ def notify_user_message(store: Any, actor_agent_id: str, prompt_id: str) -> bool
             },
             timeout_seconds=0.25,
         )
-    except SupervisorUnavailable:
+    except (SupervisorUnavailable, StorageRefusal):
         return False
     return response.get("priority") == "user"
 

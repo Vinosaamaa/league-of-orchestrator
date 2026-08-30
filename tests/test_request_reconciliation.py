@@ -13,7 +13,13 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / "src"), str(ROOT / "tests")]
 
 from league.sqlite_store import SQLiteStorage  # noqa: E402
-from request_lifecycle_fixture import GAREN_RUNTIME, create_context  # noqa: E402
+from league.storage import StorageRefusal  # noqa: E402
+from league.storage_request import ReconcileDuplicateRequestCommand  # noqa: E402
+from request_lifecycle_fixture import (  # noqa: E402
+    GAREN_RUNTIME,
+    create_context,
+    dispatch_request,
+)
 from storage_fixture import SHOTCALLER_ID  # noqa: E402
 from storage_test_support import invoke_cli  # noqa: E402
 
@@ -151,11 +157,55 @@ def test_reconciliation_refuses_self_and_stale_versions(root: Path) -> None:
     assert stale_code == 3 and stale_result["error"]["code"] == "version_conflict"
 
 
+def test_reconciliation_refuses_direct_dispatch_evidence(root: Path) -> None:
+    _state, store, clock = create_context(root, "direct-dispatch-refusal")
+    _request(store, clock, "A", "Canonical owner request")
+    _request(store, clock, "B", "Duplicate owner request")
+    store.claim_request(
+        "request:reconcile:B",
+        GAREN_RUNTIME,
+        "claim:reconcile:B",
+        clock.after(120),
+        clock.now(),
+    )
+    dispatch_request(
+        store,
+        clock,
+        "request:reconcile:B",
+        "claim:reconcile:B",
+        "dispatch:reconcile:B",
+        "question",
+        "direct",
+    )
+    duplicate_version = int(
+        store.connection.execute(
+            "SELECT version FROM requests WHERE request_id='request:reconcile:B'"
+        ).fetchone()[0]
+    )
+    try:
+        store.reconcile_duplicate_request(
+            ReconcileDuplicateRequestCommand(
+                duplicate_request_id="request:reconcile:B",
+                canonical_request_id="request:reconcile:A",
+                owner_agent_id=SHOTCALLER_ID,
+                expected_duplicate_version=duplicate_version,
+                expected_canonical_version=1,
+                at=clock.now(),
+            )
+        )
+    except StorageRefusal as exc:
+        assert exc.code == "irreversible_execution_started"
+    else:
+        raise AssertionError("direct dispatch evidence allowed semantic supersession")
+    store.close()
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="league-request-reconciliation-") as temporary:
         root = Path(temporary)
         test_stop_is_read_only_and_reconciliation_is_exact(root / "success")
         test_reconciliation_refuses_self_and_stale_versions(root / "refusal")
+        test_reconciliation_refuses_direct_dispatch_evidence(root / "direct")
     print(
         "PASS: Stop is omission-only; exact same-owner reconciliation supersedes only the duplicate, "
         "preserves sources, is idempotent, and refuses self/stale links"

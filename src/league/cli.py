@@ -46,6 +46,7 @@ from .storage import (
 from .storage_request import (
     MAX_TRIAGE_JSON_BYTES,
     MAX_TRIAGE_TURN_BYTES,
+    MAX_TRIAGE_TURN_PROMPTS,
     AnswerRequestCommand,
     ReconcileDuplicateRequestCommand,
     RequestProgressCommand,
@@ -126,6 +127,18 @@ class _BoundedSentinelPath(argparse.Action):
             )
         paths.append(value)
         setattr(namespace, self.dest, paths)
+
+
+def _turn_prompt_limit(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("turn prompt limit must be an integer") from exc
+    if not 1 <= parsed <= MAX_TRIAGE_TURN_PROMPTS:
+        raise argparse.ArgumentTypeError(
+            f"turn prompt limit must be between 1 and {MAX_TRIAGE_TURN_PROMPTS}"
+        )
+    return parsed
 
 
 def _add_acceptance_commands(groups: argparse._SubParsersAction) -> None:
@@ -849,7 +862,7 @@ def _add_request_commands(groups: argparse._SubParsersAction) -> None:
     )
     turn.add_argument("--owner-agent-id", required=True)
     turn.add_argument("--at", help=argparse.SUPPRESS)
-    turn.add_argument("--limit", type=int, default=20)
+    turn.add_argument("--limit", type=_turn_prompt_limit, default=20)
     turn.add_argument("--max-bytes", type=int, default=1_000_000)
     turn.add_argument("--candidate-limit", type=int, default=12)
     turn.add_argument("--candidate-max-bytes", type=int, default=24_576)

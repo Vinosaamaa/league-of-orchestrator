@@ -52,6 +52,21 @@ def _summary(values: Sequence[float]) -> dict[str, float]:
     }
 
 
+def _terminate_and_reap(process: subprocess.Popen[Any]) -> None:
+    """Bound termination and close every benchmark child pipe on every path."""
+
+    if process.poll() is None:
+        process.terminate()
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=2)
+    for stream in (process.stdin, process.stdout, process.stderr):
+        if stream is not None and not stream.closed:
+            stream.close()
+
+
 def _load(path: Path) -> tuple[list[dict[str, Any]], str]:
     encoded = path.read_bytes()
     payload = json.loads(encoded)
@@ -204,55 +219,64 @@ def _one(case: dict[str, Any], arm: str, sample: int, league: Path) -> dict[str,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
-        assert process.stdin is not None and process.stdout is not None
-        intake = json.loads(process.stdout.readline())
-        intake_completed = time.perf_counter_ns()
-        if not intake.get("ok") or intake["result"]["returned_count"] != 1:
-            raise RuntimeError("inline request-turn intake failed")
-        sideband, accuracy = _sideband(case, arm, intake["result"]["candidate_inventory"])
-        encode_started = time.perf_counter_ns()
-        encoded = (_json(sideband) + "\n").encode("utf-8")
-        encode_completed = time.perf_counter_ns()
-        begin_started = time.perf_counter_ns()
-        process.stdin.write(encoded)
-        process.stdin.flush()
-        begun = json.loads(process.stdout.readline())
-        begin_completed = time.perf_counter_ns()
-        if not begun.get("ok"):
-            raise RuntimeError(f"inline begin failed: {begun.get('error', {}).get('code')}")
-        commit = {
-            "actions": [
-                {
-                    "kind": "answer",
-                    "request_index": index,
-                    "content": f"Synthetic inline answer {index}",
-                    "resolution_summary": f"Completed inline request {index}",
-                }
-                for index in range(1, accuracy["items_created"] + 1)
-            ]
-        }
-        commit_started = time.perf_counter_ns()
-        process.stdin.write((_json(commit) + "\n").encode("utf-8"))
-        process.stdin.flush()
-        committed = json.loads(process.stdout.readline())
-        process.wait(timeout=20)
-        completed = time.perf_counter_ns()
-        if process.returncode != 0 or not committed.get("ok"):
-            assert process.stderr is not None
-            raise RuntimeError(process.stderr.read().decode("utf-8", errors="replace"))
-        return {
-            "sample": sample,
-            "capture_exact_event_ms": (capture_completed - capture_started) / 1_000_000,
-            "prompt_to_first_output_ms": (intake_completed - started) / 1_000_000,
-            "sideband_json_serialize_ms": (encode_completed - encode_started) / 1_000_000,
-            "local_validate_dedup_commit_ms": (begin_completed - begin_started) / 1_000_000,
-            "final_commit_ms": (completed - commit_started) / 1_000_000,
-            "total_request_turn_ms": (completed - started) / 1_000_000,
-            "separate_classifier_model_ms": 0.0,
-            "separate_classifier_processes": 0,
-            "exact_event_idempotent": True,
-            **accuracy,
-        }
+        try:
+            assert process.stdin is not None and process.stdout is not None
+            intake = json.loads(process.stdout.readline())
+            intake_completed = time.perf_counter_ns()
+            if not intake.get("ok") or intake["result"]["returned_count"] != 1:
+                raise RuntimeError("inline request-turn intake failed")
+            sideband, accuracy = _sideband(
+                case, arm, intake["result"]["candidate_inventory"]
+            )
+            encode_started = time.perf_counter_ns()
+            encoded = (_json(sideband) + "\n").encode("utf-8")
+            encode_completed = time.perf_counter_ns()
+            begin_started = time.perf_counter_ns()
+            process.stdin.write(encoded)
+            process.stdin.flush()
+            begun = json.loads(process.stdout.readline())
+            begin_completed = time.perf_counter_ns()
+            if not begun.get("ok"):
+                raise RuntimeError(
+                    f"inline begin failed: {begun.get('error', {}).get('code')}"
+                )
+            commit = {
+                "actions": [
+                    {
+                        "kind": "answer",
+                        "request_index": index,
+                        "content": f"Synthetic inline answer {index}",
+                        "resolution_summary": f"Completed inline request {index}",
+                    }
+                    for index in range(1, accuracy["items_created"] + 1)
+                ]
+            }
+            commit_started = time.perf_counter_ns()
+            process.stdin.write((_json(commit) + "\n").encode("utf-8"))
+            process.stdin.flush()
+            committed = json.loads(process.stdout.readline())
+            process.wait(timeout=20)
+            completed = time.perf_counter_ns()
+            if process.returncode != 0 or not committed.get("ok"):
+                assert process.stderr is not None
+                raise RuntimeError(
+                    process.stderr.read().decode("utf-8", errors="replace")
+                )
+            return {
+                "sample": sample,
+                "capture_exact_event_ms": (capture_completed - capture_started) / 1_000_000,
+                "prompt_to_first_output_ms": (intake_completed - started) / 1_000_000,
+                "sideband_json_serialize_ms": (encode_completed - encode_started) / 1_000_000,
+                "local_validate_dedup_commit_ms": (begin_completed - begin_started) / 1_000_000,
+                "final_commit_ms": (completed - commit_started) / 1_000_000,
+                "total_request_turn_ms": (completed - started) / 1_000_000,
+                "separate_classifier_model_ms": 0.0,
+                "separate_classifier_processes": 0,
+                "exact_event_idempotent": True,
+                **accuracy,
+            }
+        finally:
+            _terminate_and_reap(process)
 
 
 def run(args: argparse.Namespace) -> dict[str, Any]:

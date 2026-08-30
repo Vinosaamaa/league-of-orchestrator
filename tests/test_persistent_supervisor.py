@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 from pathlib import Path
@@ -24,11 +25,13 @@ from league.canonical_delivery import InstalledDeliveryAdapter  # noqa: E402
 from league.persistent_supervisor import (  # noqa: E402
     PersistentSupervisor,
     notify_user_message,
+    send_supervisor_message,
     stop_supervisor,
     supervisor_status,
 )
 from league.sqlite_store import SQLiteStorage  # noqa: E402
 from league.storage import RuntimeRegistrationCommand  # noqa: E402
+from league.storage import StorageRefusal  # noqa: E402
 
 
 class FakeWakeAdapter:
@@ -53,6 +56,37 @@ class FakeRecoveryAdapter:
         self.completed.set()
 
 
+class FailOneRenewalFactory:
+    def __init__(self) -> None:
+        self.registration_calls = 0
+        self.failed = False
+
+    def __call__(self, state_root: Path):
+        factory = self
+
+        class StoreProxy:
+            def __init__(self) -> None:
+                self.store = SQLiteStorage(state_root)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, traceback) -> None:
+                self.store.close()
+
+            def __getattr__(self, name):
+                return getattr(self.store, name)
+
+            def register_watcher(self, *args, **kwargs):
+                factory.registration_calls += 1
+                if factory.registration_calls == 2:
+                    factory.failed = True
+                    raise StorageRefusal("busy", "synthetic renewal contention", retryable=True)
+                return self.store.register_watcher(*args, **kwargs)
+
+        return StoreProxy()
+
+
 def _start(runtime: PersistentSupervisor):
     errors: list[BaseException] = []
 
@@ -74,24 +108,28 @@ def _future(seconds: float) -> str:
     )
 
 
+def _close_secondary_runtime(store: SQLiteStorage, at: str) -> None:
+    store.register_runtime(
+        RuntimeRegistrationCommand(
+            runtime_instance_id=GAREN_RUNTIME_TWO,
+            actor_agent_id=SHOTCALLER_ID,
+            harness_kind="codex-thread",
+            backend_kind="herdr",
+            session_ref=f"session:{GAREN_RUNTIME_TWO}",
+            endpoint="synthetic:garen:two",
+            runtime_generation="generation:garen:two",
+            status="closed",
+            verified=False,
+            at=at,
+        )
+    )
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="l66-supervisor-") as temporary:
         root = Path(temporary)
         state, store, clock = create_context(root, "state")
-        store.register_runtime(
-            RuntimeRegistrationCommand(
-                runtime_instance_id=GAREN_RUNTIME_TWO,
-                actor_agent_id=SHOTCALLER_ID,
-                harness_kind="codex-thread",
-                backend_kind="herdr",
-                session_ref=f"session:{GAREN_RUNTIME_TWO}",
-                endpoint="synthetic:garen:two",
-                runtime_generation="generation:garen:two",
-                status="closed",
-                verified=False,
-                at=clock.now(),
-            )
-        )
+        _close_secondary_runtime(store, clock.now())
         binding = store.supervisor_binding("Garen")
         store.close()
 
@@ -131,6 +169,16 @@ def main() -> None:
                 check=False,
             )
             assert submitted.returncode == 0 and json.loads(submitted.stdout) == {}, submitted.stderr
+        assert runtime.user_priority.is_set() and runtime.user_priority_generation == 1
+        try:
+            send_supervisor_message(
+                f"unix:{runtime.socket_path}",
+                {"kind": "hook", "hook": {"command": "unsupported"}},
+            )
+        except StorageRefusal as exc:
+            assert exc.code == "prompt_hook_invalid"
+        else:
+            raise AssertionError("brokered StorageRefusal was not preserved")
         with SQLiteStorage(state) as observer:
             intake = observer.untriaged_intake(SHOTCALLER_ID)
             assert intake["returned_count"] == 1
@@ -178,6 +226,7 @@ def main() -> None:
             check=False,
         )
         assert steer.returncode == 0 and json.loads(steer.stdout) == {}
+        assert runtime.user_priority_generation == 2
         with SQLiteStorage(state) as observer:
             intake = observer.untriaged_intake(SHOTCALLER_ID)
             assert [row["body"] for row in intake["prompts"]] == [
@@ -268,10 +317,88 @@ def main() -> None:
         assert not recovered_thread.is_alive() and not recovered_errors
         assert not stale_socket.exists()
 
+        capacity_runtime = PersistentSupervisor(
+            state,
+            callsign="Garen",
+            max_accepted_work=1,
+        )
+        capacity_runtime._executor = ThreadPoolExecutor(max_workers=1)
+        capacity_release = threading.Event()
+        assert capacity_runtime._submit(capacity_release.wait, 2)
+        assert not capacity_runtime._submit(lambda: None)
+        capacity_release.set()
+        capacity_runtime._executor.shutdown(wait=True)
+        capacity_runtime._executor = None
+
+    with tempfile.TemporaryDirectory(prefix="l66-supervisor-renewal-") as temporary:
+        state, store, clock = create_context(Path(temporary), "state")
+        _close_secondary_runtime(store, clock.now())
+        store.close()
+        factory = FailOneRenewalFactory()
+        renewal_runtime = PersistentSupervisor(
+            state,
+            callsign="Garen",
+            lease_seconds=0.8,
+            renew_seconds=0.15,
+            wake_adapter=FakeWakeAdapter(),
+            store_factory=factory,
+        )
+        renewal_thread, renewal_errors = _start(renewal_runtime)
+        time.sleep(0.4)
+        renewed = supervisor_status(state, "Garen")
+        assert factory.failed and renewed["live"] and renewed["fence"] >= 3
+        stop_supervisor(state, "Garen")
+        renewal_thread.join(timeout=5)
+        assert not renewal_thread.is_alive() and not renewal_errors
+
+    with tempfile.TemporaryDirectory(prefix="l66-supervisor-uncertain-") as temporary:
+        state, store, clock = create_context(Path(temporary), "state")
+        _close_secondary_runtime(store, clock.now())
+        binding = store.supervisor_binding("Garen")
+        socket_path = PersistentSupervisor(state, callsign="Garen").socket_path
+        assert not socket_path.exists()
+        store.register_watcher(
+            binding["scope_id"],
+            "watcher:synthetic-unreachable",
+            binding["actor_agent_id"],
+            binding["runtime_instance_id"],
+            f"unix:{socket_path}",
+            _future(30),
+            1,
+            clock.now(),
+        )
+        store.close()
+        environment = {
+            **os.environ,
+            "LEAGUE_STATE_ROOT": str(state),
+            "PYTHONDONTWRITEBYTECODE": "1",
+        }
+        refused = subprocess.run(
+            [str(ROOT / "bin/agent-watcher"), "codex-user-prompt-hook"],
+            input=json.dumps(
+                {
+                    "session_id": f"session:{GAREN_RUNTIME}",
+                    "turn_id": "turn:uncertain-owner",
+                    "hook_event_name": "UserPromptSubmit",
+                    "prompt": "Synthetic prompt must not fall back",
+                }
+            ),
+            capture_output=True,
+            text=True,
+            env=environment,
+            timeout=10,
+            check=False,
+        )
+        assert refused.returncode == 2
+        assert "supervisor_ownership_uncertain" in refused.stderr
+        with SQLiteStorage(state) as observer:
+            assert observer.untriaged_intake(SHOTCALLER_ID)["returned_count"] == 0
+
     print(
         "PASS: persistent supervisor owns one event socket, renews/fences its lease, "
         "captures exact-once prompts, suppresses Stop feedback, rearms same-turn steers, "
         "schedules orphan/backlog recovery off-path, delivers Champion wake, "
+        "bounds accepted work, recovers one transient renewal, preserves broker refusals, "
         "recovers stale ownership, and stops cleanly"
     )
 

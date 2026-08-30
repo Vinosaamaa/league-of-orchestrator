@@ -27,6 +27,7 @@ sys.path[:0] = [str(ROOT / "src"), str(ROOT / "tests")]
 
 from request_lifecycle_fixture import GAREN_RUNTIME, GAREN_RUNTIME_TWO, create_context  # noqa: E402
 from storage_fixture import SHOTCALLER_ID  # noqa: E402
+from league.sqlite_store import SQLiteStorage  # noqa: E402
 from league.storage import RuntimeRegistrationCommand  # noqa: E402
 
 
@@ -73,6 +74,21 @@ def _command_output(command: Sequence[str], *, cwd: Path | None = None) -> str:
         timeout=30,
     )
     return completed.stdout.strip()
+
+
+def _terminate_and_reap(process: subprocess.Popen[Any]) -> None:
+    """Bound termination and close every benchmark child pipe on every path."""
+
+    if process.poll() is None:
+        process.terminate()
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=2)
+    for stream in (process.stdin, process.stdout, process.stderr):
+        if stream is not None and not stream.closed:
+            stream.close()
 
 
 def _percentile(values: Sequence[float], fraction: float) -> float:
@@ -377,42 +393,50 @@ def _codex_model_runner(
     ]
     prompt = _model_prompt(cases).encode("utf-8")
     started_ns = time.perf_counter_ns()
+    process: subprocess.Popen[bytes] | None = None
     with tempfile.TemporaryFile() as errors:
-        process = subprocess.Popen(
-            command,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=errors,
-            env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
-        )
-        spawned_ns = time.perf_counter_ns()
-        if process.stdin is None:
-            raise RuntimeError("Codex input pipe is unavailable")
-        process.stdin.write(prompt)
-        process.stdin.close()
-        deadline = time.monotonic() + PROCESS_TIMEOUT_SECONDS
-        turn_started_ns: int | None = None
-        message_ns: int | None = None
-        completed_ns: int | None = None
-        message: str | None = None
-        while True:
-            line, observed_ns = _read_process_line(process, deadline)
-            event = json.loads(line)
-            event_type = event.get("type")
-            if event_type == "turn.started":
-                turn_started_ns = observed_ns
-            elif event_type == "item.completed" and event.get("item", {}).get("type") == "agent_message":
-                message = event["item"].get("text")
-                message_ns = observed_ns
-            elif event_type == "turn.completed":
-                completed_ns = observed_ns
-                break
-            elif event_type in {"turn.failed", "error"}:
-                raise RuntimeError("Codex semantic triage failed")
-        returncode = process.wait(timeout=max(0.0, deadline - time.monotonic()))
-        exited_ns = time.perf_counter_ns()
-        errors.seek(0)
-        error = errors.read(MAX_LINE_BYTES + 1)
+        try:
+            process = subprocess.Popen(
+                command,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=errors,
+                env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+            )
+            spawned_ns = time.perf_counter_ns()
+            if process.stdin is None:
+                raise RuntimeError("Codex input pipe is unavailable")
+            process.stdin.write(prompt)
+            process.stdin.close()
+            deadline = time.monotonic() + PROCESS_TIMEOUT_SECONDS
+            turn_started_ns: int | None = None
+            message_ns: int | None = None
+            completed_ns: int | None = None
+            message: str | None = None
+            while True:
+                line, observed_ns = _read_process_line(process, deadline)
+                event = json.loads(line)
+                event_type = event.get("type")
+                if event_type == "turn.started":
+                    turn_started_ns = observed_ns
+                elif (
+                    event_type == "item.completed"
+                    and event.get("item", {}).get("type") == "agent_message"
+                ):
+                    message = event["item"].get("text")
+                    message_ns = observed_ns
+                elif event_type == "turn.completed":
+                    completed_ns = observed_ns
+                    break
+                elif event_type in {"turn.failed", "error"}:
+                    raise RuntimeError("Codex semantic triage failed")
+            returncode = process.wait(timeout=max(0.0, deadline - time.monotonic()))
+            exited_ns = time.perf_counter_ns()
+            errors.seek(0)
+            error = errors.read(MAX_LINE_BYTES + 1)
+        finally:
+            if process is not None:
+                _terminate_and_reap(process)
     if returncode != 0 or turn_started_ns is None or message_ns is None or completed_ns is None:
         raise RuntimeError(error.decode("utf-8", errors="replace") or "Codex semantic triage was incomplete")
     parse_started_ns = time.perf_counter_ns()
@@ -446,46 +470,22 @@ def _watcher_environment(root: Path, state: Path, watcher: Path) -> dict[str, st
 
 
 def _wait_for_supervisor_ready(
-    league: Path,
     state: Path,
     waiter: subprocess.Popen[str],
     *,
     timeout_seconds: float = 5.0,
 ) -> None:
-    """Observe canonical watcher readiness through the stable export facade."""
+    """Observe one bounded canonical watcher registration/scope row."""
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
         if waiter.poll() is not None:
             output, error = waiter.communicate()
             raise RuntimeError(f"installed watcher exited before readiness: {output}{error}")
-        exported = subprocess.run(
-            [
-                str(league),
-                "--state-root",
-                str(state),
-                "storage",
-                "export",
-                "--format",
-                "json",
-                "--purpose",
-                "inspection",
-                "--max-records",
-                "10000",
-            ],
-            capture_output=True,
-            text=True,
-            env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
-            timeout=30,
-            check=False,
-        )
-        if exported.returncode == 0:
-            snapshot = json.loads(exported.stdout)
-            registrations = snapshot["tables"]["watcher_registrations"]
-            scopes = snapshot["tables"]["watcher_scopes"]
-            if registrations and any(int(row["wait_active"]) == 1 for row in scopes):
+        with SQLiteStorage(state) as observer:
+            readiness = observer.watcher_readiness(SHOTCALLER_ID)
+            if readiness is not None and int(readiness["wait_active"]) == 1:
                 return
         time.sleep(0.02)
-    waiter.terminate()
     raise RuntimeError("installed watcher did not publish canonical readiness")
 
 
@@ -493,7 +493,6 @@ def _capture_with_hook(
     root: Path,
     state: Path,
     cases: Sequence[dict[str, Any]],
-    league: Path,
     watcher: Path,
 ) -> dict[str, Any]:
     environment = _watcher_environment(root, state, watcher)
@@ -504,7 +503,20 @@ def _capture_with_hook(
         env=environment,
         text=True,
     )
-    _wait_for_supervisor_ready(league, state, waiter)
+    try:
+        return _capture_with_hook_process(cases, state, waiter, watcher, environment)
+    finally:
+        _terminate_and_reap(waiter)
+
+
+def _capture_with_hook_process(
+    cases: Sequence[dict[str, Any]],
+    state: Path,
+    waiter: subprocess.Popen[str],
+    watcher: Path,
+    environment: dict[str, str],
+) -> dict[str, Any]:
+    _wait_for_supervisor_ready(state, waiter)
     observed: queue.Queue[tuple[int, str]] = queue.Queue(maxsize=1)
 
     def read_wake() -> None:
@@ -566,7 +578,6 @@ def _capture_with_hook(
     try:
         wake_ns, wake_line = observed.get(timeout=5)
     except queue.Empty as exc:
-        waiter.terminate()
         raise RuntimeError("installed prompt wake did not arrive") from exc
     reader.join(timeout=1)
     returncode = waiter.wait(timeout=5)
@@ -643,97 +654,107 @@ def _turn(
         str(len(cases)),
     ]
     started_ns = time.perf_counter_ns()
+    process: subprocess.Popen[bytes] | None = None
     with tempfile.TemporaryFile() as errors:
-        process = subprocess.Popen(
-            command,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=errors,
-            env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
-        )
-        spawned_ns = time.perf_counter_ns()
-        if process.stdin is None:
-            raise RuntimeError("League turn input pipe is unavailable")
-        deadline = time.monotonic() + PROCESS_TIMEOUT_SECONDS
-        intake_line, intake_ns = _read_process_line(process, deadline)
-        parse_started_ns = time.perf_counter_ns()
-        intake = json.loads(intake_line)
-        parse_completed_ns = time.perf_counter_ns()
-        if intake["result"]["returned_count"] != len(cases):
-            raise RuntimeError("League turn intake count differs from the frozen batch")
-        if [row["body"] for row in intake["result"]["prompts"]] != [row["prompt"] for row in cases]:
-            raise RuntimeError("League turn changed frozen prompt order or bytes")
-        if arm == "on":
-            semantic, model_metrics = model_runner(cases, model_root, args)
-        else:
-            precomputed = _stable_json(_gold_payload(cases))
-            off_parse_started_ns = time.perf_counter_ns()
-            semantic = json.loads(precomputed)
-            off_parse_completed_ns = time.perf_counter_ns()
-            model_metrics = {
-                "model_process_startup_ms": 0.0,
-                "semantic_model_ms": 0.0,
-                "model_completion_tail_ms": 0.0,
-                "model_total_ms": 0.0,
-                "model_process_exit_tail_ms": 0.0,
-                "model_wall_ms": 0.0,
-                "decision_json_parse_ms": (off_parse_completed_ns - off_parse_started_ns) / 1_000_000,
-            }
-        _validate_model_payload(semantic, cases)
-        accuracy = _accuracy(semantic, cases)
-        league_semantic = _league_payload(semantic)
-        league_semantic["candidate_inventory_digest"] = intake["result"][
-            "candidate_inventory"
-        ]["digest"]
-        encode_started_ns = time.perf_counter_ns()
-        begin_encoded = (_stable_json(league_semantic) + "\n").encode("utf-8")
-        encode_completed_ns = time.perf_counter_ns()
-        handoff_started_ns = time.perf_counter_ns()
-        process.stdin.write(begin_encoded)
-        process.stdin.flush()
-        handoff_completed_ns = time.perf_counter_ns()
-        begun_line, begun_ns = _read_process_line(process, deadline)
-        begun_parse_started_ns = time.perf_counter_ns()
-        begun = json.loads(begun_line)
-        begun_parse_completed_ns = time.perf_counter_ns()
-        if not begun.get("ok"):
-            error_value = begun.get("error", {})
-            raise RuntimeError(
-                "League turn begin refused: "
-                f"{error_value.get('code', 'unknown')}: "
-                f"{error_value.get('message', 'no message')}"
+        try:
+            process = subprocess.Popen(
+                command,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=errors,
+                env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
             )
-        if begun["result"]["phase"] != "begun" or process.poll() is not None:
-            raise RuntimeError("League turn begin phase failed")
-        new_count = sum(
-            item["disposition"] == "new_request"
-            for decision in league_semantic["decisions"]
-            for item in decision["items"]
-        )
-        actions = {
-            "actions": [
-                {
-                    "kind": "answer",
-                    "request_index": index,
-                    "content": f"Synthetic benchmark answer {index}",
-                    "resolution_summary": f"Completed synthetic benchmark request {index}",
+            spawned_ns = time.perf_counter_ns()
+            if process.stdin is None:
+                raise RuntimeError("League turn input pipe is unavailable")
+            deadline = time.monotonic() + PROCESS_TIMEOUT_SECONDS
+            intake_line, intake_ns = _read_process_line(process, deadline)
+            parse_started_ns = time.perf_counter_ns()
+            intake = json.loads(intake_line)
+            parse_completed_ns = time.perf_counter_ns()
+            if intake["result"]["returned_count"] != len(cases):
+                raise RuntimeError("League turn intake count differs from the frozen batch")
+            if [row["body"] for row in intake["result"]["prompts"]] != [
+                row["prompt"] for row in cases
+            ]:
+                raise RuntimeError("League turn changed frozen prompt order or bytes")
+            if arm == "on":
+                semantic, model_metrics = model_runner(cases, model_root, args)
+            else:
+                precomputed = _stable_json(_gold_payload(cases))
+                off_parse_started_ns = time.perf_counter_ns()
+                semantic = json.loads(precomputed)
+                off_parse_completed_ns = time.perf_counter_ns()
+                model_metrics = {
+                    "model_process_startup_ms": 0.0,
+                    "semantic_model_ms": 0.0,
+                    "model_completion_tail_ms": 0.0,
+                    "model_total_ms": 0.0,
+                    "model_process_exit_tail_ms": 0.0,
+                    "model_wall_ms": 0.0,
+                    "decision_json_parse_ms": (
+                        off_parse_completed_ns - off_parse_started_ns
+                    )
+                    / 1_000_000,
                 }
-                for index in range(1, new_count + 1)
-            ]
-        }
-        commit_encode_started_ns = time.perf_counter_ns()
-        commit_encoded = (_stable_json(actions) + "\n").encode("utf-8")
-        commit_encode_completed_ns = time.perf_counter_ns()
-        process.stdin.write(commit_encoded)
-        process.stdin.flush()
-        committed_line, committed_ns = _read_process_line(process, deadline)
-        committed_parse_started_ns = time.perf_counter_ns()
-        committed = json.loads(committed_line)
-        committed_parse_completed_ns = time.perf_counter_ns()
-        returncode = process.wait(timeout=max(0.0, deadline - time.monotonic()))
-        completed_ns = time.perf_counter_ns()
-        errors.seek(0)
-        error = errors.read(MAX_LINE_BYTES + 1)
+            _validate_model_payload(semantic, cases)
+            accuracy = _accuracy(semantic, cases)
+            league_semantic = _league_payload(semantic)
+            league_semantic["candidate_inventory_digest"] = intake["result"][
+                "candidate_inventory"
+            ]["digest"]
+            encode_started_ns = time.perf_counter_ns()
+            begin_encoded = (_stable_json(league_semantic) + "\n").encode("utf-8")
+            encode_completed_ns = time.perf_counter_ns()
+            handoff_started_ns = time.perf_counter_ns()
+            process.stdin.write(begin_encoded)
+            process.stdin.flush()
+            handoff_completed_ns = time.perf_counter_ns()
+            begun_line, begun_ns = _read_process_line(process, deadline)
+            begun_parse_started_ns = time.perf_counter_ns()
+            begun = json.loads(begun_line)
+            begun_parse_completed_ns = time.perf_counter_ns()
+            if not begun.get("ok"):
+                error_value = begun.get("error", {})
+                raise RuntimeError(
+                    "League turn begin refused: "
+                    f"{error_value.get('code', 'unknown')}: "
+                    f"{error_value.get('message', 'no message')}"
+                )
+            if begun["result"]["phase"] != "begun" or process.poll() is not None:
+                raise RuntimeError("League turn begin phase failed")
+            new_count = sum(
+                item["disposition"] == "new_request"
+                for decision in league_semantic["decisions"]
+                for item in decision["items"]
+            )
+            actions = {
+                "actions": [
+                    {
+                        "kind": "answer",
+                        "request_index": index,
+                        "content": f"Synthetic benchmark answer {index}",
+                        "resolution_summary": f"Completed synthetic benchmark request {index}",
+                    }
+                    for index in range(1, new_count + 1)
+                ]
+            }
+            commit_encode_started_ns = time.perf_counter_ns()
+            commit_encoded = (_stable_json(actions) + "\n").encode("utf-8")
+            commit_encode_completed_ns = time.perf_counter_ns()
+            process.stdin.write(commit_encoded)
+            process.stdin.flush()
+            committed_line, committed_ns = _read_process_line(process, deadline)
+            committed_parse_started_ns = time.perf_counter_ns()
+            committed = json.loads(committed_line)
+            committed_parse_completed_ns = time.perf_counter_ns()
+            returncode = process.wait(timeout=max(0.0, deadline - time.monotonic()))
+            completed_ns = time.perf_counter_ns()
+            errors.seek(0)
+            error = errors.read(MAX_LINE_BYTES + 1)
+        finally:
+            if process is not None:
+                _terminate_and_reap(process)
     if returncode != 0 or committed["result"]["phase"] != "committed":
         raise RuntimeError(error.decode("utf-8", errors="replace") or "League turn commit failed")
     return {
@@ -848,9 +869,7 @@ def _pair(
         )
     )
     store.close()
-    hook = _capture_with_hook(
-        pair_root, state, cases, args.league_command, args.watcher_command
-    )
+    hook = _capture_with_hook(pair_root, state, cases, args.watcher_command)
     fixture_digest, ordered_bodies = _fixture_snapshot(
         args.league_command, state, len(cases)
     )

@@ -2346,27 +2346,70 @@ def _candidate_request_inventory(
     prompt_texts: tuple[str, ...] = (),
     page: bool = False,
 ) -> dict[str, Any]:
-    rows = store.connection.execute(
-        """
-        SELECT r.request_id,r.summary,r.state,r.version,r.updated_at,
-               (SELECT t.project_id FROM tasks t
-                 WHERE t.request_id=r.request_id AND t.project_id IS NOT NULL
-                 ORDER BY t.task_id LIMIT 1) project_id,
-               (SELECT p.repository FROM tasks t JOIN projects p ON p.project_id=t.project_id
-                 WHERE t.request_id=r.request_id ORDER BY t.task_id LIMIT 1) repository
-          FROM requests r
-         WHERE r.owner_agent_id=? AND r.state NOT IN ('answered','cancelled')
-         ORDER BY r.request_id
-        """,
-        (owner_agent_id,),
-    ).fetchall()
-    total = len(rows)
+    total = int(
+        store.connection.execute(
+            """
+            SELECT COUNT(*) FROM requests
+             WHERE owner_agent_id=? AND state NOT IN ('answered','cancelled')
+            """,
+            (owner_agent_id,),
+        ).fetchone()[0]
+    )
+    pool_limit = limit + 1 if page else min(500, limit * 4) + 1
+    if page:
+        rows = store.connection.execute(
+            """
+            SELECT request_id,summary,state,version,updated_at
+              FROM requests
+             WHERE owner_agent_id=? AND state NOT IN ('answered','cancelled')
+               AND request_id>?
+             ORDER BY request_id
+             LIMIT ?
+            """,
+            (owner_agent_id, after or "", pool_limit),
+        ).fetchall()
+    else:
+        rows = store.connection.execute(
+            """
+            SELECT request_id,summary,state,version,updated_at
+              FROM requests
+             WHERE owner_agent_id=? AND state NOT IN ('answered','cancelled')
+             ORDER BY updated_at DESC,request_id
+             LIMIT ?
+            """,
+            (owner_agent_id, pool_limit),
+        ).fetchall()
+    request_ids = [str(row["request_id"]) for row in rows]
+    routing_by_request: dict[str, dict[str, str]] = {}
+    if request_ids:
+        placeholders = ",".join("?" for _ in request_ids)
+        routing_rows = store.connection.execute(
+            f"""
+            SELECT t.request_id,MIN(t.project_id) project_id,MIN(p.repository) repository
+              FROM tasks t LEFT JOIN projects p ON p.project_id=t.project_id
+             WHERE t.request_id IN ({placeholders})
+             GROUP BY t.request_id
+            """,
+            tuple(request_ids),
+        ).fetchall()
+        routing_by_request = {
+            str(row["request_id"]): {
+                key: str(row[key])
+                for key in ("project_id", "repository")
+                if row[key] is not None
+            }
+            for row in routing_rows
+        }
     prompt_terms = {
         term
         for text in prompt_texts
         for term in re.findall(r"[a-z0-9]+", text.lower())
         if len(term) > 2
     }
+    prompt_terms = set(
+        sorted(prompt_terms, key=lambda term: (-len(term), term))[:32]
+    )
+    prompt_text = " ".join(prompt_texts).lower()
     prepared: list[dict[str, Any]] = []
     for row in rows:
         summary = " ".join(str(row["summary"]).split())[:240]
@@ -2376,11 +2419,7 @@ def _candidate_request_inventory(
             "state": row["state"],
             "version": int(row["version"]),
         }
-        routing_key = {
-            key: row[key]
-            for key in ("project_id", "repository")
-            if row[key] is not None
-        }
+        routing_key = routing_by_request.get(str(row["request_id"]), {})
         if routing_key:
             candidate["routing_key"] = routing_key
         searchable = " ".join(
@@ -2389,7 +2428,7 @@ def _candidate_request_inventory(
         terms = {term for term in re.findall(r"[a-z0-9]+", searchable) if len(term) > 2}
         candidate["_overlap"] = len(prompt_terms & terms)
         candidate["_routing_overlap"] = int(
-            any(str(value).lower() in " ".join(prompt_texts).lower() for value in routing_key.values())
+            any(str(value).lower() in prompt_text for value in routing_key.values())
         )
         candidate["_updated_at"] = str(row["updated_at"])
         prepared.append(candidate)
@@ -2398,16 +2437,14 @@ def _candidate_request_inventory(
         for row in prepared
     ]
     snapshot_digest = _digest(_json(snapshot_rows))
-    if page:
-        prepared = [row for row in prepared if str(row["request_id"]) > (after or "")]
-    else:
+    if not page:
         prepared.sort(key=lambda row: str(row["request_id"]))
         prepared.sort(key=lambda row: row["_updated_at"], reverse=True)
         prepared.sort(key=lambda row: row["_overlap"], reverse=True)
         prepared.sort(key=lambda row: row["_routing_overlap"], reverse=True)
     candidates: list[dict[str, Any]] = []
     returned_bytes = 0
-    more = len(prepared) > limit
+    more = total > limit if not page else len(prepared) > limit
     for row in prepared[:limit]:
         candidate = {key: value for key, value in row.items() if not key.startswith("_")}
         encoded = _json(candidate).encode("utf-8")

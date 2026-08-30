@@ -24,6 +24,8 @@ from .storage import StorageRefusal
 
 
 MAX_MESSAGE_BYTES = 1_100_000
+MAX_ACCEPTED_WORK = 16
+MAX_RENEW_ATTEMPTS = 3
 DEFAULT_LEASE_SECONDS = 60
 DEFAULT_RENEW_SECONDS = 20
 SOCKET_NAME = ".league-supervisor.sock"
@@ -183,7 +185,17 @@ def send_supervisor_message(
         response = json.loads(bytes(chunks))
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:
         raise SupervisorUnavailable("persistent supervisor returned a malformed reply") from exc
-    if not isinstance(response, dict) or response.get("ok") is not True:
+    if not isinstance(response, dict):
+        raise SupervisorUnavailable("persistent supervisor refused the exact wake")
+    if response.get("ok") is not True:
+        if response.get("error") == "storage_refusal" and isinstance(
+            response.get("code"), str
+        ):
+            raise StorageRefusal(
+                str(response["code"]),
+                "persistent supervisor refused the canonical operation",
+                retryable=response.get("retryable") is True,
+            )
         raise SupervisorUnavailable("persistent supervisor refused the exact wake")
     return response
 
@@ -224,11 +236,17 @@ class PersistentSupervisor:
         wake_adapter: WakeAdapter | None = None,
         recovery_adapter: SemanticRecoveryAdapter | None = None,
         store_factory: Callable[[Path], Any] = SQLiteStorage,
+        max_accepted_work: int = MAX_ACCEPTED_WORK,
     ) -> None:
         if lease_seconds <= 0 or renew_seconds <= 0 or renew_seconds >= lease_seconds:
             raise StorageRefusal(
                 "invalid_supervisor_lease",
                 "renew interval must be positive and shorter than the watcher lease",
+            )
+        if not 1 <= max_accepted_work <= 1_024:
+            raise StorageRefusal(
+                "invalid_supervisor_capacity",
+                "accepted supervisor work must have a positive bounded capacity",
             )
         self.state_root = state_root.resolve()
         self.callsign = callsign
@@ -246,6 +264,38 @@ class PersistentSupervisor:
         self._binding: dict[str, Any] = {}
         self._watcher_id = ""
         self._executor: ThreadPoolExecutor | None = None
+        self._work_slots = threading.BoundedSemaphore(max_accepted_work)
+        self._priority_lock = threading.Lock()
+        self._user_priority_generation = 0
+        self.user_priority = threading.Event()
+
+    @property
+    def user_priority_generation(self) -> int:
+        with self._priority_lock:
+            return self._user_priority_generation
+
+    def _publish_user_priority(self) -> None:
+        with self._priority_lock:
+            self._user_priority_generation += 1
+            self.user_priority.set()
+
+    def _submit(self, function: Callable[..., Any], *args: Any) -> bool:
+        executor = self._executor
+        if executor is None or not self._work_slots.acquire(blocking=False):
+            return False
+
+        def guarded() -> None:
+            try:
+                function(*args)
+            finally:
+                self._work_slots.release()
+
+        try:
+            executor.submit(guarded)
+        except RuntimeError:
+            self._work_slots.release()
+            return False
+        return True
 
     def _lease_expiry(self) -> str:
         return _at(_now() + timedelta(seconds=self.lease_seconds))
@@ -329,9 +379,23 @@ class PersistentSupervisor:
                 with self.store_factory(self.state_root) as store:
                     result = handle_brokered_hook(store, hook)
                 capture = result.get("capture")
+                published_user_priority = bool(
+                    isinstance(capture, dict)
+                    and capture.get("owned_by_shotcaller") is True
+                    and isinstance(capture.get("prompt_id"), str)
+                    and capture.get("idempotent") is False
+                    and capture.get("suppressed") is None
+                )
+                if published_user_priority:
+                    self._publish_user_priority()
                 self._response(
                     connection,
-                    {"ok": True, "hook_output": result["hook_output"], "capture": capture},
+                    {
+                        "ok": True,
+                        "hook_output": result["hook_output"],
+                        "capture": capture,
+                        "priority": "user" if published_user_priority else None,
+                    },
                 )
                 if (
                     isinstance(capture, dict)
@@ -367,6 +431,7 @@ class PersistentSupervisor:
             ):
                 raise SupervisorUnavailable("supervisor wake identity is stale")
             if kind == "user-message":
+                self._publish_user_priority()
                 self._response(
                     connection,
                     {"ok": True, "priority": "user", "fence": fence},
@@ -382,6 +447,16 @@ class PersistentSupervisor:
                     "delivered": True,
                     "event_id": message["envelope"].get("event_id"),
                     "fence": fence,
+                },
+            )
+        except StorageRefusal as exc:
+            self._response(
+                connection,
+                {
+                    "ok": False,
+                    "error": "storage_refusal",
+                    "code": exc.code,
+                    "retryable": exc.retryable,
                 },
             )
         except (SupervisorUnavailable, json.JSONDecodeError, UnicodeDecodeError, OSError):
@@ -410,7 +485,7 @@ class PersistentSupervisor:
     def _schedule_semantic_recovery(self, prompt_ids: tuple[str, ...]) -> None:
         if self.recovery_adapter is None or self._executor is None or not prompt_ids:
             return
-        self._executor.submit(self.recovery_adapter.recover, self.state_root, prompt_ids)
+        self._submit(self.recovery_adapter.recover, self.state_root, prompt_ids)
 
     def _recover_semantic_backlog(self) -> None:
         if self.recovery_adapter is None:
@@ -421,6 +496,23 @@ class PersistentSupervisor:
         except StorageRefusal:
             return
         self._schedule_semantic_recovery(tuple(backlog["prompt_ids"]))
+
+    def _renew_with_recovery(self) -> dict[str, Any]:
+        last: StorageRefusal | None = None
+        for attempt in range(MAX_RENEW_ATTEMPTS):
+            try:
+                return self._register()
+            except StorageRefusal as exc:
+                if not exc.retryable and exc.code != "busy":
+                    raise
+                last = exc
+                if attempt + 1 < MAX_RENEW_ATTEMPTS:
+                    time.sleep(min(0.05, self.renew_seconds / 4))
+        raise StorageRefusal(
+            "supervisor_renewal_failed",
+            "persistent supervisor could not renew its fenced lease within the retry bound",
+            retryable=True,
+        ) from last
 
     def run(self, *, emit_ready: bool = True) -> int:
         self.state_root.mkdir(parents=True, exist_ok=True)
@@ -467,18 +559,22 @@ class PersistentSupervisor:
                     ),
                     flush=True,
                 )
-            executor.submit(self._recover_pending)
-            executor.submit(self._recover_semantic_backlog)
+            self._submit(self._recover_pending)
+            self._submit(self._recover_semantic_backlog)
             next_renewal = time.monotonic() + self.renew_seconds
             while not self.stop_requested.is_set():
                 if time.monotonic() >= next_renewal:
-                    self._register()
+                    self._renew_with_recovery()
                     next_renewal = time.monotonic() + self.renew_seconds
                 try:
                     connection, _ = server.accept()
                 except socket.timeout:
                     continue
-                executor.submit(self._handle, connection)
+                if not self._submit(self._handle, connection):
+                    self._response(
+                        connection,
+                        {"ok": False, "error": "supervisor_capacity_exceeded"},
+                    )
             return 0
         finally:
             self.stop_requested.set()

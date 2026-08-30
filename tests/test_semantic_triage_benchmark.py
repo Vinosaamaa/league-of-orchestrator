@@ -5,8 +5,11 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import inspect
 import json
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 
 
@@ -33,6 +36,28 @@ def _fake_model(cases, model_root, args):
 
 
 def main() -> None:
+    readiness_source = inspect.getsource(BENCHMARK._wait_for_supervisor_ready)
+    assert "watcher_readiness" in readiness_source and '"export"' not in readiness_source
+    for function in (
+        BENCHMARK._codex_model_runner,
+        BENCHMARK._capture_with_hook,
+        BENCHMARK._turn,
+    ):
+        source = inspect.getsource(function)
+        assert "finally:" in source and "_terminate_and_reap" in source
+    sleeper = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    BENCHMARK._terminate_and_reap(sleeper)
+    assert sleeper.poll() is not None
+    assert all(
+        stream is None or stream.closed
+        for stream in (sleeper.stdin, sleeper.stdout, sleeper.stderr)
+    )
+
     corpus = ROOT / "tests" / "fixtures" / "semantic_triage_corpus.v1.json"
     schema = ROOT / "schema" / "league-semantic-triage-batch.schema.json"
     cases, digest = BENCHMARK._load_corpus(corpus)
@@ -78,7 +103,10 @@ def main() -> None:
     assert summary["samples"] == 1
     assert summary["triage_on_accuracy"]["accuracy"] == 1.0
     assert summary["paired_delta_on_minus_off"]["semantic_model_ms"]["median_ms"] == 2.0
-    print("PASS: paired OFF/ON harness preserves hook, fixture, one-process, journal, timing, and accuracy contracts")
+    print(
+        "PASS: paired OFF/ON harness preserves bounded readiness, child cleanup, "
+        "hook, fixture, one-process, journal, timing, and accuracy contracts"
+    )
 
 
 if __name__ == "__main__":

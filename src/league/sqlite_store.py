@@ -3299,6 +3299,13 @@ class SQLiteStorage(SQLiteTransactionCore):
     ) -> Optional[dict[str, Any]]:
         return watcher_registration_operation(self, actor_agent_id)
 
+    def watcher_readiness(
+        self, actor_agent_id: str
+    ) -> Optional[dict[str, Any]]:
+        from .sqlite_watcher_ops import watcher_readiness
+
+        return watcher_readiness(self, actor_agent_id)
+
     def release_watcher(
         self,
         watcher_id: str,

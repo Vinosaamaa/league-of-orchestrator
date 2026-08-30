@@ -513,6 +513,40 @@ def _broker_hook(args: argparse.Namespace, payload: dict[str, Any]) -> dict[str,
     )
 
 
+def _direct_hook_fallback_safe(
+    args: argparse.Namespace, payload: dict[str, Any]
+) -> bool:
+    """Permit direct storage only when no live or starting service can own the hook."""
+
+    state_root = _state_root()
+    socket_path = PersistentSupervisor(state_root).socket_path
+    if socket_path.exists():
+        return False
+    with SQLiteStorage(
+        state_root,
+        busy_timeout_ms=_hook_busy_timeout(args.command),
+    ) as store:
+        actor = _actor(store, args, payload)
+        if actor is None:
+            return True
+        registration = store.watcher_registration(str(actor[0]))
+    if registration is None:
+        return True
+    if str(registration["wake_locator"]).startswith("sqlite-supervise:"):
+        # The legacy bounded waiter is woken by the direct capture's canonical
+        # generation update; it is not a second writer or persistent broker.
+        return True
+    try:
+        leased_until = datetime.fromisoformat(str(registration["leased_until"]))
+    except (TypeError, ValueError) as exc:
+        raise StorageRefusal(
+            "supervisor_ownership_uncertain",
+            "persistent supervisor lease ownership could not be verified",
+            retryable=True,
+        ) from exc
+    return leased_until <= datetime.now().astimezone()
+
+
 def _supervision_snapshot(
     store: SQLiteStorage, scope: str, actor_id: str
 ) -> dict[str, Any]:
@@ -759,8 +793,15 @@ def main(argv: list[str] | None = None) -> int:
     }:
         try:
             response = _broker_hook(args, payload)
-        except (SupervisorUnavailable, StorageRefusal):
-            pass
+        except StorageRefusal:
+            raise
+        except SupervisorUnavailable as exc:
+            if not _direct_hook_fallback_safe(args, payload):
+                raise StorageRefusal(
+                    "supervisor_ownership_uncertain",
+                    "persistent supervisor owns or may be starting this hook boundary",
+                    retryable=True,
+                ) from exc
         else:
             _emit(response["hook_output"])
             return 0

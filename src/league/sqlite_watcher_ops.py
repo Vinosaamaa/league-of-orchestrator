@@ -366,6 +366,25 @@ def watcher_registration(
     return None if row is None else dict(row)
 
 
+def watcher_readiness(
+    store: Any, actor_agent_id: str
+) -> Optional[dict[str, Any]]:
+    """Return one bounded registration/scope readiness observation."""
+
+    row = store.connection.execute(
+        """
+        SELECT w.watcher_id,w.actor_agent_id,w.runtime_instance_id,w.wake_locator,
+               w.leased_until,w.fence,s.wait_active,s.wait_generation
+          FROM watcher_registrations w
+          JOIN watcher_scopes s ON s.actor_agent_id=w.actor_agent_id
+         WHERE w.actor_agent_id=?
+         LIMIT 1
+        """,
+        (actor_agent_id,),
+    ).fetchone()
+    return None if row is None else dict(row)
+
+
 def release_watcher(
     store: Any,
     watcher_id: str,

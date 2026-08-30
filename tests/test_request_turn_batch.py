@@ -93,9 +93,10 @@ def _seed_request(store, clock, ordinal: int, summary: str | None = None) -> Non
     )
 
 
-def _start_turn(state: Path, at: str) -> subprocess.Popen[str]:
-    return subprocess.Popen(
-        [
+def _start_turn(
+    state: Path, at: str, *, limit: int | None = None
+) -> subprocess.Popen[str]:
+    command = [
             sys.executable,
             str(ROOT / "bin/league"),
             "--state-root",
@@ -106,7 +107,11 @@ def _start_turn(state: Path, at: str) -> subprocess.Popen[str]:
             SHOTCALLER_ID,
             "--at",
             at,
-        ],
+        ]
+    if limit is not None:
+        command.extend(("--limit", str(limit)))
+    return subprocess.Popen(
+        command,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -420,11 +425,12 @@ def test_one_process_persists_all_dispositions_without_minting_deferred_requests
 
 def test_small_shortlist_does_not_block_direct_and_pages_off_path(root: Path) -> None:
     state, store, clock = create_context(root, "turn-shortlist-direct")
-    for ordinal in range(13):
+    for ordinal in range(80):
         _seed_request(store, clock, ordinal, f"Historical request {ordinal}")
     _capture(store, clock, "prompt:shortlist", "Answer this new bounded owner question")
     ranked = store.untriaged_intake(SHOTCALLER_ID)
     inventory = ranked["candidate_inventory"]
+    assert inventory["total_count"] == 80
     assert inventory["returned_count"] == 12 and inventory["truncated"]
     assert inventory["ranking"] == "routing-lexical-recency"
     page_one = store.untriaged_intake(
@@ -437,7 +443,7 @@ def test_small_shortlist_does_not_block_direct_and_pages_off_path(root: Path) ->
         candidate_after=page_one["next_cursor"],
         candidate_page=True,
     )["candidate_inventory"]
-    assert page_two["returned_count"] == 1 and not page_two["truncated"]
+    assert page_two["returned_count"] == 12 and page_two["truncated"]
     store.close()
 
     process = _start_turn(state, clock.now())
@@ -477,6 +483,18 @@ def test_small_shortlist_does_not_block_direct_and_pages_off_path(root: Path) ->
     process.stdin.flush()
     committed = json.loads(process.stdout.readline())
     assert process.wait(timeout=10) == 0 and committed["result"]["phase"] == "committed"
+
+
+def test_turn_limit_refuses_before_intake(root: Path) -> None:
+    state, store, clock = create_context(root, "turn-limit-refusal")
+    _capture(store, clock, "prompt:limit", "Prompt must remain unconsumed")
+    store.close()
+    process = _start_turn(state, clock.now(), limit=26)
+    stdout, stderr = process.communicate(timeout=10)
+    assert process.returncode == 2 and stdout == ""
+    assert "turn prompt limit must be between 1 and 25" in stderr
+    with SQLiteStorage(state) as observer:
+        assert observer.untriaged_intake(SHOTCALLER_ID)["returned_count"] == 1
 
 
 def test_truncated_or_changed_candidates_fence_only_external_dispatch(root: Path) -> None:
@@ -540,6 +558,7 @@ def main() -> None:
         test_one_process_persists_all_dispositions_without_minting_deferred_requests(root)
         test_small_shortlist_does_not_block_direct_and_pages_off_path(root)
         test_truncated_or_changed_candidates_fence_only_external_dispatch(root)
+        test_turn_limit_refuses_before_intake(root)
     print(
         "PASS: one request-turn process emits exact intake, atomically begins ordered model "
         "triage/routing, commits answers, and returns the final unresolved boundary"

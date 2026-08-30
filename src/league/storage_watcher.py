@@ -43,6 +43,10 @@ class WatcherStorage(Protocol):
         self, actor_agent_id: str
     ) -> Optional[dict[str, Any]]: ...
 
+    def watcher_readiness(
+        self, actor_agent_id: str
+    ) -> Optional[dict[str, Any]]: ...
+
     def release_watcher(
         self,
         watcher_id: str,

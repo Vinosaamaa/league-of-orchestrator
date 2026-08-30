@@ -150,6 +150,16 @@ restoration, League leaves the new reservation, lease, agent baseline, and
 history intact as a recoverable cleanup obligation. Canonical rollback waits
 until a later exact-identity retry proves the alias and owned-token cleanup.
 
+Installed Herdr 0.2.32 exposed an additional identity-shape distinction. An
+unbound Codex pane can have a provider-generated callsign/sidebar/thread/title
+such as an owner prompt while having no routing binding and no
+`metadata_source` field. League now treats those values only as presentation:
+it infers the provider source solely from a complete, self-consistent Codex
+session/thread/identity-title envelope and normalizes Herdr's terminal
+` | codex` suffix. A real bind still requires a consistent top-level `name`,
+`routing_name`, or `routing_alias`; conflicting fields, a present invalid
+source, partial tokens, or endpoint identity drift refuse before mutation.
+
 Recovery refuses before any Herdr mutation when assignment history is
 ambiguous, the thread generation differs, the agent is not the exact bootstrap
 residue, the callsign is not available, or any runtime, lease, Squad,

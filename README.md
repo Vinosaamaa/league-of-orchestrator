@@ -55,7 +55,10 @@ Nothing here installs files, changes hooks, or connects to live Roster state.
   baseline-less legacy residue is eligible only when its metadata is exactly
   empty and two exact current observations prove an unbound, callsign-free
   presentation; League atomically upgrades that row with the observed source,
-  title, token, generation, and sequence baseline before publication.
+  title, token, generation, and sequence baseline before publication. Herdr
+  provider-generated presentation tokens are never treated as a routing bind:
+  only consistent top-level route fields bind the pane, while a source-less
+  provider presentation is accepted only as one complete thread-bound envelope.
 - One active-turn semantic sideband with a 12-row/24 KiB same-owner candidate
   shortlist, version-fenced duplicate/follow-up links, and external-dispatch
   refusal when the complete candidate inventory is unavailable or changed.

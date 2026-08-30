@@ -76,6 +76,22 @@ authorization plus exact assignment version, Champion agent, runtime,
 callsign, pane, terminal, thread, physical worktree, route, two-word target,
 and the complete expected source/title/state-sequence tuple.
 
+The stable command contract is:
+
+```text
+league --state-root <canonical-root> assign reconcile-legacy-display \
+  --assignment-id <exact-assignment> --expected-version <version> \
+  --champion-agent-id <exact-agent> --runtime-instance-id <exact-runtime> \
+  --callsign <exact-callsign> --pane-id <exact-pane> \
+  --terminal-id <exact-terminal> --thread-id <exact-thread> \
+  --worktree <exact-physical-worktree> --routing-name <exact-route> \
+  --expected-presentation-json <source-title-sequence-json> \
+  --target-task-label <exact-two-word-label> --owner-authorized --at <timestamp>
+```
+
+The presentation JSON has exactly three fields: `source`, `title`, and the
+integer `state_change_seq`. Extra, missing, or differently typed fields refuse.
+
 The store first appends one immutable intent after proving that the canonical
 assignment/runtime/route are exact, that only one live runtime matches, and
 that no valid modern launch-title receipt exists. The adapter then requires two

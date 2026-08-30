@@ -96,12 +96,15 @@ The store first appends one immutable intent after proving that the canonical
 assignment/runtime/route are exact, that only one live runtime matches, and
 that no valid modern launch-title receipt exists. The adapter then requires two
 fresh identical observations of the expected legacy presentation. Its single
-metadata report advances the exact observed presentation source at the next
-state-change sequence; a newer provider or user write therefore rejects the
-stale compare-and-set. Final success requires two identical observations of
-the target sidebar, task label, thread title, terminal title, source, sequence,
-and unchanged unrelated token map. Only then does SQLite append the immutable
-final receipt.
+metadata report uses a reconciliation-specific League source because Herdr
+sequence freshness is source-scoped. The expected global state-change sequence
+still fences the observation: any interleaved provider or user write makes the
+post-effect sequence inexact. League then clears only its own source-scoped
+title and tokens, verifies the newer presentation is stable, and refuses the
+race. Final success requires two identical observations of the target sidebar,
+task label, thread title, terminal title, League source, exact next global
+sequence, and unchanged unrelated token map. Only then does SQLite append the
+immutable final receipt.
 
 An exact completed retry re-observes the final endpoint and returns the stored
 receipt byte-for-byte without another metadata report. Changed identity,
@@ -138,4 +141,7 @@ Legacy coverage mirrors the observed pre-fix shape with synthetic identities:
 an exact active route plus prompt-derived display and no modern receipt. It
 proves one compare-and-set repair, receipt-identical retry, unrelated-token
 preservation, modern-receipt refusal, ambiguous-runtime/route refusal, and
-user races both before the write and in the final read-to-write window.
+user races both before the write and in the final read-to-write window. The
+last-window fixture models Herdr's real per-source sequence rule and proves the
+League overlay is cleared while the newer user title/source and unrelated
+tokens survive.

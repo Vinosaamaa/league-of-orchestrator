@@ -38,7 +38,7 @@ Nothing here installs files, changes hooks, or connects to live Roster state.
 - Recoverable visible-Champion assignment with exact acceptance receipts,
   settled post-context callsign/task title restoration bound to the exact
   metadata source and sequence, deterministic two-word display-task defaults,
-  and one owner-authorized compare-and-set legacy display reconciliation for
+  and one owner-authorized sequence-fenced League-overlay reconciliation for
   exact active pre-fix Champions without modern title receipts,
   source-bound transition outbox delivery, unique recipient effects, and fair
   backlog draining.

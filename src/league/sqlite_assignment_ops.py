@@ -1237,7 +1237,11 @@ def assignment_launch_context(store: Any, assignment_id: str) -> dict[str, Any]:
         """,
         (assignment_id,),
     ).fetchall()
-    if len(legacy_intents) > 1 or len(legacy_results) > 1:
+    if (
+        len(legacy_intents) > 1
+        or len(legacy_results) > 1
+        or (legacy_results and not legacy_intents)
+    ):
         raise StorageRefusal(
             "legacy_display_ambiguous",
             "assignment has ambiguous legacy display reconciliation history",
@@ -1496,6 +1500,15 @@ def begin_legacy_display_reconciliation(
                 "SELECT event_id,detail_json FROM events WHERE aggregate_kind='assignment' AND aggregate_id=? AND event_type='assignment_legacy_display_reconciliation_intent' LIMIT 2",
                 (command.assignment_id,),
             ).fetchall()
+            results = store.connection.execute(
+                "SELECT detail_json FROM events WHERE aggregate_kind='assignment' AND aggregate_id=? AND event_type='assignment_legacy_display_reconciled' LIMIT 2",
+                (command.assignment_id,),
+            ).fetchall()
+            if len(results) > 1 or (results and not intents):
+                raise StorageRefusal(
+                    "legacy_display_ambiguous",
+                    "legacy display reconciliation has orphaned or ambiguous final receipts",
+                )
             if intents:
                 if len(intents) != 1 or _stored_object(
                     intents[0]["detail_json"],
@@ -1524,15 +1537,6 @@ def begin_legacy_display_reconciliation(
                         _json(detail),
                         command.assignment_id,
                     ),
-                )
-            results = store.connection.execute(
-                "SELECT detail_json FROM events WHERE aggregate_kind='assignment' AND aggregate_id=? AND event_type='assignment_legacy_display_reconciled' LIMIT 2",
-                (command.assignment_id,),
-            ).fetchall()
-            if len(results) > 1:
-                raise StorageRefusal(
-                    "legacy_display_ambiguous",
-                    "legacy display reconciliation has ambiguous final receipts",
                 )
             final_receipt = (
                 _legacy_result_receipt(results[0]) if results else None
@@ -1593,6 +1597,7 @@ def finalize_legacy_display_reconciliation(
                 "observation_digest",
             }
             target = f"{command.callsign} · {command.target_task_label}"
+            expected_source = f"league-legacy-{reconciliation_id.rsplit(':', 1)[-1]}"
             valid = bool(
                 set(receipt) == expected_keys
                 and receipt.get("schema") == "league.legacy-display-reconciliation.v1"
@@ -1608,11 +1613,11 @@ def finalize_legacy_display_reconciliation(
                 and bool(receipt.get("source"))
                 and isinstance(receipt.get("applies_to_source"), str)
                 and bool(receipt.get("applies_to_source"))
-                and isinstance(receipt.get("state_change_seq"), int)
+                and type(receipt.get("state_change_seq")) is int
                 and int(receipt["state_change_seq"]) >= 0
                 and isinstance(receipt.get("observation_digest"), str)
                 and bool(re.fullmatch(r"[0-9a-f]{64}", receipt["observation_digest"]))
-                and receipt.get("source") == command.expected_presentation_source
+                and receipt.get("source") == expected_source
                 and int(receipt["state_change_seq"])
                 > int(command.expected_state_change_seq)
             )

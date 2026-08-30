@@ -211,6 +211,95 @@ class HerdrLegacyDisplayAdapter:
             "legacy_display_applies_to": authority,
         }
 
+    def _metadata_source(self, reconciliation_id: str) -> str:
+        return f"league-legacy-{reconciliation_id.rsplit(':', 1)[-1]}"
+
+    def _owns_overlay(
+        self,
+        spec: LegacyDisplayReconciliationSpec,
+        reconciliation_id: str,
+        observation: Mapping[str, Any],
+        tokens: Mapping[str, str],
+    ) -> bool:
+        source = self._metadata_source(reconciliation_id)
+        expected = self._reconciliation_tokens(
+            spec,
+            reconciliation_id,
+            source,
+            str(observation.get("authority_source", "")),
+        )
+        return all(tokens.get(key) == value for key, value in expected.items())
+
+    def _clear_owned_overlay(
+        self,
+        spec: LegacyDisplayReconciliationSpec,
+        reconciliation_id: str,
+        authority: str,
+        sequence: int,
+    ) -> None:
+        source = self._metadata_source(reconciliation_id)
+        owned = self._reconciliation_tokens(
+            spec, reconciliation_id, source, authority
+        )
+        clear_arguments = tuple(
+            part for key in owned for part in ("--clear-token", key)
+        )
+        try:
+            self._run(
+                (
+                    "herdr",
+                    "pane",
+                    "report-metadata",
+                    spec.pane_id,
+                    "--source",
+                    source,
+                    "--applies-to-source",
+                    authority,
+                    "--agent",
+                    "codex",
+                    "--clear-title",
+                    "--clear-display-agent",
+                    *clear_arguments,
+                    "--seq",
+                    str(sequence),
+                ),
+                "legacy Champion display rollback",
+                silent=True,
+            )
+        except StorageRefusal as exc:
+            raise StorageRefusal(
+                "legacy_display_unverified",
+                "League-owned legacy display overlay could not be cleared",
+            ) from exc
+        prior: tuple[dict[str, Any], dict[str, str]] | None = None
+        stable = 0
+        for _ in range(3):
+            try:
+                observation, tokens = self._observe(spec)
+            except StorageRefusal as exc:
+                raise StorageRefusal(
+                    "legacy_display_unverified",
+                    "League-owned legacy display overlay clearance could not be observed",
+                ) from exc
+            current = (observation, tokens)
+            exact = bool(
+                observation["presentation_source"] != source
+                and not OWNERSHIP_TOKENS.intersection(tokens)
+            )
+            if exact:
+                stable = stable + 1 if current == prior else 1
+                prior = current
+                if stable == 2:
+                    return
+            else:
+                stable = 0
+                prior = None
+            time.sleep(0.1)
+        raise StorageRefusal(
+            "legacy_display_unverified",
+            "League-owned legacy display overlay did not clear exactly",
+        )
+
     def _pending_effect_exact(
         self,
         spec: LegacyDisplayReconciliationSpec,
@@ -219,14 +308,16 @@ class HerdrLegacyDisplayAdapter:
         tokens: Mapping[str, str],
     ) -> bool:
         target = f"{spec.callsign} · {spec.target_task_label}"
+        source = self._metadata_source(reconciliation_id)
         expected = self._reconciliation_tokens(
             spec,
             reconciliation_id,
-            str(observation.get("presentation_source", "")),
+            source,
             str(observation.get("authority_source", "")),
         )
         return bool(
-            observation.get("title") == target
+            observation.get("presentation_source") == source
+            and observation.get("title") == target
             and all(tokens.get(key) == value for key, value in expected.items())
         )
 
@@ -243,6 +334,15 @@ class HerdrLegacyDisplayAdapter:
                 observed, tokens = self._observe(spec)
                 if observed == baseline and tokens == baseline_tokens:
                     return self._receipt(spec, reconciliation_id, observed)
+            if self._owns_overlay(
+                spec, reconciliation_id, baseline, baseline_tokens
+            ):
+                self._clear_owned_overlay(
+                    spec,
+                    reconciliation_id,
+                    str(baseline["authority_source"]),
+                    int(baseline["state_change_seq"]) + 1,
+                )
             raise StorageRefusal(
                 "legacy_display_race",
                 "legacy Champion presentation changed after owner authorization",
@@ -253,9 +353,9 @@ class HerdrLegacyDisplayAdapter:
                 "legacy Champion already exposes display ownership metadata",
             )
 
-        # A second fresh read is the ordering barrier. The write then advances the
-        # exact observed presentation source, so a newer same-source user or
-        # provider write rejects its stale sequence instead of being overwritten.
+        # A second fresh read is the ordering barrier. Herdr sequences are scoped
+        # per metadata source, so the effect uses a dedicated League source and
+        # the global observation sequence detects any interleaved presentation.
         current, current_tokens = self._observe(spec)
         if current != baseline or current_tokens != baseline_tokens:
             raise StorageRefusal(
@@ -263,7 +363,7 @@ class HerdrLegacyDisplayAdapter:
                 "legacy Champion presentation changed before reconciliation",
             )
         target = f"{spec.callsign} · {spec.target_task_label}"
-        source = str(current["presentation_source"])
+        source = self._metadata_source(reconciliation_id)
         authority = str(current["authority_source"])
         sequence = int(current["state_change_seq"]) + 1
         reconciliation_tokens = self._reconciliation_tokens(
@@ -317,29 +417,45 @@ class HerdrLegacyDisplayAdapter:
         prior_digest: str | None = None
         stable = 0
         final: dict[str, Any] | None = None
-        for _ in range(50):
-            observed, tokens = self._observe(spec)
+        observed = current
+        observation_error: StorageRefusal | None = None
+        for _ in range(3):
+            try:
+                observed, tokens = self._observe(spec)
+            except StorageRefusal as exc:
+                observation_error = exc
+                break
             exact = bool(
                 observed["presentation_source"] == source
                 and observed["authority_source"] == authority
                 and observed["title"] == target
+                and observed["state_change_seq"] == sequence
                 and tokens == expected_tokens
             )
-            if exact:
-                digest = _digest(observed)
-                stable = stable + 1 if digest == prior_digest else 1
-                prior_digest = digest
-                final = observed
-                if stable == 2:
-                    break
-            else:
-                stable = 0
-                prior_digest = None
+            if not exact:
+                break
+            digest = _digest(observed)
+            stable = stable + 1 if digest == prior_digest else 1
+            prior_digest = digest
+            final = observed
+            if stable == 2:
+                break
             time.sleep(0.1)
         if stable != 2 or final is None:
+            self._clear_owned_overlay(
+                spec,
+                reconciliation_id,
+                authority,
+                max(sequence + 1, int(observed["state_change_seq"]) + 1),
+            )
+            if observation_error is not None:
+                raise StorageRefusal(
+                    "legacy_display_unverified",
+                    "legacy Champion final display observation failed after the owned effect",
+                ) from observation_error
             raise StorageRefusal(
-                "legacy_display_unverified",
-                "legacy Champion final display did not become exact and stable",
+                "legacy_display_race",
+                "legacy Champion presentation changed during reconciliation",
             )
         return self._receipt(spec, reconciliation_id, final)
 

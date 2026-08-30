@@ -177,6 +177,9 @@ class FakeHerdrRunner:
         self.tokens: dict[str, str] = {}
         self.metadata_source = "herdr:codex"
         self.source_sequences: dict[str, int] = {}
+        self.overlay_baselines: dict[
+            str, tuple[str | None, str, dict[str, str], str, dict[str, str]]
+        ] = {}
         self.state_change_seq = 99
         self.pending_title_reads: int | None = None
         self.contexts: list[str] = []
@@ -235,6 +238,22 @@ class FakeHerdrRunner:
         copied.tokens = dict(self.tokens)
         copied.metadata_source = self.metadata_source
         copied.source_sequences = dict(self.source_sequences)
+        copied.overlay_baselines = {
+            source: (
+                baseline_source,
+                baseline_title,
+                dict(baseline_tokens),
+                overlay_title,
+                dict(overlay_tokens),
+            )
+            for source, (
+                baseline_source,
+                baseline_title,
+                baseline_tokens,
+                overlay_title,
+                overlay_tokens,
+            ) in self.overlay_baselines.items()
+        }
         copied.state_change_seq = self.state_change_seq
         return copied
 
@@ -271,21 +290,51 @@ class FakeHerdrRunner:
                         command, 1, "", "metadata source mismatch"
                     )
             sequence = int(command[command.index("--seq") + 1])
-            if (
-                sequence <= self.state_change_seq
-                or sequence <= self.source_sequences.get(source, 0)
-            ):
+            if sequence <= self.source_sequences.get(source, 0):
                 return subprocess.CompletedProcess(
                     command, 1, "", "metadata sequence conflict"
                 )
             self.source_sequences[source] = sequence
-            self.metadata_source = source
             self.state_change_seq += 1
+            if "--clear-title" in command and source in self.overlay_baselines:
+                (
+                    baseline_source,
+                    baseline_title,
+                    baseline_tokens,
+                    overlay_title,
+                    overlay_tokens,
+                ) = self.overlay_baselines.pop(source)
+                current_source = self.metadata_source
+                current_title = self.title
+                current_tokens = dict(self.tokens)
+                self.metadata_source = baseline_source
+                self.title = baseline_title
+                self.tokens = dict(baseline_tokens)
+                if current_source != source or current_title != overlay_title:
+                    self.metadata_source = current_source
+                    self.title = current_title
+                for key, value in current_tokens.items():
+                    if overlay_tokens.get(key) != value:
+                        self.tokens[key] = value
+                return subprocess.CompletedProcess(command, 0, "", "")
+            prior_source = self.metadata_source
+            prior_title = self.title
+            prior_tokens = dict(self.tokens)
+            self.metadata_source = source
             self.title = command[command.index("--title") + 1]
             for index, value in enumerate(command):
                 if value == "--token":
                     key, token_value = command[index + 1].split("=", 1)
                     self.tokens[key] = token_value
+            if source.startswith("league-legacy-"):
+                baseline = self.overlay_baselines.get(source)
+                self.overlay_baselines[source] = (
+                    baseline[0] if baseline else prior_source,
+                    baseline[1] if baseline else prior_title,
+                    dict(baseline[2]) if baseline else prior_tokens,
+                    self.title,
+                    dict(self.tokens),
+                )
             return subprocess.CompletedProcess(command, 0, "", "")
         elif command[:3] == ("herdr", "agent", "prompt"):
             prompt = command[4]
@@ -630,14 +679,20 @@ class UserTitleAtCompareAndSetRunner(FakeHerdrRunner):
         self, arguments, *, timeout_seconds: int = 30
     ) -> subprocess.CompletedProcess[str]:
         command = tuple(arguments)
-        if command[:3] == ("herdr", "pane", "report-metadata") and not self.raced:
+        completed = super().run(arguments, timeout_seconds=timeout_seconds)
+        if (
+            command[:3] == ("herdr", "pane", "report-metadata")
+            and "--title" in command
+            and completed.returncode == 0
+            and not self.raced
+        ):
             self.raced = True
             self.metadata_source = "user-selected"
             self.state_change_seq += 1
             self.source_sequences["user-selected"] = self.state_change_seq
             self.title = "User selected title"
             self.tokens["user_note"] = "preserve"
-        return super().run(arguments, timeout_seconds=timeout_seconds)
+        return completed
 
 
 def _legacy_reconciliation_spec(
@@ -770,6 +825,13 @@ def test_legacy_display_compare_and_set_does_not_overwrite_last_window_user_titl
     assert runner.metadata_source == "user-selected"
     assert runner.tokens["user_note"] == "preserve"
     assert runner.tokens["sidebar_name"] == "Prepare handshake only"
+    assert "legacy_display_owner" not in runner.tokens
+    assert "legacy_display_assignment" not in runner.tokens
+    reports = [
+        call for call in runner.calls if call[:3] == ("herdr", "pane", "report-metadata")
+    ]
+    assert len(reports) == 2
+    assert "--clear-title" in reports[-1]
     assert store.assignment_launch_context(assignment_id)[
         "legacy_display_reconciliation"
     ]["receipt"] is None
@@ -978,6 +1040,52 @@ def test_legacy_display_reconciliation_refuses_boolean_sequence(root: Path) -> N
     assert store.assignment_launch_context(str(launch["assignment_id"]))[
         "legacy_display_reconciliation"
     ] is None
+    store.close()
+
+
+def test_legacy_display_reconciliation_refuses_orphaned_final_receipt(
+    root: Path,
+) -> None:
+    store, clock, worktree, launch, receipt, runner = _prepared_legacy_display(
+        root, "legacy-orphan-result"
+    )
+    spec = _legacy_reconciliation_spec(launch, receipt, worktree, runner)
+    service = LegacyDisplayReconciliationService(
+        store,
+        HerdrLegacyDisplayAdapter(
+            runner,
+            environment={"HERDR_ENV": "1", "HERDR_WORKSPACE_ID": "w1"},
+        ),
+        clock,
+    )
+    service.reconcile(spec)
+    store.connection.execute(
+        "DELETE FROM events WHERE aggregate_id=? AND event_type='assignment_legacy_display_reconciliation_intent'",
+        (launch["assignment_id"],),
+    )
+
+    try:
+        store.assignment_launch_context(str(launch["assignment_id"]))
+    except StorageRefusal as exc:
+        assert exc.code == "legacy_display_ambiguous"
+    else:
+        raise AssertionError("orphaned legacy display result was reported as no history")
+    reports_before = len(
+        [call for call in runner.calls if call[:3] == ("herdr", "pane", "report-metadata")]
+    )
+    try:
+        service.reconcile(spec)
+    except StorageRefusal as exc:
+        assert exc.code == "legacy_display_ambiguous"
+    else:
+        raise AssertionError("a new legacy display intent was created around an orphan result")
+    assert store.connection.execute(
+        "SELECT COUNT(*) FROM events WHERE aggregate_id=? AND event_type='assignment_legacy_display_reconciliation_intent'",
+        (launch["assignment_id"],),
+    ).fetchone()[0] == 0
+    assert len(
+        [call for call in runner.calls if call[:3] == ("herdr", "pane", "report-metadata")]
+    ) == reports_before
     store.close()
 
 
@@ -1336,6 +1444,7 @@ def main() -> None:
         test_legacy_display_reconciliation_refuses_ambiguous_runtime_and_wrong_route(root)
         test_legacy_display_reconciliation_requires_live_owned_presentation_source(root)
         test_legacy_display_reconciliation_refuses_boolean_sequence(root)
+        test_legacy_display_reconciliation_refuses_orphaned_final_receipt(root)
         test_post_context_title_restoration_refuses_unowned_metadata(root)
         test_active_retry_refuses_newer_user_metadata(root)
         test_real_adapter_persists_exact_initial_codex_session(root)

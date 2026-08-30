@@ -123,6 +123,24 @@ only before any canonical or Herdr mutation. Valid-but-mismatched identity and
 persistently malformed output still refuse. Rename and metadata reports are
 never retried by this mechanism, preserving provider and placement safety.
 
+## Retired bootstrap retry invariant
+
+A clean failed in-place Shotcaller bootstrap retains its original rolled-back
+callsign assignment and a version-2 retired `unbound` agent row. A later create
+for the same exact agent and running Codex thread may atomically re-reserve that
+same callsign and rebind the retired row only when the stored bootstrap
+baseline proves the same terminal/thread generation and the prior assignment,
+rollback event, role, scope, and failure receipt are complete.
+
+Recovery refuses before any Herdr mutation when assignment history is
+ambiguous, the thread generation differs, the agent is not the exact bootstrap
+residue, the callsign is not available, or any runtime, lease, Squad,
+registration offer, or active assignment remains. The reservation and agent
+version updates share one SQLite transaction. A finalization failure rolls back
+only the new attempt and preserves the original rolled-back assignment and
+events. Successful exact retry returns the same creation receipt without a
+second rename, metadata write, prompt, layout action, or process start.
+
 ## Regression boundary
 
 Focused fake-Herdr coverage schedules a prompt-derived write after prompt

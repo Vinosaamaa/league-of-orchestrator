@@ -650,13 +650,17 @@ class ShotcallerBootstrapService:
             spec.agent_id,
             spec.capabilities,
             at,
+            recovery_baseline=self.adapter.restoration_baseline(),
+            recovery_thread_id=spec.thread_id,
         )
         published = False
         try:
             if baseline is None:
-                baseline = self.store.record_shotcaller_bootstrap_baseline(
-                    spec.assignment_id, 1, self.adapter.restoration_baseline()
-                )["baseline"]
+                baseline = self.store.shotcaller_bootstrap_baseline(spec.assignment_id)
+                if baseline is None:
+                    baseline = self.store.record_shotcaller_bootstrap_baseline(
+                        spec.assignment_id, 1, self.adapter.restoration_baseline()
+                    )["baseline"]
                 self.adapter.use_restoration_baseline(baseline)
             if existing is not None and existing["state"] == "active":
                 receipt = self.adapter.current_receipt(spec, str(reserved["callsign"]))

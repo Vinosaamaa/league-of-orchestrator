@@ -1120,6 +1120,7 @@ def test_legacy_display_interrupted_effect_refuses_newer_sequence(root: Path) ->
         raise AssertionError("synthetic post-effect interruption did not stop finalization")
     store.finalize_legacy_display_reconciliation = finalize  # type: ignore[method-assign]
     runner.state_change_seq += 1
+    runner.tokens["launch_title_owner"] = "new-owner"
 
     try:
         service.reconcile(spec)
@@ -1127,8 +1128,9 @@ def test_legacy_display_interrupted_effect_refuses_newer_sequence(root: Path) ->
         assert exc.code == "legacy_display_race"
     else:
         raise AssertionError("interrupted retry absorbed a newer endpoint sequence")
-    assert runner.metadata_source == "herdr:codex"
+    assert runner.metadata_source == spec.expected_presentation_source
     assert "legacy_display_owner" not in runner.tokens
+    assert runner.tokens["launch_title_owner"] == "new-owner"
     assert store.assignment_launch_context(str(launch["assignment_id"]))[
         "legacy_display_reconciliation"
     ]["receipt"] is None
@@ -1170,7 +1172,7 @@ def test_legacy_display_refuses_malformed_modern_receipt(root: Path) -> None:
     store.close()
 
 
-def test_legacy_display_refuses_missing_persisted_worktree(root: Path) -> None:
+def test_legacy_display_refuses_missing_acceptance_worktree(root: Path) -> None:
     store, clock, worktree, launch, receipt, runner = _prepared_legacy_display(
         root, "legacy-missing-worktree"
     )
@@ -1180,8 +1182,8 @@ def test_legacy_display_refuses_missing_persisted_worktree(root: Path) -> None:
     ]
     stored_receipt["worktree"] = ""
     store.connection.execute(
-        "UPDATE agent_instances SET worktree='' WHERE agent_id=?",
-        (LUX_ID,),
+        "UPDATE agent_instances SET worktree=? WHERE agent_id=?",
+        (str(Path.cwd()), LUX_ID),
     )
     store.connection.execute(
         "UPDATE task_assignments SET acceptance_receipt_json=? WHERE task_assignment_id=?",
@@ -1198,7 +1200,7 @@ def test_legacy_display_refuses_missing_persisted_worktree(root: Path) -> None:
     except StorageRefusal as exc:
         assert exc.code == "legacy_display_conflict"
     else:
-        raise AssertionError("missing persisted worktree matched the process directory")
+        raise AssertionError("missing acceptance worktree matched the process directory")
     assert store.assignment_launch_context(str(launch["assignment_id"]))[
         "legacy_display_reconciliation"
     ] is None
@@ -1563,7 +1565,7 @@ def main() -> None:
         test_legacy_display_reconciliation_refuses_orphaned_final_receipt(root)
         test_legacy_display_interrupted_effect_refuses_newer_sequence(root)
         test_legacy_display_refuses_malformed_modern_receipt(root)
-        test_legacy_display_refuses_missing_persisted_worktree(root)
+        test_legacy_display_refuses_missing_acceptance_worktree(root)
         test_post_context_title_restoration_refuses_unowned_metadata(root)
         test_active_retry_refuses_newer_user_metadata(root)
         test_real_adapter_persists_exact_initial_codex_session(root)

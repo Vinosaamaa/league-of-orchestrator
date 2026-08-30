@@ -36,6 +36,9 @@ OWNERSHIP_TOKENS = {
     "legacy_display_source",
     "legacy_display_applies_to",
 }
+LEGACY_OWNERSHIP_TOKENS = {
+    key for key in OWNERSHIP_TOKENS if key.startswith("legacy_display_")
+}
 
 
 def _stable_json(value: Any) -> str:
@@ -284,7 +287,7 @@ class HerdrLegacyDisplayAdapter:
             current = (observation, tokens)
             exact = bool(
                 observation["presentation_source"] != source
-                and not OWNERSHIP_TOKENS.intersection(tokens)
+                and not LEGACY_OWNERSHIP_TOKENS.intersection(tokens)
             )
             if exact:
                 stable = stable + 1 if current == prior else 1
@@ -318,7 +321,10 @@ class HerdrLegacyDisplayAdapter:
         return bool(
             observation.get("presentation_source") == source
             and observation.get("title") == target
+            and observation.get("state_change_seq")
+            == int(spec.expected_state_change_seq) + 1
             and all(tokens.get(key) == value for key, value in expected.items())
+            and not (OWNERSHIP_TOKENS - set(expected)).intersection(tokens)
         )
 
     def reconcile(

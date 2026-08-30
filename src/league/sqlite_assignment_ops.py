@@ -1353,9 +1353,32 @@ def assignment_launch_context(store: Any, assignment_id: str) -> dict[str, Any]:
             reconciliation_id = f"legacy-display:{intent_digest[:24]}"
             expected_source = f"league-legacy-{intent_digest[:24]}"
             expected_sequence = legacy_intent.get("expected_state_change_seq")
+            intent_keys = {
+                "schema",
+                "assignment_id",
+                "expected_version",
+                "champion_agent_id",
+                "runtime_instance_id",
+                "callsign",
+                "pane_id",
+                "terminal_id",
+                "thread_id",
+                "worktree",
+                "routing_name",
+                "expected_presentation_source",
+                "expected_title",
+                "expected_state_change_seq",
+                "target_task_label",
+                "target_title",
+                "owner_authorized",
+            }
             exact_result = bool(
-                legacy_intent.get("schema")
+                set(legacy_intent) == intent_keys
+                and legacy_intent.get("schema")
                 == "league.legacy-display-reconciliation-intent.v1"
+                and legacy_intent.get("owner_authorized") is True
+                and type(legacy_intent.get("expected_version")) is int
+                and legacy_intent["expected_version"] >= 1
                 and type(expected_sequence) is int
                 and expected_sequence >= 0
                 and result_detail["intent_digest"] == intent_digest
@@ -1474,7 +1497,6 @@ def _validate_legacy_display_command(
         or assignment["champion_agent_id"] != command.champion_agent_id
         or assignment["runtime_instance_id"] != command.runtime_instance_id
         or assignment["callsign"] != command.callsign
-        or not _physical_worktree_exact(assignment["worktree"], command.worktree)
     ):
         raise StorageRefusal(
             "legacy_display_conflict",
@@ -1564,17 +1586,27 @@ def _validate_legacy_display_command(
         "legacy_display_ambiguous",
         "legacy display reconciliation context history is malformed",
     )
-    modern = context_detail.get("display_receipt")
-    if revalidations or (
-        isinstance(modern, dict)
-        and isinstance(modern.get("source"), str)
-        and modern["source"].startswith("league-launch-")
-        and isinstance(modern.get("state_change_seq"), int)
-        and not isinstance(modern.get("state_change_seq"), bool)
-    ):
+    if revalidations:
         raise StorageRefusal(
             "legacy_display_modern",
             "modern launch-title ownership receipts must use normal exact retry",
+        )
+    if "display_receipt" in context_detail:
+        modern = context_detail["display_receipt"]
+        if (
+            isinstance(modern, dict)
+            and isinstance(modern.get("source"), str)
+            and modern["source"].startswith("league-launch-")
+            and type(modern.get("state_change_seq")) is int
+            and modern["state_change_seq"] >= 0
+        ):
+            raise StorageRefusal(
+                "legacy_display_modern",
+                "modern launch-title ownership receipts must use normal exact retry",
+            )
+        raise StorageRefusal(
+            "legacy_display_ambiguous",
+            "legacy display reconciliation context has malformed display ownership evidence",
         )
     detail = _legacy_display_detail(command)
     reconciliation_id = "legacy-display:" + hashlib.sha256(

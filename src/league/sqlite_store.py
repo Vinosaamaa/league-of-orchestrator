@@ -40,7 +40,13 @@ from .sqlite_callsign_ops import (
     record_shotcaller_bootstrap_baseline as record_shotcaller_bootstrap_baseline_operation,
 )
 from .sqlite_callsign_ops import (
+    record_shotcaller_bootstrap_publication as record_shotcaller_bootstrap_publication_operation,
+)
+from .sqlite_callsign_ops import (
     shotcaller_bootstrap_baseline as shotcaller_bootstrap_baseline_operation,
+)
+from .sqlite_callsign_ops import (
+    shotcaller_bootstrap_publication as shotcaller_bootstrap_publication_operation,
 )
 from .sqlite_callsign_ops import shotcaller_bootstrap_status as shotcaller_bootstrap_status_operation
 from .sqlite_callsign_ops import allocate_callsign as allocate_callsign_operation
@@ -2277,6 +2283,18 @@ class SQLiteStorage(SQLiteTransactionCore):
 
     def shotcaller_bootstrap_baseline(self, assignment_id: str) -> Optional[dict[str, Any]]:
         return shotcaller_bootstrap_baseline_operation(self, assignment_id)
+
+    def record_shotcaller_bootstrap_publication(
+        self, assignment_id: str, expected_version: int, publication: dict[str, Any]
+    ) -> dict[str, Any]:
+        return record_shotcaller_bootstrap_publication_operation(
+            self, assignment_id, expected_version, publication
+        )
+
+    def shotcaller_bootstrap_publication(
+        self, assignment_id: str
+    ) -> Optional[dict[str, Any]]:
+        return shotcaller_bootstrap_publication_operation(self, assignment_id)
 
     def activate_callsign(
         self,

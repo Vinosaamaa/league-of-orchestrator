@@ -11,6 +11,7 @@ import json
 import re
 import sqlite3
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
 
 from .storage_types import FaultInjector, StorageRefusal
@@ -37,6 +38,7 @@ RUNTIME_RECEIPT_KEYS = {
     "capabilities",
 }
 SHOTCALLER_BASELINE_KEY = "shotcaller_bootstrap_baseline"
+SHOTCALLER_PUBLICATION_KEY = "shotcaller_bootstrap_publication"
 SHOTCALLER_BASELINE_V1_KEYS = {
     "schema",
     "terminal_id",
@@ -48,6 +50,23 @@ SHOTCALLER_BASELINE_V1_KEYS = {
     "title",
 }
 SHOTCALLER_BASELINE_V2_KEYS = SHOTCALLER_BASELINE_V1_KEYS | {"presentation_source"}
+SHOTCALLER_PUBLICATION_V1_KEYS = {
+    "schema",
+    "assignment_id",
+    "agent_id",
+    "callsign",
+    "routing_name",
+    "terminal_id",
+    "endpoint_generation",
+    "session_identity",
+    "worktree",
+    "presentation_source",
+    "title",
+    "sidebar_name",
+    "thread_title",
+    "baseline_digest",
+    "observed_state_change_seq",
+}
 
 
 def stable_json(value: Any) -> str:
@@ -124,6 +143,42 @@ def _shotcaller_baseline(value: Mapping[str, Any]) -> dict[str, Any]:
         raise StorageRefusal(
             "bootstrap_baseline_unverified",
             "Shotcaller bootstrap baseline presentation source is invalid",
+        )
+    return dict(value)
+
+
+def _shotcaller_publication(value: Mapping[str, Any]) -> dict[str, Any]:
+    if (
+        not isinstance(value, Mapping)
+        or set(value) != SHOTCALLER_PUBLICATION_V1_KEYS
+        or value.get("schema") != "league.shotcaller-bootstrap-publication.v1"
+        or type(value.get("observed_state_change_seq")) is not int
+        or value["observed_state_change_seq"] < 0
+    ):
+        raise StorageRefusal(
+            "bootstrap_publication_unverified",
+            "Shotcaller bootstrap publication attempt is malformed",
+        )
+    optional_empty = {"title", "sidebar_name", "thread_title"}
+    for key in SHOTCALLER_PUBLICATION_V1_KEYS - {"observed_state_change_seq"}:
+        item = value.get(key)
+        if (
+            not isinstance(item, str)
+            or (not item and key not in optional_empty)
+            or len(item.encode("utf-8")) > 4096
+        ):
+            raise StorageRefusal(
+                "bootstrap_publication_unverified",
+                "Shotcaller bootstrap publication identity is invalid",
+            )
+    if (
+        value["routing_name"] != str(value["callsign"]).lower()
+        or not Path(str(value["worktree"])).is_absolute()
+        or not re.fullmatch(r"[0-9a-f]{64}", str(value["baseline_digest"]))
+    ):
+        raise StorageRefusal(
+            "bootstrap_publication_unverified",
+            "Shotcaller bootstrap publication target is invalid",
         )
     return dict(value)
 
@@ -1321,6 +1376,148 @@ def shotcaller_bootstrap_baseline(
         )
     baseline = metadata.get(SHOTCALLER_BASELINE_KEY)
     return None if baseline is None else _shotcaller_baseline(baseline)
+
+
+def record_shotcaller_bootstrap_publication(
+    store: Any,
+    assignment_id: str,
+    expected_version: int,
+    publication: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Persist the exact external publication intent before its first effect."""
+
+    normalized = _shotcaller_publication(publication)
+    try:
+        with store._transaction():
+            assignment = store.connection.execute(
+                "SELECT * FROM callsign_assignments WHERE callsign_assignment_id=?",
+                (assignment_id,),
+            ).fetchone()
+            if (
+                assignment is None
+                or assignment["role"] != "shotcaller"
+                or assignment["scope_kind"] != "shotcaller"
+                or assignment["scope_id"] != assignment["agent_id"]
+                or assignment["state"] != "reserved"
+                or int(assignment["version"]) != expected_version
+                or normalized["assignment_id"] != assignment_id
+                or normalized["agent_id"] != assignment["agent_id"]
+                or normalized["callsign"] != assignment["callsign"]
+            ):
+                raise StorageRefusal(
+                    "assignment_conflict",
+                    "Shotcaller publication requires the exact reservation",
+                )
+            agent = store.connection.execute(
+                "SELECT metadata_json FROM agent_instances "
+                "WHERE agent_id=? AND retired_at IS NULL",
+                (assignment["agent_id"],),
+            ).fetchone()
+            if agent is None:
+                raise StorageRefusal(
+                    "agent_conflict", "Shotcaller publication agent is not live"
+                )
+            try:
+                metadata = json.loads(agent["metadata_json"])
+            except (TypeError, json.JSONDecodeError) as exc:
+                raise StorageRefusal(
+                    "receipt_conflict", "Shotcaller publication metadata is malformed"
+                ) from exc
+            if not isinstance(metadata, dict):
+                raise StorageRefusal(
+                    "receipt_conflict", "Shotcaller publication metadata is not an object"
+                )
+            baseline = metadata.get(SHOTCALLER_BASELINE_KEY)
+            if (
+                baseline is None
+                or normalized["baseline_digest"] != digest(_shotcaller_baseline(baseline))
+            ):
+                raise StorageRefusal(
+                    "receipt_conflict",
+                    "Shotcaller publication does not match the durable baseline",
+                )
+            existing = metadata.get(SHOTCALLER_PUBLICATION_KEY)
+            if existing is not None:
+                if _shotcaller_publication(existing) != normalized:
+                    raise StorageRefusal(
+                        "receipt_conflict",
+                        "Shotcaller publication retry changed the durable attempt",
+                    )
+                return {"publication": normalized, "idempotent": True}
+            metadata[SHOTCALLER_PUBLICATION_KEY] = normalized
+            changed = store.connection.execute(
+                "UPDATE agent_instances SET metadata_json=? "
+                "WHERE agent_id=? AND metadata_json=?",
+                (stable_json(metadata), assignment["agent_id"], agent["metadata_json"]),
+            )
+            if changed.rowcount != 1:
+                raise StorageRefusal(
+                    "version_conflict", "Shotcaller publication changed concurrently"
+                )
+            return {"publication": normalized, "idempotent": False}
+    except StorageRefusal:
+        raise
+    except sqlite3.DatabaseError as exc:
+        raise store._translate_database_error(
+            exc, "Shotcaller publication conflicted with canonical state"
+        ) from exc
+
+
+def shotcaller_bootstrap_publication(
+    store: Any, assignment_id: str
+) -> Optional[dict[str, Any]]:
+    assignment = store.connection.execute(
+        "SELECT agent_id,callsign,role,scope_kind,scope_id FROM callsign_assignments "
+        "WHERE callsign_assignment_id=?",
+        (assignment_id,),
+    ).fetchone()
+    if assignment is None:
+        return None
+    if (
+        assignment["role"] != "shotcaller"
+        or assignment["scope_kind"] != "shotcaller"
+        or assignment["scope_id"] != assignment["agent_id"]
+    ):
+        raise StorageRefusal(
+            "assignment_conflict", "Shotcaller publication assignment is not exact"
+        )
+    agent = store.connection.execute(
+        "SELECT metadata_json FROM agent_instances WHERE agent_id=?",
+        (assignment["agent_id"],),
+    ).fetchone()
+    if agent is None:
+        raise StorageRefusal("agent_conflict", "Shotcaller publication agent is missing")
+    try:
+        metadata = json.loads(agent["metadata_json"])
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise StorageRefusal(
+            "receipt_conflict", "Shotcaller publication metadata is malformed"
+        ) from exc
+    if not isinstance(metadata, dict):
+        raise StorageRefusal(
+            "receipt_conflict", "Shotcaller publication metadata is not an object"
+        )
+    publication = metadata.get(SHOTCALLER_PUBLICATION_KEY)
+    if publication is None:
+        return None
+    normalized = _shotcaller_publication(publication)
+    if (
+        normalized["assignment_id"] != assignment_id
+        or normalized["agent_id"] != assignment["agent_id"]
+        or normalized["callsign"] != assignment["callsign"]
+    ):
+        raise StorageRefusal(
+            "receipt_conflict", "Shotcaller publication identity is not exact"
+        )
+    baseline = metadata.get(SHOTCALLER_BASELINE_KEY)
+    if (
+        baseline is None
+        or normalized["baseline_digest"] != digest(_shotcaller_baseline(baseline))
+    ):
+        raise StorageRefusal(
+            "receipt_conflict", "Shotcaller publication baseline is not exact"
+        )
+    return normalized
 
 
 def record_shotcaller_bootstrap(

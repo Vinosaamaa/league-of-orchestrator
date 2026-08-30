@@ -22,6 +22,8 @@ THREAD_UUID = re.compile(
 )
 LIVE_STATUSES = {"active", "blocked", "done", "idle", "waiting", "working"}
 ROUTING_ALIAS = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
+TITLE_OWNER_TOKEN = "shotcaller_title_owner"
+TITLE_SOURCE_TOKEN = "shotcaller_title_source"
 
 
 class _MalformedHerdrResult(StorageRefusal):
@@ -90,6 +92,9 @@ class HerdrShotcallerBootstrapAdapter:
         self._restore_baseline: dict[str, Any] | None = None
         self._published_source: str | None = None
         self._resume_owned_route = False
+        self._resume_owned_metadata = False
+        self._publication_attempt: dict[str, Any] | None = None
+        self._expected_published_sequence: int | None = None
         worktree = Path(options.worktree)
         if (
             self.environment.get("HERDR_ENV") != "1"
@@ -221,6 +226,8 @@ class HerdrShotcallerBootstrapAdapter:
                 )
             ):
                 return None
+        elif token_route in {None, ""} and orchestrator_identity in {None, ""}:
+            pass
         elif (
             token_route != route
             or orchestrator_identity != f"codex · {route}"
@@ -228,6 +235,24 @@ class HerdrShotcallerBootstrapAdapter:
         ):
             return None
         return authority_source
+
+    def _owned_presentation_source(
+        self, spec: ShotcallerBootstrapSpec, agent: Mapping[str, Any], route: str | None
+    ) -> str | None:
+        tokens = agent.get("tokens")
+        title = self._presentation_title(agent)
+        if (
+            route is None
+            or not isinstance(tokens, Mapping)
+            or tokens.get(TITLE_OWNER_TOKEN) != self._title_owner(spec)
+            or tokens.get(TITLE_SOURCE_TOKEN) != self._title_source(spec)
+            or not isinstance(title, str)
+            or tokens.get("sidebar_name") != title
+            or tokens.get("thread_title") != title
+            or title.casefold() != route.casefold()
+        ):
+            return None
+        return self._title_source(spec)
 
     def _exact(
         self,
@@ -276,6 +301,10 @@ class HerdrShotcallerBootstrapAdapter:
         tokens = agent.get("tokens")
         routing_name = self._routing_name(agent)
         presentation_source = self._presentation_source(agent)
+        if presentation_source is None:
+            presentation_source = self._owned_presentation_source(
+                spec, agent, routing_name
+            )
         routing_exact = (
             routing_name is None
             if expected_alias is None
@@ -354,7 +383,7 @@ class HerdrShotcallerBootstrapAdapter:
         spec: ShotcallerBootstrapSpec,
         baseline: Mapping[str, Any],
         callsign: str,
-    ) -> None:
+    ) -> dict[str, Any]:
         """Fence a legacy recovery against writes after its first observation."""
 
         pane, agent = self._current()
@@ -380,7 +409,8 @@ class HerdrShotcallerBootstrapAdapter:
         route_only_publication = bool(
             common_exact
             and routing_name == callsign.lower()
-            and agent.get("state_change_seq") == baseline.get("state_change_seq") + 1
+            and isinstance(agent.get("state_change_seq"), int)
+            and agent["state_change_seq"] >= baseline.get("state_change_seq")
         )
         if not unpublished and not route_only_publication:
             raise StorageRefusal(
@@ -388,6 +418,98 @@ class HerdrShotcallerBootstrapAdapter:
                 "legacy Shotcaller presentation changed before publication",
             )
         self._resume_owned_route = route_only_publication
+        return {
+            "schema": "league.shotcaller-bootstrap-publication.v1",
+            "assignment_id": spec.assignment_id,
+            "agent_id": spec.agent_id,
+            "callsign": callsign,
+            "routing_name": callsign.lower(),
+            "terminal_id": str(agent["terminal_id"]),
+            "endpoint_generation": str(baseline["endpoint_generation"]),
+            "session_identity": spec.thread_id,
+            "worktree": str(Path(self.options.worktree).resolve()),
+            "presentation_source": str(presentation_source),
+            "title": str(title),
+            "sidebar_name": str(tokens.get("sidebar_name", "")),
+            "thread_title": str(tokens.get("thread_title", "")),
+            "baseline_digest": digest(baseline),
+            "observed_state_change_seq": int(agent["state_change_seq"]),
+        }
+
+    def use_publication_attempt(
+        self,
+        spec: ShotcallerBootstrapSpec,
+        baseline: Mapping[str, Any],
+        publication: Mapping[str, Any],
+        callsign: str,
+    ) -> None:
+        expected = {
+            "schema": "league.shotcaller-bootstrap-publication.v1",
+            "assignment_id": spec.assignment_id,
+            "agent_id": spec.agent_id,
+            "callsign": callsign,
+            "routing_name": callsign.lower(),
+            "terminal_id": self._observed["terminal_id"] if self._observed else None,
+            "endpoint_generation": baseline.get("endpoint_generation"),
+            "session_identity": spec.thread_id,
+            "worktree": str(Path(self.options.worktree).resolve()),
+            "presentation_source": baseline.get("presentation_source"),
+            "title": baseline.get("title"),
+            "sidebar_name": baseline.get("sidebar_name"),
+            "thread_title": baseline.get("thread_title"),
+            "baseline_digest": digest(baseline),
+        }
+        if (
+            set(publication) != set(expected) | {"observed_state_change_seq"}
+            or any(publication.get(key) != value for key, value in expected.items())
+            or type(publication.get("observed_state_change_seq")) is not int
+            or publication["observed_state_change_seq"] < baseline.get("state_change_seq", 0)
+        ):
+            raise StorageRefusal(
+                "bootstrap_publication_unverified",
+                "stored Shotcaller publication attempt is not exact",
+            )
+        self._publication_attempt = dict(publication)
+        self._published_source = self._title_source(spec)
+
+    def require_current_publication(
+        self,
+        spec: ShotcallerBootstrapSpec,
+        baseline: Mapping[str, Any],
+        callsign: str,
+    ) -> None:
+        if self._publication_attempt is None:
+            raise StorageRefusal(
+                "bootstrap_publication_unverified",
+                "Shotcaller publication attempt was not loaded",
+            )
+        pane, agent = self._current()
+        tokens = agent.get("tokens")
+        sequence = agent.get("state_change_seq")
+        route = self._routing_name(agent)
+        baseline_exact = bool(
+            self._exact(spec, pane, agent)
+            and isinstance(tokens, Mapping)
+            and self._presentation_source(agent) == baseline.get("presentation_source")
+            and self._presentation_title(agent) == baseline.get("title")
+            and str(tokens.get("sidebar_name", "")) == baseline.get("sidebar_name")
+            and str(tokens.get("thread_title", "")) == baseline.get("thread_title")
+        )
+        owned_exact = self._published_exact(spec, callsign, pane, agent)
+        if (
+            not isinstance(sequence, int)
+            or sequence < self._publication_attempt["observed_state_change_seq"]
+            or not (
+                baseline_exact and route in {None, callsign.lower()}
+                or owned_exact and route == callsign.lower()
+            )
+        ):
+            raise StorageRefusal(
+                "shotcaller_metadata_unverified",
+                "Shotcaller publication identity or presentation changed",
+            )
+        self._resume_owned_route = route == callsign.lower()
+        self._resume_owned_metadata = owned_exact
 
     def publish(self, spec: ShotcallerBootstrapSpec, callsign: str) -> dict[str, Any]:
         if self._observed is None:
@@ -395,21 +517,50 @@ class HerdrShotcallerBootstrapAdapter:
                 "shotcaller_identity_unverified", "calling identity was not inspected"
             )
         alias = callsign.lower()
+        resume_owned_metadata = self._resume_owned_metadata
         if not self._resume_owned_route:
             self._run(
                 ("herdr", "agent", "rename", self.options.pane_id, alias),
                 "Herdr Shotcaller routing rename",
             )
         self._resume_owned_route = False
+        self._resume_owned_metadata = False
         pane, agent = self._current()
         if not self._exact(spec, pane, agent) or self._routing_name(agent) != alias:
             raise StorageRefusal(
                 "shotcaller_identity_unverified",
                 "same-pane Shotcaller routing identity did not verify",
             )
-        self._report_title(spec, callsign, agent)
+        if not resume_owned_metadata:
+            if self._publication_attempt is not None and not self._baseline_presentation_exact(
+                spec, pane, agent
+            ):
+                raise StorageRefusal(
+                    "shotcaller_metadata_unverified",
+                    "Shotcaller provider presentation changed before title publication",
+                )
+            self._report_title(spec, callsign, agent)
         self._stable_published(spec, callsign)
         return self._receipt(spec, callsign)
+
+    def _baseline_presentation_exact(
+        self,
+        spec: ShotcallerBootstrapSpec,
+        pane: Mapping[str, Any],
+        agent: Mapping[str, Any],
+    ) -> bool:
+        attempt = self._publication_attempt
+        tokens = agent.get("tokens")
+        return bool(
+            attempt is not None
+            and self._exact(spec, pane, agent)
+            and isinstance(tokens, Mapping)
+            and agent.get("terminal_id") == attempt["terminal_id"]
+            and self._presentation_source(agent) == attempt["presentation_source"]
+            and self._presentation_title(agent) == attempt["title"]
+            and str(tokens.get("sidebar_name", "")) == attempt["sidebar_name"]
+            and str(tokens.get("thread_title", "")) == attempt["thread_title"]
+        )
 
     def _title_owner(self, spec: ShotcallerBootstrapSpec) -> str:
         return hashlib.sha256(spec.assignment_id.encode()).hexdigest()[:16]
@@ -431,6 +582,7 @@ class HerdrShotcallerBootstrapAdapter:
                 "same-pane Shotcaller metadata authority is incomplete",
             )
         self._published_source = self._title_source(spec)
+        self._expected_published_sequence = sequence + 1
         self._run(
             (
                 "herdr",
@@ -451,8 +603,10 @@ class HerdrShotcallerBootstrapAdapter:
                 f"sidebar_name={callsign}",
                 "--token",
                 f"thread_title={callsign}",
-                "--seq",
-                str(sequence + 1),
+                "--token",
+                f"{TITLE_OWNER_TOKEN}={self._title_owner(spec)}",
+                "--token",
+                f"{TITLE_SOURCE_TOKEN}={self._title_source(spec)}",
             ),
             "Herdr Shotcaller metadata",
             silent=True,
@@ -468,10 +622,19 @@ class HerdrShotcallerBootstrapAdapter:
         tokens = agent.get("tokens")
         presentation_source = self._presentation_source(agent)
         authority_source = _session_source(agent)
+        ownership_exact = bool(
+            isinstance(tokens, Mapping)
+            and tokens.get(TITLE_OWNER_TOKEN) == self._title_owner(spec)
+            and tokens.get(TITLE_SOURCE_TOKEN) == self._title_source(spec)
+        )
         return bool(
             self._exact(spec, pane, agent)
             and self._routing_name(agent) == callsign.lower()
-            and presentation_source in {self._title_source(spec), authority_source}
+            and ownership_exact
+            and (
+                presentation_source in {self._title_source(spec), authority_source}
+                or (presentation_source is None and ownership_exact)
+            )
             and isinstance(tokens, Mapping)
             and tokens.get("sidebar_name") == callsign
             and tokens.get("thread_title") == callsign
@@ -483,17 +646,17 @@ class HerdrShotcallerBootstrapAdapter:
     ) -> None:
         prior: tuple[str, int] | None = None
         consecutive = 0
-        restored = False
         for _ in range(50):
             pane, agent = self._current()
             authority_source = _session_source(agent)
             presentation_source = self._presentation_source(agent)
             sequence = agent.get("state_change_seq")
+            published_exact = self._published_exact(spec, callsign, pane, agent)
             endpoint_exact = bool(
                 self._exact(spec, pane, agent)
                 and self._routing_name(agent) == callsign.lower()
                 and isinstance(authority_source, str)
-                and isinstance(presentation_source, str)
+                and (isinstance(presentation_source, str) or published_exact)
                 and isinstance(sequence, int)
             )
             if not endpoint_exact:
@@ -501,30 +664,27 @@ class HerdrShotcallerBootstrapAdapter:
                     "shotcaller_metadata_unverified",
                     "same-pane Shotcaller route or metadata authority changed",
                 )
-            if self._published_exact(spec, callsign, pane, agent):
-                key = (presentation_source, sequence)
+            if published_exact:
+                if (
+                    self._expected_published_sequence is not None
+                    and consecutive == 0
+                    and sequence != self._expected_published_sequence
+                ):
+                    raise StorageRefusal(
+                        "shotcaller_metadata_unverified",
+                        "Shotcaller presentation changed during title publication",
+                    )
+                key = (presentation_source or self._title_source(spec), sequence)
                 consecutive = consecutive + 1 if key == prior else 1
                 prior = key
                 if consecutive >= 2:
+                    self._expected_published_sequence = None
                     return
             else:
-                if presentation_source not in {
-                    authority_source,
-                    self._title_source(spec),
-                }:
-                    raise StorageRefusal(
-                        "shotcaller_metadata_unverified",
-                        "newer Shotcaller display metadata is not bootstrap-owned",
-                    )
-                if restored:
-                    raise StorageRefusal(
-                        "shotcaller_metadata_unverified",
-                        "owned Shotcaller display metadata did not settle",
-                    )
-                self._report_title(spec, callsign, agent)
-                restored = True
-                prior = None
-                consecutive = 0
+                raise StorageRefusal(
+                    "shotcaller_metadata_unverified",
+                    "newer Shotcaller display metadata is not bootstrap-owned",
+                )
             time.sleep(0.1)
         raise StorageRefusal(
             "shotcaller_metadata_unverified",
@@ -574,6 +734,22 @@ class HerdrShotcallerBootstrapAdapter:
             tokens = agent.get("tokens")
             presentation_source = self._presentation_source(agent)
             authority_source = _session_source(agent)
+            routing_name = self._routing_name(agent)
+            current_title = self._presentation_title(agent) or ""
+            owned_display = bool(
+                isinstance(tokens, Mapping)
+                and isinstance(routing_name, str)
+                and tokens.get(TITLE_OWNER_TOKEN)
+                == self._title_owner_from_source(self._published_source)
+                and tokens.get(TITLE_SOURCE_TOKEN) == self._published_source
+                and tokens.get("sidebar_name") == current_title
+                and tokens.get("thread_title") == current_title
+                and current_title.casefold() == routing_name.casefold()
+            )
+            if presentation_source is None and isinstance(authority_source, str):
+                presentation_source = (
+                    self._published_source if owned_display else authority_source
+                )
             if (
                 not self._exact_placeholder(pane, agent)
                 or not isinstance(tokens, Mapping)
@@ -581,13 +757,15 @@ class HerdrShotcallerBootstrapAdapter:
                 or not isinstance(authority_source, str)
             ):
                 return False
-            preserve_newer_presentation = presentation_source not in {
-                authority_source,
-                self._published_source,
-            }
+            baseline_exact = bool(
+                current_title == previous_title
+                and str(tokens.get("sidebar_name", "")) == previous_sidebar
+                and str(tokens.get("thread_title", "")) == previous_thread_title
+            )
+            preserve_newer_presentation = not owned_display and not baseline_exact
             protected = {
                 "metadata_source": presentation_source,
-                "title": self._presentation_title(agent) or "",
+                "title": current_title,
                 "tokens": dict(tokens),
             }
             self._run(
@@ -611,35 +789,52 @@ class HerdrShotcallerBootstrapAdapter:
                 ):
                     return False
                 expected_tokens = dict(current_tokens)
+                expected_tokens.pop(TITLE_OWNER_TOKEN, None)
+                expected_tokens.pop(TITLE_SOURCE_TOKEN, None)
+                restore_tokens: list[tuple[str, str]] = []
                 for key, value in (
                     ("sidebar_name", previous_sidebar),
                     ("thread_title", previous_thread_title),
                 ):
-                    if value:
-                        expected_tokens[key] = value
-                    else:
-                        expected_tokens.pop(key, None)
-                self._run(
+                    current_value = current_tokens.get(key)
+                    if (
+                        isinstance(current_value, str)
+                        and isinstance(routing_name, str)
+                        and current_value.casefold() == routing_name.casefold()
+                    ):
+                        restore_tokens.append((key, value))
+                        if value:
+                            expected_tokens[key] = value
+                        else:
+                            expected_tokens.pop(key, None)
+                arguments = [
+                    "herdr",
+                    "pane",
+                    "report-metadata",
+                    self.options.pane_id,
+                    "--source",
+                    "league-shotcaller-rollback",
+                    "--applies-to-source",
+                    authority_source,
+                    "--agent",
+                    "codex",
+                    "--display-agent",
+                    "codex",
+                ]
+                for key, value in restore_tokens:
+                    arguments.extend(("--token", f"{key}={value}"))
+                arguments.extend(
                     (
-                        "herdr",
-                        "pane",
-                        "report-metadata",
-                        self.options.pane_id,
-                        "--source",
-                        "league-shotcaller-rollback",
-                        "--applies-to-source",
-                        authority_source,
-                        "--agent",
-                        "codex",
-                        "--display-agent",
-                        "codex",
                         "--token",
-                        f"sidebar_name={previous_sidebar}",
+                        f"{TITLE_OWNER_TOKEN}=",
                         "--token",
-                        f"thread_title={previous_thread_title}",
+                        f"{TITLE_SOURCE_TOKEN}=",
                         "--seq",
                         str(sequence + 1),
-                    ),
+                    )
+                )
+                self._run(
+                    tuple(arguments),
                     "Herdr Shotcaller display-token rollback",
                     silent=True,
                 )
@@ -682,6 +877,10 @@ class HerdrShotcallerBootstrapAdapter:
                     f"sidebar_name={previous_sidebar}",
                     "--token",
                     f"thread_title={previous_thread_title}",
+                    "--token",
+                    f"{TITLE_OWNER_TOKEN}=",
+                    "--token",
+                    f"{TITLE_SOURCE_TOKEN}=",
                     "--seq",
                     str(sequence + 1),
                 ),
@@ -702,6 +901,13 @@ class HerdrShotcallerBootstrapAdapter:
             )
         except StorageRefusal:
             return False
+
+    @staticmethod
+    def _title_owner_from_source(source: str | None) -> str | None:
+        prefix = "league-shotcaller-"
+        if isinstance(source, str) and source.startswith(prefix):
+            return source[len(prefix) :]
+        return None
 
     def _exact_placeholder(
         self, pane: Mapping[str, Any], agent: Mapping[str, Any]
@@ -744,6 +950,11 @@ class ShotcallerBootstrapService:
         completed = self.store.shotcaller_bootstrap_status(spec.assignment_id)
         baseline = (
             self.store.shotcaller_bootstrap_baseline(spec.assignment_id)
+            if existing is not None
+            else None
+        )
+        publication = (
+            self.store.shotcaller_bootstrap_publication(spec.assignment_id)
             if existing is not None
             else None
         )
@@ -796,7 +1007,17 @@ class ShotcallerBootstrapService:
             if baseline.get("schema") == "league.shotcaller-bootstrap-baseline.v2":
                 if fault:
                     fault("after_shotcaller_recovery_reserved")
-                self.adapter.require_current_recovery_baseline(
+                if publication is None:
+                    candidate = self.adapter.require_current_recovery_baseline(
+                        spec, baseline, str(reserved["callsign"])
+                    )
+                    publication = self.store.record_shotcaller_bootstrap_publication(
+                        spec.assignment_id, 1, candidate
+                    )["publication"]
+                self.adapter.use_publication_attempt(
+                    spec, baseline, publication, str(reserved["callsign"])
+                )
+                self.adapter.require_current_publication(
                     spec, baseline, str(reserved["callsign"])
                 )
             if existing is not None and existing["state"] == "active":

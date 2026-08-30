@@ -139,16 +139,24 @@ League-owned, and sidebar, thread, and terminal titles must contain no retired
 callsign. League stores that clean presentation as a v2 durable baseline in the
 same transaction as re-reservation, then requires an exact second
 source/title/token/thread/terminal/generation/sequence observation before any
-Herdr publication. If the process crashes immediately after the routing rename,
-an exact retry resumes only when the alias is the reserved callsign, every
-presentation byte still matches the baseline, and the sequence is exactly one
-newer. It skips the duplicate rename. Any mismatch clears the League-owned
+Herdr publication. Before that rename, League persists one immutable publication
+attempt bound to the reservation, agent, callsign, endpoint identity, provider
+presentation, and v2 baseline digest. If the process crashes immediately after
+the routing rename, an exact retry resumes only when the alias is the reserved
+callsign and every endpoint and presentation byte still matches that attempt.
+The current global state-change sequence may be newer because unrelated state
+can advance it; League does not reuse that global value as Herdr's source-local
+metadata sequence. Retry skips the duplicate rename, applies an explicitly
+owner-tagged League overlay, and accepts only the exact first post-effect global
+fence followed by two stable observations. A later provider or user
+presentation is never reasserted over. Any mismatch clears the League-owned
 alias and restores only baseline display tokens before rolling back the new
-reservation, leaving newer user presentation metadata unchanged. If an
-interleaved thread or terminal-generation change prevents exact external
-restoration, League leaves the new reservation, lease, agent baseline, and
-history intact as a recoverable cleanup obligation. Canonical rollback waits
-until a later exact-identity retry proves the alias and owned-token cleanup.
+reservation, leaving newer presentation metadata unchanged. If an interleaved
+thread or terminal-generation change prevents exact external restoration,
+League leaves the new reservation, lease, agent baseline, publication attempt,
+and history intact as a recoverable cleanup obligation. Canonical rollback
+waits until a later exact-identity retry proves the alias and owned-token
+cleanup.
 
 One installed pre-baseline generation retained exactly
 `scope_kind=squad` and a historical Squad `scope_id` instead of empty metadata.

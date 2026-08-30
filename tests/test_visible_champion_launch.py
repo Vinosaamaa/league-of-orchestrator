@@ -146,7 +146,7 @@ class FakeHerdrRunner:
             result = {"agent": self._agent()}
         elif command[:3] == ("herdr", "pane", "report-metadata"):
             self.renamed = True
-            result = {"accepted": True}
+            return subprocess.CompletedProcess(command, 0, "", "")
         elif command[:3] == ("herdr", "agent", "prompt"):
             prompt = command[4]
             if prompt == "/exit":
@@ -307,6 +307,18 @@ class PendingStartFailureRunner(FakeHerdrRunner):
         return super().run(arguments, timeout_seconds=timeout_seconds)
 
 
+class FailedMetadataRunner(FakeHerdrRunner):
+    def run(
+        self, arguments, *, timeout_seconds: int = 30
+    ) -> subprocess.CompletedProcess[str]:
+        command = tuple(arguments)
+        if command[:3] == ("herdr", "pane", "report-metadata"):
+            del timeout_seconds
+            self.calls.append(command)
+            return subprocess.CompletedProcess(command, 1, "", "metadata refused")
+        return super().run(arguments, timeout_seconds=timeout_seconds)
+
+
 def test_pre_session_launch_failure_closes_exact_pending_pane(root: Path) -> None:
     store, clock, worktree = _context(root, "pending-start-cleanup")
     options = _options(root)
@@ -320,6 +332,20 @@ def test_pre_session_launch_failure_closes_exact_pending_pane(root: Path) -> Non
         for call in runner.calls
     )
     assert any(call[:3] == ("herdr", "pane", "close") for call in runner.calls)
+    store.close()
+
+
+def test_metadata_silent_success_is_exact_and_failure_stays_closed(root: Path) -> None:
+    store, clock, worktree = _context(root, "metadata-failure")
+    options = _options(root)
+    runner = FailedMetadataRunner(worktree)
+    result = VisibleChampionLaunchService(
+        store, _adapter(options, runner), options, clock
+    ).launch(_spec(worktree, "metadata-failure"))
+    assert result["state"] == "blocked"
+    assert result["failure_class"] == "launch_adapter_failed"
+    assert result["cleanup_proven"] is True
+    assert runner.closed is True
     store.close()
 
 
@@ -473,6 +499,7 @@ def main() -> None:
         test_real_adapter_one_command_success_and_retry(root)
         test_real_adapter_persists_exact_initial_codex_session(root)
         test_pre_session_launch_failure_closes_exact_pending_pane(root)
+        test_metadata_silent_success_is_exact_and_failure_stays_closed(root)
         test_linked_worktree_trust_binds_owning_repository(root)
         test_unproven_partial_launch_stays_cleanup_pending(root)
         test_context_failure_records_pending_when_cleanup_is_unproven(root)

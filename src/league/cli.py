@@ -1486,7 +1486,7 @@ def _task_transfer(store: Storage, args: argparse.Namespace) -> CommandResult:
 
 
 def _task_transition(store: Storage, args: argparse.Namespace) -> CommandResult:
-    return store.transition_task(
+    transition = store.transition_task(
         args.task_id,
         args.runtime_instance_id,
         args.expected_version,
@@ -1500,7 +1500,18 @@ def _task_transition(store: Storage, args: argparse.Namespace) -> CommandResult:
         args.outbox_id,
         args.recipient_agent_id,
         args.at,
-    ), None
+    )
+    if transition.get("outbox_id"):
+        from .canonical_delivery import dispatch_event
+
+        transition["delivery"] = dispatch_event(
+            store,
+            outbox_id=transition["outbox_id"],
+            event_id=transition["event_id"],
+            recipient_agent_id=args.recipient_agent_id,
+            at=args.at,
+        )
+    return transition, None
 
 
 def _read_json_object(path: Path) -> dict[str, Any]:

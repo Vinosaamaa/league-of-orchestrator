@@ -14,7 +14,7 @@ import stat
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Optional, Sequence
+from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
 
 from . import sqlite_runtime_ops
 from .sqlite_artifact_ops import declare as declare_repository_artifact_operation
@@ -94,6 +94,12 @@ from .sqlite_rollover_ops import rollover_cleanup_target as rollover_cleanup_tar
 from .sqlite_rollover_ops import (
     rollover_descendant_target as rollover_descendant_target_operation,
 )
+from .sqlite_rollover_snapshot_ops import (
+    refresh as refresh_rollover_snapshot_operation,
+)
+from .sqlite_rollover_snapshot_ops import (
+    refresh_target as rollover_snapshot_refresh_target_operation,
+)
 from .sqlite_roster_ops import roster_snapshot as roster_snapshot_operation
 from .sqlite_report_ops import generate_report as generate_report_operation
 from .sqlite_report_ops import record_activity_evidence as record_activity_evidence_operation
@@ -146,10 +152,16 @@ from .sqlite_stop_feedback_schema import MIGRATION_NAME as STOP_FEEDBACK_MIGRATI
 from .sqlite_stop_feedback_schema import STATEMENTS as STOP_FEEDBACK_MIGRATION_STATEMENTS
 from .sqlite_continuation_schema import MIGRATION_NAME as CONTINUATION_MIGRATION_NAME
 from .sqlite_continuation_schema import STATEMENTS as CONTINUATION_MIGRATION_STATEMENTS
+from .sqlite_rollover_snapshot_schema import (
+    MIGRATION_NAME as ROLLOVER_SNAPSHOT_MIGRATION_NAME,
+)
+from .sqlite_rollover_snapshot_schema import (
+    STATEMENTS as ROLLOVER_SNAPSHOT_MIGRATION_STATEMENTS,
+)
 
 
 WAL_MINIMUM = (3, 51, 3)
-CURRENT_SCHEMA_VERSION = 16
+CURRENT_SCHEMA_VERSION = 17
 DATABASE_NAME = "league.sqlite3"
 DEFAULT_BUSY_TIMEOUT_MS = 500
 MAX_BUSY_TIMEOUT_MS = 10_000
@@ -1158,6 +1170,12 @@ MIGRATIONS = (
     Migration(14, PROMPT_OWNER_MIGRATION_NAME, PROMPT_OWNER_MIGRATION_STATEMENTS),
     Migration(15, STOP_FEEDBACK_MIGRATION_NAME, STOP_FEEDBACK_MIGRATION_STATEMENTS),
     Migration(16, CONTINUATION_MIGRATION_NAME, CONTINUATION_MIGRATION_STATEMENTS),
+    Migration(
+        17,
+        ROLLOVER_SNAPSHOT_MIGRATION_NAME,
+        ROLLOVER_SNAPSHOT_MIGRATION_STATEMENTS,
+        rebuilds_foreign_keys=True,
+    ),
 )
 
 
@@ -2125,6 +2143,71 @@ class SQLiteStorage(SQLiteTransactionCore):
     ) -> dict[str, Any]:
         return rollover_bindings_operation(
             self, operation_id, at, cursor=cursor, limit=limit
+        )
+
+    def rollover_snapshot_refresh_target(
+        self,
+        operation_id: str,
+        refresh_id: str,
+        squad_id: str,
+        predecessor_agent_id: str,
+        successor_agent_id: str,
+        expected_rollover_version: int,
+        expected_snapshot_version: int,
+        expected_snapshot_digest: str,
+        expires_at: str,
+        at: str,
+    ) -> dict[str, Any]:
+        return rollover_snapshot_refresh_target_operation(
+            self,
+            operation_id,
+            refresh_id,
+            squad_id,
+            predecessor_agent_id,
+            successor_agent_id,
+            expected_rollover_version,
+            expected_snapshot_version,
+            expected_snapshot_digest,
+            expires_at,
+            at,
+        )
+
+    def refresh_rollover_snapshot(
+        self,
+        operation_id: str,
+        refresh_id: str,
+        squad_id: str,
+        predecessor_agent_id: str,
+        successor_agent_id: str,
+        expected_rollover_version: int,
+        expected_snapshot_version: int,
+        expected_snapshot_digest: str,
+        expires_at: str,
+        at: str,
+        canonical_digest: str,
+        observations: Sequence[dict[str, Any]],
+        final_observer: Callable[
+            [list[dict[str, Any]]], Sequence[Mapping[str, Any]]
+        ],
+        *,
+        fault: Optional[FaultInjector] = None,
+    ) -> dict[str, Any]:
+        return refresh_rollover_snapshot_operation(
+            self,
+            operation_id,
+            refresh_id,
+            squad_id,
+            predecessor_agent_id,
+            successor_agent_id,
+            expected_rollover_version,
+            expected_snapshot_version,
+            expected_snapshot_digest,
+            expires_at,
+            at,
+            canonical_digest,
+            observations,
+            final_observer,
+            fault=fault,
         )
 
     def acknowledge_rollover(

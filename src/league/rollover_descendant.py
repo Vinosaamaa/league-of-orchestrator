@@ -19,6 +19,12 @@ LIVE_STATUSES = {"active", "blocked", "done", "idle", "waiting", "working"}
 CLOSED_STATUSES = {"closed", "completed", "failed", "stopped"}
 
 
+def _herdr_runtime_generation(terminal_id: str, thread_id: str) -> str:
+    return "herdr:" + hashlib.sha256(
+        f"{terminal_id}\0{thread_id}".encode("utf-8")
+    ).hexdigest()[:24]
+
+
 class DescendantRuntimeAdapter(Protocol):
     def verify(
         self, target: Mapping[str, Any], runtime_instance_id: str
@@ -111,9 +117,7 @@ class HerdrDescendantRuntimeAdapter:
                 "Herdr endpoint, route, thread, terminal, or worktree differs from the frozen Champion",
             )
         runtime_status = "idle" if status in {"done", "idle"} else "active"
-        generation = "herdr:" + hashlib.sha256(
-            f"{terminal_id}\0{expected_thread}".encode("utf-8")
-        ).hexdigest()[:24]
+        generation = _herdr_runtime_generation(terminal_id, expected_thread)
         return {
             "schema": "league.rollover-descendant-runtime.v1",
             "verified": True,

@@ -461,9 +461,10 @@ make test-reporting-privacy
 
 The staged migration assertion and strict receipt schema follow
 `CURRENT_SCHEMA_VERSION`; the current contiguous sequence is
-`[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15]`. Versions 12 through 15 add the
+`[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17]`. Versions 12 through 17 add the
 bounded rollover-reconciliation, in-place Shotcaller-bootstrap, immutable prompt
-provenance/current-owner, and exact Stop-feedback suppression contracts. The
+provenance/current-owner, exact Stop-feedback suppression, issue-coupled
+continuation, and immutable switched-rollover snapshot-revision contracts. The
 acceptance operation and source-sentinel contract remain unchanged.
 
 The skill-contract suite uses only synthetic temporary custom roots and fake

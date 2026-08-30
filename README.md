@@ -27,7 +27,7 @@ Nothing here installs files, changes hooks, or connects to live Roster state.
 - Synthetic examples, authoring schemas, and focused local regression tests.
 - One standard-library SQLite implementation behind a `Storage` protocol and
   stable `league` command facade.
-- Nine contiguous checksummed schema migrations, a loaded-runtime WAL gate, verified
+- Seventeen contiguous checksummed schema migrations, a loaded-runtime WAL gate, verified
   backups, integrity checks, expected-version writes, and bounded contention.
 - A strict manifest importer covering every canonical issue-#18 artifact
   family, with dry-run digest confirmation before apply.
@@ -63,6 +63,13 @@ Nothing here installs files, changes hooks, or connects to live Roster state.
 - One guarded disposable Shotcaller rollover for a stable Squad with a bounded
   immutable Champion snapshot, exact successor acknowledgement, and one atomic
   owner/event/outbox switch.
+- One switched-rollover-only snapshot refresh that replaces an expired
+  descendant snapshot with a new immutable revision after exact canonical CAS
+  and two identical complete live Herdr identity observations. Runtime
+  generations are derived from the observed terminal and exact thread/session,
+  and must also match an existing canonical generation; stale rows are never
+  reused. The final observation runs in the consistent deferred transaction
+  immediately before pointer CAS without reserving the SQLite writer lock.
 - Deterministic bounded activity reports with stable JSON, exact range/timezone
   and scope, immutable show/since specifications, completion gates, indexed
   pagination, and JSON-derived Markdown/portable HTML.

@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import json
 import hashlib
+import os
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -23,6 +25,10 @@ from league.sqlite_store import SQLiteStorage  # noqa: E402
 from league.rollover_descendant import (  # noqa: E402
     HerdrDescendantRuntimeAdapter,
     RolloverDescendantService,
+)
+from league.rollover_snapshot import (  # noqa: E402
+    HerdrRolloverSnapshotAdapter,
+    RolloverSnapshotRefreshService,
 )
 from league.storage import RuntimeRegistrationCommand, StorageRefusal  # noqa: E402
 from storage_fixture import (  # noqa: E402
@@ -494,6 +500,879 @@ def acknowledge(store: SQLiteStorage, prepared: dict, pages: list[dict]) -> dict
         pages,
         AT4,
     )
+
+
+def switch_rollover(store: SQLiteStorage, context: dict) -> tuple[dict, dict]:
+    for champion_id in context["champion_ids"]:
+        runtime = store.connection.execute(
+            "SELECT runtime_generation FROM runtime_instances WHERE actor_agent_id=?",
+            (champion_id,),
+        ).fetchone()
+        champion = store.agent_status(champion_id)
+        if runtime is not None and str(runtime["runtime_generation"]).startswith(
+            "generation:champion:"
+        ):
+            terminal_id = f"terminal:{champion_id}"
+            runtime_generation = "herdr:" + hashlib.sha256(
+                f"{terminal_id}\0{champion['thread_id']}".encode("utf-8")
+            ).hexdigest()[:24]
+            store.connection.execute(
+                "UPDATE runtime_instances SET runtime_generation=? WHERE actor_agent_id=?",
+                (runtime_generation, champion_id),
+            )
+    prepared = prepare(store, context["successor"])
+    store.activate_callsign(
+        context["successor"]["assignment_id"],
+        1,
+        runtime_receipt(context["successor"], "new-shotcaller", ["rollover.accept"]),
+        AT3,
+    )
+    acknowledged = acknowledge(store, prepared, read_all_pages(store, prepared["operation_id"]))
+    assert acknowledged["state"] == "acknowledged"
+    switched = store.commit_rollover(
+        prepared["operation_id"],
+        1,
+        1,
+        "event:owner-changed:refresh",
+        "outbox:owner-changed:refresh",
+        AT5,
+    )
+    return prepared, switched
+
+
+class ExactSnapshotInventory:
+    def observe(self, descendants: list[dict]) -> list[dict]:
+        observations = []
+        for target in descendants:
+            terminal_id = f"terminal:{target['champion_agent_id']}"
+            observations.append(
+                {
+                    "schema": "league.rollover-snapshot-observation.v1",
+                    "verified": True,
+                    "champion_agent_id": target["champion_agent_id"],
+                    "task_id": target["task_id"],
+                    "callsign": target["callsign"],
+                    "thread_id": target["thread_id"],
+                    "endpoint": target["address"],
+                    "routing_name": target["routing_name"],
+                    "worktree": target["worktree"],
+                    "terminal_id": terminal_id,
+                    "state_change_seq": 1,
+                    "runtime_generation": (
+                        target["runtime"]["runtime_generation"]
+                        if target["runtime"] is not None
+                        else "herdr:"
+                        + hashlib.sha256(
+                            f"{terminal_id}\0{target['thread_id']}".encode("utf-8")
+                        ).hexdigest()[:24]
+                    ),
+                    "status": "idle",
+                    "canonical_row_digest": target["canonical_row_digest"],
+                }
+            )
+        return observations
+
+
+def test_snapshot_refresh_cli_requires_the_exact_switched_identity() -> None:
+    completed = subprocess.run(
+        [str(LEAGUE), "rollover", "refresh-bindings", "--help"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    for option in (
+        "--operation-id",
+        "--refresh-id",
+        "--squad-id",
+        "--predecessor-agent-id",
+        "--successor-agent-id",
+        "--expected-rollover-version",
+        "--expected-snapshot-version",
+        "--expected-snapshot-digest",
+        "--expires-at",
+        "--at",
+    ):
+        assert option in completed.stdout
+
+
+def test_snapshot_refresh_cli_runs_two_stable_herdr_inventories(root: Path) -> None:
+    state, _ = migrated_state(root, "refresh-cli")
+    worktree = (root / "refresh-cli-worktree").resolve()
+    worktree.mkdir()
+    thread_id = "eeeeeeee-ffff-4aaa-8bbb-000000000000"
+    pane_id = "pane:refresh-cli"
+    with SQLiteStorage(state) as store:
+        context = seed_rollover(store, champion_count=1)
+        champion_id = context["champion_ids"][0]
+        champion = store.agent_status(champion_id)
+        route = champion["callsign"].lower()
+        store.connection.execute(
+            """
+            UPDATE agent_instances
+               SET kind='codex-thread',thread_id=?,address=?,backend='herdr',
+                   routing_name=?,display_agent='codex',worktree=?
+             WHERE agent_id=?
+            """,
+            (thread_id, pane_id, route, str(worktree), champion_id),
+        )
+        store.connection.execute(
+            """
+            UPDATE runtime_instances
+               SET harness_kind='codex-thread',backend_kind='herdr',session_ref=?,endpoint=?,
+                   runtime_generation=?,status='active',verified=1
+             WHERE actor_agent_id=?
+            """,
+            (
+                thread_id,
+                pane_id,
+                "herdr:"
+                + hashlib.sha256(
+                    f"terminal:refresh-cli\0{thread_id}".encode("utf-8")
+                ).hexdigest()[:24],
+                champion_id,
+            ),
+        )
+        prepared, switched = switch_rollover(store, context)
+
+    inventory = {
+        "result": {
+            "agents": [
+                {
+                    "agent": "codex",
+                    "agent_session": {"value": thread_id},
+                    "agent_status": "done",
+                    "interactive_ready": True,
+                    "cwd": str(worktree),
+                    "foreground_cwd": str(worktree),
+                    "name": route,
+                    "pane_id": pane_id,
+                    "state_change_seq": 3,
+                    "terminal_id": "terminal:refresh-cli",
+                }
+            ]
+        }
+    }
+    fake_bin = root / "refresh-cli-bin"
+    fake_bin.mkdir()
+    fake_herdr = fake_bin / "herdr"
+    calls = root / "refresh-cli-herdr-calls"
+    fake_herdr.write_text(
+        "#!/bin/sh\nprintf 'observe\\n' >> "
+        + shlex.quote(str(calls))
+        + "\nprintf '%s\\n' "
+        + shlex.quote(json.dumps(inventory))
+        + "\n",
+        encoding="utf-8",
+    )
+    fake_herdr.chmod(0o755)
+    completed = subprocess.run(
+        [
+            str(LEAGUE),
+            "--state-root",
+            str(state),
+            "rollover",
+            "refresh-bindings",
+            "--operation-id",
+            prepared["operation_id"],
+            "--refresh-id",
+            "refresh:cli",
+            "--squad-id",
+            SQUAD_ID,
+            "--predecessor-agent-id",
+            OLD_ID,
+            "--successor-agent-id",
+            NEW_ID,
+            "--expected-rollover-version",
+            str(switched["version"]),
+            "--expected-snapshot-version",
+            str(prepared["snapshot"]["version"]),
+            "--expected-snapshot-digest",
+            prepared["snapshot"]["digest"],
+            "--expires-at",
+            "2026-01-01T03:00:00Z",
+            "--at",
+            "2026-01-01T02:00:00Z",
+        ],
+        cwd=ROOT,
+        env={**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}"},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    payload = json.loads(completed.stdout)
+    assert payload["command"] == "rollover.refresh-bindings"
+    assert payload["result"]["snapshot"]["version"] == 2
+    assert calls.read_text(encoding="utf-8").splitlines() == ["observe", "observe"]
+
+
+def test_snapshot_refresh_adapter_requires_one_exact_live_identity(root: Path) -> None:
+    worktree = (root / "snapshot-refresh-adapter").resolve()
+    worktree.mkdir()
+    thread_id = "dddddddd-eeee-4fff-8aaa-000000000000"
+    target = {
+        "champion_agent_id": "agent:refresh:champion",
+        "task_id": "task:refresh:champion",
+        "callsign": "Annie",
+        "kind": "codex-thread",
+        "thread_id": thread_id,
+        "backend": "herdr",
+        "routing_name": "annie",
+        "display_agent": "codex",
+        "address": "pane:refresh",
+        "worktree": str(worktree),
+        "canonical_row_digest": "a" * 64,
+        "capabilities": ["task.execute"],
+    }
+    exact = {
+        "agent": "codex",
+        "agent_session": {"value": thread_id},
+        "agent_status": "done",
+        "interactive_ready": True,
+        "cwd": str(worktree),
+        "foreground_cwd": str(worktree),
+        "name": "annie",
+        "pane_id": "pane:refresh",
+        "state_change_seq": 2,
+        "terminal_id": "terminal:refresh",
+    }
+
+    class Inventory:
+        def __init__(self, agents: list[dict]) -> None:
+            self.agents = agents
+
+        def run(
+            self, argv: tuple[str, ...], *, timeout_seconds: int
+        ) -> subprocess.CompletedProcess[str]:
+            assert argv == ("herdr", "agent", "list") and timeout_seconds == 30
+            return subprocess.CompletedProcess(
+                argv, 0, json.dumps({"result": {"agents": self.agents}}), ""
+            )
+
+    observed = HerdrRolloverSnapshotAdapter(Inventory([exact])).observe([target])
+    assert observed[0]["status"] == "idle"
+    assert observed[0]["runtime_generation"] == "herdr:" + hashlib.sha256(
+        f"terminal:refresh\0{thread_id}".encode("utf-8")
+    ).hexdigest()[:24]
+    cases = (
+        ([], "snapshot_refresh_live_missing"),
+        ([{**exact, "interactive_ready": False}], "snapshot_refresh_live_mismatch"),
+        ([exact, {**exact, "pane_id": "pane:other"}], "snapshot_refresh_live_ambiguous"),
+    )
+    for agents, code in cases:
+        try:
+            HerdrRolloverSnapshotAdapter(Inventory(agents)).observe([target])
+        except StorageRefusal as exc:
+            assert exc.code == code
+        else:
+            raise AssertionError(f"Herdr refusal {code} was not enforced")
+    for changed, malformed_agent in (
+        ({**target, "address": None}, {**exact, "pane_id": None}),
+        ({**target, "routing_name": None}, {**exact, "name": None}),
+    ):
+        try:
+            HerdrRolloverSnapshotAdapter(Inventory([malformed_agent])).observe(
+                [changed]
+            )
+        except StorageRefusal as exc:
+            assert exc.code == "snapshot_refresh_live_mismatch"
+        else:
+            raise AssertionError("missing canonical Herdr locator passed refresh")
+
+
+def test_snapshot_refresh_refuses_a_mismatched_canonical_runtime(root: Path) -> None:
+    state, _ = migrated_state(root, "refresh-runtime-mismatch")
+    with SQLiteStorage(state) as store:
+        context = seed_rollover(store, champion_count=1)
+        store.connection.execute(
+            "UPDATE runtime_instances SET endpoint='pane:stale' WHERE actor_agent_id=?",
+            (context["champion_ids"][0],),
+        )
+        prepared, switched = switch_rollover(store, context)
+        try:
+            RolloverSnapshotRefreshService(
+                store, ExactSnapshotInventory()
+            ).refresh(
+                operation_id=prepared["operation_id"],
+                refresh_id="refresh:runtime-mismatch",
+                squad_id=SQUAD_ID,
+                predecessor_agent_id=OLD_ID,
+                successor_agent_id=NEW_ID,
+                expected_rollover_version=switched["version"],
+                expected_snapshot_version=prepared["snapshot"]["version"],
+                expected_snapshot_digest=prepared["snapshot"]["digest"],
+                expires_at="2026-01-01T03:00:00Z",
+                at="2026-01-01T02:00:00Z",
+            )
+        except StorageRefusal as exc:
+            assert exc.code == "snapshot_refresh_runtime_mismatch"
+        else:
+            raise AssertionError("mismatched canonical runtime refreshed the snapshot")
+
+
+def test_snapshot_refresh_refuses_invalid_missing_runtime_generations_without_mutation(
+    root: Path,
+) -> None:
+    state, _ = migrated_state(root, "refresh-missing-runtime-generation")
+    with SQLiteStorage(state) as store:
+        context = seed_rollover(store, champion_count=1)
+        mark_exact_imported_legacy_partial(
+            store, context["champion_ids"][0], "task:champion:0"
+        )
+        prepared, switched = switch_rollover(store, context)
+
+        invalid_generations = (
+            ("arbitrary", "herdr:arbitrary"),
+            ("malformed", ""),
+            (
+                "changed",
+                "herdr:"
+                + hashlib.sha256(
+                    b"terminal:other\0synthetic:champion:0"
+                ).hexdigest()[:24],
+            ),
+        )
+        for label, invalid_generation in invalid_generations:
+            class InvalidGenerationInventory(ExactSnapshotInventory):
+                def observe(self, descendants: list[dict]) -> list[dict]:
+                    observations = super().observe(descendants)
+                    observations[0]["runtime_generation"] = invalid_generation
+                    return observations
+
+            try:
+                RolloverSnapshotRefreshService(
+                    store, InvalidGenerationInventory()
+                ).refresh(
+                    operation_id=prepared["operation_id"],
+                    refresh_id=f"refresh:missing-runtime-generation:{label}",
+                    squad_id=SQUAD_ID,
+                    predecessor_agent_id=OLD_ID,
+                    successor_agent_id=NEW_ID,
+                    expected_rollover_version=switched["version"],
+                    expected_snapshot_version=prepared["snapshot"]["version"],
+                    expected_snapshot_digest=prepared["snapshot"]["digest"],
+                    expires_at="2026-01-01T03:00:00Z",
+                    at="2026-01-01T02:00:00Z",
+                )
+            except StorageRefusal as exc:
+                assert exc.code == "snapshot_refresh_live_proof_mismatch"
+            else:
+                raise AssertionError(
+                    f"{label} missing-runtime generation refreshed the snapshot"
+                )
+            status = store.rollover_status(prepared["operation_id"])
+            assert status["version"] == switched["version"]
+            assert status["snapshot"] == prepared["snapshot"]
+            assert store.connection.execute(
+                "SELECT COUNT(*) FROM active_champion_snapshots WHERE operation_id=?",
+                (prepared["operation_id"],),
+            ).fetchone()[0] == 1
+            assert store.connection.execute(
+                "SELECT COUNT(*) FROM events WHERE event_type='rollover_snapshot_refreshed'"
+            ).fetchone()[0] == 0
+
+
+def test_snapshot_refresh_requires_canonical_generation_to_match_observed_terminal(
+    root: Path,
+) -> None:
+    state, _ = migrated_state(root, "refresh-canonical-generation")
+    with SQLiteStorage(state) as store:
+        context = seed_rollover(store, champion_count=1)
+        prepared, switched = switch_rollover(store, context)
+
+        class ChangedTerminalInventory(ExactSnapshotInventory):
+            def observe(self, descendants: list[dict]) -> list[dict]:
+                observations = super().observe(descendants)
+                terminal_id = "terminal:other"
+                observations[0]["terminal_id"] = terminal_id
+                observations[0]["runtime_generation"] = "herdr:" + hashlib.sha256(
+                    f"{terminal_id}\0{observations[0]['thread_id']}".encode("utf-8")
+                ).hexdigest()[:24]
+                return observations
+
+        try:
+            RolloverSnapshotRefreshService(
+                store, ChangedTerminalInventory()
+            ).refresh(
+                operation_id=prepared["operation_id"],
+                refresh_id="refresh:canonical-generation",
+                squad_id=SQUAD_ID,
+                predecessor_agent_id=OLD_ID,
+                successor_agent_id=NEW_ID,
+                expected_rollover_version=switched["version"],
+                expected_snapshot_version=prepared["snapshot"]["version"],
+                expected_snapshot_digest=prepared["snapshot"]["digest"],
+                expires_at="2026-01-01T03:00:00Z",
+                at="2026-01-01T02:00:00Z",
+            )
+        except StorageRefusal as exc:
+            assert exc.code == "snapshot_refresh_live_proof_mismatch"
+        else:
+            raise AssertionError(
+                "canonical generation detached from observed terminal refreshed snapshot"
+            )
+        status = store.rollover_status(prepared["operation_id"])
+        assert status["version"] == switched["version"]
+        assert status["snapshot"] == prepared["snapshot"]
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM active_champion_snapshots WHERE operation_id=?",
+            (prepared["operation_id"],),
+        ).fetchone()[0] == 1
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM events WHERE event_type='rollover_snapshot_refreshed'"
+        ).fetchone()[0] == 0
+
+
+def test_switched_rollover_refreshes_only_the_expired_exact_snapshot(root: Path) -> None:
+    state, _ = migrated_state(root, "refresh-expired-snapshot")
+    with SQLiteStorage(state) as store:
+        context = seed_rollover(store, champion_count=2)
+        prepared, switched = switch_rollover(store, context)
+        expired_rows = store.rollover_bindings(
+            prepared["operation_id"], AT6
+        )["page"]["rows"]
+        refreshed = RolloverSnapshotRefreshService(
+            store, ExactSnapshotInventory()
+        ).refresh(
+            operation_id=prepared["operation_id"],
+            refresh_id="refresh:synthetic:1",
+            squad_id=SQUAD_ID,
+            predecessor_agent_id=OLD_ID,
+            successor_agent_id=NEW_ID,
+            expected_rollover_version=switched["version"],
+            expected_snapshot_version=prepared["snapshot"]["version"],
+            expected_snapshot_digest=prepared["snapshot"]["digest"],
+            expires_at="2026-01-01T03:00:00Z",
+            at="2026-01-01T02:00:00Z",
+        )
+
+        assert refreshed["schema"] == "league.rollover-snapshot-refresh.v1"
+        assert refreshed["operation_id"] == prepared["operation_id"]
+        assert refreshed["source_snapshot"] == prepared["snapshot"]
+        assert refreshed["snapshot"]["version"] == 2
+        assert refreshed["snapshot"]["snapshot_id"] != prepared["snapshot"]["snapshot_id"]
+        assert refreshed["snapshot"]["expires_at"] == "2026-01-01T03:00:00Z"
+        assert refreshed["rollover_version"] == switched["version"] + 1
+        assert refreshed["descendant_count"] == 2
+        assert refreshed["observation_digest"] == refreshed["final_observation_digest"]
+        assert refreshed["idempotent"] is False
+        page = store.rollover_bindings(
+            prepared["operation_id"], "2026-01-01T02:01:00Z"
+        )
+        assert page["page"]["count"] == 2
+        assert {row["row_digest"] for row in page["page"]["rows"]}.isdisjoint(
+            row["row_digest"] for row in expired_rows
+        )
+        preserved = store.connection.execute(
+            """
+            SELECT snapshot_id,snapshot_version FROM active_champion_snapshots
+             WHERE operation_id=? ORDER BY snapshot_version
+            """,
+            (prepared["operation_id"],),
+        ).fetchall()
+        assert [tuple(item) for item in preserved] == [
+            (prepared["snapshot"]["snapshot_id"], 1),
+            (refreshed["snapshot"]["snapshot_id"], 2),
+        ]
+
+
+def test_snapshot_refresh_refuses_before_expiry_without_live_observation(root: Path) -> None:
+    state, _ = migrated_state(root, "refresh-before-expiry")
+    with SQLiteStorage(state) as store:
+        context = seed_rollover(store, champion_count=1)
+        prepared, switched = switch_rollover(store, context)
+
+        class UnexpectedInventory:
+            def observe(self, descendants: list[dict]) -> list[dict]:
+                raise AssertionError("live inventory ran before expiry validation")
+
+        try:
+            RolloverSnapshotRefreshService(store, UnexpectedInventory()).refresh(
+                operation_id=prepared["operation_id"],
+                refresh_id="refresh:too-early",
+                squad_id=SQUAD_ID,
+                predecessor_agent_id=OLD_ID,
+                successor_agent_id=NEW_ID,
+                expected_rollover_version=switched["version"],
+                expected_snapshot_version=prepared["snapshot"]["version"],
+                expected_snapshot_digest=prepared["snapshot"]["digest"],
+                expires_at="2026-01-01T02:00:00Z",
+                at=AT6,
+            )
+        except StorageRefusal as exc:
+            assert exc.code == "snapshot_refresh_not_expired"
+        else:
+            raise AssertionError("unexpired rollover snapshot was refreshed")
+        assert store.rollover_status(prepared["operation_id"])["snapshot"] == prepared["snapshot"]
+
+
+def test_snapshot_refresh_refuses_a_changed_descendant_set(root: Path) -> None:
+    state, _ = migrated_state(root, "refresh-changed-set")
+    with SQLiteStorage(state) as store:
+        context = seed_rollover(store, champion_count=2)
+        prepared, switched = switch_rollover(store, context)
+        store.connection.execute(
+            "DELETE FROM squad_champions WHERE squad_id=? AND champion_agent_id=?",
+            (SQUAD_ID, context["champion_ids"][1]),
+        )
+        try:
+            RolloverSnapshotRefreshService(store, ExactSnapshotInventory()).refresh(
+                operation_id=prepared["operation_id"],
+                refresh_id="refresh:changed-set",
+                squad_id=SQUAD_ID,
+                predecessor_agent_id=OLD_ID,
+                successor_agent_id=NEW_ID,
+                expected_rollover_version=switched["version"],
+                expected_snapshot_version=prepared["snapshot"]["version"],
+                expected_snapshot_digest=prepared["snapshot"]["digest"],
+                expires_at="2026-01-01T03:00:00Z",
+                at="2026-01-01T02:00:00Z",
+            )
+        except StorageRefusal as exc:
+            assert exc.code == "snapshot_refresh_set_changed"
+        else:
+            raise AssertionError("changed descendant set refreshed the snapshot")
+        assert store.rollover_status(prepared["operation_id"])["snapshot"] == prepared["snapshot"]
+
+
+def test_snapshot_refresh_retry_returns_the_identical_receipt(root: Path) -> None:
+    state, _ = migrated_state(root, "refresh-idempotent")
+    with SQLiteStorage(state) as store:
+        context = seed_rollover(store, champion_count=1)
+        prepared, switched = switch_rollover(store, context)
+        service = RolloverSnapshotRefreshService(store, ExactSnapshotInventory())
+        inputs = {
+            "operation_id": prepared["operation_id"],
+            "refresh_id": "refresh:idempotent",
+            "squad_id": SQUAD_ID,
+            "predecessor_agent_id": OLD_ID,
+            "successor_agent_id": NEW_ID,
+            "expected_rollover_version": switched["version"],
+            "expected_snapshot_version": prepared["snapshot"]["version"],
+            "expected_snapshot_digest": prepared["snapshot"]["digest"],
+            "expires_at": "2026-01-01T03:00:00Z",
+            "at": "2026-01-01T02:00:00Z",
+        }
+        first = service.refresh(**inputs)
+        second = service.refresh(**inputs)
+        assert first["receipt_digest"] == second["receipt_digest"]
+        assert {key: value for key, value in first.items() if key != "idempotent"} == {
+            key: value for key, value in second.items() if key != "idempotent"
+        }
+        assert first["idempotent"] is False
+        assert second["idempotent"] is True
+
+
+def test_refreshed_snapshot_drives_descendant_reconciliation(root: Path) -> None:
+    state, _ = migrated_state(root, "refresh-then-reconcile")
+    with SQLiteStorage(state) as store:
+        context = seed_rollover(store, champion_count=1)
+        mark_exact_imported_legacy_partial(
+            store, context["champion_ids"][0], "task:champion:0"
+        )
+        prepared, switched = switch_rollover(store, context)
+        refreshed = RolloverSnapshotRefreshService(
+            store, ExactSnapshotInventory()
+        ).refresh(
+            operation_id=prepared["operation_id"],
+            refresh_id="refresh:then-reconcile",
+            squad_id=SQUAD_ID,
+            predecessor_agent_id=OLD_ID,
+            successor_agent_id=NEW_ID,
+            expected_rollover_version=switched["version"],
+            expected_snapshot_version=prepared["snapshot"]["version"],
+            expected_snapshot_digest=prepared["snapshot"]["digest"],
+            expires_at="2026-01-01T03:00:00Z",
+            at="2026-01-01T02:00:00Z",
+        )
+        row = store.rollover_bindings(
+            prepared["operation_id"], "2026-01-01T02:01:00Z"
+        )["page"]["rows"][0]
+        champion = store.agent_status(context["champion_ids"][0])
+
+        class ExactRuntime:
+            def verify(self, target: dict, runtime_instance_id: str) -> dict:
+                return descendant_runtime_receipt(target, runtime_instance_id)
+
+        result = RolloverDescendantService(store, ExactRuntime()).reconcile(
+            operation_id=prepared["operation_id"],
+            reconciliation_id="reconciliation:refreshed-snapshot",
+            champion_agent_id=context["champion_ids"][0],
+            task_id=row["task_id"],
+            runtime_instance_id="runtime:champion:0",
+            snapshot_digest=refreshed["snapshot"]["digest"],
+            snapshot_row_digest=row["row_digest"],
+            expected_rollover_version=refreshed["rollover_version"],
+            expected_agent_version=champion["version"],
+            expected_task_version=1,
+            expected_assignment_version=0,
+            expected_callsign_assignment_version=1,
+            pending_outbox_ids=(),
+            at="2026-01-01T02:02:00Z",
+        )
+        assert result["successor_agent_id"] == NEW_ID
+
+
+def test_snapshot_refresh_refuses_concurrent_canonical_mutation(root: Path) -> None:
+    state, _ = migrated_state(root, "refresh-concurrent-mutation")
+    with SQLiteStorage(state) as store:
+        context = seed_rollover(store, champion_count=1)
+        prepared, switched = switch_rollover(store, context)
+
+        class RacingInventory(ExactSnapshotInventory):
+            def observe(self, descendants: list[dict]) -> list[dict]:
+                observations = super().observe(descendants)
+                with SQLiteStorage(state) as racer:
+                    racer.connection.execute(
+                        "UPDATE agent_instances SET display_agent='changed' WHERE agent_id=?",
+                        (context["champion_ids"][0],),
+                    )
+                return observations
+
+        try:
+            RolloverSnapshotRefreshService(store, RacingInventory()).refresh(
+                operation_id=prepared["operation_id"],
+                refresh_id="refresh:concurrent-mutation",
+                squad_id=SQUAD_ID,
+                predecessor_agent_id=OLD_ID,
+                successor_agent_id=NEW_ID,
+                expected_rollover_version=switched["version"],
+                expected_snapshot_version=prepared["snapshot"]["version"],
+                expected_snapshot_digest=prepared["snapshot"]["digest"],
+                expires_at="2026-01-01T03:00:00Z",
+                at="2026-01-01T02:00:00Z",
+            )
+        except StorageRefusal as exc:
+            assert exc.code == "snapshot_refresh_concurrent_mutation"
+        else:
+            raise AssertionError("concurrent descendant mutation refreshed the snapshot")
+        assert store.rollover_status(prepared["operation_id"])["snapshot"] == prepared["snapshot"]
+
+
+def test_snapshot_refresh_refuses_a_changed_final_live_observation(root: Path) -> None:
+    state, _ = migrated_state(root, "refresh-final-live-race")
+    with SQLiteStorage(state) as store:
+        context = seed_rollover(store, champion_count=1)
+        prepared, switched = switch_rollover(store, context)
+
+        mutations = (
+            ("endpoint", "endpoint", "pane:changed"),
+            ("route", "routing_name", "changed-route"),
+            (
+                "session",
+                "thread_id",
+                "ffffffff-ffff-4fff-8fff-ffffffffffff",
+            ),
+            ("terminal", "terminal_id", "terminal:changed"),
+            ("sequence", "state_change_seq", 2),
+        )
+        for label, field, value in mutations:
+            class RacingInventory(ExactSnapshotInventory):
+                def __init__(self) -> None:
+                    self.calls = 0
+
+                def observe(self, descendants: list[dict]) -> list[dict]:
+                    observations = super().observe(descendants)
+                    self.calls += 1
+                    if self.calls == 2:
+                        observations[0][field] = value
+                    return observations
+
+            inventory = RacingInventory()
+            try:
+                RolloverSnapshotRefreshService(store, inventory).refresh(
+                    operation_id=prepared["operation_id"],
+                    refresh_id=f"refresh:final-live-race:{label}",
+                    squad_id=SQUAD_ID,
+                    predecessor_agent_id=OLD_ID,
+                    successor_agent_id=NEW_ID,
+                    expected_rollover_version=switched["version"],
+                    expected_snapshot_version=prepared["snapshot"]["version"],
+                    expected_snapshot_digest=prepared["snapshot"]["digest"],
+                    expires_at="2026-01-01T03:00:00Z",
+                    at="2026-01-01T02:00:00Z",
+                )
+            except StorageRefusal as exc:
+                assert exc.code == "snapshot_refresh_live_changed"
+            else:
+                raise AssertionError(
+                    f"changed final Herdr {label} refreshed the snapshot"
+                )
+            assert inventory.calls == 2
+            status = store.rollover_status(prepared["operation_id"])
+            assert status["version"] == switched["version"]
+            assert status["snapshot"] == prepared["snapshot"]
+            assert store.connection.execute(
+                "SELECT COUNT(*) FROM active_champion_snapshots WHERE operation_id=?",
+                (prepared["operation_id"],),
+            ).fetchone()[0] == 1
+            assert store.connection.execute(
+                "SELECT COUNT(*) FROM events WHERE event_type='rollover_snapshot_refreshed'"
+            ).fetchone()[0] == 0
+
+
+def test_snapshot_refresh_reobserves_inside_the_final_pointer_boundary(
+    root: Path,
+) -> None:
+    state, _ = migrated_state(root, "refresh-final-pointer-boundary")
+    with SQLiteStorage(state) as store:
+        context = seed_rollover(store, champion_count=1)
+        prepared, switched = switch_rollover(store, context)
+
+        class PointerBoundaryInventory(ExactSnapshotInventory):
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def observe(self, descendants: list[dict]) -> list[dict]:
+                observations = super().observe(descendants)
+                self.calls += 1
+                if self.calls == 2:
+                    assert store.connection.in_transaction is True
+                    with SQLiteStorage(state) as writer_probe:
+                        writer_probe.connection.execute("BEGIN IMMEDIATE")
+                        writer_probe.connection.execute("ROLLBACK")
+                    operation = store.connection.execute(
+                        "SELECT version,snapshot_id FROM rollover_operations WHERE operation_id=?",
+                        (prepared["operation_id"],),
+                    ).fetchone()
+                    assert tuple(operation) == (
+                        switched["version"],
+                        prepared["snapshot"]["snapshot_id"],
+                    )
+                    assert store.connection.execute(
+                        "SELECT COUNT(*) FROM active_champion_snapshots WHERE operation_id=?",
+                        (prepared["operation_id"],),
+                    ).fetchone()[0] == 1
+                    observations[0]["state_change_seq"] += 1
+                return observations
+
+        inventory = PointerBoundaryInventory()
+        try:
+            RolloverSnapshotRefreshService(store, inventory).refresh(
+                operation_id=prepared["operation_id"],
+                refresh_id="refresh:final-pointer-boundary",
+                squad_id=SQUAD_ID,
+                predecessor_agent_id=OLD_ID,
+                successor_agent_id=NEW_ID,
+                expected_rollover_version=switched["version"],
+                expected_snapshot_version=prepared["snapshot"]["version"],
+                expected_snapshot_digest=prepared["snapshot"]["digest"],
+                expires_at="2026-01-01T03:00:00Z",
+                at="2026-01-01T02:00:00Z",
+            )
+        except StorageRefusal as exc:
+            assert exc.code == "snapshot_refresh_live_changed"
+        else:
+            raise AssertionError("final live change advanced the rollover pointer")
+        assert inventory.calls == 2
+        status = store.rollover_status(prepared["operation_id"])
+        assert status["version"] == switched["version"]
+        assert status["snapshot"] == prepared["snapshot"]
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM active_champion_snapshots WHERE operation_id=?",
+            (prepared["operation_id"],),
+        ).fetchone()[0] == 1
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM events WHERE event_type='rollover_snapshot_refreshed'"
+        ).fetchone()[0] == 0
+
+
+def test_snapshot_refresh_faults_restore_the_expired_snapshot(root: Path) -> None:
+    points = (
+        "after_refresh_snapshot",
+        "after_refresh_rows",
+        "after_refresh_operation_cas",
+        "after_refresh_event",
+    )
+    for point in points:
+        state, _ = migrated_state(root, f"refresh-fault-{point}")
+        with SQLiteStorage(state) as store:
+            context = seed_rollover(store, champion_count=1)
+            prepared, switched = switch_rollover(store, context)
+            inputs = {
+                "operation_id": prepared["operation_id"],
+                "refresh_id": f"refresh:fault:{point}",
+                "squad_id": SQUAD_ID,
+                "predecessor_agent_id": OLD_ID,
+                "successor_agent_id": NEW_ID,
+                "expected_rollover_version": switched["version"],
+                "expected_snapshot_version": prepared["snapshot"]["version"],
+                "expected_snapshot_digest": prepared["snapshot"]["digest"],
+                "expires_at": "2026-01-01T03:00:00Z",
+                "at": "2026-01-01T02:00:00Z",
+            }
+            target = store.rollover_snapshot_refresh_target(**inputs)
+            observations = ExactSnapshotInventory().observe(target["descendants"])
+
+            def crash(observed: str) -> None:
+                if observed == point:
+                    raise InjectedCrash(point)
+
+            try:
+                store.refresh_rollover_snapshot(
+                    **inputs,
+                    canonical_digest=target["canonical_digest"],
+                    observations=observations,
+                    final_observer=lambda _descendants: observations,
+                    fault=crash,
+                )
+            except InjectedCrash as exc:
+                assert str(exc) == point
+            else:
+                raise AssertionError(f"snapshot refresh fault {point} was not injected")
+            status = store.rollover_status(prepared["operation_id"])
+            assert status["version"] == switched["version"]
+            assert status["snapshot"] == prepared["snapshot"]
+            recovered = store.refresh_rollover_snapshot(
+                **inputs,
+                canonical_digest=target["canonical_digest"],
+                observations=observations,
+                final_observer=lambda _descendants: observations,
+            )
+            assert recovered["snapshot"]["version"] == 2
+
+
+def test_snapshot_refresh_refuses_changed_rollover_identity(root: Path) -> None:
+    state, _ = migrated_state(root, "refresh-changed-identity")
+    with SQLiteStorage(state) as store:
+        context = seed_rollover(store, champion_count=1)
+        prepared, switched = switch_rollover(store, context)
+        base = {
+            "operation_id": prepared["operation_id"],
+            "refresh_id": "refresh:changed-identity",
+            "squad_id": SQUAD_ID,
+            "predecessor_agent_id": OLD_ID,
+            "successor_agent_id": NEW_ID,
+            "expected_rollover_version": switched["version"],
+            "expected_snapshot_version": prepared["snapshot"]["version"],
+            "expected_snapshot_digest": prepared["snapshot"]["digest"],
+            "expires_at": "2026-01-01T03:00:00Z",
+            "at": "2026-01-01T02:00:00Z",
+        }
+        changed = (
+            {**base, "squad_id": "squad:other"},
+            {**base, "predecessor_agent_id": "agent:other-predecessor"},
+            {**base, "successor_agent_id": "agent:other-successor"},
+        )
+        for inputs in changed:
+            try:
+                RolloverSnapshotRefreshService(
+                    store, ExactSnapshotInventory()
+                ).refresh(**inputs)
+            except StorageRefusal as exc:
+                assert exc.code == "snapshot_refresh_identity_changed"
+            else:
+                raise AssertionError("changed rollover identity refreshed the snapshot")
+        try:
+            RolloverSnapshotRefreshService(store, ExactSnapshotInventory()).refresh(
+                **{**base, "operation_id": "rollover:other"}
+            )
+        except StorageRefusal as exc:
+            assert exc.code == "rollover_unknown"
+        else:
+            raise AssertionError("changed operation identity refreshed the snapshot")
 
 
 def test_guarded_switch_crash_retry_and_drain(root: Path) -> None:
@@ -2282,6 +3161,22 @@ def test_retired_squad_refuses_stale_accepting_intake(root: Path) -> None:
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="league-shotcaller-rollover-") as temporary:
         root = Path(temporary)
+        test_snapshot_refresh_cli_requires_the_exact_switched_identity()
+        test_snapshot_refresh_cli_runs_two_stable_herdr_inventories(root)
+        test_snapshot_refresh_adapter_requires_one_exact_live_identity(root)
+        test_snapshot_refresh_refuses_a_mismatched_canonical_runtime(root)
+        test_snapshot_refresh_refuses_invalid_missing_runtime_generations_without_mutation(root)
+        test_snapshot_refresh_requires_canonical_generation_to_match_observed_terminal(root)
+        test_switched_rollover_refreshes_only_the_expired_exact_snapshot(root)
+        test_snapshot_refresh_refuses_before_expiry_without_live_observation(root)
+        test_snapshot_refresh_refuses_a_changed_descendant_set(root)
+        test_snapshot_refresh_retry_returns_the_identical_receipt(root)
+        test_refreshed_snapshot_drives_descendant_reconciliation(root)
+        test_snapshot_refresh_refuses_concurrent_canonical_mutation(root)
+        test_snapshot_refresh_refuses_a_changed_final_live_observation(root)
+        test_snapshot_refresh_reobserves_inside_the_final_pointer_boundary(root)
+        test_snapshot_refresh_faults_restore_the_expired_snapshot(root)
+        test_snapshot_refresh_refuses_changed_rollover_identity(root)
         test_manual_imported_legacy_partial_fixture_matches_supported_importer(root)
         test_guarded_switch_crash_retry_and_drain(root)
         test_switched_rollover_reconciles_exact_imported_descendant(root)

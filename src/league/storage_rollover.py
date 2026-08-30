@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Mapping, Optional, Protocol, Sequence
+from typing import Any, Callable, Mapping, Optional, Protocol, Sequence
 
 from .storage_types import FaultInjector
 
@@ -31,6 +31,41 @@ class RolloverStorage(Protocol):
         *,
         cursor: Optional[str] = None,
         limit: Optional[int] = None,
+    ) -> dict[str, Any]: ...
+
+    def rollover_snapshot_refresh_target(
+        self,
+        operation_id: str,
+        refresh_id: str,
+        squad_id: str,
+        predecessor_agent_id: str,
+        successor_agent_id: str,
+        expected_rollover_version: int,
+        expected_snapshot_version: int,
+        expected_snapshot_digest: str,
+        expires_at: str,
+        at: str,
+    ) -> dict[str, Any]: ...
+
+    def refresh_rollover_snapshot(
+        self,
+        operation_id: str,
+        refresh_id: str,
+        squad_id: str,
+        predecessor_agent_id: str,
+        successor_agent_id: str,
+        expected_rollover_version: int,
+        expected_snapshot_version: int,
+        expected_snapshot_digest: str,
+        expires_at: str,
+        at: str,
+        canonical_digest: str,
+        observations: Sequence[Mapping[str, Any]],
+        final_observer: Callable[
+            [list[dict[str, Any]]], Sequence[Mapping[str, Any]]
+        ],
+        *,
+        fault: Optional[FaultInjector] = None,
     ) -> dict[str, Any]: ...
 
     def acknowledge_rollover(

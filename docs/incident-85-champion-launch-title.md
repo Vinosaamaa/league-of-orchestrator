@@ -144,7 +144,11 @@ an exact retry resumes only when the alias is the reserved callsign, every
 presentation byte still matches the baseline, and the sequence is exactly one
 newer. It skips the duplicate rename. Any mismatch clears the League-owned
 alias and restores only baseline display tokens before rolling back the new
-reservation, leaving newer user presentation metadata unchanged.
+reservation, leaving newer user presentation metadata unchanged. If an
+interleaved thread or terminal-generation change prevents exact external
+restoration, League leaves the new reservation, lease, agent baseline, and
+history intact as a recoverable cleanup obligation. Canonical rollback waits
+until a later exact-identity retry proves the alias and owned-token cleanup.
 
 Recovery refuses before any Herdr mutation when assignment history is
 ambiguous, the thread generation differs, the agent is not the exact bootstrap

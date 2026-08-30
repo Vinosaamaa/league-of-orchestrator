@@ -553,7 +553,10 @@ resumes an already-published exact callsign alias when every presentation byte
 still matches the v2 baseline and the sequence is exactly baseline plus one;
 retry skips the rename and continues publication. Any other routed partial
 effect restores the owned alias and baseline tokens before canonical rollback,
-preserving a newer user presentation.
+preserving a newer user presentation. If endpoint identity changes before that
+restoration can be proven, League retains the reservation, lease, rebound agent,
+and v2 baseline as the cleanup obligation; canonical rollback occurs only after
+an exact retry proves and completes the external cleanup.
 The reopened issue adds one deliberately separate legacy provenance path:
 owner-authorized reconciliation binds the exact canonical Champion identity to
 the expected live presentation, writes immutable intent before the external

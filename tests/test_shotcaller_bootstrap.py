@@ -1811,6 +1811,159 @@ def test_legacy_route_crash_with_newer_user_write_restores_before_rollback(
     )
 
 
+def test_legacy_route_crash_identity_race_preserves_reservation_until_cleanup(
+    root: Path,
+) -> None:
+    for case in ("thread", "generation"):
+        state, _ = migrated_state(root, f"shotcaller-legacy-route-{case}-cleanup")
+        worktree = root / f"shotcaller-legacy-route-{case}-cleanup" / "worktree"
+        worktree.mkdir()
+        clock = FakeClock()
+        runner = CrashAfterRenameHerdr(worktree, publish_mismatch=True)
+        with SQLiteStorage(state) as store:
+            _seed_available_ashe(store, clock)
+            service = _service(store, clock, worktree, runner)
+            original, original_assignment = _make_legacy_bootstrap_residue(
+                store, service, runner
+            )
+            retry = ShotcallerBootstrapSpec(
+                assignment_id=f"callsign-assignment:bootstrap:ashe:route-{case}-cleanup",
+                agent_id=original.agent_id,
+                runtime_instance_id=original.runtime_instance_id,
+                thread_id=original.thread_id,
+                capabilities=original.capabilities,
+            )
+            runner.crash_after_rename = True
+            try:
+                service.bootstrap(retry)
+            except InjectedBootstrapCrash:
+                pass
+            else:
+                raise AssertionError("legacy recovery did not crash after routing rename")
+
+            allocate = store.allocate_callsign
+
+            def interleaved_allocate(*args, **kwargs):
+                if case == "thread":
+                    runner.thread_id = "77777777-7777-4777-8777-777777777777"
+                else:
+                    runner.terminal_id = "terminal:foreign"
+                runner.metadata_source = "user-selected"
+                runner.title = "User selected title"
+                runner.tokens = {"user_theme": "newer"}
+                runner.state_change_seq += 1
+                return allocate(*args, **kwargs)
+
+            store.allocate_callsign = interleaved_allocate  # type: ignore[method-assign]
+            calls_before_failed_cleanup = len(runner.calls)
+            try:
+                service.bootstrap(retry)
+            except StorageRefusal as exc:
+                assert exc.code == "shotcaller_creation_cleanup_unproven"
+            else:
+                raise AssertionError(f"{case} race did not preserve cleanup obligation")
+
+            reserved = store.callsign_assignment_status(retry.assignment_id)
+            assert reserved is not None and reserved["state"] == "reserved"
+            assert store.callsign_assignment_status(original.assignment_id) == original_assignment
+            assert tuple(
+                store.connection.execute(
+                    "SELECT state,reservation_assignment_id FROM callsign_queue "
+                    "WHERE callsign='Ashe'"
+                ).fetchone()
+            ) == ("reserved", retry.assignment_id)
+            assert store.connection.execute(
+                "SELECT COUNT(*) FROM callsign_leases WHERE callsign='Ashe' AND agent_id=?",
+                (AGENT_ID,),
+            ).fetchone()[0] == 1
+            agent = store.connection.execute(
+                "SELECT version,retired_at,metadata_json FROM agent_instances WHERE agent_id=?",
+                (AGENT_ID,),
+            ).fetchone()
+            assert agent["version"] == 3 and agent["retired_at"] is None
+            assert (
+                json.loads(agent["metadata_json"])["shotcaller_bootstrap_baseline"]["schema"]
+                == "league.shotcaller-bootstrap-baseline.v2"
+            )
+            assert store.connection.execute(
+                "SELECT COUNT(*) FROM runtime_instances WHERE actor_agent_id=?", (AGENT_ID,)
+            ).fetchone()[0] == 0
+            assert store.connection.execute(
+                "SELECT COUNT(*) FROM squads WHERE shotcaller_agent_id=?", (AGENT_ID,)
+            ).fetchone()[0] == 0
+            assert store.connection.execute(
+                "SELECT COUNT(*) FROM squad_registration_offers WHERE shotcaller_agent_id=?",
+                (AGENT_ID,),
+            ).fetchone()[0] == 0
+
+            failed_cleanup_calls = runner.calls[calls_before_failed_cleanup:]
+            assert runner.name == "ashe"
+            assert not any(
+                call[:3]
+                in {
+                    ("herdr", "agent", "rename"),
+                    ("herdr", "pane", "report-metadata"),
+                    ("herdr", "agent", "prompt"),
+                    ("herdr", "tab", "create"),
+                    ("herdr", "pane", "split"),
+                    ("herdr", "workspace", "create"),
+                    ("herdr", "agent", "start"),
+                }
+                for call in failed_cleanup_calls
+            )
+
+            store.allocate_callsign = allocate  # type: ignore[method-assign]
+            runner.thread_id = original.thread_id
+            runner.terminal_id = "terminal:1"
+            calls_before_completed_cleanup = len(runner.calls)
+            try:
+                service.bootstrap(retry)
+            except StorageRefusal as exc:
+                assert exc.code == "shotcaller_metadata_unverified"
+            else:
+                raise AssertionError(f"{case} cleanup retry unexpectedly activated")
+
+            rolled_back = store.callsign_assignment_status(retry.assignment_id)
+            assert rolled_back is not None and rolled_back["state"] == "rolled_back"
+            assert tuple(
+                store.connection.execute(
+                    "SELECT state,reservation_assignment_id FROM callsign_queue "
+                    "WHERE callsign='Ashe'"
+                ).fetchone()
+            ) == ("available", None)
+            assert store.connection.execute(
+                "SELECT COUNT(*) FROM callsign_leases WHERE callsign='Ashe' AND agent_id=?",
+                (AGENT_ID,),
+            ).fetchone()[0] == 0
+
+        completed_cleanup_calls = runner.calls[calls_before_completed_cleanup:]
+        assert runner.name is None
+        assert runner.metadata_source == "user-selected"
+        assert runner.title == "User selected title"
+        assert runner.tokens == {"user_theme": "newer"}
+        assert any(
+            call[:3] == ("herdr", "agent", "rename") and call[-1] == "--clear"
+            for call in completed_cleanup_calls
+        )
+        reports = [
+            call
+            for call in completed_cleanup_calls
+            if call[:3] == ("herdr", "pane", "report-metadata")
+        ]
+        assert len(reports) == 1 and "--title" not in reports[0]
+        assert not any(
+            call[:3]
+            in {
+                ("herdr", "agent", "prompt"),
+                ("herdr", "tab", "create"),
+                ("herdr", "pane", "split"),
+                ("herdr", "workspace", "create"),
+                ("herdr", "agent", "start"),
+            }
+            for call in completed_cleanup_calls
+        )
+
+
 def test_legacy_residue_finalization_failure_restores_captured_presentation(
     root: Path,
 ) -> None:
@@ -2519,6 +2672,7 @@ def main() -> None:
         test_legacy_residue_crash_after_baseline_retries_exactly_once(root)
         test_legacy_residue_crash_after_routing_rename_resumes_owned_publication(root)
         test_legacy_route_crash_with_newer_user_write_restores_before_rollback(root)
+        test_legacy_route_crash_identity_race_preserves_reservation_until_cleanup(root)
         test_legacy_residue_finalization_failure_restores_captured_presentation(root)
         test_recovered_bootstrap_exact_retry_is_receipt_identical_and_read_only(root)
         test_recovered_bootstrap_finalization_fault_rolls_back_without_losing_history(root)

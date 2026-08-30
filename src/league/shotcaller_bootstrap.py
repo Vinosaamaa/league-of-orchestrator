@@ -750,13 +750,14 @@ class ShotcallerBootstrapService:
                 }
             )
             canonical_restored = False
-            try:
-                rolled_back = self.store.rollback_callsign(
-                    spec.assignment_id, 1, failure_digest, at
-                )
-                canonical_restored = rolled_back["state"] == "rolled_back"
-            except StorageRefusal:
-                canonical_restored = False
+            if restored:
+                try:
+                    rolled_back = self.store.rollback_callsign(
+                        spec.assignment_id, 1, failure_digest, at
+                    )
+                    canonical_restored = rolled_back["state"] == "rolled_back"
+                except StorageRefusal:
+                    canonical_restored = False
             if not restored or not canonical_restored:
                 raise StorageRefusal(
                     "shotcaller_creation_cleanup_unproven",

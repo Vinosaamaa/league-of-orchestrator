@@ -2186,6 +2186,7 @@ class SQLiteStorage(SQLiteTransactionCore):
         at: str,
         canonical_digest: str,
         observations: Sequence[dict[str, Any]],
+        final_observations: Sequence[dict[str, Any]],
         *,
         fault: Optional[FaultInjector] = None,
     ) -> dict[str, Any]:
@@ -2203,6 +2204,7 @@ class SQLiteStorage(SQLiteTransactionCore):
             at,
             canonical_digest,
             observations,
+            final_observations,
             fault=fault,
         )
 

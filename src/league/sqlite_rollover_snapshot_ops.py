@@ -7,6 +7,7 @@ import re
 import sqlite3
 from typing import Any, Mapping, Optional, Sequence
 
+from .rollover_descendant import _herdr_runtime_generation
 from .sqlite_callsign_ops import digest, stable_json, timestamp
 from .sqlite_rollover_ops import (
     _operation,
@@ -457,6 +458,17 @@ def _observations(
             "live descendant observation count differs from the canonical snapshot",
         )
     for target, observation in zip(targets, ordered):
+        terminal_id = observation.get("terminal_id")
+        thread_id = observation.get("thread_id")
+        runtime_generation = observation.get("runtime_generation")
+        derived_generation = (
+            _herdr_runtime_generation(terminal_id, thread_id)
+            if isinstance(terminal_id, str)
+            and bool(terminal_id)
+            and isinstance(thread_id, str)
+            and bool(thread_id)
+            else None
+        )
         if (
             set(observation) != keys
             or observation.get("schema") != "league.rollover-snapshot-observation.v1"
@@ -469,16 +481,18 @@ def _observations(
             or observation.get("routing_name") != target["routing_name"]
             or observation.get("worktree") != target["worktree"]
             or observation.get("canonical_row_digest") != target["canonical_row_digest"]
-            or not isinstance(observation.get("runtime_generation"), str)
-            or not observation["runtime_generation"]
+            or not isinstance(runtime_generation, str)
+            or not runtime_generation
+            or derived_generation is None
+            or runtime_generation != derived_generation
             or (
                 target["runtime"] is not None
-                and observation["runtime_generation"]
+                and runtime_generation
                 != target["runtime"]["runtime_generation"]
             )
             or observation.get("status") not in {"active", "idle"}
-            or not isinstance(observation.get("terminal_id"), str)
-            or not observation["terminal_id"]
+            or not isinstance(terminal_id, str)
+            or not terminal_id
             or type(observation.get("state_change_seq")) is not int
             or observation["state_change_seq"] < 0
         ):
@@ -503,6 +517,7 @@ def refresh(
     at: str,
     canonical_digest: str,
     observations: Sequence[Mapping[str, Any]],
+    final_observations: Sequence[Mapping[str, Any]],
     *,
     fault: Optional[FaultInjector] = None,
 ) -> dict[str, Any]:
@@ -544,6 +559,18 @@ def refresh(
                 )
             normalized, observation_digest = _observations(
                 context["descendants"], observations
+            )
+            final_candidate = sorted(
+                (dict(item) for item in final_observations),
+                key=lambda item: item.get("champion_agent_id", ""),
+            )
+            if normalized != final_candidate:
+                raise StorageRefusal(
+                    "snapshot_refresh_live_changed",
+                    "live descendant identity changed during snapshot refresh",
+                )
+            final_normalized, final_observation_digest = _observations(
+                context["descendants"], final_candidate
             )
             next_snapshot_version = expected_snapshot_version + 1
             next_rollover_version = expected_rollover_version + 1
@@ -633,6 +660,7 @@ def refresh(
                 "descendant_count": len(refreshed_rows),
                 "canonical_digest": canonical_digest,
                 "observation_digest": observation_digest,
+                "final_observation_digest": final_observation_digest,
                 "expires_at": expires_at,
                 "refreshed_at": at,
             }
@@ -651,7 +679,7 @@ def refresh(
                         {
                             "receipt": receipt,
                             "receipt_digest": receipt_digest,
-                            "observation_count": len(normalized),
+                            "observation_count": len(final_normalized),
                         }
                     ),
                     squad_id,

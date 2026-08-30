@@ -238,8 +238,12 @@ Migrations 12 through 17 are contiguous and named
 `immutable-switched-rollover-snapshot-revisions`. The final migration preserves
 every prior snapshot revision while allowing the exact switched operation to
 CAS-point at one refreshed immutable revision. The source-only refresh observes
-one fake Herdr inventory through the production adapter boundary and records
-only identity/receipt digests; it does not reuse an expired page or row input.
+two fake Herdr inventories through the production adapter boundary, requires
+their normalized endpoint/route/session/terminal/sequence evidence to remain
+identical, and binds both observation digests to the committed receipt. Runtime
+generation is deterministically derived from the observed terminal and exact
+thread/session proof, and must match canonical generation when present. It does
+not reuse an expired page or row input.
 Focused tests use temporary roots and
 recording fake Herdr adapters for no-runtime import, closed/mismatched/ambiguous
 refusal, exact CAS and delivery-claim races, repeatable intake paging,

@@ -61,6 +61,7 @@ class RolloverStorage(Protocol):
         at: str,
         canonical_digest: str,
         observations: Sequence[Mapping[str, Any]],
+        final_observations: Sequence[Mapping[str, Any]],
         *,
         fault: Optional[FaultInjector] = None,
     ) -> dict[str, Any]: ...

@@ -1224,6 +1224,102 @@ def test_cli_protected_gate_consumes_and_settles_mode_authority(root: Path) -> N
     assert executed["protected_gate"]["outcome"] == "succeeded"
 
 
+def test_cli_rollover_refresh_bindings_is_scoped_and_settled_retry_is_effect_free(
+    root: Path,
+) -> None:
+    state, store, _ = create_context(root, "protected-rollover-refresh-cli")
+    store.close()
+    exact = {
+        "command": "rollover.refresh-bindings",
+        "arguments": {
+            "expected_rollover_version": 4,
+            "expected_snapshot_digest": "d" * 64,
+            "expected_snapshot_version": 2,
+            "expires_at": "2026-01-01T01:00:00Z",
+            "operation_id": "rollover:synthetic",
+            "predecessor_agent_id": "agent:old",
+            "refresh_id": "refresh:synthetic",
+            "squad_id": "squad:synthetic",
+            "successor_agent_id": "agent:new",
+        },
+    }
+    _authorize(
+        state,
+        root,
+        protected_gate_scope_digests=(protected_gate_scope_digest(exact),),
+    )
+    action_path = _action(
+        root / "protected-rollover-refresh.json",
+        suffix="protected-rollover-refresh",
+        action_kind="live_reconcile",
+        cost_microunits=0,
+        changed_files=0,
+        duration_seconds=1,
+        protected_gate_scope=exact,
+    )
+    calls: list[str] = []
+    original = league_cli.HANDLERS["rollover.refresh-bindings"]
+
+    def synthetic_handler(_, args):
+        calls.append(args.squad_id)
+        return {"refreshed": True, "squad_id": args.squad_id}, None
+
+    league_cli.HANDLERS["rollover.refresh-bindings"] = synthetic_handler
+    common = (
+        "rollover",
+        "refresh-bindings",
+        "--operation-id",
+        "rollover:synthetic",
+        "--refresh-id",
+        "refresh:synthetic",
+        "--squad-id",
+        "squad:synthetic",
+        "--predecessor-agent-id",
+        "agent:old",
+        "--successor-agent-id",
+        "agent:new",
+        "--expected-rollover-version",
+        "4",
+        "--expected-snapshot-version",
+        "2",
+        "--expected-snapshot-digest",
+        "d" * 64,
+        "--expires-at",
+        "2026-01-01T01:00:00Z",
+        "--at",
+        AT,
+        "--mode-action",
+        str(action_path),
+        "--expected-mode-goal-version",
+        "1",
+    )
+    try:
+        foreign = invoke_cli(
+            state,
+            *common[:7],
+            "squad:foreign",
+            *common[8:],
+            expected=2,
+        )
+        assert foreign["error"]["code"] == "protected_gate_scope_mismatch"
+        assert calls == []
+        with SQLiteStorage(state) as verify:
+            assert verify.connection.execute(
+                "SELECT COUNT(*) FROM protected_gate_uses"
+            ).fetchone()[0] == 0
+            assert verify.connection.execute(
+                "SELECT COUNT(*) FROM autonomous_action_uses"
+            ).fetchone()[0] == 0
+        exact_result = invoke_cli(state, *common)["result"]
+        retry = invoke_cli(state, *common)["result"]
+    finally:
+        league_cli.HANDLERS["rollover.refresh-bindings"] = original
+    assert calls == ["squad:synthetic"]
+    assert exact_result["operation"]["refreshed"] is True
+    assert retry["operation"] is None
+    assert retry["protected_gate"]["outcome"] == "succeeded"
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory() as raw:
         test_manual_default_and_exact_grant_authorization(Path(raw))
@@ -1243,6 +1339,10 @@ def main() -> None:
         test_max_concurrency_settles_older_valid_protected_use(Path(raw))
     with tempfile.TemporaryDirectory() as raw:
         test_cli_protected_gate_consumes_and_settles_mode_authority(Path(raw))
+    with tempfile.TemporaryDirectory() as raw:
+        test_cli_rollover_refresh_bindings_is_scoped_and_settled_retry_is_effect_free(
+            Path(raw)
+        )
     with tempfile.TemporaryDirectory() as raw:
         test_mode_records_survive_verified_backup_and_bounded_export(Path(raw))
     print("PASS: autonomous delivery authorization and action lifecycle")

@@ -108,7 +108,7 @@ refuse for explicit reconciliation.
 
 The protected mapping covers assignment runtime/display reconciliation,
 Shotcaller creation, Squad registration/acceptance, rollover
-prepare/commit/descendant/intake reconciliation, rollover drain, callsign
+prepare/refresh-bindings/commit/descendant/intake reconciliation, rollover drain, callsign
 release, and cleanup execution/reconciliation. Landing, release, installation,
 deployment, verification, smoke, repair, issue reopen, and cleanup retain their
 existing explicit action-use boundary. No category is implied by the goal or

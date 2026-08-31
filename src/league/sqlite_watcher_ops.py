@@ -229,15 +229,10 @@ def ensure_watcher_scope(
     *,
     block_on_obligations: Optional[bool],
 ) -> None:
-    rows = store.connection.execute(
-        """
-        SELECT scope_id,actor_agent_id FROM watcher_scopes
-         WHERE scope_id=? OR actor_agent_id=?
-         ORDER BY scope_id LIMIT 2
-        """,
-        (scope_id, actor_agent_id),
-    ).fetchall()
-    if not rows:
+    row = store.connection.execute(
+        "SELECT actor_agent_id FROM watcher_scopes WHERE scope_id=?", (scope_id,)
+    ).fetchone()
+    if row is None:
         store.connection.execute(
             """
             INSERT INTO watcher_scopes
@@ -250,44 +245,12 @@ def ensure_watcher_scope(
             """,
             (scope_id, actor_agent_id, int(True if block_on_obligations is None else block_on_obligations)),
         )
-        return
-    row = rows[0]
-    if (
-        len(rows) != 1
-        or row["scope_id"] != scope_id
-        or row["actor_agent_id"] not in {None, actor_agent_id}
-    ):
-        raise StorageRefusal(
-            "scope_conflict",
-            "watcher scope and Shotcaller require one exact binding",
-        )
-    assignments = (
-        "actor_agent_id=?"
-        if block_on_obligations is None
-        else "actor_agent_id=?,block_on_obligations=?"
-    )
-    parameters = (
-        (actor_agent_id, scope_id, actor_agent_id)
-        if block_on_obligations is None
-        else (
-            actor_agent_id,
-            int(block_on_obligations),
-            scope_id,
-            actor_agent_id,
-        )
-    )
-    changed = store.connection.execute(
-        f"""
-        UPDATE watcher_scopes SET {assignments}
-         WHERE scope_id=? AND (actor_agent_id IS NULL OR actor_agent_id=?)
-        """,
-        parameters,
-    )
-    if changed.rowcount != 1:
-        raise StorageRefusal(
-            "scope_conflict",
-            "watcher scope identity changed before exact binding",
-            retryable=True,
+    elif row["actor_agent_id"] not in {None, actor_agent_id}:
+        raise StorageRefusal("scope_conflict", "watcher scope belongs to another Shotcaller")
+    elif block_on_obligations is not None:
+        store.connection.execute(
+            "UPDATE watcher_scopes SET actor_agent_id=?,block_on_obligations=? WHERE scope_id=?",
+            (actor_agent_id, int(block_on_obligations), scope_id),
         )
 
 

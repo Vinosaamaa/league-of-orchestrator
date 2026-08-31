@@ -24,6 +24,7 @@ from league.persistent_supervisor import (  # noqa: E402
     supervisor_status,
 )
 from league.canonical_delivery import dispatch_event  # noqa: E402
+from league.canonical_watcher import handle_brokered_hook  # noqa: E402
 from league.sqlite_handoff_schema import SHOTCALLER_SEED, SHUFFLE_VERSION  # noqa: E402
 from league.sqlite_store import SQLiteStorage  # noqa: E402
 from league.storage import RuntimeRegistrationCommand  # noqa: E402
@@ -248,6 +249,53 @@ def test_one_service_registers_three_isolated_shotcallers(root: Path) -> None:
             send_supervisor_message(f"unix:{runtime.socket_path}", {"kind": "stop"})
         thread.join(timeout=5)
     assert not thread.is_alive() and not errors
+
+
+def test_global_stop_hook_resolves_session_and_blocks_only_owning_shotcaller(root: Path) -> None:
+    """A global Codex Stop hook must not bleed Azir obligations into Ashe."""
+    _, store = _multisquad_state(root, "global-stop-session-routing")
+    store.intake_prompt(
+        "prompt:azir:untriaged",
+        AZIR_ID,
+        AZIR_RUNTIME,
+        "codex",
+        "session:runtime:azir:one",
+        "source:azir:untriaged",
+        "Azir's real owner steer remains untriaged.",
+        "2026-01-01T00:00:00+00:00",
+    )
+    ashe = handle_brokered_hook(
+        store,
+        {
+            "command": "codex-stop-hook",
+            "payload": {
+                "session_id": "session:runtime:garen:one",
+                "turn_id": "turn:ashe-stop",
+                "hook_event_name": "Stop",
+                "stop_hook_active": False,
+            },
+        },
+    )
+    azir = handle_brokered_hook(
+        store,
+        {
+            "command": "codex-stop-hook",
+            "payload": {
+                "session_id": "session:runtime:azir:one",
+                "turn_id": "turn:azir-stop",
+                "hook_event_name": "Stop",
+                "stop_hook_active": False,
+            },
+        },
+    )
+    assert ashe["actor_agent_id"] == SHOTCALLER_ID
+    # The fixture may retain Garen's own seeded obligations, but Azir's
+    # untriaged prompt must never appear in Ashe's decision or wake target.
+    assert "Azir" not in str(ashe["hook_output"])
+    assert azir["actor_agent_id"] == AZIR_ID
+    assert azir["hook_output"]["decision"] == "block"
+    assert "Azir" in azir["hook_output"]["reason"]
+    assert azir["supervision_handoff"] is False
 
 
 def test_service_manager_starts_one_multiplex_runtime() -> None:

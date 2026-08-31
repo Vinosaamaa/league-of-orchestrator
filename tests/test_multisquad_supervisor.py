@@ -26,7 +26,6 @@ from league.persistent_supervisor import (  # noqa: E402
 from league.canonical_delivery import dispatch_event  # noqa: E402
 from league.sqlite_handoff_schema import SHOTCALLER_SEED, SHUFFLE_VERSION  # noqa: E402
 from league.sqlite_store import SQLiteStorage  # noqa: E402
-from league.sqlite_watcher_ops import ensure_watcher_scope  # noqa: E402
 from league.storage import RuntimeRegistrationCommand  # noqa: E402
 from lifecycle_fakes import FakeDeliveryAdapter  # noqa: E402
 from request_lifecycle_fixture import (  # noqa: E402
@@ -540,6 +539,99 @@ def test_active_turn_persists_attention_without_duplicate_wake(root: Path) -> No
     assert not thread.is_alive() and not errors
 
 
+def test_turn_reuses_existing_shotcaller_scope(root: Path) -> None:
+    _, store = _multisquad_state(root, "existing-scope")
+    store.stop_decision(
+        "Garen-existing-scope",
+        SHOTCALLER_ID,
+        "terminal:existing-scope",
+        "2026-01-01T00:02:00Z",
+    )
+    begun = store.begin_shotcaller_turn(
+        SHOTCALLER_ID, "turn-token:existing-scope", "2026-01-01T00:02:01Z"
+    )
+    assert begun["scope_id"] == "Garen-existing-scope"
+    store.abort_shotcaller_turn(
+        SHOTCALLER_ID, "turn-token:existing-scope", "2026-01-01T00:02:02Z"
+    )
+    store.close()
+
+
+def test_priority_publish_refuses_removed_binding_without_global_signal(
+    root: Path,
+) -> None:
+    state, store = _multisquad_state(root, "priority-renewal-race")
+    store.close()
+    runtime = PersistentSupervisor(state, wake_adapter=FakeWakeAdapter())
+    runtime._bindings = {
+        SHOTCALLER_ID: {
+            "actor_agent_id": SHOTCALLER_ID,
+            "user_priority_generation": 0,
+        }
+    }
+    started = threading.Event()
+    errors: list[BaseException] = []
+
+    def publish() -> None:
+        started.set()
+        try:
+            runtime._publish_user_priority(SHOTCALLER_ID)
+        except BaseException as exc:
+            errors.append(exc)
+
+    with runtime._fence_lock:
+        worker = threading.Thread(target=publish)
+        worker.start()
+        assert started.wait(timeout=2)
+        runtime._bindings.pop(SHOTCALLER_ID)
+    worker.join(timeout=5)
+    assert not worker.is_alive()
+    assert len(errors) == 1 and isinstance(errors[0], SupervisorUnavailable)
+    assert runtime.user_priority_generation == 0
+    assert not runtime.user_priority.is_set()
+
+
+def test_discovery_observation_and_aggregate_status_are_batched(root: Path) -> None:
+    state, store = _multisquad_state(root, "batched-service")
+    assert len(store.supervisor_bindings()) == 3
+    store.close()
+
+    observer = CountingRuntimeObserver()
+    runtime = PersistentSupervisor(
+        state,
+        lease_seconds=0.8,
+        renew_seconds=0.2,
+        recovery_seconds=10,
+        wake_adapter=FakeWakeAdapter(),
+        delivery_adapter=FakeDeliveryAdapter(),
+        runtime_observer=observer,
+    )
+    thread, errors = _start(runtime)
+    try:
+        deadline = time.monotonic() + 2
+        while not observer.calls and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert len(observer.calls) == 1
+        real_send = send_supervisor_message
+        status_messages: list[dict[str, object]] = []
+
+        def counted_send(locator, message, **kwargs):
+            status_messages.append(dict(message))
+            return real_send(locator, message, **kwargs)
+
+        with patch(
+            "league.persistent_supervisor.send_supervisor_message",
+            side_effect=counted_send,
+        ):
+            status = supervisor_status(state)
+        assert status["live"] and status["binding_count"] == 3
+        assert status_messages == [{"kind": "service-ping"}]
+    finally:
+        send_supervisor_message(f"unix:{runtime.socket_path}", {"kind": "stop"})
+        thread.join(timeout=5)
+    assert not thread.is_alive() and not errors
+
+
 def test_committed_turn_stop_hands_pending_attention_to_supervisor(root: Path) -> None:
     state, store = _multisquad_state(root, "stop-handoff")
     delivery = FakeDeliveryAdapter()
@@ -615,6 +707,11 @@ def main() -> None:
         test_brokered_prompt_resolves_and_wakes_only_its_shotcaller(Path(temporary))
         test_calm_pause_and_delivery_targets_are_isolated_per_squad(Path(temporary))
         test_active_turn_persists_attention_without_duplicate_wake(Path(temporary))
+        test_turn_reuses_existing_shotcaller_scope(Path(temporary))
+        test_priority_publish_refuses_removed_binding_without_global_signal(
+            Path(temporary)
+        )
+        test_discovery_observation_and_aggregate_status_are_batched(Path(temporary))
         test_committed_turn_stop_hands_pending_attention_to_supervisor(Path(temporary))
     print("PASS: one persistent service multiplexes isolated Shotcaller bindings")
 

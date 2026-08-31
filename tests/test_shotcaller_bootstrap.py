@@ -23,6 +23,7 @@ from league.shotcaller_bootstrap import (  # noqa: E402
     ShotcallerBootstrapSpec,
 )
 from league.sqlite_handoff_schema import SHOTCALLER_SEED, SHUFFLE_VERSION  # noqa: E402
+from league.presentation import orchestrator_role_tokens  # noqa: E402
 from league.sqlite_store import SQLiteStorage  # noqa: E402
 from league.storage import StorageRefusal  # noqa: E402
 from lifecycle_fakes import FakeClock  # noqa: E402
@@ -43,9 +44,11 @@ class RecordingHerdr:
         thread_id: str = THREAD_ID,
         publish_mismatch: bool = False,
         delayed_auto_title_reads: int | None = None,
+        session_source: str = "herdr:codex",
     ) -> None:
         self.worktree = str(worktree.resolve())
         self.thread_id = thread_id
+        self.session_source = session_source
         self.terminal_id = "terminal:1"
         self.agent_status = "working"
         self.publish_mismatch = publish_mismatch
@@ -70,7 +73,7 @@ class RecordingHerdr:
         value: dict[str, object] = {
             "agent": "codex",
             "agent_status": self.agent_status,
-            "agent_session": {"source": "herdr:codex", "value": self.thread_id},
+            "agent_session": {"source": self.session_source, "value": self.thread_id},
             "cwd": self.worktree,
             "foreground_cwd": self.worktree,
             "pane_id": "w1:p1",
@@ -151,7 +154,7 @@ class RecordingHerdr:
                 return subprocess.CompletedProcess(command, 0, "", "")
             if "--applies-to-source" in command:
                 applies_to = command[command.index("--applies-to-source") + 1]
-                if applies_to != "herdr:codex":
+                if applies_to != self.session_source:
                     return subprocess.CompletedProcess(
                         command, 1, "", "metadata source mismatch"
                     )
@@ -423,6 +426,7 @@ def _shotcaller_title_ownership(spec: ShotcallerBootstrapSpec) -> dict[str, str]
     return {
         "shotcaller_title_owner": owner,
         "shotcaller_title_source": f"league-shotcaller-{owner}",
+        "orchestrator_role": "shotcaller",
     }
 
 
@@ -567,6 +571,8 @@ def test_in_place_bootstrap_creates_shotcaller_without_layout_or_squad_registrat
         assert created["idempotent"] is False
         assert created["callsign"] == "Ashe"
         assert created["runtime_instance_id"] == "runtime:shotcaller:ashe"
+        assert created["orchestrator_role"] == "shotcaller"
+        assert runner.tokens["orchestrator_role"] == "shotcaller"
         assert [call[:3] for call in runner.calls[:2]] == [
             ("herdr", "pane", "current"),
             ("herdr", "agent", "list"),
@@ -623,6 +629,13 @@ def test_in_place_bootstrap_creates_shotcaller_without_layout_or_squad_registrat
             "callsign_activated",
             "shotcaller_created",
         ]
+        created_detail = json.loads(
+            store.connection.execute(
+                "SELECT detail_json FROM events WHERE event_type='shotcaller_created' AND agent_id=?",
+                (AGENT_ID,),
+            ).fetchone()[0]
+        )
+        assert created_detail["orchestrator_role"] == "shotcaller"
         calls_before_retry = len(runner.calls)
         retry = service.bootstrap(_spec())
         assert retry == {**created, "idempotent": True}
@@ -633,6 +646,19 @@ def test_in_place_bootstrap_creates_shotcaller_without_layout_or_squad_registrat
         assert store.connection.execute(
             "SELECT COUNT(*) FROM events WHERE agent_id=?", (AGENT_ID,)
         ).fetchone()[0] == 3
+        runner.tokens["orchestrator_role"] = "champion"
+        calls_before_role_tamper = len(runner.calls)
+        try:
+            service.bootstrap(_spec())
+        except StorageRefusal as exc:
+            assert exc.code == "shotcaller_metadata_unverified"
+        else:
+            raise AssertionError("Shotcaller retry accepted a tampered canonical role")
+        assert not any(
+            call[:3] == ("herdr", "pane", "report-metadata")
+            for call in runner.calls[calls_before_role_tamper:]
+        )
+        runner.tokens["orchestrator_role"] = "shotcaller"
         calls_before_mismatch = len(runner.calls)
         runner.thread_id = "77777777-7777-4777-8777-777777777777"
         try:
@@ -800,6 +826,81 @@ def test_in_place_bootstrap_creates_shotcaller_without_layout_or_squad_registrat
             "FROM watcher_scopes WHERE scope_id='watcher:Ashe'"
         ).fetchone()
         assert tuple(scope) == (AGENT_ID, 2, 3)
+
+
+def test_cursor_authority_shotcaller_role_token_is_owned_and_retry_safe(
+    root: Path,
+) -> None:
+    assert orchestrator_role_tokens("hidden-worker") == {}
+    state, _ = migrated_state(root, "cursor-shotcaller-role")
+    worktree = root / "cursor-shotcaller-role" / "worktree"
+    worktree.mkdir()
+    clock = FakeClock()
+    runner = RecordingHerdr(worktree, session_source="herdr:cursor")
+    runner.metadata_source = "herdr:cursor"
+    with SQLiteStorage(state) as store:
+        _seed_available_ashe(store, clock)
+        service = _service(store, clock, worktree, runner)
+        runner.tokens["orchestrator_role"] = "champion"
+        calls_before_unowned = len(runner.calls)
+        try:
+            service.bootstrap(_spec())
+        except StorageRefusal as exc:
+            assert exc.code == "shotcaller_metadata_unverified"
+        else:
+            raise AssertionError("unbound pane role token was guessed as Shotcaller")
+        assert store.callsign_assignment_status(_spec().assignment_id) is None
+        assert not any(
+            call[:3]
+            in {
+                ("herdr", "agent", "rename"),
+                ("herdr", "pane", "report-metadata"),
+            }
+            for call in runner.calls[calls_before_unowned:]
+        )
+        runner.tokens.pop("orchestrator_role")
+        created = service.bootstrap(_spec())
+        assert created["state"] == "active"
+        assert runner.tokens["orchestrator_role"] == "shotcaller"
+        reports = len(
+            [
+                call
+                for call in runner.calls
+                if call[:3] == ("herdr", "pane", "report-metadata")
+            ]
+        )
+        retry = service.bootstrap(_spec())
+        assert retry == {**created, "idempotent": True}
+        assert runner.tokens["orchestrator_role"] == "shotcaller"
+        assert len(
+            [
+                call
+                for call in runner.calls
+                if call[:3] == ("herdr", "pane", "report-metadata")
+            ]
+        ) == reports
+
+        runner.metadata_source = "herdr:cursor"
+        runner.state_change_seq += 1
+        runner.title = "Cursor refreshed title"
+        runner.tokens.update(
+            {
+                "sidebar_name": "Cursor refreshed title",
+                "thread_title": "Cursor refreshed title",
+            }
+        )
+        calls_before = len(runner.calls)
+        try:
+            service.bootstrap(_spec())
+        except StorageRefusal as exc:
+            assert exc.code == "shotcaller_metadata_unverified"
+        else:
+            raise AssertionError("provider title refresh bypassed Shotcaller ownership")
+        assert runner.tokens["orchestrator_role"] == "shotcaller"
+        assert not any(
+            call[:3] == ("herdr", "pane", "report-metadata")
+            for call in runner.calls[calls_before:]
+        )
 
 
 def test_in_place_bootstrap_retries_transient_malformed_identity_read_without_layout(
@@ -3882,6 +3983,7 @@ def test_bootstrap_rolls_back_without_overwriting_newer_user_title(root: Path) -
         "thread_title=",
         "shotcaller_title_owner=",
         "shotcaller_title_source=",
+        "orchestrator_role=",
     }
     assert not any(
         call[:3]
@@ -4007,6 +4109,7 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="league-shotcaller-bootstrap-") as temporary:
         root = Path(temporary)
         test_in_place_bootstrap_creates_shotcaller_without_layout_or_squad_registration(root)
+        test_cursor_authority_shotcaller_role_token_is_owned_and_retry_safe(root)
         test_in_place_bootstrap_retries_transient_malformed_identity_read_without_layout(root)
         test_in_place_bootstrap_refuses_persistently_malformed_identity_without_mutation(root)
         test_bootstrap_refuses_later_provider_title_without_overwriting_it(root)

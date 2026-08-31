@@ -140,6 +140,27 @@ fence the effect, unrelated tokens are preserved, modern ownership metadata or
 identity drift refuses, and exact retry revalidates the stored receipt without
 a second report.
 
+## Canonical role-token invariant
+
+League publishes exactly one provider-neutral role key with its owned display
+overlay: `orchestrator_role=shotcaller` for a canonically verified Shotcaller or
+`orchestrator_role=champion` for a canonically verified Champion. The value is
+derived from the assignment/callsign role, never from provider title text or a
+best-effort guess. Missing and unknown roles therefore emit no token.
+
+Champion launch, active retry, legacy reconciliation, and retained-done
+reconciliation include the token in the same final source/sequence receipt as
+their title. Shotcaller create and exact retry include it in the existing
+title-owner/source overlay and the durable creation event receipt. Codex and
+Cursor presentation authorities follow the same rule. An exact owned retry may
+restore a changed value; an unowned source or ambiguous role refuses. Rollback
+clears only League's role token while preserving unrelated provider/user
+metadata.
+
+This is only the League metadata half of the cross-repository presentation
+contract. League adds no marker text, glyph, color, ANSI, conditional renderer
+logic, name/title length change, or pane styling.
+
 Shotcaller bootstrap applies a corresponding read boundary: current-pane and
 agent-inventory queries may retry malformed JSON up to three attempts each, but
 only before any canonical or Herdr mutation. Valid-but-mismatched identity and

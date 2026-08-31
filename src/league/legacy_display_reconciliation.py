@@ -13,6 +13,7 @@ from typing import Any, Mapping
 
 from .storage import Storage, StorageRefusal
 from .storage_assignment import LegacyDisplayReconciliationCommand
+from .presentation import ORCHESTRATOR_ROLE_TOKEN, orchestrator_role_tokens
 from .visible_launch import (
     CommandRunner,
     SubprocessRunner,
@@ -35,6 +36,7 @@ OWNERSHIP_TOKENS = {
     "legacy_display_assignment",
     "legacy_display_source",
     "legacy_display_applies_to",
+    ORCHESTRATOR_ROLE_TOKEN,
 }
 LEGACY_OWNERSHIP_TOKENS = {
     key for key in OWNERSHIP_TOKENS if key.startswith("legacy_display_")
@@ -200,6 +202,7 @@ class HerdrLegacyDisplayAdapter:
             "thread_title": target,
             "terminal_title": target,
             "observation_digest": _digest(observation),
+            ORCHESTRATOR_ROLE_TOKEN: "champion",
         }
         if spec.expected_agent_status is not None:
             receipt["schema"] = "league.legacy-display-reconciliation.v2"
@@ -215,11 +218,13 @@ class HerdrLegacyDisplayAdapter:
     ) -> dict[str, str]:
         target = f"{spec.callsign} · {spec.target_task_label}"
         owner = hashlib.sha256(spec.assignment_id.encode("utf-8")).hexdigest()[:16]
+        role = orchestrator_role_tokens("champion")[ORCHESTRATOR_ROLE_TOKEN]
         return {
             "callsign": spec.callsign,
             "sidebar_name": spec.callsign,
             "task_label": spec.target_task_label,
             "thread_title": target,
+            ORCHESTRATOR_ROLE_TOKEN: role,
             "legacy_display_owner": owner,
             "legacy_display_assignment": reconciliation_id,
             "legacy_display_source": source,
@@ -300,6 +305,7 @@ class HerdrLegacyDisplayAdapter:
             exact = bool(
                 observation["presentation_source"] != source
                 and not LEGACY_OWNERSHIP_TOKENS.intersection(tokens)
+                and ORCHESTRATOR_ROLE_TOKEN not in tokens
             )
             if exact:
                 stable = stable + 1 if current == prior else 1
@@ -493,6 +499,8 @@ class HerdrLegacyDisplayAdapter:
             and tokens.get("sidebar_name") == spec.callsign
             and tokens.get("task_label") == spec.target_task_label
             and tokens.get("thread_title") == target
+            and tokens.get(ORCHESTRATOR_ROLE_TOKEN)
+            == receipt.get(ORCHESTRATOR_ROLE_TOKEN)
             and tokens.get("legacy_display_assignment")
             == receipt.get("reconciliation_id")
             and tokens.get("legacy_display_source") == receipt.get("source")

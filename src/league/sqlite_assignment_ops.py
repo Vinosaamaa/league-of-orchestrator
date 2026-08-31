@@ -23,6 +23,7 @@ from .storage_assignment import (
     PrepareAssignmentCommand,
 )
 from .storage_types import LIFECYCLE_STATES, StorageRefusal
+from .presentation import ORCHESTRATOR_ROLE_TOKEN
 from .issue_first import (
     issue_scope_digest,
     normalize_issue_title,
@@ -121,6 +122,9 @@ def _legacy_result_receipt(row: Any) -> dict[str, Any]:
     )
     if retained_done:
         receipt_keys.add("endpoint_status")
+    role_receipt = receipt.get(ORCHESTRATOR_ROLE_TOKEN) if isinstance(receipt, dict) else None
+    if role_receipt is not None:
+        receipt_keys.add(ORCHESTRATOR_ROLE_TOKEN)
     string_keys = receipt_keys - {"state_change_seq"}
     exact = bool(
         set(detail) == {"schema", "intent_digest", "receipt"}
@@ -141,6 +145,7 @@ def _legacy_result_receipt(row: Any) -> dict[str, Any]:
             else "league.legacy-display-reconciliation.v1"
         )
         and (not retained_done or receipt.get("endpoint_status") == "done")
+        and (role_receipt is None or role_receipt == "champion")
         and type(receipt.get("state_change_seq")) is int
         and receipt["state_change_seq"] >= 0
         and bool(re.fullmatch(r"[0-9a-f]{64}", receipt["observation_digest"]))
@@ -1701,6 +1706,7 @@ def assignment_launch_context(store: Any, assignment_id: str) -> dict[str, Any]:
                 and legacy_receipt["terminal_title"]
                 == legacy_intent.get("target_title")
                 and legacy_receipt["state_change_seq"] == expected_sequence + 1
+                and legacy_receipt.get(ORCHESTRATOR_ROLE_TOKEN) in {None, "champion"}
                 and legacy_receipt.get("schema")
                 == (
                     "league.legacy-display-reconciliation.v2"
@@ -2088,6 +2094,7 @@ def finalize_legacy_display_reconciliation(
                 "thread_title",
                 "terminal_title",
                 "observation_digest",
+                ORCHESTRATOR_ROLE_TOKEN,
             }
             expected_schema = "league.legacy-display-reconciliation.v1"
             if command.expected_agent_status is not None:
@@ -2106,6 +2113,7 @@ def finalize_legacy_display_reconciliation(
                 and receipt.get("task_label") == command.target_task_label
                 and receipt.get("thread_title") == target
                 and receipt.get("terminal_title") == target
+                and receipt.get(ORCHESTRATOR_ROLE_TOKEN) == "champion"
                 and isinstance(receipt.get("source"), str)
                 and bool(receipt.get("source"))
                 and isinstance(receipt.get("applies_to_source"), str)
@@ -2279,6 +2287,7 @@ def record_assignment_context_delivery(
         "task_label",
         "thread_title",
         "terminal_title",
+        ORCHESTRATOR_ROLE_TOKEN,
     }
     if (
         not digest_pattern.fullmatch(context_sha256)
@@ -2412,6 +2421,7 @@ def record_assignment_title_revalidation(
         "task_label",
         "thread_title",
         "terminal_title",
+        ORCHESTRATOR_ROLE_TOKEN,
     }
     if (
         not event_id

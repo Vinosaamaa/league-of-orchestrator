@@ -45,6 +45,10 @@ Nothing here installs files, changes hooks, or connects to live Roster state.
   status while repairing presentation without closing or reactivating it,
   source-bound transition outbox delivery, unique recipient effects, and fair
   backlog draining.
+- One League-owned `orchestrator_role` presentation token, emitted only as
+  `shotcaller` or `champion` from canonical role truth and covered by the same
+  source/owner receipts as the title overlay. Unknown roles emit no token;
+  League defines no glyph, color, marker, or renderer behavior for it.
 - One role-aware bounded Shotcaller Stop decision with ordinary-message
   priority and separate request, dispatch, and watcher leases, plus in-place
   Shotcaller bootstrap that waits for a stable source-owned callsign title

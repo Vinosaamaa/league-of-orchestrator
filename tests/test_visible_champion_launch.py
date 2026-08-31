@@ -27,6 +27,7 @@ from league.issue_first import (  # noqa: E402
     semantic_scope_digest,
 )
 from league.sqlite_project_ops import canonical_repository  # noqa: E402
+from league.presentation import orchestrator_role_tokens  # noqa: E402
 from league.storage_assignment import PrepareAssignmentCommand  # noqa: E402
 import league.visible_launch as visible_launch  # noqa: E402
 from league.storage_issue import (  # noqa: E402
@@ -189,11 +190,13 @@ class FakeHerdrRunner:
         wrong_thread: bool = False,
         delayed_context_title_reads: int | None = None,
         routing_name: str = "lux",
+        session_source: str = "herdr:codex",
     ) -> None:
         self.worktree = str(worktree.resolve())
         self.wrong_thread = wrong_thread
         self.delayed_context_title_reads = delayed_context_title_reads
         self.routing_name = routing_name
+        self.session_source = session_source
         self.agent_status = "idle"
         self.started = False
         self.session_reported = False
@@ -232,7 +235,7 @@ class FakeHerdrRunner:
         agent["agent_session"] = {
             "agent": "codex",
             "kind": "id",
-            "source": "herdr:codex",
+            "source": self.session_source,
             "value": thread,
         }
         return agent
@@ -257,7 +260,11 @@ class FakeHerdrRunner:
         )
 
     def active_copy(self) -> "FakeHerdrRunner":
-        copied = FakeHerdrRunner(Path(self.worktree), routing_name=self.routing_name)
+        copied = FakeHerdrRunner(
+            Path(self.worktree),
+            routing_name=self.routing_name,
+            session_source=self.session_source,
+        )
         copied.started = True
         copied.agent_status = self.agent_status
         copied.title = self.title
@@ -311,7 +318,7 @@ class FakeHerdrRunner:
             source = command[command.index("--source") + 1]
             if "--applies-to-source" in command:
                 applies_to = command[command.index("--applies-to-source") + 1]
-                if applies_to != "herdr:codex":
+                if applies_to != self.session_source:
                     return subprocess.CompletedProcess(
                         command, 1, "", "metadata source mismatch"
                     )
@@ -709,6 +716,7 @@ def test_real_adapter_one_command_success_and_retry(root: Path) -> None:
         "task_label": "Tiny Gate",
         "thread_title": "Lux · Tiny Gate",
         "terminal_title": "Lux · Tiny Gate",
+        "orchestrator_role": "champion",
     }
     assert runner.metadata_source == display_receipt["source"]
     assert len(runner.contexts) == 1
@@ -728,6 +736,7 @@ def test_real_adapter_one_command_success_and_retry(root: Path) -> None:
     assert runner.title == "Lux · Tiny Gate"
     assert runner.tokens["sidebar_name"] == "Lux"
     assert runner.tokens["thread_title"] == "Lux · Tiny Gate"
+    assert runner.tokens["orchestrator_role"] == "champion"
     start = runner.calls[start_index]
     assert start[start.index("--pane") + 1] == "w1:p99"
     assert start[start.index("--pane") + 1] != SHOTCALLER_PANE_ID
@@ -798,6 +807,7 @@ def test_real_adapter_one_command_success_and_retry(root: Path) -> None:
     assert durable_display_receipt == restore_retry["context_delivery"]["display_receipt"]
     assert durable_display_receipt["source"] == runner.metadata_source
     assert durable_display_receipt["state_change_seq"] == runner.state_change_seq
+    assert durable_display_receipt["orchestrator_role"] == "champion"
     revalidation_events = store.connection.execute(
         "SELECT COUNT(*) FROM events WHERE event_type='assignment_title_revalidated' AND aggregate_id=?",
         (spec.assignment_id,),
@@ -839,6 +849,65 @@ def test_real_adapter_one_command_success_and_retry(root: Path) -> None:
         "assignment_context",
     )
     assert activation_delivery["effect_id"] == result["context_delivery"]["effect_sha256"]
+    store.close()
+
+
+def test_champion_role_token_is_canonical_for_cursor_authority_and_owned_retry(
+    root: Path,
+) -> None:
+    assert orchestrator_role_tokens("champion") == {
+        "orchestrator_role": "champion"
+    }
+    assert orchestrator_role_tokens("shotcaller") == {
+        "orchestrator_role": "shotcaller"
+    }
+    assert orchestrator_role_tokens("unknown") == {}
+    assert orchestrator_role_tokens(None) == {}
+
+    store, clock, worktree = _context(root, "cursor-role-token")
+    options = _options(root)
+    runner = FakeHerdrRunner(worktree, session_source="herdr:cursor")
+    runner.metadata_source = "herdr:cursor"
+    service = VisibleChampionLaunchService(
+        store, _adapter(options, runner, store), options, clock
+    )
+    spec = _spec(worktree, "cursor-role-token")
+    result = service.launch(spec)
+    contexts = len(runner.contexts)
+    assert result["context_delivery"]["display_receipt"][
+        "orchestrator_role"
+    ] == "champion"
+    assert runner.tokens["orchestrator_role"] == "champion"
+
+    runner.metadata_source = "herdr:cursor"
+    runner.state_change_seq += 1
+    runner.title = "Cursor generated title"
+    runner.tokens.update(
+        {
+            "sidebar_name": "Cursor generated title",
+            "thread_title": "Cursor generated title",
+            "orchestrator_role": "shotcaller",
+        }
+    )
+    calls_before = len(runner.calls)
+    retry = service.launch(spec)
+    retry_calls = runner.calls[calls_before:]
+    assert retry["idempotent"] is True
+    assert retry["context_delivery"]["display_receipt"][
+        "orchestrator_role"
+    ] == "champion"
+    assert runner.tokens["orchestrator_role"] == "champion"
+    assert len(runner.contexts) == contexts == 1
+    assert len(
+        [
+            call
+            for call in retry_calls
+            if call[:3] == ("herdr", "pane", "report-metadata")
+        ]
+    ) == 1
+    assert not any(
+        call[:3] == ("herdr", "agent", "prompt") for call in retry_calls
+    )
     store.close()
 
 
@@ -1116,6 +1185,7 @@ def test_retained_done_legacy_champion_reconciles_without_reactivating_endpoint(
 
     assert result["state"] == "reconciled"
     assert result["receipt"]["endpoint_status"] == "done"
+    assert result["receipt"]["orchestrator_role"] == "champion"
     assert runner.agent_status == "done"
     assert runner.routing_name == "shaco"
     assert runner.title == "Shaco · Broker Repair"
@@ -2377,6 +2447,7 @@ def main() -> None:
         test_immediate_resume_session_still_requires_exact_process_identity(root)
         test_resume_retry_reconciles_owned_endpoint_without_second_launch(root)
         test_real_adapter_one_command_success_and_retry(root)
+        test_champion_role_token_is_canonical_for_cursor_authority_and_owned_retry(root)
         test_active_retry_requires_migration18_issue_binding(root)
         test_active_retry_refuses_changed_owner_issue_before_title_read(root)
         test_legacy_active_champion_display_is_reconciled_once_with_exact_receipt(root)

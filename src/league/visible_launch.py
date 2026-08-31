@@ -18,6 +18,7 @@ from typing import Any, Mapping, Protocol, Sequence
 from .request_services import AssignmentService, AssignmentSpec, LaunchAdapterError
 from .issue_first import IssueVerifier
 from .storage import Storage, StorageRefusal
+from .presentation import ORCHESTRATOR_ROLE_TOKEN, orchestrator_role_tokens
 from .worktree import verified_worktree_repository_root
 
 
@@ -625,6 +626,7 @@ class HerdrCodexLaunchAdapter:
         sequence: int,
     ) -> None:
         title = f"{callsign} · {self.options.task_label}"
+        role = orchestrator_role_tokens("champion")[ORCHESTRATOR_ROLE_TOKEN]
         self._command(
             (
                 "herdr",
@@ -647,6 +649,8 @@ class HerdrCodexLaunchAdapter:
                 f"task_label={self.options.task_label}",
                 "--token",
                 f"thread_title={title}",
+                "--token",
+                f"{ORCHESTRATOR_ROLE_TOKEN}={role}",
                 "--token",
                 f"launch_title_owner={self._title_owner(assignment_id)}",
                 "--token",
@@ -675,6 +679,7 @@ class HerdrCodexLaunchAdapter:
             and tokens.get("sidebar_name") == callsign
             and tokens.get("task_label") == self.options.task_label
             and tokens.get("thread_title") == expected
+            and tokens.get(ORCHESTRATOR_ROLE_TOKEN) == "champion"
             and tokens.get("launch_title_owner")
             == self._title_owner(assignment_id)
             and tokens.get("launch_title_source")
@@ -717,6 +722,7 @@ class HerdrCodexLaunchAdapter:
                             "task_label": self.options.task_label,
                             "thread_title": expected,
                             "terminal_title": expected,
+                            ORCHESTRATOR_ROLE_TOKEN: "champion",
                         }
             else:
                 prior_key = None

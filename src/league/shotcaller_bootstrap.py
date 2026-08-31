@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from .sqlite_callsign_ops import digest
+from .presentation import ORCHESTRATOR_ROLE_TOKEN, orchestrator_role_tokens
 from .storage import Storage, StorageRefusal
 from .visible_launch import CommandRunner, SubprocessRunner
 
@@ -343,6 +344,7 @@ class HerdrShotcallerBootstrapAdapter:
             )
             or tokens.get(TITLE_OWNER_TOKEN) not in (None, "")
             or tokens.get(TITLE_SOURCE_TOKEN) not in (None, "")
+            or tokens.get(ORCHESTRATOR_ROLE_TOKEN) not in (None, "")
         ):
             return None
         return source
@@ -363,6 +365,7 @@ class HerdrShotcallerBootstrapAdapter:
             )
             or tokens.get(TITLE_OWNER_TOKEN) != self._title_owner(spec)
             or tokens.get(TITLE_SOURCE_TOKEN) != self._title_source(spec)
+            or tokens.get(ORCHESTRATOR_ROLE_TOKEN) != "shotcaller"
             or not isinstance(title, str)
             or tokens.get("sidebar_name") != title
             or tokens.get("thread_title") != title
@@ -419,6 +422,15 @@ class HerdrShotcallerBootstrapAdapter:
         tokens = agent.get("tokens")
         routing_name = self._routing_name(agent)
         owned_source = self._owned_presentation_source(spec, agent, routing_name)
+        unowned_role = bool(
+            tokens.get(ORCHESTRATOR_ROLE_TOKEN) not in (None, "")
+            and owned_source is None
+        ) if isinstance(tokens, Mapping) else False
+        if unowned_role:
+            raise StorageRefusal(
+                "shotcaller_metadata_unverified",
+                "Shotcaller canonical role token is not owned by this bootstrap",
+            )
         route_only_candidate = bool(
             allow_unpublished
             and expected_alias is not None
@@ -715,6 +727,7 @@ class HerdrShotcallerBootstrapAdapter:
             )
         self._published_source = self._title_source(spec)
         self._expected_published_sequence = sequence + 1
+        role = orchestrator_role_tokens("shotcaller")[ORCHESTRATOR_ROLE_TOKEN]
         self._run(
             (
                 "herdr",
@@ -735,6 +748,8 @@ class HerdrShotcallerBootstrapAdapter:
                 f"sidebar_name={callsign}",
                 "--token",
                 f"thread_title={callsign}",
+                "--token",
+                f"{ORCHESTRATOR_ROLE_TOKEN}={role}",
                 "--token",
                 f"{TITLE_OWNER_TOKEN}={self._title_owner(spec)}",
                 "--token",
@@ -758,6 +773,7 @@ class HerdrShotcallerBootstrapAdapter:
             isinstance(tokens, Mapping)
             and tokens.get(TITLE_OWNER_TOKEN) == self._title_owner(spec)
             and tokens.get(TITLE_SOURCE_TOKEN) == self._title_source(spec)
+            and tokens.get(ORCHESTRATOR_ROLE_TOKEN) == "shotcaller"
         )
         return bool(
             self._exact(spec, pane, agent)
@@ -874,6 +890,7 @@ class HerdrShotcallerBootstrapAdapter:
                 and tokens.get(TITLE_OWNER_TOKEN)
                 == self._title_owner_from_source(self._published_source)
                 and tokens.get(TITLE_SOURCE_TOKEN) == self._published_source
+                and tokens.get(ORCHESTRATOR_ROLE_TOKEN) == "shotcaller"
                 and tokens.get("sidebar_name") == current_title
                 and tokens.get("thread_title") == current_title
                 and current_title.casefold() == routing_name.casefold()
@@ -943,6 +960,7 @@ class HerdrShotcallerBootstrapAdapter:
                 expected_tokens = dict(current_tokens)
                 expected_tokens.pop(TITLE_OWNER_TOKEN, None)
                 expected_tokens.pop(TITLE_SOURCE_TOKEN, None)
+                expected_tokens.pop(ORCHESTRATOR_ROLE_TOKEN, None)
                 restore_tokens: list[tuple[str, str]] = []
                 for key, value in (
                     ("sidebar_name", previous_sidebar),
@@ -981,6 +999,8 @@ class HerdrShotcallerBootstrapAdapter:
                         f"{TITLE_OWNER_TOKEN}=",
                         "--token",
                         f"{TITLE_SOURCE_TOKEN}=",
+                        "--token",
+                        f"{ORCHESTRATOR_ROLE_TOKEN}=",
                         "--seq",
                         str(sequence + 1),
                     )
@@ -1033,6 +1053,8 @@ class HerdrShotcallerBootstrapAdapter:
                     f"{TITLE_OWNER_TOKEN}=",
                     "--token",
                     f"{TITLE_SOURCE_TOKEN}=",
+                    "--token",
+                    f"{ORCHESTRATOR_ROLE_TOKEN}=",
                     "--seq",
                     str(sequence + 1),
                 ),

@@ -34,6 +34,21 @@ Private roots, repository identities, session locators, endpoints, model names,
 prompt text, and update prose are redacted in outbound mode. The design samples
 below are synthetic and contain no live names, paths, repositories, or records.
 
+### Provider presentation role boundary
+
+Provider-facing display metadata may carry one canonical League role token:
+`orchestrator_role=shotcaller` or `orchestrator_role=champion`. League derives
+it only from exact canonical role ownership and omits it for missing or unknown
+roles. It is independent of `sidebar_name`, thread title, terminal title, and
+task label, and provider-generated title refreshes do not own it. The token is
+receipt-bound to League's existing presentation overlay; a changed unowned
+value refuses or an exact owned retry restores it.
+
+This document assigns no rendering to that token. In particular it defines no
+marker, glyph, color, ANSI, conditional style, pane decoration, or additional
+sidebar text; any source-managed terminal renderer remains an owning-layer
+decision outside League.
+
 ## Layout options
 
 ### Layout A — Project Ledger (selected)

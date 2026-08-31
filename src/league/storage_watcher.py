@@ -39,6 +39,24 @@ class WatcherStorage(Protocol):
 
     def supervisor_binding(self, callsign: Optional[str] = None) -> dict[str, Any]: ...
 
+    def supervisor_bindings(
+        self, *, limit: int = 64
+    ) -> tuple[dict[str, Any], ...]: ...
+
+    def supervision_owner(self, actor_agent_id: str) -> Optional[str]: ...
+
+    def begin_shotcaller_turn(
+        self, actor_agent_id: str, turn_token: str, at: str
+    ) -> dict[str, Any]: ...
+
+    def commit_shotcaller_turn(
+        self, actor_agent_id: str, turn_token: str, at: str
+    ) -> dict[str, Any]: ...
+
+    def abort_shotcaller_turn(
+        self, actor_agent_id: str, turn_token: str, at: str
+    ) -> dict[str, Any]: ...
+
     def watcher_registration(
         self, actor_agent_id: str
     ) -> Optional[dict[str, Any]]: ...

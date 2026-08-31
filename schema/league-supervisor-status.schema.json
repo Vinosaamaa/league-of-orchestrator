@@ -13,6 +13,7 @@
     "lease_valid": {"type": "boolean"},
     "identity_valid": {"type": "boolean"},
     "fence": {"type": "integer", "minimum": 1},
+    "user_priority_generation": {"type": "integer", "minimum": 0},
     "lease_seconds": {"type": "number", "exclusiveMinimum": 0},
     "recovery_seconds": {"type": "number", "exclusiveMinimum": 0},
     "mode": {"enum": ["all_material", "calm"]},

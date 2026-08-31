@@ -137,6 +137,15 @@ def test_interactive_turn_uses_one_process_and_one_ordered_batch(root: Path) -> 
         "First exact owner prompt",
         "Second distinct exact owner prompt",
     ]
+    with SQLiteStorage(state) as observer:
+        active_turn_stop = observer.stop_decision(
+            "watcher:Garen",
+            SHOTCALLER_ID,
+            "terminal:request-turn-active",
+            clock.now(),
+        )
+    assert active_turn_stop["decision"] == "block", active_turn_stop
+    assert active_turn_stop["obligations"]["turn_commit_pending"] == 1, active_turn_stop
     decisions = {
         "candidate_inventory_digest": intake["result"]["candidate_inventory"]["digest"],
         "decisions": [

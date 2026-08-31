@@ -635,6 +635,22 @@ def apply_supervision_delivery_policy(
                     "state": str(row["state"]),
                     "idempotent": True,
                 }
+            scope = store.connection.execute(
+                "SELECT scope_id,actor_agent_id,metadata_json FROM watcher_scopes WHERE actor_agent_id=?",
+                (recipient_agent_id,),
+            ).fetchone()
+            active_turn = None if scope is None else _shotcaller_turn(_scope_metadata(scope))
+            if (
+                row["state"] == "pending"
+                and active_turn is not None
+                and active_turn.get("active") is True
+            ):
+                return {
+                    "action": "defer",
+                    "reason": "owner_turn_active",
+                    "state": "pending",
+                    "idempotent": False,
+                }
             policy = supervision_policy(store, recipient_agent_id)
             if policy["mode"] == "all_material" or row["state"] != "pending":
                 return {"action": "wake", "reason": "all_material", "idempotent": False}
@@ -1068,50 +1084,324 @@ def register_watcher(
     }
 
 
-def supervisor_binding(store: Any, callsign: Optional[str] = None) -> dict[str, Any]:
-    rows = store.connection.execute(
+def supervisor_bindings(
+    store: Any, *, limit: int = 64
+) -> tuple[dict[str, Any], ...]:
+    if not 1 <= limit <= 256:
+        raise StorageRefusal(
+            "invalid_limit", "supervisor binding limit must be between 1 and 256"
+        )
+    owners = store.connection.execute(
         """
-        SELECT a.agent_id,a.callsign,a.routing_name,r.runtime_instance_id,
-               r.runtime_generation,r.backend_kind,r.endpoint,r.session_ref
-          FROM agent_instances a
-          JOIN runtime_instances r ON r.actor_agent_id=a.agent_id
-         WHERE a.role='shotcaller' AND a.retired_at IS NULL
-           AND (? IS NULL OR a.callsign=?)
-           AND r.status IN ('active','idle') AND r.verified=1
-         ORDER BY a.agent_id,r.runtime_instance_id
-         LIMIT 2
+        SELECT s.squad_id,a.agent_id,a.callsign,a.routing_name
+          FROM squads s
+          JOIN agent_instances a ON a.agent_id=s.shotcaller_agent_id
+         WHERE s.state='active' AND a.role='shotcaller' AND a.retired_at IS NULL
+         ORDER BY s.squad_id,a.agent_id
+         LIMIT ?
         """,
-        (callsign, callsign),
+        (limit + 1,),
     ).fetchall()
-    if len(rows) != 1:
+    if len(owners) > limit:
+        raise StorageRefusal(
+            "supervisor_binding_capacity",
+            "active Shotcaller bindings exceed the supported service bound",
+        )
+    owner_ids = [str(row["agent_id"]) for row in owners]
+    if len(set(owner_ids)) != len(owner_ids):
+        raise StorageRefusal(
+            "supervisor_binding_invalid",
+            "one Shotcaller cannot own multiple active Squad bindings",
+        )
+    bindings: list[dict[str, Any]] = []
+    for row in owners:
+        runtimes = store.connection.execute(
+            """
+            SELECT runtime_instance_id,runtime_generation,backend_kind,endpoint,session_ref
+              FROM runtime_instances
+             WHERE actor_agent_id=? AND status IN ('active','idle') AND verified=1
+             ORDER BY runtime_instance_id LIMIT 2
+            """,
+            (row["agent_id"],),
+        ).fetchall()
+        if len(runtimes) != 1:
+            raise StorageRefusal(
+                "supervisor_binding_invalid",
+                "each active Squad requires one exact verified Shotcaller runtime",
+            )
+        runtime = runtimes[0]
+        scopes = store.connection.execute(
+            "SELECT scope_id,generation FROM watcher_scopes WHERE actor_agent_id=? ORDER BY scope_id LIMIT 2",
+            (row["agent_id"],),
+        ).fetchall()
+        if len(scopes) > 1:
+            raise StorageRefusal(
+                "supervisor_binding_invalid",
+                "each Shotcaller requires one exact watcher scope",
+            )
+        bindings.append(
+            {
+                "squad_id": str(row["squad_id"]),
+                "actor_agent_id": str(row["agent_id"]),
+                "callsign": str(row["callsign"]),
+                "routing_name": row["routing_name"],
+                "runtime_instance_id": str(runtime["runtime_instance_id"]),
+                "runtime_generation": str(runtime["runtime_generation"]),
+                "backend_kind": str(runtime["backend_kind"]),
+                "endpoint": str(runtime["endpoint"]),
+                "session_ref": str(runtime["session_ref"]),
+                "scope_id": (
+                    str(scopes[0]["scope_id"])
+                    if scopes
+                    else f"watcher:{row['callsign']}"
+                ),
+                "fence_floor": int(scopes[0]["generation"]) if scopes else 0,
+            }
+        )
+    return tuple(bindings)
+
+
+def supervisor_binding(store: Any, callsign: Optional[str] = None) -> dict[str, Any]:
+    bindings = tuple(
+        binding
+        for binding in supervisor_bindings(store)
+        if callsign is None or binding["callsign"] == callsign
+    )
+    if len(bindings) != 1:
         raise StorageRefusal(
             "supervisor_binding_invalid",
             "persistent supervision requires one exact verified Shotcaller runtime",
         )
-    row = rows[0]
-    scope = store.connection.execute(
-        "SELECT scope_id FROM watcher_scopes WHERE actor_agent_id=? ORDER BY scope_id LIMIT 2",
-        (row["agent_id"],),
-    ).fetchall()
-    if len(scope) > 1:
+    return bindings[0]
+
+
+def supervision_owner(store: Any, actor_agent_id: str) -> Optional[str]:
+    row = store.connection.execute(
+        """
+        SELECT role,shotcaller_agent_id FROM agent_instances
+         WHERE agent_id=? AND retired_at IS NULL
+        """,
+        (actor_agent_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    if row["role"] == "shotcaller":
+        return actor_agent_id
+    return (
+        str(row["shotcaller_agent_id"])
+        if row["shotcaller_agent_id"] is not None
+        else None
+    )
+
+
+def _shotcaller_turn(metadata: dict[str, Any]) -> dict[str, Any] | None:
+    value = metadata.get("shotcaller_turn")
+    if value is None:
+        return None
+    if not isinstance(value, dict):
         raise StorageRefusal(
-            "supervisor_binding_invalid",
-            "persistent supervision requires one exact Shotcaller watcher scope",
+            "shotcaller_turn_invalid", "Shotcaller turn metadata is malformed"
         )
+    return value
+
+
+def begin_shotcaller_turn(
+    store: Any, actor_agent_id: str, turn_token: str, at: str
+) -> dict[str, Any]:
+    _time(at, "Shotcaller turn begin time")
+    if not actor_agent_id or not 1 <= len(turn_token.encode("utf-8")) <= 256:
+        raise StorageRefusal(
+            "shotcaller_turn_invalid", "Shotcaller turn identity is incomplete"
+        )
+    token_digest = hashlib.sha256(turn_token.encode("utf-8")).hexdigest()
+    try:
+        with store._transaction():
+            actor = store.connection.execute(
+                """
+                SELECT a.callsign FROM agent_instances a JOIN squads s
+                  ON s.shotcaller_agent_id=a.agent_id
+                 WHERE a.agent_id=? AND a.role='shotcaller' AND a.retired_at IS NULL
+                   AND s.state='active'
+                """,
+                (actor_agent_id,),
+            ).fetchone()
+            if actor is None:
+                raise StorageRefusal(
+                    "shotcaller_turn_invalid",
+                    "Shotcaller turn requires one active Squad owner",
+                )
+            scope_id = f"watcher:{actor['callsign']}"
+            ensure_watcher_scope(
+                store, scope_id, actor_agent_id, block_on_obligations=None
+            )
+            scope = store.connection.execute(
+                "SELECT scope_id,actor_agent_id,metadata_json FROM watcher_scopes WHERE actor_agent_id=?",
+                (actor_agent_id,),
+            ).fetchone()
+            if scope is None:
+                raise StorageRefusal(
+                    "shotcaller_turn_conflict",
+                    "Shotcaller turn commit requires an active turn scope",
+                )
+            metadata = _scope_metadata(scope)
+            existing = _shotcaller_turn(metadata)
+            if existing is not None and existing.get("active") is True:
+                if existing.get("token_digest") != token_digest:
+                    raise StorageRefusal(
+                        "shotcaller_turn_active",
+                        "another Shotcaller turn is already active",
+                        retryable=True,
+                    )
+                return {
+                    "actor_agent_id": actor_agent_id,
+                    "scope_id": str(scope["scope_id"]),
+                    "active": True,
+                    "committed": existing.get("committed") is True,
+                    "idempotent": True,
+                }
+            metadata["shotcaller_turn"] = {
+                "active": True,
+                "committed": False,
+                "token_digest": token_digest,
+                "opened_at": at,
+            }
+            store.connection.execute(
+                "UPDATE watcher_scopes SET metadata_json=? WHERE scope_id=?",
+                (
+                    json.dumps(metadata, sort_keys=True, separators=(",", ":")),
+                    scope["scope_id"],
+                ),
+            )
+    except StorageRefusal:
+        raise
+    except sqlite3.DatabaseError as exc:
+        raise store._translate_database_error(
+            exc, "Shotcaller turn begin conflicted with canonical state"
+        ) from exc
     return {
-        "actor_agent_id": str(row["agent_id"]),
-        "callsign": str(row["callsign"]),
-        "routing_name": row["routing_name"],
-        "runtime_instance_id": str(row["runtime_instance_id"]),
-        "runtime_generation": str(row["runtime_generation"]),
-        "backend_kind": str(row["backend_kind"]),
-        "endpoint": str(row["endpoint"]),
-        "session_ref": str(row["session_ref"]),
-        "scope_id": (
-            str(scope[0]["scope_id"])
-            if scope
-            else f"watcher:{row['callsign']}"
-        ),
+        "actor_agent_id": actor_agent_id,
+        "scope_id": str(scope["scope_id"]),
+        "active": True,
+        "committed": False,
+        "idempotent": False,
+    }
+
+
+def commit_shotcaller_turn(
+    store: Any, actor_agent_id: str, turn_token: str, at: str
+) -> dict[str, Any]:
+    _time(at, "Shotcaller turn commit time")
+    token_digest = hashlib.sha256(turn_token.encode("utf-8")).hexdigest()
+    try:
+        with store._transaction():
+            scope = store.connection.execute(
+                "SELECT scope_id,actor_agent_id,metadata_json FROM watcher_scopes WHERE actor_agent_id=?",
+                (actor_agent_id,),
+            ).fetchone()
+            metadata = _scope_metadata(scope)
+            active = _shotcaller_turn(metadata)
+            if (
+                active is None
+                or active.get("active") is not True
+                or active.get("token_digest") != token_digest
+            ):
+                raise StorageRefusal(
+                    "shotcaller_turn_conflict",
+                    "Shotcaller turn commit does not match the active turn",
+                )
+            if active.get("committed") is True:
+                return {
+                    "actor_agent_id": actor_agent_id,
+                    "scope_id": str(scope["scope_id"]),
+                    "active": True,
+                    "committed": True,
+                    "idempotent": True,
+                }
+            active["committed"] = True
+            active["committed_at"] = at
+            store.connection.execute(
+                "UPDATE watcher_scopes SET metadata_json=? WHERE scope_id=?",
+                (
+                    json.dumps(metadata, sort_keys=True, separators=(",", ":")),
+                    scope["scope_id"],
+                ),
+            )
+    except StorageRefusal:
+        raise
+    except (AttributeError, sqlite3.DatabaseError) as exc:
+        if isinstance(exc, sqlite3.DatabaseError):
+            raise store._translate_database_error(
+                exc, "Shotcaller turn commit conflicted with canonical state"
+            ) from exc
+        raise StorageRefusal(
+            "shotcaller_turn_invalid", "Shotcaller turn identity is incomplete"
+        ) from exc
+    return {
+        "actor_agent_id": actor_agent_id,
+        "scope_id": str(scope["scope_id"]),
+        "active": True,
+        "committed": True,
+        "idempotent": False,
+    }
+
+
+def abort_shotcaller_turn(
+    store: Any, actor_agent_id: str, turn_token: str, at: str
+) -> dict[str, Any]:
+    _time(at, "Shotcaller turn abort time")
+    token_digest = hashlib.sha256(turn_token.encode("utf-8")).hexdigest()
+    try:
+        with store._transaction():
+            scope = store.connection.execute(
+                "SELECT scope_id,actor_agent_id,metadata_json FROM watcher_scopes WHERE actor_agent_id=?",
+                (actor_agent_id,),
+            ).fetchone()
+            if scope is None:
+                raise StorageRefusal(
+                    "shotcaller_turn_conflict",
+                    "Shotcaller turn abort requires an active turn scope",
+                )
+            metadata = _scope_metadata(scope)
+            active = _shotcaller_turn(metadata)
+            if (
+                active is None
+                or active.get("active") is not True
+                or active.get("token_digest") != token_digest
+            ):
+                raise StorageRefusal(
+                    "shotcaller_turn_conflict",
+                    "Shotcaller turn abort does not match the active turn",
+                )
+            if active.get("committed") is True:
+                raise StorageRefusal(
+                    "shotcaller_turn_conflict",
+                    "a committed Shotcaller turn cannot be aborted",
+                )
+            active["active"] = False
+            active["aborted_at"] = at
+            store.connection.execute(
+                "UPDATE watcher_scopes SET metadata_json=? WHERE scope_id=?",
+                (
+                    json.dumps(metadata, sort_keys=True, separators=(",", ":")),
+                    scope["scope_id"],
+                ),
+            )
+    except StorageRefusal:
+        raise
+    except (AttributeError, sqlite3.DatabaseError) as exc:
+        if isinstance(exc, sqlite3.DatabaseError):
+            raise store._translate_database_error(
+                exc, "Shotcaller turn abort conflicted with canonical state"
+            ) from exc
+        raise StorageRefusal(
+            "shotcaller_turn_invalid", "Shotcaller turn identity is incomplete"
+        ) from exc
+    return {
+        "actor_agent_id": actor_agent_id,
+        "scope_id": str(scope["scope_id"]),
+        "active": False,
+        "committed": False,
+        "idempotent": False,
     }
 
 
@@ -1515,11 +1805,79 @@ def stop_decision(
             ).fetchone()
             terminal_fresh = scope["last_terminal_generation"] != terminal_generation
             policy = _policy_from_scope(scope)
+            turn = _shotcaller_turn(_scope_metadata(scope))
+            immediate_counts = _paused_actionable_counts(store, actor_agent_id)
+            if (
+                turn is not None
+                and turn.get("active") is True
+                and turn.get("committed") is not True
+            ):
+                immediate_counts["turn_commit_pending"] = 1
+            if (
+                turn is not None
+                and turn.get("active") is True
+                and turn.get("committed") is True
+                and policy["runtime_state"] == "supervising"
+                and sum(immediate_counts.values()) == 0
+            ):
+                registration = store.connection.execute(
+                    """
+                    SELECT w.watcher_id,w.runtime_instance_id,w.leased_until,w.fence,
+                           r.status,r.verified
+                      FROM watcher_registrations w JOIN runtime_instances r
+                        ON r.runtime_instance_id=w.runtime_instance_id
+                     WHERE w.actor_agent_id=?
+                    """,
+                    (actor_agent_id,),
+                ).fetchone()
+                if (
+                    registration is not None
+                    and _time(str(registration["leased_until"]), "watcher lease")
+                    > _time(at, "Stop decision time")
+                    and registration["status"] in {"active", "idle"}
+                    and registration["verified"]
+                ):
+                    metadata = _scope_metadata(scope)
+                    active_turn = _shotcaller_turn(metadata)
+                    assert active_turn is not None
+                    active_turn["active"] = False
+                    active_turn["handed_off_at"] = at
+                    store.connection.execute(
+                        """
+                        UPDATE watcher_scopes
+                           SET stop_blocked=0,wait_active=1,last_terminal_generation=?,
+                               pending_stop_feedback_digest=NULL,
+                               pending_stop_terminal_generation=NULL,
+                               pending_stop_wait_generation=NULL,metadata_json=?
+                         WHERE scope_id=?
+                        """,
+                        (
+                            terminal_generation,
+                            json.dumps(metadata, sort_keys=True, separators=(",", ":")),
+                            scope_id,
+                        ),
+                    )
+                    return {
+                        "scope_id": scope_id,
+                        "status": "supervision_handoff",
+                        "decision": "allow",
+                        "priority": "supervisor",
+                        "wait_generation": int(scope["wait_generation"]),
+                        "terminal_fresh": terminal_fresh,
+                        "obligations": _obligation_counts(store, actor_agent_id),
+                        "immediate_actions": immediate_counts,
+                        "supervision_mode": policy["mode"],
+                        "supervision_state": policy["runtime_state"],
+                        "unresolved_summaries": [],
+                        "supervision_handoff": True,
+                    }
             effective_counts = (
-                _paused_actionable_counts(store, actor_agent_id)
+                immediate_counts
                 if policy["mode"] == "calm" and policy["runtime_state"] == "paused"
                 else _obligation_counts(store, actor_agent_id)
             )
+            if turn is not None and turn.get("active") is True and turn.get("committed") is not True:
+                effective_counts["turn_commit_pending"] = 1
             total = sum(effective_counts.values())
             if effective_counts.get("unresolved_requests", 0) or effective_counts.get(
                 "owner_decisions", 0

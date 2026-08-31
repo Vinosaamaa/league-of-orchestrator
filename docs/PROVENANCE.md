@@ -781,6 +781,17 @@ and the matching Stop retry is allowed. This source-only correction adds no
 schema migration and performs no installation, hook mutation, live
 reconciliation, or runtime cutover.
 
+The issue-#123 successor deliberately replaces the one-binding physical
+supervisor assumption with one root-scoped service that discovers active Squad
+Shotcallers and holds an independent durable fence for each. Root lock/socket
+ownership remains singular, but binding registration, cursor, generation,
+priority, Calm policy, recovery, and delivery identity never cross Squads.
+`request turn` now marks its exact active/committed boundary: attention persists
+without starting a concurrent model turn, and Stop hands pending delivery to a
+live fenced service only after the request commit and only when no immediate
+owner action remains. The launchd template provides RunAtLoad, failed-exit
+restart, and five-second throttling but remains inert and uninstalled.
+
 The 3×3 prompt-size/intent-count matrix measures exact capture, JSON sideband,
 candidate linking, SQLite commit, and one-process completion on synthetic
 temporary roots. Its gold sideband proves local mechanics only; it does not

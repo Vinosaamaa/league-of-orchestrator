@@ -49,7 +49,7 @@ Codex owner turn
   | UserPromptSubmit: exact bytes + exact event identity
   v
 persistent local supervisor (outside model turns)
-  |-- one renewable/fenced watcher lease
+  |-- one physical service, independently fenced Squad bindings
   |-- event-driven Unix socket; no steady SQLite snapshot polling
   |-- user prompt priority over Champion events
   |-- asynchronous orphan/backlog recovery adapter
@@ -65,14 +65,23 @@ one `league request turn` process
   `-- atomic final commit + complete obligation boundary
 ```
 
-The source service boundary is one service-manager-owned
-`agent-watcher --shotcaller <callsign> service-run` process per canonical state
-root. It owns one same-user Unix socket, one root lock, and one renewable,
-monotonically fenced watcher registration. Hooks are bounded socket clients;
-they do not start a foreground supervisor or another model. The repository
-contains an inert launchd template with placeholders. Rendering, installing,
-loading, or starting it requires a separate exact-source install/cutover
-authority and rollback receipt.
+The source service boundary is one service-manager-owned `agent-watcher
+service-run` process per canonical state root. It owns one same-user Unix
+socket and one root lock, while multiplexing one independently renewable,
+monotonically fenced watcher registration per active Squad Shotcaller. Each
+binding keeps its own cursor, generations, wake target, Calm policy, recovery,
+and exact-once delivery state. Hooks are bounded socket clients; they resolve
+their canonical Squad owner before selecting a binding and do not start a
+foreground supervisor or another model. The repository contains an inert
+launchd template with placeholders. Rendering, installing, loading, or starting
+it requires separate exact-source install/cutover authority and rollback proof.
+
+The one-process `request turn` path records a durable active-turn marker before
+emitting intake. Attention events commit while that marker is active but do not
+wake a second model turn. After request effects commit, the command marks the
+turn committed; Stop hands delivery to the live fenced service only when no
+immediate Shotcaller-owned action remains. A failed pre-commit command aborts
+its own exact marker. This is source behavior, not an installed-service claim.
 
 The supervisor's semantic recovery port is explicitly injected. It schedules
 only quarantined prompts or prompts whose owner has no verified live runtime,

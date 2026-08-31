@@ -513,11 +513,9 @@ def _notify_direct_user_priority(
     return notify_user_message(store, actor_id, str(captured["prompt_id"]))
 
 
-def handle_brokered_hook(
+def _brokered_hook_context(
     store: SQLiteStorage, hook: dict[str, Any]
-) -> dict[str, Any]:
-    """Execute one validated hook inside the persistent canonical-state owner."""
-
+) -> tuple[Any, ...]:
     command = hook.get("command")
     payload = hook.get("payload")
     shotcaller = hook.get("shotcaller")
@@ -540,9 +538,45 @@ def handle_brokered_hook(
     callsign = None if actor is None else str(actor[1])
     actor_role = None if actor is None else str(actor[2])
     scope = None if actor is None else _scope(store, actor_id, str(callsign))
+    return (
+        command,
+        payload,
+        capture_event_id,
+        args,
+        actor,
+        actor_id,
+        callsign,
+        actor_role,
+        scope,
+    )
+
+
+def brokered_hook_actor(store: SQLiteStorage, hook: dict[str, Any]) -> str | None:
+    """Resolve the exact canonical hook actor before selecting a service binding."""
+
+    actor_id = _brokered_hook_context(store, hook)[5]
+    return None if actor_id is None else store.supervision_owner(actor_id)
+
+
+def handle_brokered_hook(
+    store: SQLiteStorage, hook: dict[str, Any]
+) -> dict[str, Any]:
+    """Execute one validated hook inside the persistent canonical-state owner."""
+
+    (
+        command,
+        payload,
+        capture_event_id,
+        args,
+        actor,
+        actor_id,
+        callsign,
+        actor_role,
+        scope,
+    ) = _brokered_hook_context(store, hook)
     if command == "codex-stop-hook":
         if actor is None:
-            return {"hook_output": {}, "capture": None}
+            return {"hook_output": {}, "capture": None, "actor_agent_id": None}
         assert actor_id is not None and callsign is not None and scope is not None
         terminal, _ = _codex_stop_generation(args, payload)
         if actor_role == "champion":
@@ -554,6 +588,7 @@ def handle_brokered_hook(
             return {
                 "hook_output": _champion_stop_output(command, result),
                 "capture": None,
+                "actor_agent_id": actor_id,
             }
         result = store.stop_decision(
             scope,
@@ -574,7 +609,12 @@ def handle_brokered_hook(
             if result["decision"] == "block"
             else {}
         )
-        return {"hook_output": output, "capture": None}
+        return {
+            "hook_output": output,
+            "capture": None,
+            "actor_agent_id": actor_id,
+            "supervision_handoff": result.get("supervision_handoff") is True,
+        }
     captured = _capture_prompt(
         store,
         scope,
@@ -587,6 +627,7 @@ def handle_brokered_hook(
     priority_eligible = _priority_eligible_capture(actor_id, actor_role, captured)
     return {
         "hook_output": {},
+        "actor_agent_id": actor_id,
         "capture": {
             "prompt_id": captured.get("prompt_id"),
             "idempotent": bool(captured.get("idempotent", False)),

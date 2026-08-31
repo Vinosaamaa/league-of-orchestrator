@@ -248,7 +248,10 @@ contracts are [command](schema/league-command-output.schema.json),
 [import report](schema/league-import-report.schema.json), and
 [export](schema/league-export.schema.json) JSON Schemas. The advisory surfaces
 add [project catalog](schema/league-project-catalog.schema.json) and
-[Roster snapshot](schema/league-roster-snapshot.schema.json) contracts.
+[Roster snapshot](schema/league-roster-snapshot.schema.json) contracts. The
+multiplex service status uses the strict
+[supervisor service](schema/league-supervisor-service-status.schema.json)
+schema; each binding retains the existing per-Shotcaller status schema.
 
 The grouped request-lifecycle command and transaction map is documented in
 [request lifecycle](docs/REQUEST_LIFECYCLE.md). Its implementation is inert
@@ -259,7 +262,10 @@ measured source-only boundaries are in the
 The normal Shotcaller path opens one `request turn` process; the same active
 model authors its semantic JSON. `agent-watcher service-run` is an external
 service-manager surface, never an active-turn command. The inert launchd
-template is not an install receipt.
+template is not an install receipt. One physical service per canonical state
+root discovers all active Squad Shotcallers and multiplexes a separate fenced
+registration, cursor, generation, wake target, Calm policy, and recovery lane
+for each. It does not create one process per Squad.
 
 The repository-local supervisor supports `all_material` and Calm (`calm`) wake
 policies. Calm commits every transition but suppresses routine Champion
@@ -277,6 +283,13 @@ SQLite audit is recovery-only for lost notifications or service restart and
 never invokes a model when healthy. The service renews its silent lease every
 20 seconds, the lease expires after 60 seconds, and the inert launchd template
 uses a five-second restart throttle.
+
+While a Shotcaller owns an active `request turn`, attention events remain
+durable but do not start a second model turn. The command commits its final
+request effects before marking the turn eligible for Stop handoff. Stop hands
+off only when there is a live fenced supervisor and no immediate owner action;
+the service then resumes exact-recipient delivery without performing model
+inference.
 
 Installed 0.2.28 has no always-running watchdog or OS-owned supervision timer.
 Its legacy foreground `supervise` loop keeps a 30-second runtime snapshot and

@@ -79,6 +79,11 @@ from .sqlite_outbox_ops import outbox_envelope as outbox_envelope_operation
 from .sqlite_outbox_ops import pending_backlog as pending_backlog_operation
 from .sqlite_watcher_ops import release_watcher as release_watcher_operation
 from .sqlite_watcher_ops import supervisor_binding as supervisor_binding_operation
+from .sqlite_watcher_ops import supervisor_bindings as supervisor_bindings_operation
+from .sqlite_watcher_ops import supervision_owner as supervision_owner_operation
+from .sqlite_watcher_ops import begin_shotcaller_turn as begin_shotcaller_turn_operation
+from .sqlite_watcher_ops import commit_shotcaller_turn as commit_shotcaller_turn_operation
+from .sqlite_watcher_ops import abort_shotcaller_turn as abort_shotcaller_turn_operation
 from .sqlite_watcher_ops import watcher_registration as watcher_registration_operation
 from .sqlite_watcher_ops import apply_supervision_delivery_policy as apply_supervision_delivery_policy_operation
 from .sqlite_watcher_ops import champion_stop_decision as champion_stop_decision_operation
@@ -3376,6 +3381,29 @@ class SQLiteStorage(SQLiteTransactionCore):
 
     def supervisor_binding(self, callsign: Optional[str] = None) -> dict[str, Any]:
         return supervisor_binding_operation(self, callsign)
+
+    def supervisor_bindings(
+        self, *, limit: int = 64
+    ) -> tuple[dict[str, Any], ...]:
+        return supervisor_bindings_operation(self, limit=limit)
+
+    def supervision_owner(self, actor_agent_id: str) -> Optional[str]:
+        return supervision_owner_operation(self, actor_agent_id)
+
+    def begin_shotcaller_turn(
+        self, actor_agent_id: str, turn_token: str, at: str
+    ) -> dict[str, Any]:
+        return begin_shotcaller_turn_operation(self, actor_agent_id, turn_token, at)
+
+    def commit_shotcaller_turn(
+        self, actor_agent_id: str, turn_token: str, at: str
+    ) -> dict[str, Any]:
+        return commit_shotcaller_turn_operation(self, actor_agent_id, turn_token, at)
+
+    def abort_shotcaller_turn(
+        self, actor_agent_id: str, turn_token: str, at: str
+    ) -> dict[str, Any]:
+        return abort_shotcaller_turn_operation(self, actor_agent_id, turn_token, at)
 
     def watcher_registration(
         self, actor_agent_id: str

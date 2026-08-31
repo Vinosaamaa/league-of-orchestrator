@@ -72,6 +72,7 @@ class LegacyDisplayReconciliationSpec:
     expected_state_change_seq: int | None
     target_task_label: str
     owner_authorized: bool
+    expected_agent_status: str | None = None
 
 
 class HerdrLegacyDisplayAdapter:
@@ -119,9 +120,14 @@ class HerdrLegacyDisplayAdapter:
         authority = _session_source(agent)
         sequence = agent.get("state_change_seq")
         worktree = str(Path(spec.worktree).resolve())
+        status_exact = (
+            agent.get("agent_status") == spec.expected_agent_status
+            if spec.expected_agent_status is not None
+            else agent.get("agent_status") in LIVE_STATUSES
+        )
         exact = bool(
             agent.get("agent") == "codex"
-            and agent.get("agent_status") in LIVE_STATUSES
+            and status_exact
             and agent.get("name") == spec.routing_name
             and agent.get("pane_id") == spec.pane_id
             and agent.get("terminal_id") == spec.terminal_id
@@ -156,6 +162,8 @@ class HerdrLegacyDisplayAdapter:
             "state_change_seq": sequence,
             "tokens_digest": _digest(token_map),
         }
+        if spec.expected_agent_status is not None:
+            projection["endpoint_status"] = spec.expected_agent_status
         return projection, token_map
 
     def _matches_expected(
@@ -178,7 +186,7 @@ class HerdrLegacyDisplayAdapter:
         observation: Mapping[str, Any],
     ) -> dict[str, Any]:
         target = f"{spec.callsign} · {spec.target_task_label}"
-        return {
+        receipt = {
             "schema": "league.legacy-display-reconciliation.v1",
             "reconciliation_id": reconciliation_id,
             "assignment_id": spec.assignment_id,
@@ -193,6 +201,10 @@ class HerdrLegacyDisplayAdapter:
             "terminal_title": target,
             "observation_digest": _digest(observation),
         }
+        if spec.expected_agent_status is not None:
+            receipt["schema"] = "league.legacy-display-reconciliation.v2"
+            receipt["endpoint_status"] = spec.expected_agent_status
+        return receipt
 
     def _reconciliation_tokens(
         self,
@@ -486,6 +498,10 @@ class HerdrLegacyDisplayAdapter:
             and tokens.get("legacy_display_source") == receipt.get("source")
             and tokens.get("legacy_display_applies_to")
             == receipt.get("applies_to_source")
+            and (
+                spec.expected_agent_status is None
+                or receipt.get("endpoint_status") == spec.expected_agent_status
+            )
         )
         if not exact:
             raise StorageRefusal(

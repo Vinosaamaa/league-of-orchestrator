@@ -2961,14 +2961,14 @@ def _assign_reconcile_legacy_display(
     expected = _decode_json(
         args.expected_presentation_json, "legacy display expected presentation"
     )
-    if not isinstance(expected, dict) or set(expected) != {
-        "source",
-        "title",
-        "state_change_seq",
-    }:
+    expected_keys = set(expected) if isinstance(expected, dict) else set()
+    if not isinstance(expected, dict) or expected_keys not in (
+        {"source", "title", "state_change_seq"},
+        {"source", "title", "state_change_seq", "agent_status"},
+    ):
         raise StorageRefusal(
             "legacy_display_invalid",
-            "expected presentation must contain only source, title, and state_change_seq",
+            "expected presentation must contain source, title, state_change_seq, and optional agent_status",
         )
     expected_source = expected["source"]
     expected_title = expected["title"]
@@ -2989,6 +2989,7 @@ def _assign_reconcile_legacy_display(
         expected_state_change_seq=expected_sequence,
         target_task_label=args.target_task_label,
         owner_authorized=args.owner_authorized or args.mode_action is not None,
+        expected_agent_status=expected.get("agent_status"),
     )
     return LegacyDisplayReconciliationService(
         store, HerdrLegacyDisplayAdapter(), _ProvidedClock(args.at)

@@ -194,6 +194,7 @@ class FakeHerdrRunner:
         self.wrong_thread = wrong_thread
         self.delayed_context_title_reads = delayed_context_title_reads
         self.routing_name = routing_name
+        self.agent_status = "idle"
         self.started = False
         self.session_reported = False
         self.closed = False
@@ -213,7 +214,7 @@ class FakeHerdrRunner:
         thread = "not-a-thread" if self.wrong_thread else THREAD_ID
         agent = {
             "agent": "codex",
-            "agent_status": "idle",
+            "agent_status": self.agent_status,
             "interactive_ready": True,
             "cwd": self.worktree,
             "foreground_cwd": self.worktree,
@@ -258,6 +259,7 @@ class FakeHerdrRunner:
     def active_copy(self) -> "FakeHerdrRunner":
         copied = FakeHerdrRunner(Path(self.worktree), routing_name=self.routing_name)
         copied.started = True
+        copied.agent_status = self.agent_status
         copied.title = self.title
         copied.tokens = dict(self.tokens)
         copied.metadata_source = self.metadata_source
@@ -1027,6 +1029,282 @@ def test_legacy_active_champion_display_is_reconciled_once_with_exact_receipt(
         assert exc.code == "legacy_display_ambiguous"
     else:
         raise AssertionError("malformed legacy final history escaped controlled refusal")
+    store.close()
+
+
+def test_retained_done_legacy_champion_reconciles_without_reactivating_endpoint(
+    root: Path,
+) -> None:
+    store, clock, worktree = _context(root, "retained-done-display")
+    store.connection.execute(
+        "INSERT INTO callsigns(callsign,pool_role,enabled,pool_position,last_released_at) VALUES('Shaco','champion',1,99,NULL)"
+    )
+    store.connection.execute(
+        "INSERT INTO callsign_queue(callsign,pool_role,queue_position,state,reservation_assignment_id,version,updated_at) VALUES('Shaco','champion',-1,'available',NULL,1,?)",
+        (clock.now(),),
+    )
+    options = _options(root)
+    launch_runner = FakeHerdrRunner(worktree, routing_name="shaco")
+    launch = VisibleChampionLaunchService(
+        store, _adapter(options, launch_runner, store), options, clock
+    ).launch(_spec(worktree, "retained-done-display"))
+    assignment_id = str(launch["assignment_id"])
+    receipt = store.assignment_launch_context(assignment_id)["acceptance_receipt"]
+    context_event = store.connection.execute(
+        "SELECT event_id,detail_json FROM events WHERE aggregate_id=? AND event_type='assignment_context_delivered'",
+        (assignment_id,),
+    ).fetchone()
+    context_detail = json.loads(context_event["detail_json"])
+    context_detail.pop("display_receipt")
+    store.connection.execute(
+        "UPDATE events SET detail_json=? WHERE event_id=?",
+        (
+            json.dumps(context_detail, sort_keys=True, separators=(",", ":")),
+            context_event["event_id"],
+        ),
+    )
+    task_id = store.connection.execute(
+        "SELECT task_id FROM task_assignments WHERE task_assignment_id=?",
+        (assignment_id,),
+    ).fetchone()["task_id"]
+    store.connection.execute(
+        "UPDATE tasks SET state='ready_to_land',version=version+1,updated_at=? WHERE task_id=?",
+        (clock.now(), task_id),
+    )
+
+    runner = launch_runner.active_copy()
+    runner.agent_status = "done"
+    runner.metadata_source = "herdr:codex"
+    runner.state_change_seq += 1
+    runner.title = "Prepare handshake only"
+    runner.tokens = {
+        "callsign": "Prepare",
+        "sidebar_name": "Prepare handshake only",
+        "thread_title": "Prepare handshake only",
+        "status_marker": "retained",
+        "user_accent": "keep-me",
+    }
+    spec = LegacyDisplayReconciliationSpec(
+        assignment_id=assignment_id,
+        expected_version=int(launch["version"]),
+        champion_agent_id=LUX_ID,
+        runtime_instance_id=str(launch["runtime_instance_id"]),
+        callsign="Shaco",
+        pane_id=str(receipt["endpoint"]),
+        terminal_id="term_test_99",
+        thread_id=str(receipt["thread_id"]),
+        worktree=str(worktree.resolve()),
+        routing_name="shaco",
+        expected_presentation_source="herdr:codex",
+        expected_title="Prepare handshake only",
+        expected_state_change_seq=runner.state_change_seq,
+        target_task_label="Broker Repair",
+        owner_authorized=True,
+        expected_agent_status="done",
+    )
+    service = LegacyDisplayReconciliationService(
+        store,
+        HerdrLegacyDisplayAdapter(
+            runner,
+            environment={"HERDR_ENV": "1", "HERDR_WORKSPACE_ID": "w1"},
+        ),
+        clock,
+    )
+    calls_before = len(runner.calls)
+
+    result = service.reconcile(spec)
+
+    assert result["state"] == "reconciled"
+    assert result["receipt"]["endpoint_status"] == "done"
+    assert runner.agent_status == "done"
+    assert runner.routing_name == "shaco"
+    assert runner.title == "Shaco · Broker Repair"
+    assert runner.tokens["sidebar_name"] == "Shaco"
+    assert runner.tokens["thread_title"] == "Shaco · Broker Repair"
+    assert runner.tokens["status_marker"] == "retained"
+    assert runner.tokens["user_accent"] == "keep-me"
+    effect_calls = runner.calls[calls_before:]
+    assert len(
+        [
+            call
+            for call in effect_calls
+            if call[:3] == ("herdr", "pane", "report-metadata")
+        ]
+    ) == 1
+    assert not any(
+        call[:3]
+        in {
+            ("herdr", "agent", "prompt"),
+            ("herdr", "agent", "start"),
+            ("herdr", "pane", "close"),
+        }
+        for call in effect_calls
+    )
+    canonical = store.connection.execute(
+        "SELECT a.state assignment_state,r.status runtime_status,c.state callsign_state "
+        "FROM task_assignments a "
+        "JOIN runtime_instances r ON r.runtime_instance_id=a.runtime_instance_id "
+        "JOIN callsign_assignments c ON c.callsign_assignment_id='callsign-assignment:'||a.task_assignment_id "
+        "WHERE a.task_assignment_id=?",
+        (assignment_id,),
+    ).fetchone()
+    assert dict(canonical) == {
+        "assignment_state": "active",
+        "runtime_status": "active",
+        "callsign_state": "active",
+    }
+    durable = store.assignment_launch_context(assignment_id)[
+        "legacy_display_reconciliation"
+    ]
+    assert durable["intent"]["expected_agent_status"] == "done"
+    assert durable["intent"]["canonical_lifecycle"] == "terminal"
+    assert durable["receipt"] == result["receipt"]
+    assert {
+        row["status"]
+        for row in store.connection.execute(
+            "SELECT status FROM events WHERE aggregate_id=? AND event_type IN ('assignment_legacy_display_reconciliation_intent','assignment_legacy_display_reconciled')",
+            (assignment_id,),
+        ).fetchall()
+    } == {"completed"}
+    reports_before_retry = len(
+        [call for call in runner.calls if call[:3] == ("herdr", "pane", "report-metadata")]
+    )
+    retry = service.reconcile(spec)
+    assert retry["receipt"] == result["receipt"]
+    assert retry["idempotent"] is True
+    assert len(
+        [call for call in runner.calls if call[:3] == ("herdr", "pane", "report-metadata")]
+    ) == reports_before_retry
+    assert runner.agent_status == "done"
+    store.close()
+
+
+def test_retained_done_reconciliation_requires_settled_task_and_active_callsign(
+    root: Path,
+) -> None:
+    store, clock, worktree, launch, receipt, runner = _prepared_legacy_display(
+        root, "retained-done-authority"
+    )
+    runner.agent_status = "done"
+    spec = replace(
+        _legacy_reconciliation_spec(launch, receipt, worktree, runner),
+        expected_agent_status="done",
+    )
+    service = LegacyDisplayReconciliationService(
+        store,
+        HerdrLegacyDisplayAdapter(
+            runner,
+            environment={"HERDR_ENV": "1", "HERDR_WORKSPACE_ID": "w1"},
+        ),
+        clock,
+    )
+
+    try:
+        service.reconcile(spec)
+    except StorageRefusal as exc:
+        assert exc.code == "legacy_display_lifecycle_unsettled"
+    else:
+        raise AssertionError("provider-done endpoint bypassed canonical task settlement")
+    assert not any(
+        call[:3] == ("herdr", "pane", "report-metadata") for call in runner.calls
+    )
+    assert store.assignment_launch_context(str(launch["assignment_id"]))[
+        "legacy_display_reconciliation"
+    ] is None
+
+    task_id = store.connection.execute(
+        "SELECT task_id FROM task_assignments WHERE task_assignment_id=?",
+        (launch["assignment_id"],),
+    ).fetchone()["task_id"]
+    store.connection.execute(
+        "UPDATE tasks SET state='completed',version=version+1,updated_at=? WHERE task_id=?",
+        (clock.now(), task_id),
+    )
+    store.connection.execute(
+        "UPDATE callsign_assignments SET state='released',released_at=? WHERE callsign_assignment_id=?",
+        (clock.now(), f"callsign-assignment:{launch['assignment_id']}"),
+    )
+    try:
+        service.reconcile(spec)
+    except StorageRefusal as exc:
+        assert exc.code == "legacy_display_conflict"
+    else:
+        raise AssertionError("retained-done repair accepted a released callsign")
+    assert not any(
+        call[:3] == ("herdr", "pane", "report-metadata") for call in runner.calls
+    )
+    assert store.assignment_launch_context(str(launch["assignment_id"]))[
+        "legacy_display_reconciliation"
+    ] is None
+    store.close()
+
+
+class RetainedDoneStatusRaceRunner(FakeHerdrRunner):
+    def __init__(self, worktree: Path) -> None:
+        super().__init__(worktree)
+        self.started = True
+        self.agent_status = "done"
+        self.get_reads = 0
+
+    def run(
+        self, arguments, *, timeout_seconds: int = 30
+    ) -> subprocess.CompletedProcess[str]:
+        command = tuple(arguments)
+        if command[:3] == ("herdr", "agent", "get"):
+            self.get_reads += 1
+            if self.get_reads == 2:
+                self.agent_status = "idle"
+                self.state_change_seq += 1
+        return super().run(arguments, timeout_seconds=timeout_seconds)
+
+
+def test_retained_done_reconciliation_refuses_status_race_before_effect(
+    root: Path,
+) -> None:
+    store, clock, worktree, launch, receipt, prepared = _prepared_legacy_display(
+        root, "retained-done-status-race"
+    )
+    task_id = store.connection.execute(
+        "SELECT task_id FROM task_assignments WHERE task_assignment_id=?",
+        (launch["assignment_id"],),
+    ).fetchone()["task_id"]
+    store.connection.execute(
+        "UPDATE tasks SET state='ready_to_land',version=version+1,updated_at=? WHERE task_id=?",
+        (clock.now(), task_id),
+    )
+    runner = RetainedDoneStatusRaceRunner(worktree)
+    runner.routing_name = prepared.routing_name
+    runner.title = prepared.title
+    runner.tokens = dict(prepared.tokens)
+    runner.metadata_source = prepared.metadata_source
+    runner.state_change_seq = prepared.state_change_seq
+    spec = replace(
+        _legacy_reconciliation_spec(launch, receipt, worktree, runner),
+        expected_agent_status="done",
+    )
+    service = LegacyDisplayReconciliationService(
+        store,
+        HerdrLegacyDisplayAdapter(
+            runner,
+            environment={"HERDR_ENV": "1", "HERDR_WORKSPACE_ID": "w1"},
+        ),
+        clock,
+    )
+
+    try:
+        service.reconcile(spec)
+    except StorageRefusal as exc:
+        assert exc.code == "legacy_display_identity_unverified"
+    else:
+        raise AssertionError("retained-done status race reached a metadata effect")
+    assert not any(
+        call[:3] == ("herdr", "pane", "report-metadata") for call in runner.calls
+    )
+    assert runner.title == prepared.title
+    assert runner.tokens == prepared.tokens
+    assert store.assignment_launch_context(str(launch["assignment_id"]))[
+        "legacy_display_reconciliation"
+    ]["receipt"] is None
     store.close()
 
 
@@ -2102,6 +2380,9 @@ def main() -> None:
         test_active_retry_requires_migration18_issue_binding(root)
         test_active_retry_refuses_changed_owner_issue_before_title_read(root)
         test_legacy_active_champion_display_is_reconciled_once_with_exact_receipt(root)
+        test_retained_done_legacy_champion_reconciles_without_reactivating_endpoint(root)
+        test_retained_done_reconciliation_requires_settled_task_and_active_callsign(root)
+        test_retained_done_reconciliation_refuses_status_race_before_effect(root)
         test_legacy_display_reconciliation_refuses_user_title_race_before_write(root)
         test_legacy_display_compare_and_set_does_not_overwrite_last_window_user_title(root)
         test_legacy_display_reconciliation_refuses_modern_receipt_before_live_write(root)

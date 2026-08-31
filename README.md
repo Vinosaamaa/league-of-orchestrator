@@ -39,7 +39,10 @@ Nothing here installs files, changes hooks, or connects to live Roster state.
   settled post-context callsign/task title restoration bound to the exact
   metadata source and sequence, deterministic two-word display-task defaults,
   and one owner-authorized sequence-fenced League-overlay reconciliation for
-  exact active pre-fix Champions without modern title receipts,
+  exact active pre-fix Champions without modern title receipts. The same
+  receipt-bound command admits a retained provider endpoint reporting `done`
+  only after the canonical task is terminal, and preserves that terminal
+  status while repairing presentation without closing or reactivating it,
   source-bound transition outbox delivery, unique recipient effects, and fair
   backlog draining.
 - One role-aware bounded Shotcaller Stop decision with ordinary-message

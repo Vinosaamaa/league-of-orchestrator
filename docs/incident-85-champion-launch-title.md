@@ -89,8 +89,9 @@ league --state-root <canonical-root> assign reconcile-legacy-display \
   --target-task-label <exact-two-word-label> --owner-authorized --at <timestamp>
 ```
 
-The presentation JSON has exactly three fields: `source`, `title`, and the
-integer `state_change_seq`. Extra, missing, or differently typed fields refuse.
+The presentation JSON normally has exactly three fields: `source`, `title`,
+and the integer `state_change_seq`. A retained endpoint may add only
+`"agent_status":"done"`; no other status or extra field is accepted.
 
 The store first appends one immutable intent after proving that the canonical
 assignment/runtime/route are exact, that only one live runtime matches, and
@@ -116,6 +117,28 @@ The operation does not create, replace, stop, or clean a runtime; allocate or
 release a callsign; create layout; register a Squad; or mutate task progress.
 It patches only display keys owned by this recovery and preserves every
 unrelated metadata token.
+
+### Retained-done classification
+
+A pre-fix Champion may finish at the provider while League deliberately retains
+its pane, route, runtime row, assignment, and callsign. That endpoint is not an
+active worker and must not be made to look active merely to repair its stale
+handshake title. The retained-done v2 intent is therefore available only when
+the exact canonical assignment and callsign assignment are still active, one
+verified runtime binds the same agent/thread/pane/generation, the route and
+physical worktree remain exact, the task is already in a terminal state, and
+the legacy context contains no modern display receipt. If the task is not yet
+terminal, reconciliation refuses with `legacy_display_lifecycle_unsettled`;
+the ordinary durable task transition must settle lifecycle first.
+
+The v2 intent records the terminal lifecycle class and expected provider status
+`done`. The final receipt binds that same status to the stable source, title,
+sequence, and observation digest. Metadata repair does not prompt, start,
+close, rename, or resume the endpoint, and the final canonical events use a
+completed status instead of claiming active work. Two fresh observations still
+fence the effect, unrelated tokens are preserved, modern ownership metadata or
+identity drift refuses, and exact retry revalidates the stored receipt without
+a second report.
 
 Shotcaller bootstrap applies a corresponding read boundary: current-pane and
 agent-inventory queries may retry malformed JSON up to three attempts each, but

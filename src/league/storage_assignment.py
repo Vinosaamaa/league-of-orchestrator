@@ -61,6 +61,7 @@ class LegacyDisplayReconciliationCommand:
     target_task_label: str
     owner_authorized: bool
     at: str
+    expected_agent_status: Optional[str] = None
 
 
 class AssignmentStorage(Protocol):

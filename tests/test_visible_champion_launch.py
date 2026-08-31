@@ -1421,6 +1421,7 @@ class UserTitleAtCompareAndSetRunner(FakeHerdrRunner):
             self.source_sequences["user-selected"] = self.state_change_seq
             self.title = "User selected title"
             self.tokens["user_note"] = "preserve"
+            self.tokens["orchestrator_role"] = "champion"
         return completed
 
 

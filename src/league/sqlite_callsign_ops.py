@@ -52,6 +52,7 @@ SHOTCALLER_BASELINE_V1_KEYS = {
     "title",
 }
 SHOTCALLER_BASELINE_V2_KEYS = SHOTCALLER_BASELINE_V1_KEYS | {"presentation_source"}
+_SHOTCALLER_ROLE_KEY = ORCHESTRATOR_ROLE_TOKEN
 SHOTCALLER_PUBLICATION_V1_KEYS = {
     "schema",
     "assignment_id",
@@ -116,7 +117,7 @@ def _shotcaller_baseline(value: Mapping[str, Any]) -> dict[str, Any]:
     )
     if (
         not isinstance(value, Mapping)
-        or set(value) != keys
+        or set(value) not in (keys, keys | {_SHOTCALLER_ROLE_KEY})
         or value.get("routing_name") is not None
         or type(value.get("state_change_seq")) is not int
         or value["state_change_seq"] < 0
@@ -145,6 +146,15 @@ def _shotcaller_baseline(value: Mapping[str, Any]) -> dict[str, Any]:
         raise StorageRefusal(
             "bootstrap_baseline_unverified",
             "Shotcaller bootstrap baseline presentation source is invalid",
+        )
+    if _SHOTCALLER_ROLE_KEY in value and value[_SHOTCALLER_ROLE_KEY] not in {
+        None,
+        "shotcaller",
+        "champion",
+    }:
+        raise StorageRefusal(
+            "bootstrap_baseline_unverified",
+            "Shotcaller bootstrap baseline role token is invalid",
         )
     return dict(value)
 
@@ -1731,8 +1741,9 @@ def record_shotcaller_bootstrap(
         "receipt_digest": receipt_digest,
         "idempotent": idempotent,
     }
-    if role_owned:
-        result[ORCHESTRATOR_ROLE_TOKEN] = "shotcaller"
+    # The exact active assignment is the source of role truth.  Historical
+    # creation events may predate this token, but retries still return it.
+    result[ORCHESTRATOR_ROLE_TOKEN] = "shotcaller"
     return result
 
 
@@ -1789,8 +1800,9 @@ def shotcaller_bootstrap_status(store: Any, assignment_id: str) -> Optional[dict
         "receipt_digest": assignment["acceptance_digest"],
         "idempotent": True,
     }
-    if role_owned:
-        result[ORCHESTRATOR_ROLE_TOKEN] = "shotcaller"
+    # Re-read callers have already passed the exact live-assignment checks;
+    # expose canonical role metadata even for pre-token receipts.
+    result[ORCHESTRATOR_ROLE_TOKEN] = "shotcaller"
     return result
 
 

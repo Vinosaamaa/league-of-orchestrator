@@ -491,7 +491,7 @@ class HerdrShotcallerBootstrapAdapter:
                 "shotcaller_identity_unverified", "calling identity was not inspected"
             )
         tokens = self._observed["tokens"]
-        return {
+        baseline = {
             "schema": "league.shotcaller-bootstrap-baseline.v1",
             "terminal_id": self._observed["terminal_id"],
             "endpoint_generation": self._observed["endpoint_generation"],
@@ -501,6 +501,10 @@ class HerdrShotcallerBootstrapAdapter:
             "thread_title": str(tokens.get("thread_title", "")),
             "title": str(self._observed["title"] or ""),
         }
+        prior_role = tokens.get(ORCHESTRATOR_ROLE_TOKEN)
+        if prior_role in {"shotcaller", "champion"}:
+            baseline[ORCHESTRATOR_ROLE_TOKEN] = prior_role
+        return baseline
 
     def use_restoration_baseline(self, baseline: Mapping[str, Any]) -> None:
         if (
@@ -960,7 +964,11 @@ class HerdrShotcallerBootstrapAdapter:
                 expected_tokens = dict(current_tokens)
                 expected_tokens.pop(TITLE_OWNER_TOKEN, None)
                 expected_tokens.pop(TITLE_SOURCE_TOKEN, None)
-                expected_tokens.pop(ORCHESTRATOR_ROLE_TOKEN, None)
+                prior_role = self._restore_baseline.get(ORCHESTRATOR_ROLE_TOKEN)
+                if prior_role in {"shotcaller", "champion"}:
+                    expected_tokens[ORCHESTRATOR_ROLE_TOKEN] = prior_role
+                else:
+                    expected_tokens.pop(ORCHESTRATOR_ROLE_TOKEN, None)
                 restore_tokens: list[tuple[str, str]] = []
                 for key, value in (
                     ("sidebar_name", previous_sidebar),
@@ -993,6 +1001,7 @@ class HerdrShotcallerBootstrapAdapter:
                 ]
                 for key, value in restore_tokens:
                     arguments.extend(("--token", f"{key}={value}"))
+                restore_role = prior_role if prior_role in {"shotcaller", "champion"} else ""
                 arguments.extend(
                     (
                         "--token",
@@ -1000,7 +1009,7 @@ class HerdrShotcallerBootstrapAdapter:
                         "--token",
                         f"{TITLE_SOURCE_TOKEN}=",
                         "--token",
-                        f"{ORCHESTRATOR_ROLE_TOKEN}=",
+                        f"{ORCHESTRATOR_ROLE_TOKEN}={restore_role}",
                         "--seq",
                         str(sequence + 1),
                     )

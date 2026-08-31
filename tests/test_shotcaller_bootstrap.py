@@ -1275,6 +1275,23 @@ def test_completed_bootstrap_retry_refuses_later_provider_title_without_prompt(r
                 assert exc.code in {"receipt_conflict", "receipt_mismatch"}
             else:
                 raise AssertionError("completed bootstrap retry accepted changed identity")
+        # A receipt written before canonical role metadata was introduced is
+        # still a completed Shotcaller, but retry must reverify the live
+        # assignment and return the canonical role rather than role_owned=False.
+        created_event = store.connection.execute(
+            "SELECT detail_json FROM events WHERE event_id=?",
+            (f"shotcaller:{_spec().assignment_id}:created",),
+        ).fetchone()
+        assert created_event is not None
+        legacy_detail = json.loads(created_event["detail_json"])
+        legacy_detail.pop("orchestrator_role", None)
+        store.connection.execute(
+            "UPDATE events SET detail_json=? WHERE event_id=?",
+            (json.dumps(legacy_detail, sort_keys=True, separators=(",", ":")),
+             f"shotcaller:{_spec().assignment_id}:created"),
+        )
+        pre_token_retry = service.bootstrap(_spec())
+        assert pre_token_retry["orchestrator_role"] == "shotcaller"
         runner.metadata_source = "herdr:codex"
         runner.state_change_seq += 1
         runner.title = "Create the Shotcaller for this pane | codex"

@@ -305,7 +305,10 @@ class HerdrLegacyDisplayAdapter:
             exact = bool(
                 observation["presentation_source"] != source
                 and not LEGACY_OWNERSHIP_TOKENS.intersection(tokens)
-                and ORCHESTRATOR_ROLE_TOKEN not in tokens
+                # A newer provider/user presentation may have restored the
+                # durable Champion role token.  Clear only this reconciliation's
+                # ownership tokens; never erase that preserved role truth.
+                and tokens.get(ORCHESTRATOR_ROLE_TOKEN) in {None, "champion"}
             )
             if exact:
                 stable = stable + 1 if current == prior else 1

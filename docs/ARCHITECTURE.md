@@ -190,14 +190,16 @@ The repository-local SQLite path is separately testable:
 20. Exact project roots and full evidence remain classified `local_only`.
     Every remote adapter validates the final rendered bytes with the same
     fail-closed policy immediately before invoking its injected transport.
-21. One service-manager-owned persistent supervisor process multiplexes all
-    active Squad Shotcallers beneath one canonical state root. The root lock and
-    Unix socket are physical-service resources; watcher registration, lease
-    fence, generation, cursor, wake target, Calm policy, recovery, and exact-once
-    delivery remain keyed to one Shotcaller/Squad. An active `request turn`
-    defers attention delivery; after its canonical commit, Stop may hand off to
-    the live fenced registration only when no immediate owner action remains.
-    Waiting and recovery run outside model inference.
+21. Persistent supervision has four independent invariants:
+    - service ownership: one service-manager-owned process, root lock, and Unix
+      socket multiplex all active Squad Shotcallers beneath one canonical root;
+    - binding isolation: watcher registration, lease fence, generation, cursor,
+      wake target, and Calm policy remain keyed to one Shotcaller/Squad;
+    - delivery ordering: an active `request turn` defers attention, and Stop may
+      hand it to the live fenced registration only after canonical commit and
+      only when no immediate owner action remains; and
+    - recovery: exact-once delivery and lost-notification recovery remain
+      per-Shotcaller and execute outside model inference.
 
 `src/agent_watcher.py` does not import `league`. The filesystem baseline is the
 only live writer until issue #23 switches every consumer at one authorized

@@ -11,6 +11,7 @@ import os
 import secrets
 import sys
 import time
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterator
@@ -513,9 +514,22 @@ def _notify_direct_user_priority(
     return notify_user_message(store, actor_id, str(captured["prompt_id"]))
 
 
-def _brokered_hook_context(
+@dataclass(frozen=True)
+class BrokeredHookContext:
+    command: Any
+    payload: Any
+    capture_event_id: Any
+    args: argparse.Namespace
+    actor: Any
+    actor_id: str | None
+    callsign: str | None
+    actor_role: str | None
+    scope: str | None
+
+
+def brokered_hook_context(
     store: SQLiteStorage, hook: dict[str, Any]
-) -> tuple[Any, ...]:
+) -> BrokeredHookContext:
     command = hook.get("command")
     payload = hook.get("payload")
     shotcaller = hook.get("shotcaller")
@@ -538,42 +552,37 @@ def _brokered_hook_context(
     callsign = None if actor is None else str(actor[1])
     actor_role = None if actor is None else str(actor[2])
     scope = None if actor is None else _scope(store, actor_id, str(callsign))
-    return (
-        command,
-        payload,
-        capture_event_id,
-        args,
-        actor,
-        actor_id,
-        callsign,
-        actor_role,
-        scope,
+    return BrokeredHookContext(
+        command=command,
+        payload=payload,
+        capture_event_id=capture_event_id,
+        args=args,
+        actor=actor,
+        actor_id=actor_id,
+        callsign=callsign,
+        actor_role=actor_role,
+        scope=scope,
     )
 
 
-def brokered_hook_actor(store: SQLiteStorage, hook: dict[str, Any]) -> str | None:
-    """Resolve the exact canonical hook actor before selecting a service binding."""
-
-    actor_id = _brokered_hook_context(store, hook)[5]
-    return None if actor_id is None else store.supervision_owner(actor_id)
-
-
 def handle_brokered_hook(
-    store: SQLiteStorage, hook: dict[str, Any]
+    store: SQLiteStorage,
+    hook: dict[str, Any],
+    *,
+    context: BrokeredHookContext | None = None,
 ) -> dict[str, Any]:
     """Execute one validated hook inside the persistent canonical-state owner."""
 
-    (
-        command,
-        payload,
-        capture_event_id,
-        args,
-        actor,
-        actor_id,
-        callsign,
-        actor_role,
-        scope,
-    ) = _brokered_hook_context(store, hook)
+    resolved = context or brokered_hook_context(store, hook)
+    command = resolved.command
+    payload = resolved.payload
+    capture_event_id = resolved.capture_event_id
+    args = resolved.args
+    actor = resolved.actor
+    actor_id = resolved.actor_id
+    callsign = resolved.callsign
+    actor_role = resolved.actor_role
+    scope = resolved.scope
     if command == "codex-stop-hook":
         if actor is None:
             return {"hook_output": {}, "capture": None, "actor_agent_id": None}

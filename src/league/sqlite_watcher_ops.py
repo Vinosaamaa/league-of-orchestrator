@@ -1113,27 +1113,45 @@ def supervisor_bindings(
             "supervisor_binding_invalid",
             "one Shotcaller cannot own multiple active Squad bindings",
         )
+    if not owners:
+        return ()
+    placeholders = ",".join("?" for _ in owner_ids)
+    runtime_rows = store.connection.execute(
+        f"""
+        SELECT actor_agent_id,runtime_instance_id,runtime_generation,
+               backend_kind,endpoint,session_ref
+          FROM runtime_instances
+         WHERE actor_agent_id IN ({placeholders})
+           AND status IN ('active','idle') AND verified=1
+         ORDER BY actor_agent_id,runtime_instance_id
+        """,
+        owner_ids,
+    ).fetchall()
+    scope_rows = store.connection.execute(
+        f"""
+        SELECT actor_agent_id,scope_id,generation FROM watcher_scopes
+         WHERE actor_agent_id IN ({placeholders})
+         ORDER BY actor_agent_id,scope_id
+        """,
+        owner_ids,
+    ).fetchall()
+    runtimes_by_owner: dict[str, list[Any]] = {owner_id: [] for owner_id in owner_ids}
+    scopes_by_owner: dict[str, list[Any]] = {owner_id: [] for owner_id in owner_ids}
+    for runtime in runtime_rows:
+        runtimes_by_owner[str(runtime["actor_agent_id"])].append(runtime)
+    for scope in scope_rows:
+        scopes_by_owner[str(scope["actor_agent_id"])].append(scope)
     bindings: list[dict[str, Any]] = []
     for row in owners:
-        runtimes = store.connection.execute(
-            """
-            SELECT runtime_instance_id,runtime_generation,backend_kind,endpoint,session_ref
-              FROM runtime_instances
-             WHERE actor_agent_id=? AND status IN ('active','idle') AND verified=1
-             ORDER BY runtime_instance_id LIMIT 2
-            """,
-            (row["agent_id"],),
-        ).fetchall()
+        owner_id = str(row["agent_id"])
+        runtimes = runtimes_by_owner[owner_id]
         if len(runtimes) != 1:
             raise StorageRefusal(
                 "supervisor_binding_invalid",
                 "each active Squad requires one exact verified Shotcaller runtime",
             )
         runtime = runtimes[0]
-        scopes = store.connection.execute(
-            "SELECT scope_id,generation FROM watcher_scopes WHERE actor_agent_id=? ORDER BY scope_id LIMIT 2",
-            (row["agent_id"],),
-        ).fetchall()
+        scopes = scopes_by_owner[owner_id]
         if len(scopes) > 1:
             raise StorageRefusal(
                 "supervisor_binding_invalid",

@@ -61,6 +61,10 @@ class WatcherStorage(Protocol):
         self, actor_agent_id: str
     ) -> Optional[dict[str, Any]]: ...
 
+    def watcher_registrations(
+        self, actor_agent_ids: tuple[str, ...], *, limit: int = 64
+    ) -> dict[str, dict[str, Any]]: ...
+
     def watcher_readiness(
         self, actor_agent_id: str
     ) -> Optional[dict[str, Any]]: ...

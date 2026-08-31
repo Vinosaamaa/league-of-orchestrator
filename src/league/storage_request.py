@@ -161,6 +161,14 @@ class RequestStorage(Protocol):
         at: str,
     ) -> dict[str, Any]: ...
 
+    def commit_interactive_request_turn(
+        self,
+        owner_agent_id: str,
+        turn_token: str,
+        actions: tuple[AnswerRequestCommand | RequestResultCommand, ...],
+        at: str,
+    ) -> dict[str, Any]: ...
+
     def request_turn_boundary(self, owner_agent_id: str) -> dict[str, Any]: ...
 
     def reconcile_duplicate_request(

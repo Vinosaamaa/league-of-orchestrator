@@ -85,6 +85,7 @@ from .sqlite_watcher_ops import begin_shotcaller_turn as begin_shotcaller_turn_o
 from .sqlite_watcher_ops import commit_shotcaller_turn as commit_shotcaller_turn_operation
 from .sqlite_watcher_ops import abort_shotcaller_turn as abort_shotcaller_turn_operation
 from .sqlite_watcher_ops import watcher_registration as watcher_registration_operation
+from .sqlite_watcher_ops import watcher_registrations as watcher_registrations_operation
 from .sqlite_watcher_ops import apply_supervision_delivery_policy as apply_supervision_delivery_policy_operation
 from .sqlite_watcher_ops import champion_stop_decision as champion_stop_decision_operation
 from .sqlite_watcher_ops import configure_supervision_policy as configure_supervision_policy_operation
@@ -2999,6 +3000,19 @@ class SQLiteStorage(SQLiteTransactionCore):
 
         return commit_request_turn(self, owner_agent_id, actions, at)
 
+    def commit_interactive_request_turn(
+        self,
+        owner_agent_id: str,
+        turn_token: str,
+        actions: tuple[Any, ...],
+        at: str,
+    ) -> dict[str, Any]:
+        from .sqlite_request_ops import commit_interactive_request_turn
+
+        return commit_interactive_request_turn(
+            self, owner_agent_id, turn_token, actions, at
+        )
+
     def request_turn_boundary(self, owner_agent_id: str) -> dict[str, Any]:
         from .sqlite_request_ops import request_turn_boundary
 
@@ -3409,6 +3423,13 @@ class SQLiteStorage(SQLiteTransactionCore):
         self, actor_agent_id: str
     ) -> Optional[dict[str, Any]]:
         return watcher_registration_operation(self, actor_agent_id)
+
+    def watcher_registrations(
+        self, actor_agent_ids: tuple[str, ...], *, limit: int = 64
+    ) -> dict[str, dict[str, Any]]:
+        return watcher_registrations_operation(
+            self, actor_agent_ids, limit=limit
+        )
 
     def watcher_readiness(
         self, actor_agent_id: str

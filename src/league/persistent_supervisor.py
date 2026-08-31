@@ -472,18 +472,18 @@ class PersistentSupervisor:
             return self._user_priority_generation
 
     def _publish_user_priority(self, actor_agent_id: str) -> None:
-        with self._priority_lock:
-            self._user_priority_generation += 1
-            self.user_priority.set()
         with self._fence_lock:
             state = self._bindings.get(actor_agent_id)
             if state is None:
                 raise SupervisorUnavailable(
                     "user priority does not name an active Shotcaller binding"
                 )
-            state["user_priority_generation"] = (
-                int(state.get("user_priority_generation", 0)) + 1
-            )
+            with self._priority_lock:
+                state["user_priority_generation"] = (
+                    int(state.get("user_priority_generation", 0)) + 1
+                )
+                self._user_priority_generation += 1
+                self.user_priority.set()
 
     def _submit(self, function: Callable[..., Any], *args: Any) -> bool:
         executor = self._executor
@@ -615,7 +615,18 @@ class PersistentSupervisor:
     def _assert_fenced_registration(
         self, store: Any, state: dict[str, Any], fence: int
     ) -> None:
-        registration = store.watcher_registration(state["actor_agent_id"])
+        registrations = store.watcher_registrations(
+            (str(state["actor_agent_id"]),)
+        )
+        registration = registrations.get(str(state["actor_agent_id"]))
+        self._validate_fenced_registration(state, fence, registration)
+
+    def _validate_fenced_registration(
+        self,
+        state: dict[str, Any],
+        fence: int,
+        registration: dict[str, Any] | None,
+    ) -> None:
         if (
             registration is None
             or registration["watcher_id"] != state["watcher_id"]
@@ -628,6 +639,19 @@ class PersistentSupervisor:
             raise StorageRefusal(
                 "watcher_fenced",
                 "persistent supervisor no longer owns the exact live watcher lease",
+            )
+
+    def _assert_fenced_registrations(
+        self, store: Any, states: tuple[dict[str, Any], ...]
+    ) -> None:
+        registrations = store.watcher_registrations(
+            tuple(str(state["actor_agent_id"]) for state in states)
+        )
+        for state in states:
+            self._validate_fenced_registration(
+                state,
+                int(state["fence"]),
+                registrations.get(str(state["actor_agent_id"])),
             )
 
     def _release(self) -> None:
@@ -670,10 +694,7 @@ class PersistentSupervisor:
                     )
                 )
             with self.store_factory(self.state_root) as store:
-                for state in states:
-                    self._assert_fenced_registration(
-                        store, state, int(state["fence"])
-                    )
+                self._assert_fenced_registrations(store, states)
             self._response(
                 connection,
                 {
@@ -1247,14 +1268,11 @@ class PersistentSupervisor:
 def supervisor_status(state_root: Path, callsign: str | None = None) -> dict[str, Any]:
     with SQLiteStorage(state_root) as store:
         bindings = store.supervisor_bindings()
-        registrations = {
-            binding["actor_agent_id"]: store.watcher_registration(
-                binding["actor_agent_id"]
-            )
-            for binding in bindings
-        }
+        registrations = store.watcher_registrations(
+            tuple(str(binding["actor_agent_id"]) for binding in bindings)
+        )
     if callsign is None and len(bindings) > 1:
-        missing = any(
+        missing = len(registrations) != len(bindings) or any(
             registration is None
             or not str(registration["wake_locator"]).startswith("unix:")
             for registration in registrations.values()
@@ -1292,7 +1310,7 @@ def supervisor_status(state_root: Path, callsign: str | None = None) -> dict[str
         }
     with SQLiteStorage(state_root) as store:
         binding = store.supervisor_binding(callsign)
-        registration = registrations[binding["actor_agent_id"]]
+        registration = registrations.get(str(binding["actor_agent_id"]))
         policy = store.supervision_policy(binding["actor_agent_id"])
     base = {
         "schema": "league.supervisor-status.v1",

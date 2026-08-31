@@ -3346,6 +3346,7 @@ SCHEMA_INVENTORY = (
     "league-mode-status.schema.json",
     "league-mode-action-receipt.schema.json",
     "league-protected-gate-receipt.schema.json",
+    "league-supervisor-service-status.schema.json",
     "league-repository-issue.schema.json",
     "league-issue-selection-receipt.schema.json",
 )
@@ -3653,15 +3654,15 @@ def _run_interactive_request_turn(
                 "turn commit input must contain only an actions array",
             )
         commit_at = _turn_time(args.at)
-        committed = store.commit_request_turn(
+        committed = store.commit_interactive_request_turn(
             args.owner_agent_id,
+            turn_token,
             _turn_commit_actions(
                 commit_payload["actions"], commit_at, new_requests, begun
             ),
             commit_at,
         )
         request_state_committed = True
-        store.commit_shotcaller_turn(args.owner_agent_id, turn_token, commit_at)
         return (
             {
                 "phase": "committed",

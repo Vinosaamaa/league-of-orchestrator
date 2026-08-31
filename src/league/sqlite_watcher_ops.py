@@ -229,15 +229,10 @@ def ensure_watcher_scope(
     *,
     block_on_obligations: Optional[bool],
 ) -> None:
-    rows = store.connection.execute(
-        """
-        SELECT scope_id,actor_agent_id FROM watcher_scopes
-         WHERE scope_id=? OR actor_agent_id=?
-         ORDER BY scope_id LIMIT 2
-        """,
-        (scope_id, actor_agent_id),
-    ).fetchall()
-    if not rows:
+    row = store.connection.execute(
+        "SELECT actor_agent_id FROM watcher_scopes WHERE scope_id=?", (scope_id,)
+    ).fetchone()
+    if row is None:
         store.connection.execute(
             """
             INSERT INTO watcher_scopes
@@ -250,44 +245,12 @@ def ensure_watcher_scope(
             """,
             (scope_id, actor_agent_id, int(True if block_on_obligations is None else block_on_obligations)),
         )
-        return
-    row = rows[0]
-    if (
-        len(rows) != 1
-        or row["scope_id"] != scope_id
-        or row["actor_agent_id"] not in {None, actor_agent_id}
-    ):
-        raise StorageRefusal(
-            "scope_conflict",
-            "watcher scope and Shotcaller require one exact binding",
-        )
-    assignments = (
-        "actor_agent_id=?"
-        if block_on_obligations is None
-        else "actor_agent_id=?,block_on_obligations=?"
-    )
-    parameters = (
-        (actor_agent_id, scope_id, actor_agent_id)
-        if block_on_obligations is None
-        else (
-            actor_agent_id,
-            int(block_on_obligations),
-            scope_id,
-            actor_agent_id,
-        )
-    )
-    changed = store.connection.execute(
-        f"""
-        UPDATE watcher_scopes SET {assignments}
-         WHERE scope_id=? AND (actor_agent_id IS NULL OR actor_agent_id=?)
-        """,
-        parameters,
-    )
-    if changed.rowcount != 1:
-        raise StorageRefusal(
-            "scope_conflict",
-            "watcher scope identity changed before exact binding",
-            retryable=True,
+    elif row["actor_agent_id"] not in {None, actor_agent_id}:
+        raise StorageRefusal("scope_conflict", "watcher scope belongs to another Shotcaller")
+    elif block_on_obligations is not None:
+        store.connection.execute(
+            "UPDATE watcher_scopes SET actor_agent_id=?,block_on_obligations=? WHERE scope_id=?",
+            (actor_agent_id, int(block_on_obligations), scope_id),
         )
 
 
@@ -1290,16 +1253,13 @@ def begin_shotcaller_turn(
                 store, scope_id, actor_agent_id, block_on_obligations=None
             )
             scope = store.connection.execute(
-                """
-                SELECT scope_id,actor_agent_id,metadata_json FROM watcher_scopes
-                 WHERE scope_id=? AND actor_agent_id=?
-                """,
-                (scope_id, actor_agent_id),
+                "SELECT scope_id,actor_agent_id,metadata_json FROM watcher_scopes WHERE actor_agent_id=?",
+                (actor_agent_id,),
             ).fetchone()
             if scope is None:
                 raise StorageRefusal(
                     "shotcaller_turn_conflict",
-                    "Shotcaller turn begin requires one exact owner scope",
+                    "Shotcaller turn commit requires an active turn scope",
                 )
             metadata = _scope_metadata(scope)
             existing = _shotcaller_turn(metadata)
@@ -1476,6 +1436,36 @@ def watcher_registration(
         (actor_agent_id,),
     ).fetchone()
     return None if row is None else dict(row)
+
+
+def watcher_registrations(
+    store: Any, actor_agent_ids: tuple[str, ...], *, limit: int = 64
+) -> dict[str, dict[str, Any]]:
+    """Batch one bounded registration snapshot for aggregate service status."""
+
+    if (
+        not 0 <= len(actor_agent_ids) <= limit <= 256
+        or len(set(actor_agent_ids)) != len(actor_agent_ids)
+        or any(not actor_agent_id for actor_agent_id in actor_agent_ids)
+    ):
+        raise StorageRefusal(
+            "supervisor_binding_invalid",
+            "aggregate watcher status requires unique bounded actor identities",
+        )
+    if not actor_agent_ids:
+        return {}
+    placeholders = ",".join("?" for _ in actor_agent_ids)
+    rows = store.connection.execute(
+        f"""
+        SELECT watcher_id,actor_agent_id,runtime_instance_id,wake_locator,
+               leased_until,fence,registered_at
+          FROM watcher_registrations
+         WHERE actor_agent_id IN ({placeholders})
+         ORDER BY actor_agent_id
+        """,
+        actor_agent_ids,
+    ).fetchall()
+    return {str(row["actor_agent_id"]): dict(row) for row in rows}
 
 
 def watcher_readiness(
@@ -1864,16 +1854,24 @@ def stop_decision(
             terminal_fresh = scope["last_terminal_generation"] != terminal_generation
             policy = _policy_from_scope(scope)
             turn = _shotcaller_turn(_scope_metadata(scope))
-            immediate_counts = _paused_actionable_counts(store, actor_agent_id)
+            turn_active = turn is not None and turn.get("active") is True
+            paused_calm = (
+                policy["mode"] == "calm" and policy["runtime_state"] == "paused"
+            )
+            immediate_counts = (
+                _paused_actionable_counts(store, actor_agent_id)
+                if turn_active or paused_calm
+                else {}
+            )
             if (
-                turn is not None
-                and turn.get("active") is True
+                turn_active
+                and turn is not None
                 and turn.get("committed") is not True
             ):
                 immediate_counts["turn_commit_pending"] = 1
             if (
-                turn is not None
-                and turn.get("active") is True
+                turn_active
+                and turn is not None
                 and turn.get("committed") is True
                 and policy["runtime_state"] == "supervising"
                 and sum(immediate_counts.values()) == 0
@@ -1931,10 +1929,10 @@ def stop_decision(
                     }
             effective_counts = (
                 immediate_counts
-                if policy["mode"] == "calm" and policy["runtime_state"] == "paused"
+                if paused_calm
                 else _obligation_counts(store, actor_agent_id)
             )
-            if turn is not None and turn.get("active") is True and turn.get("committed") is not True:
+            if turn_active and turn is not None and turn.get("committed") is not True:
                 effective_counts["turn_commit_pending"] = 1
             total = sum(effective_counts.values())
             if effective_counts.get("unresolved_requests", 0) or effective_counts.get(

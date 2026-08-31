@@ -965,8 +965,16 @@ class HerdrShotcallerBootstrapAdapter:
                 expected_tokens.pop(TITLE_OWNER_TOKEN, None)
                 expected_tokens.pop(TITLE_SOURCE_TOKEN, None)
                 prior_role = self._restore_baseline.get(ORCHESTRATOR_ROLE_TOKEN)
-                if prior_role in {"shotcaller", "champion"}:
-                    expected_tokens[ORCHESTRATOR_ROLE_TOKEN] = prior_role
+                current_role = current_tokens.get(ORCHESTRATOR_ROLE_TOKEN)
+                restore_role = (
+                    prior_role
+                    if prior_role in {"shotcaller", "champion"}
+                    else current_role
+                    if current_role == "champion"
+                    else None
+                )
+                if restore_role in {"shotcaller", "champion"}:
+                    expected_tokens[ORCHESTRATOR_ROLE_TOKEN] = restore_role
                 else:
                     expected_tokens.pop(ORCHESTRATOR_ROLE_TOKEN, None)
                 restore_tokens: list[tuple[str, str]] = []
@@ -1001,7 +1009,7 @@ class HerdrShotcallerBootstrapAdapter:
                 ]
                 for key, value in restore_tokens:
                     arguments.extend(("--token", f"{key}={value}"))
-                restore_role = prior_role if prior_role in {"shotcaller", "champion"} else ""
+                restore_role = restore_role if restore_role in {"shotcaller", "champion"} else ""
                 arguments.extend(
                     (
                         "--token",

@@ -1934,6 +1934,34 @@ def test_legacy_display_refuses_malformed_modern_receipt(root: Path) -> None:
     store.close()
 
 
+def test_legacy_display_refuses_malformed_agent_status_without_type_error(root: Path) -> None:
+    store, clock, worktree, launch, receipt, runner = _prepared_legacy_display(
+        root, "legacy-malformed-agent-status"
+    )
+    spec = replace(
+        _legacy_reconciliation_spec(launch, receipt, worktree, runner),
+        expected_agent_status=["done"],
+    )
+    service = LegacyDisplayReconciliationService(
+        store,
+        HerdrLegacyDisplayAdapter(
+            runner,
+            environment={"HERDR_ENV": "1", "HERDR_WORKSPACE_ID": "w1"},
+        ),
+        clock,
+    )
+    try:
+        service.reconcile(spec)
+    except StorageRefusal as exc:
+        assert exc.code == "legacy_display_invalid"
+    else:
+        raise AssertionError("malformed agent_status was not refused")
+    assert not any(
+        call[:3] == ("herdr", "pane", "report-metadata") for call in runner.calls
+    )
+    store.close()
+
+
 def test_legacy_display_refuses_missing_acceptance_worktree(root: Path) -> None:
     store, clock, worktree, launch, receipt, runner = _prepared_legacy_display(
         root, "legacy-missing-worktree"
@@ -2465,6 +2493,7 @@ def main() -> None:
         test_legacy_display_readback_refuses_expected_plus_two_receipt(root)
         test_legacy_display_interrupted_effect_refuses_newer_sequence(root)
         test_legacy_display_refuses_malformed_modern_receipt(root)
+        test_legacy_display_refuses_malformed_agent_status_without_type_error(root)
         test_legacy_display_refuses_missing_acceptance_worktree(root)
         test_post_context_title_restoration_refuses_unowned_metadata(root)
         test_active_retry_refuses_newer_user_metadata(root)

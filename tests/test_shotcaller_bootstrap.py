@@ -23,7 +23,7 @@ from league.shotcaller_bootstrap import (  # noqa: E402
     ShotcallerBootstrapSpec,
 )
 from league.sqlite_handoff_schema import SHOTCALLER_SEED, SHUFFLE_VERSION  # noqa: E402
-from league.presentation import orchestrator_role_tokens  # noqa: E402
+from league.presentation import ORCHESTRATOR_ROLE_TOKEN, orchestrator_role_tokens  # noqa: E402
 from league.sqlite_store import SQLiteStorage  # noqa: E402
 from league.storage import StorageRefusal  # noqa: E402
 from lifecycle_fakes import FakeClock  # noqa: E402
@@ -279,6 +279,7 @@ class UserTitleAfterPublishHerdr(RecordingHerdr):
         self.metadata_source = "user-selected"
         self.state_change_seq += 1
         self.title = "User selected title"
+        self.tokens[ORCHESTRATOR_ROLE_TOKEN] = "champion"
 
 
 class ProviderPresentationAfterPublishHerdr(RecordingHerdr):
@@ -3981,7 +3982,7 @@ def test_bootstrap_rolls_back_without_overwriting_newer_user_title(root: Path) -
     assert runner.name is None
     assert runner.metadata_source == "user-selected"
     assert runner.title == "User selected title"
-    assert runner.tokens == {"user_badge": "favorite"}
+    assert runner.tokens == {"user_badge": "favorite", "orchestrator_role": "champion"}
     metadata_calls = [
         call
         for call in runner.calls
@@ -4000,7 +4001,7 @@ def test_bootstrap_rolls_back_without_overwriting_newer_user_title(root: Path) -
         "thread_title=",
         "shotcaller_title_owner=",
         "shotcaller_title_source=",
-        "orchestrator_role=",
+        "orchestrator_role=champion",
     }
     assert not any(
         call[:3]

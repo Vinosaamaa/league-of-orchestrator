@@ -2973,6 +2973,11 @@ def _assign_reconcile_legacy_display(
     expected_source = expected["source"]
     expected_title = expected["title"]
     expected_sequence = expected["state_change_seq"]
+    if "agent_status" in expected and expected["agent_status"] != "done":
+        raise StorageRefusal(
+            "legacy_display_invalid",
+            "expected presentation agent_status must be done",
+        )
     spec = LegacyDisplayReconciliationSpec(
         assignment_id=args.assignment_id,
         expected_version=args.expected_version,

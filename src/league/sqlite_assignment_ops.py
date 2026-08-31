@@ -1815,7 +1815,10 @@ def _validate_legacy_display_command(
         or " ".join(command.target_task_label.split()) != command.target_task_label
         or len(command.target_task_label) > 48
         or command.routing_name != command.callsign.lower()
-        or command.expected_agent_status not in {None, "done"}
+        or (
+            command.expected_agent_status is not None
+            and command.expected_agent_status != "done"
+        )
     ):
         raise StorageRefusal(
             "legacy_display_invalid",

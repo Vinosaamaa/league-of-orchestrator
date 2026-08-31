@@ -23,7 +23,7 @@ from league.persistent_supervisor import (  # noqa: E402
 )
 from league.canonical_delivery import dispatch_event  # noqa: E402
 from league.sqlite_handoff_schema import SHOTCALLER_SEED, SHUFFLE_VERSION  # noqa: E402
-from league.storage import RuntimeRegistrationCommand  # noqa: E402
+from league.storage import RuntimeRegistrationCommand, StorageRefusal  # noqa: E402
 from lifecycle_fakes import FakeDeliveryAdapter  # noqa: E402
 from request_lifecycle_fixture import (  # noqa: E402
     GAREN_RUNTIME_TWO,
@@ -520,6 +520,28 @@ def test_active_turn_persists_attention_without_duplicate_wake(root: Path) -> No
     assert not thread.is_alive() and not errors
 
 
+def test_shotcaller_scope_identity_cannot_alias_an_existing_binding(root: Path) -> None:
+    _, store = _multisquad_state(root, "scope-conflict")
+    store.begin_shotcaller_turn(
+        SHOTCALLER_ID, "turn-token:scope-conflict", "2026-01-01T00:02:00Z"
+    )
+    try:
+        store.stop_decision(
+            "watcher:forged-garen",
+            SHOTCALLER_ID,
+            "terminal:scope-conflict",
+            "2026-01-01T00:02:01Z",
+        )
+    except StorageRefusal as exc:
+        assert exc.code == "scope_conflict"
+    else:  # pragma: no cover - fail-closed contract
+        raise AssertionError("a Shotcaller accepted a second watcher scope")
+    store.abort_shotcaller_turn(
+        SHOTCALLER_ID, "turn-token:scope-conflict", "2026-01-01T00:02:02Z"
+    )
+    store.close()
+
+
 def test_committed_turn_stop_hands_pending_attention_to_supervisor(root: Path) -> None:
     state, store = _multisquad_state(root, "stop-handoff")
     delivery = FakeDeliveryAdapter()
@@ -595,6 +617,9 @@ def main() -> None:
         test_brokered_prompt_resolves_and_wakes_only_its_shotcaller(Path(temporary))
         test_calm_pause_and_delivery_targets_are_isolated_per_squad(Path(temporary))
         test_active_turn_persists_attention_without_duplicate_wake(Path(temporary))
+        test_shotcaller_scope_identity_cannot_alias_an_existing_binding(
+            Path(temporary)
+        )
         test_committed_turn_stop_hands_pending_attention_to_supervisor(Path(temporary))
     print("PASS: one persistent service multiplexes isolated Shotcaller bindings")
 

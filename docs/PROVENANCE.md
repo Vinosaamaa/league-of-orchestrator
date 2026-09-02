@@ -1238,6 +1238,10 @@ participated in the A-to-B transaction matrix. The registered Cursor adapter now
 covers predecessor and successor success, launch-crash recovery, post-switch
 compensation, retirement, and exactly-once handoff. Third, the canonical
 pre-tool hook path now proves the same open-replacement refusal for Codex, Pi,
-and Cursor. Fourth, Pi descriptor settlement no longer branches in core
-storage: the Pi adapter emits bounded declarative actions and storage executes
-them atomically. A synthetic non-Pi adapter exercises that same descriptor seam.
+and Cursor. Fourth, Pi owns its bounded descriptor storage transaction while
+core validates the exact operation, assignment, participant, and source adapter
+before invoking it atomically. Cross-assignment, cross-adapter, and
+cross-operation probes refuse before an adapter callback; no non-Pi descriptor
+lifecycle is claimed. Launch-gap recovery also retains the replacement fence
+when no exact staged successor can be bound, because absence of a routing name
+does not prove that a pre-start pane or tab was never created.

@@ -77,7 +77,7 @@ class RuntimeReplacementService:
             ),
         }
 
-    def _descriptor_actions(
+    def _descriptor_transactions(
         self,
         *,
         prepared: Mapping[str, Any],
@@ -86,26 +86,30 @@ class RuntimeReplacementService:
         successor_receipt: Mapping[str, Any] | None,
         phase: str,
         activated: bool,
-    ) -> tuple[Mapping[str, Any], ...]:
+    ) -> tuple[Any, ...]:
         common = {
             "phase": phase,
             "operation_id": str(prepared["operation_id"]),
             "assignment_id": str(prepared["assignment_id"]),
             "activated": activated,
         }
-        predecessor_actions = predecessor_adapter.replacement_descriptor_actions(
-            participant="predecessor",
-            target=prepared["predecessor"],
-            **common,
+        predecessor_transactions = (
+            predecessor_adapter.replacement_descriptor_transactions(
+                participant="predecessor",
+                target=prepared["predecessor"],
+                **common,
+            )
         )
-        successor_actions = successor_adapter.replacement_descriptor_actions(
-            participant="successor",
-            target=self._target(prepared["successor"], successor_receipt),
-            **common,
+        successor_transactions = (
+            successor_adapter.replacement_descriptor_transactions(
+                participant="successor",
+                target=self._target(prepared["successor"], successor_receipt),
+                **common,
+            )
         )
         if phase == "rollback":
-            return tuple((*successor_actions, *predecessor_actions))
-        return tuple((*predecessor_actions, *successor_actions))
+            return tuple((*successor_transactions, *predecessor_transactions))
+        return tuple((*predecessor_transactions, *successor_transactions))
 
     def _dispatch_completed(self, result: Mapping[str, Any]) -> dict[str, Any]:
         event_id = result.get("event_id") or result.get("handoff_event_id")
@@ -149,17 +153,12 @@ class RuntimeReplacementService:
         successor_receipt: Mapping[str, Any] | None,
         driver: Any | None,
         activated: bool,
-        successor_absence_verified: bool = False,
     ) -> dict[str, Any]:
         # A missing receipt after the launch effect began is not evidence that
         # no successor exists.  Recovery ambiguity must retain the canonical
         # fence and an open recovery obligation until the native endpoint is
         # proven absent or can be bound exactly.
-        if (
-            successor_receipt is None
-            and driver is None
-            and not successor_absence_verified
-        ):
+        if successor_receipt is None and driver is None:
             return self.store.record_runtime_replacement_recovery(
                 str(prepared["operation_id"]),
                 int(prepared["version"]),
@@ -168,7 +167,7 @@ class RuntimeReplacementService:
                 self.clock.now(),
             )
         route_rollback_verified = route_receipt is None
-        successor_cleanup_verified = successor_absence_verified
+        successor_cleanup_verified = False
         try:
             if route_receipt is not None:
                 route_rollback = multiplexer.replacement_route_rollback(
@@ -205,7 +204,7 @@ class RuntimeReplacementService:
                 possible_receipt = getattr(driver, "launch_receipt", None)
                 if isinstance(possible_receipt, Mapping):
                     descriptor_receipt = possible_receipt
-            descriptor_actions = self._descriptor_actions(
+            descriptor_transactions = self._descriptor_transactions(
                 prepared=prepared,
                 predecessor_adapter=predecessor,
                 successor_adapter=successor_adapter,
@@ -248,7 +247,7 @@ class RuntimeReplacementService:
             str(prepared["intent_digest"]),
             self._failure_code(failure),
             receipt,
-            descriptor_actions,
+            descriptor_transactions,
             self.clock.now(),
         )
 
@@ -395,7 +394,6 @@ class RuntimeReplacementService:
                             successor_receipt=None,
                             driver=None,
                             activated=False,
-                            successor_absence_verified=True,
                         )
                 successor_target = self._target(
                     prepared["successor"], successor_receipt
@@ -460,7 +458,7 @@ class RuntimeReplacementService:
                     successor_provider_kind=prepared["successor"]["provider_kind"],
                     successor_process_names=successor_adapter.process_names,
                 )
-                descriptor_actions = self._descriptor_actions(
+                descriptor_transactions = self._descriptor_transactions(
                     prepared=prepared,
                     predecessor_adapter=predecessor_adapter,
                     successor_adapter=successor_adapter,
@@ -473,7 +471,7 @@ class RuntimeReplacementService:
                     int(prepared["version"]),
                     str(prepared["intent_digest"]),
                     route_receipt,
-                    descriptor_actions,
+                    descriptor_transactions,
                     self.clock.now(),
                 )
                 prepared = {

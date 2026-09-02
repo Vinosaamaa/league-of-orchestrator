@@ -5,7 +5,7 @@ from ..base import (
     DeclaredAgentAdapter,
     native_assignment,
     native_presentation,
-    no_replacement_descriptor_actions,
+    no_replacement_descriptor_transactions,
 )
 from ..core import declared_lifecycle_operations
 
@@ -125,5 +125,5 @@ def adapter() -> DeclaredAgentAdapter:
         _deliver,
         _presentation,
         native_assignment,
-        no_replacement_descriptor_actions,
+        no_replacement_descriptor_transactions,
     )

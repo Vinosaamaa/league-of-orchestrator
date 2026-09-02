@@ -315,9 +315,10 @@ ambiguous recovery remains a durable obligation. The successor receives its
 handoff outbox only after verified predecessor retirement, and canonical delivery
 deduplicates the effect. Direct Codex-to-Cursor-CLI and Cursor-CLI-to-Codex,
 Codex-to-Pi, Pi-to-Codex, and Pi provider changes all exercise the same A-to-B
-contract; none is a special core path. Adapter-authored descriptor transitions
-execute inside the canonical ownership transaction without provider branches
-in storage.
+contract; none is a special core path. Adapter-owned descriptor transactions
+execute inside the canonical ownership transaction. Core validates their exact
+operation, assignment, participant, and source adapter; Pi-specific descriptor
+queries remain inside the Pi adapter's storage facade.
 
 Issue #66's inline-triage, candidate-inventory, persistent-supervision, and
 measured source-only boundaries are in the

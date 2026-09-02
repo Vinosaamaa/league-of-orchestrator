@@ -6,6 +6,7 @@ from __future__ import annotations
 import tempfile
 import hashlib
 import json
+from dataclasses import dataclass
 from pathlib import Path
 import subprocess
 import sys
@@ -27,6 +28,9 @@ from league.request_services import AssignmentService, AssignmentSpec  # noqa: E
 from league.runtime_replacement import (  # noqa: E402
     RuntimeReplacementService,
     RuntimeReplacementSpec,
+)
+from league.sqlite_runtime_replacement_ops import (  # noqa: E402
+    _apply_descriptor_transactions,
 )
 from league.storage import StorageRefusal  # noqa: E402
 from lifecycle_fakes import FakeDeliveryAdapter, FakeIds, issue_bound_spec  # noqa: E402
@@ -68,6 +72,7 @@ class HerdrRouteCompensationRunner:
         cwd = str(root.resolve())
         self.list_calls = 0
         self.effects: list[tuple[str, ...]] = []
+        self.orphaned_placements: dict[str, dict[str, str]] = {}
         self.agents = {
             "pane:a": {
                 "workspace_id": "w1",
@@ -303,14 +308,39 @@ class RealCursorReplacementDriver:
 class FakeAgentAdapter:
     def __init__(self, kind: str, providers: frozenset[str]) -> None:
         self.kind = kind
-        self.contract = SimpleNamespace(kind=kind, capabilities=frozenset({"create", "exit"}))
+        self.contract = SimpleNamespace(
+            kind=kind, capabilities=frozenset({"create", "exit"})
+        )
         self.lifecycle_operations = frozenset({"replacement"})
         self.provider_kinds = providers
-        self.hook_profile = {}
+        self.provider_aliases: dict[str, str] = {}
+        self.native_events = {
+            "synthetic-prompt": "prompt_intake",
+            "synthetic-pre-tool": "pre_tool_authorization",
+            "synthetic-stop": "stop_supervision",
+        }
+        self.hook_profile = {
+            operation: {
+                "command": f"{kind}-{operation}",
+                "native_event": native_event,
+                "hook_event": native_event,
+                "session_field": "session_ref",
+                "source_field": "source_event_key",
+            }
+            for operation, native_event in (
+                ("prompt_intake", "synthetic-prompt"),
+                ("pre_tool_authorization", "synthetic-pre-tool"),
+                ("stop_supervision", "synthetic-stop"),
+            )
+        }
         self.visible_launch_factory = self.visible_launch
         self.delivery_handler = lambda **_inputs: None
         self.presentation_factory = lambda **inputs: inputs
-        self.native_events = {}
+        self.assignment_factory = lambda _store, row: row["assignment_id"]
+        self.replacement_descriptor_factory = self._descriptor_factory
+        self.multiplexer_requirements = {
+            "replacement": frozenset({"runtime_replacement"})
+        }
         self.multiplexer: FakeMultiplexer
         self.process_names = frozenset({kind})
         self.launches = 0
@@ -320,6 +350,9 @@ class FakeAgentAdapter:
 
     def accepts_provider(self, provider_kind: str) -> bool:
         return provider_kind in self.provider_kinds
+
+    def normalize_provider(self, provider_kind: str) -> str:
+        return self.provider_aliases.get(provider_kind, provider_kind)
 
     def visible_launch(self, **inputs: Any) -> ReplacementDriver:
         return ReplacementDriver(self, inputs["launch"], inputs["store"])
@@ -360,10 +393,13 @@ class FakeAgentAdapter:
             target=target,
         )
 
-    def replacement_descriptor_actions(self, **inputs: Any) -> tuple[Mapping[str, Any], ...]:
+    def _descriptor_factory(self, **inputs: Any) -> tuple[Any, ...]:
         if self.descriptor_delegate is None:
             return ()
         return self.descriptor_delegate(**inputs)
+
+    def replacement_descriptor_transactions(self, **inputs: Any) -> tuple[Any, ...]:
+        return self._descriptor_factory(**inputs)
 
     # Registry validation only requires advertised methods.  These hooks keep
     # this fixture deliberately narrower than a production lifecycle adapter.
@@ -685,13 +721,13 @@ def service_fixture(
     agents = AgentAdapterRegistry()
     codex = FakeAgentAdapter("codex", frozenset({"codex"}))
     pi = FakeAgentAdapter("pi", frozenset({"codex", "cursor"}))
-    pi.descriptor_delegate = pi_adapter().replacement_descriptor_actions
+    pi.descriptor_delegate = pi_adapter().replacement_descriptor_transactions
     for adapter in (codex, pi):
         adapter.multiplexer = mux
-        agents._adapters[adapter.kind] = adapter
+        agents.register(adapter)
     for adapter in extra_adapters:
         adapter.multiplexer = mux
-        agents._adapters[adapter.kind] = adapter
+        agents.register(adapter)
     cursor = cursor_cli_adapter()
     agents.register(cursor)
     multiplexers = MultiplexerAdapterRegistry()
@@ -704,6 +740,24 @@ def service_fixture(
         codex,
         pi,
         cursor,
+    )
+
+
+def real_recovery_service_fixture(store: Any, clock: Any, mux: Any):
+    agents = AgentAdapterRegistry()
+    predecessor = FakeAgentAdapter("codex", frozenset({"codex"}))
+    predecessor.multiplexer = mux
+    agents.register(predecessor)
+    agents.register(pi_adapter())
+    agents.register(cursor_cli_adapter())
+    multiplexers = MultiplexerAdapterRegistry()
+    multiplexers.register(mux)
+    return RuntimeReplacementService(
+        store,
+        agents,
+        multiplexers,
+        clock,
+        delivery_adapter=FakeDeliveryAdapter(),
     )
 
 
@@ -857,20 +911,51 @@ def test_crash_boundaries_resume_without_duplicate_native_effects(root: Path) ->
 
 
 def test_herdr_unverified_launch_gap_stays_fenced(root: Path) -> None:
-    cases = ("ambiguous", "wrong-session", "wrong-process")
-    for case in cases:
-        case_root = root / case
+    cases = (
+        ("pi", "cursor", "orphan-after-placement"),
+        ("cursor", "cursor", "orphan-after-placement"),
+        ("pi", "cursor", "ambiguous"),
+        ("pi", "cursor", "wrong-session"),
+        ("pi", "cursor", "wrong-process"),
+        ("pi", "cursor", "wrong-provider"),
+        ("cursor", "cursor", "wrong-cwd"),
+    )
+    for successor_kind, successor_provider, case in cases:
+        case_root = root / f"{successor_kind}-{case}"
         case_root.mkdir(parents=True)
         store, clock, assignment, agent, task, worktree = active_fixture(
             case_root, "codex", "codex"
         )
         spec = replacement_spec(
-            assignment, agent, task, worktree, "pi", "cursor", f"gap-{case}"
+            assignment,
+            agent,
+            task,
+            worktree,
+            successor_kind,
+            successor_provider,
+            f"gap-{successor_kind}-{case}",
         )
         runner = HerdrRouteCompensationRunner(worktree)
         successor = runner.agents["pane:b"]
         successor["name"] = spec.request["staging_routing_name"]
-        if case == "ambiguous":
+        successor["agent"] = successor_kind
+        successor["display_agent"] = successor_provider
+        successor["process_name"] = (
+            "cursor-agent" if successor_kind == "cursor" else "pi"
+        )
+        successor["agent_session"] = {
+            "value": "session:b",
+            "source": f"herdr:{successor_kind}",
+        }
+        if case == "orphan-after-placement":
+            runner.orphaned_placements["pane:b"] = {
+                "tab_id": str(successor["tab_id"]),
+                "pane_id": str(successor["pane_id"]),
+                "terminal_id": str(successor["terminal_id"]),
+                "cwd": str(successor["cwd"]),
+            }
+            del runner.agents["pane:b"]
+        elif case == "ambiguous":
             duplicate = {
                 **successor,
                 "tab_id": "tab:c",
@@ -881,10 +966,15 @@ def test_herdr_unverified_launch_gap_stays_fenced(root: Path) -> None:
             runner.agents["pane:c"] = duplicate
         elif case == "wrong-session":
             successor["agent_session"] = {"value": "", "source": "herdr:pi"}
-        else:
+        elif case == "wrong-process":
             successor["process_name"] = "unexpected-provider-process"
+        elif case == "wrong-provider":
+            successor["display_agent"] = "codex"
+        elif case == "wrong-cwd":
+            successor["cwd"] = str(case_root.resolve())
+            successor["foreground_cwd"] = str(case_root.resolve())
         multiplexer = HerdrMultiplexerAdapter(runner=runner, binary="herdr")
-        service, _, pi, _ = service_fixture(store, clock, multiplexer)
+        service = real_recovery_service_fixture(store, clock, multiplexer)
 
         prepared = store.prepare_runtime_replacement(spec.request, clock.now())
         launching = store.begin_runtime_replacement_effect(
@@ -904,8 +994,12 @@ def test_herdr_unverified_launch_gap_stays_fenced(root: Path) -> None:
             (assignment["task_assignment_id"],),
         ).fetchone()
         assert tuple(canonical) == (LUX_ID, assignment["runtime_instance_id"])
-        assert pi.launches == 0 and runner.effects == []
-        assert "pane:b" in runner.agents
+        assert runner.effects == []
+        assert (
+            "pane:b" in runner.orphaned_placements
+            if case == "orphan-after-placement"
+            else "pane:b" in runner.agents
+        )
         obligation = store.connection.execute(
             "SELECT state FROM obligations WHERE kind='runtime_replacement' AND aggregate_id=?",
             (spec.request["operation_id"],),
@@ -925,8 +1019,12 @@ def test_herdr_unverified_launch_gap_stays_fenced(root: Path) -> None:
         retry = service.replace(spec)
         assert retry["state"] == "recovery_required", (case, retry)
         assert retry["recovery_state"] == "launching"
-        assert pi.launches == 0 and runner.effects == []
-        assert "pane:b" in runner.agents
+        assert runner.effects == []
+        assert (
+            "pane:b" in runner.orphaned_placements
+            if case == "orphan-after-placement"
+            else "pane:b" in runner.agents
+        )
         store.close()
 
 
@@ -1122,93 +1220,88 @@ def test_post_switch_retirement_failure_compensates_to_predecessor(root: Path) -
         store.close()
 
 
-def test_non_pi_adapter_descriptor_plan_is_atomic(root: Path) -> None:
+@dataclass
+class ProbeDescriptorTransaction:
+    source_adapter: str
+    phase: str
+    participant: str
+    operation_id: str
+    assignment_id: str
+    schema: str = "league.runtime-replacement-descriptor-transaction.v1"
+    applied: bool = False
+
+    def apply(self, _store: Any, *, at: str) -> None:
+        assert at
+        self.applied = True
+
+
+def test_descriptor_transaction_binding_refuses_cross_scope(root: Path) -> None:
     store, clock, assignment, agent, task, worktree = active_fixture(
-        root, "synthetic", "synthetic"
-    )
-    descriptor_id = "descriptor:synthetic-replacement"
-    descriptor = {"schema": "synthetic.descriptor.v1", "owner": agent["agent_id"]}
-    with store._transaction():
-        store.connection.execute(
-            """
-            INSERT INTO provider_launch_descriptors
-              (descriptor_id,assignment_id,runtime_kind,provider_kind,role,
-               placement,launch_mode,cwd,parent_session_id,parent_session_path,
-               session_id,session_path,workspace_id,tab_id,pane_id,terminal_id,
-               state,descriptor_json,descriptor_digest,launch_receipt_json,
-               version,created_at,updated_at)
-            VALUES(?,?,'pi','codex','champion','new_tab','create',?,NULL,NULL,
-                   ?,?,'w1','tab:synthetic','pane:synthetic','terminal:synthetic',
-                   'active',?,?,NULL,1,?,?)
-            """,
-            (
-                descriptor_id,
-                assignment["task_assignment_id"],
-                str(worktree.resolve()),
-                str(uuid.uuid5(uuid.NAMESPACE_URL, descriptor_id)),
-                agent["thread_id"],
-                json.dumps(descriptor, sort_keys=True, separators=(",", ":")),
-                hashlib.sha256(
-                    json.dumps(
-                        descriptor, sort_keys=True, separators=(",", ":")
-                    ).encode()
-                ).hexdigest(),
-                clock.now(),
-                clock.now(),
-            ),
-        )
-
-    synthetic = FakeAgentAdapter("synthetic", frozenset({"synthetic"}))
-
-    def descriptor_actions(**inputs: Any) -> tuple[Mapping[str, Any], ...]:
-        if inputs["participant"] != "predecessor":
-            return ()
-        if inputs["phase"] == "activation":
-            states = ("active", "blocked")
-        elif inputs["phase"] == "rollback" and inputs["activated"]:
-            states = ("blocked", "active")
-        else:
-            return ()
-        return ({
-            "schema": "league.runtime-replacement-descriptor-action.v1",
-            "source_adapter": "synthetic",
-            "action": "transition",
-            "descriptor_id": descriptor_id,
-            "assignment_id": inputs["assignment_id"],
-            "session_ref": inputs["target"]["session_ref"],
-            "from_state": states[0],
-            "to_state": states[1],
-            "required": True,
-        },)
-
-    synthetic.descriptor_delegate = descriptor_actions
-    mux = FakeMultiplexer()
-    mux.native[LUX_ID] = {
-        "agent_id": LUX_ID,
-        "runtime_instance_id": assignment["runtime_instance_id"],
-        "session_ref": agent["thread_id"],
-        "endpoint": agent["address"],
-        "runtime_generation": "generation:synthetic:1",
-        "cwd": agent["worktree"],
-        "routing_name": agent["routing_name"],
-        "provider_kind": "synthetic",
-        "adapter_kind": "synthetic",
-    }
-    mux.fail_retirement = True
-    service, _, _, _ = service_fixture(
-        store, clock, mux, extra_adapters=(synthetic,)
+        root, "codex", "codex"
     )
     spec = replacement_spec(
-        assignment, agent, task, worktree,
-        "codex", "codex", "synthetic-descriptor",
+        assignment, agent, task, worktree, "pi", "cursor", "descriptor-binding"
     )
-    result = service.replace(spec)
-    assert result["state"] == "rolled_back", result
-    descriptor_row = store.connection.execute(
-        "SELECT state,version FROM provider_launch_descriptors WHERE descriptor_id=?",
-        (descriptor_id,),
+    store.prepare_runtime_replacement(spec.request, clock.now())
+    row = store.connection.execute(
+        "SELECT * FROM runtime_replacements WHERE operation_id=?",
+        (spec.request["operation_id"],),
     ).fetchone()
-    assert tuple(descriptor_row) == ("active", 3)
+    assert row is not None
+    intent = json.loads(row["intent_json"])
+
+    valid = ProbeDescriptorTransaction(
+        "codex",
+        "activation",
+        "predecessor",
+        spec.request["operation_id"],
+        assignment["task_assignment_id"],
+    )
+    with store._transaction():
+        _apply_descriptor_transactions(
+            store, (valid,), row, intent, "activation", clock.now()
+        )
+    assert valid.applied is True
+
+    for label, transaction in (
+        (
+            "cross-assignment",
+            ProbeDescriptorTransaction(
+                "codex",
+                "activation",
+                "predecessor",
+                spec.request["operation_id"],
+                "assignment:other",
+            ),
+        ),
+        (
+            "cross-adapter",
+            ProbeDescriptorTransaction(
+                "pi",
+                "activation",
+                "predecessor",
+                spec.request["operation_id"],
+                assignment["task_assignment_id"],
+            ),
+        ),
+        (
+            "cross-operation",
+            ProbeDescriptorTransaction(
+                "codex",
+                "activation",
+                "predecessor",
+                "replacement:other",
+                assignment["task_assignment_id"],
+            ),
+        ),
+    ):
+        refused(
+            lambda transaction=transaction: _apply_descriptor_transactions(
+                store, (transaction,), row, intent, "activation", clock.now()
+            ),
+            "runtime_replacement_descriptor_invalid",
+        )
+        assert transaction.applied is False, label
     store.close()
 
 
@@ -1244,9 +1337,9 @@ def main() -> None:
         rollback = root / "rollback"
         rollback.mkdir()
         test_post_switch_retirement_failure_compensates_to_predecessor(rollback)
-        synthetic_descriptor = root / "synthetic-descriptor"
-        synthetic_descriptor.mkdir()
-        test_non_pi_adapter_descriptor_plan_is_atomic(synthetic_descriptor)
+        descriptor_binding = root / "descriptor-binding"
+        descriptor_binding.mkdir()
+        test_descriptor_transaction_binding_refuses_cross_scope(descriptor_binding)
         unsupported = root / "unsupported"
         unsupported.mkdir()
         test_unsupported_successor_pair_refuses_before_canonical_write(unsupported)

@@ -6,6 +6,7 @@ from ...provider_lifecycle import ProviderLifecycle
 from ...storage_types import StorageRefusal
 from ..base import DeclaredAgentAdapter, deliver_via_multiplexer
 from ..core import declared_lifecycle_operations
+from .descriptor import replacement_descriptor_transactions
 
 
 def _launch_arguments(
@@ -232,63 +233,6 @@ def _pi_presentation(
     }
 
 
-def _replacement_descriptor_actions(
-    *,
-    phase: str,
-    participant: str,
-    operation_id: str,
-    assignment_id: str,
-    target: Mapping[str, Any],
-    activated: bool,
-) -> tuple[Mapping[str, Any], ...]:
-    """Describe Pi launch-descriptor state changes for atomic core execution."""
-
-    session_ref = target.get("session_ref")
-    common = {
-        "schema": "league.runtime-replacement-descriptor-action.v1",
-        "source_adapter": "pi",
-        "assignment_id": assignment_id,
-        "session_ref": session_ref if isinstance(session_ref, str) and session_ref else None,
-    }
-    if phase == "activation" and participant == "predecessor":
-        return ({
-            **common,
-            "action": "transition",
-            "descriptor_id": None,
-            "from_state": "active",
-            "to_state": "blocked",
-            "required": True,
-        },)
-    if phase == "activation" and participant == "successor":
-        return ({
-            **common,
-            "action": "verify",
-            "descriptor_id": f"runtime-replacement:{operation_id}",
-            "from_state": "active",
-            "to_state": "active",
-            "required": True,
-        },)
-    if phase == "rollback" and participant == "successor":
-        return ({
-            **common,
-            "action": "transition",
-            "descriptor_id": f"runtime-replacement:{operation_id}",
-            "from_state": "active",
-            "to_state": "blocked",
-            "required": False,
-        },)
-    if phase == "rollback" and participant == "predecessor" and activated:
-        return ({
-            **common,
-            "action": "transition",
-            "descriptor_id": None,
-            "from_state": "blocked",
-            "to_state": "active",
-            "required": True,
-        },)
-    return ()
-
-
 def adapter() -> DeclaredAgentAdapter:
     contract = AdapterContract(
         "pi", "harness", frozenset(HARNESS_CAPABILITIES - {"interrupt"}),
@@ -341,5 +285,5 @@ def adapter() -> DeclaredAgentAdapter:
         deliver_via_multiplexer,
         _presentation,
         _assignment,
-        _replacement_descriptor_actions,
+        replacement_descriptor_transactions,
     )

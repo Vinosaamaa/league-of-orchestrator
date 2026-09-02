@@ -165,115 +165,43 @@ def _requirements(store: Any, assignment_id: str) -> tuple[str, ...]:
     return result
 
 
-def _apply_descriptor_actions(
-    store: Any, actions: tuple[Mapping[str, Any], ...], at: str
+def _apply_descriptor_transactions(
+    store: Any,
+    transactions: tuple[Any, ...],
+    row: Mapping[str, Any],
+    intent: Mapping[str, Any],
+    phase: str,
+    at: str,
 ) -> None:
-    """Execute adapter-authored descriptor transitions inside ownership CAS."""
+    """Invoke validated adapter-owned storage facades inside ownership CAS."""
 
-    if len(actions) > 8:
+    if len(transactions) > 8:
         raise StorageRefusal(
             "runtime_replacement_descriptor_invalid",
-            "runtime replacement descriptor plan is unbounded",
+            "runtime replacement descriptor transaction set is unbounded",
         )
-    required = {
-        "schema",
-        "source_adapter",
-        "action",
-        "descriptor_id",
-        "assignment_id",
-        "session_ref",
-        "from_state",
-        "to_state",
-        "required",
+    expected_adapters = {
+        "predecessor": str(intent["predecessor_adapter_kind"]),
+        "successor": str(row["successor_adapter_kind"]),
     }
-    for value in actions:
-        action = dict(value)
-        descriptor_id = action.get("descriptor_id")
-        session_ref = action.get("session_ref")
+    for transaction in transactions:
+        participant = getattr(transaction, "participant", None)
+        source_adapter = getattr(transaction, "source_adapter", None)
         if (
-            set(action) != required
-            or action.get("schema")
-            != "league.runtime-replacement-descriptor-action.v1"
-            or action.get("action") not in {"verify", "transition"}
-            or not isinstance(action.get("source_adapter"), str)
-            or not SAFE_ID.fullmatch(action["source_adapter"])
-            or not isinstance(action.get("assignment_id"), str)
-            or not SAFE_ID.fullmatch(action["assignment_id"])
-            or (
-                descriptor_id is not None
-                and (
-                    not isinstance(descriptor_id, str)
-                    or not SAFE_ID.fullmatch(descriptor_id)
-                )
-            )
-            or (
-                session_ref is not None
-                and (
-                    not isinstance(session_ref, str)
-                    or not session_ref
-                    or len(session_ref.encode("utf-8")) > 4096
-                )
-            )
-            or (descriptor_id is None and session_ref is None)
-            or action.get("from_state") not in {"active", "blocked"}
-            or action.get("to_state") not in {"active", "blocked"}
-            or not isinstance(action.get("required"), bool)
-            or (
-                action["action"] == "verify"
-                and action["from_state"] != action["to_state"]
-            )
-            or (
-                action["action"] == "transition"
-                and action["from_state"] == action["to_state"]
-            )
+            getattr(transaction, "schema", None)
+            != "league.runtime-replacement-descriptor-transaction.v1"
+            or getattr(transaction, "phase", None) != phase
+            or participant not in expected_adapters
+            or source_adapter != expected_adapters.get(participant)
+            or getattr(transaction, "operation_id", None) != row["operation_id"]
+            or getattr(transaction, "assignment_id", None) != row["assignment_id"]
+            or not callable(getattr(transaction, "apply", None))
         ):
             raise StorageRefusal(
                 "runtime_replacement_descriptor_invalid",
-                "runtime replacement descriptor action is malformed",
+                "runtime replacement descriptor transaction changed canonical ownership",
             )
-        rows = store.connection.execute(
-            """
-            SELECT descriptor_id FROM provider_launch_descriptors
-             WHERE assignment_id=? AND state=?
-               AND (? IS NULL OR descriptor_id=?)
-               AND (? IS NULL OR session_path=?)
-             ORDER BY descriptor_id
-            """,
-            (
-                action["assignment_id"],
-                action["from_state"],
-                descriptor_id,
-                descriptor_id,
-                session_ref,
-                session_ref,
-            ),
-        ).fetchall()
-        if not rows and action["required"] is False:
-            continue
-        if len(rows) != 1:
-            raise StorageRefusal(
-                "runtime_replacement_descriptor_ambiguous",
-                "runtime replacement descriptor action did not bind exactly once",
-            )
-        if action["action"] == "transition":
-            updated = store.connection.execute(
-                """
-                UPDATE provider_launch_descriptors
-                   SET state=?,version=version+1,updated_at=?
-                 WHERE descriptor_id=? AND state=?
-                """,
-                (
-                    action["to_state"],
-                    at,
-                    rows[0]["descriptor_id"],
-                    action["from_state"],
-                ),
-            )
-            if updated.rowcount != 1:
-                raise StorageRefusal(
-                    "runtime_replacement_descriptor_conflict",
-                    "runtime replacement descriptor transition lost its CAS",
-                )
+        transaction.apply(store, at=at)
 
 
 def prepare_runtime_replacement(
@@ -792,7 +720,7 @@ def activate_runtime_replacement(
     expected_version: int,
     intent_digest: str,
     route_receipt: Mapping[str, Any],
-    descriptor_actions: tuple[Mapping[str, Any], ...],
+    descriptor_transactions: tuple[Any, ...],
     at: str,
 ) -> dict[str, Any]:
     """Atomically move all canonical ownership only after B is proven."""
@@ -1061,7 +989,9 @@ def activate_runtime_replacement(
                     row["successor_agent_id"],
                 ),
             )
-            _apply_descriptor_actions(store, descriptor_actions, at)
+            _apply_descriptor_transactions(
+                store, descriptor_transactions, row, intent, "activation", at
+            )
             next_version = expected_version + 1
             store.connection.execute(
                 """
@@ -1406,7 +1336,7 @@ def rollback_runtime_replacement(
     intent_digest: str,
     failure_code: str,
     receipt: Mapping[str, Any],
-    descriptor_actions: tuple[Mapping[str, Any], ...],
+    descriptor_transactions: tuple[Any, ...],
     at: str,
 ) -> dict[str, Any]:
     """Settle a verified pre-switch rollback; A was never mutated canonically."""
@@ -1500,7 +1430,9 @@ def rollback_runtime_replacement(
                         "runtime_replacement_rollback_unverified",
                         "predecessor authority changed before rollback settlement",
                     )
-            _apply_descriptor_actions(store, descriptor_actions, at)
+            _apply_descriptor_transactions(
+                store, descriptor_transactions, row, intent, "rollback", at
+            )
             next_version = expected_version + 1
             store.connection.execute(
                 """

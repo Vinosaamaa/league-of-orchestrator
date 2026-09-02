@@ -71,7 +71,7 @@ def native_assignment(store: Any, row: Mapping[str, Any]) -> str:
     )
 
 
-def no_replacement_descriptor_actions(**_inputs: Any) -> tuple[Mapping[str, Any], ...]:
+def no_replacement_descriptor_transactions(**_inputs: Any) -> tuple[Any, ...]:
     """Default for adapters without a canonical launch-descriptor resource."""
 
     return ()
@@ -188,7 +188,7 @@ class DeclaredAgentAdapter:
             )
         return str(self.assignment_factory(store, row))
 
-    def replacement_descriptor_actions(
+    def replacement_descriptor_transactions(
         self,
         *,
         phase: str,
@@ -197,7 +197,7 @@ class DeclaredAgentAdapter:
         assignment_id: str,
         target: Mapping[str, Any],
         activated: bool,
-    ) -> tuple[Mapping[str, Any], ...]:
+    ) -> tuple[Any, ...]:
         if not callable(self.replacement_descriptor_factory):
             raise StorageRefusal(
                 "runtime_replacement_descriptor_invalid",
@@ -212,16 +212,16 @@ class DeclaredAgentAdapter:
             activated=activated,
         )
         if not isinstance(actions, tuple) or any(
-            not isinstance(action, Mapping)
-            or action.get("source_adapter") != self.contract.kind
-            or action.get("assignment_id") != assignment_id
-            for action in actions
+            getattr(transaction, "source_adapter", None) != self.contract.kind
+            or getattr(transaction, "assignment_id", None) != assignment_id
+            or not callable(getattr(transaction, "apply", None))
+            for transaction in actions
         ):
             raise StorageRefusal(
                 "runtime_replacement_descriptor_invalid",
                 "agent adapter descriptor transition plan is malformed",
             )
-        return tuple(dict(action) for action in actions)
+        return actions
 
     def verify_replacement(
         self,

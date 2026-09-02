@@ -3974,7 +3974,7 @@ class SQLiteStorage(SQLiteTransactionCore):
         expected_version: int,
         intent_digest: str,
         route_receipt: Mapping[str, Any],
-        descriptor_actions: tuple[Mapping[str, Any], ...],
+        descriptor_transactions: tuple[Any, ...],
         at: str,
     ) -> dict[str, Any]:
         return sqlite_runtime_replacement_ops.activate_runtime_replacement(
@@ -3983,7 +3983,7 @@ class SQLiteStorage(SQLiteTransactionCore):
             expected_version,
             intent_digest,
             route_receipt,
-            descriptor_actions,
+            descriptor_transactions,
             at,
         )
 
@@ -4032,7 +4032,7 @@ class SQLiteStorage(SQLiteTransactionCore):
         intent_digest: str,
         failure_code: str,
         receipt: Mapping[str, Any],
-        descriptor_actions: tuple[Mapping[str, Any], ...],
+        descriptor_transactions: tuple[Any, ...],
         at: str,
     ) -> dict[str, Any]:
         return sqlite_runtime_replacement_ops.rollback_runtime_replacement(
@@ -4042,7 +4042,7 @@ class SQLiteStorage(SQLiteTransactionCore):
             intent_digest,
             failure_code,
             receipt,
-            descriptor_actions,
+            descriptor_transactions,
             at,
         )
 

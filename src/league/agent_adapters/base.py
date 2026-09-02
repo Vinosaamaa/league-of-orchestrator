@@ -71,6 +71,12 @@ def native_assignment(store: Any, row: Mapping[str, Any]) -> str:
     )
 
 
+def no_replacement_descriptor_actions(**_inputs: Any) -> tuple[Mapping[str, Any], ...]:
+    """Default for adapters without a canonical launch-descriptor resource."""
+
+    return ()
+
+
 def native_presentation(
     store: Any,
     row: Mapping[str, Any],
@@ -152,6 +158,7 @@ class DeclaredAgentAdapter:
     delivery_handler: Any
     presentation_factory: Any
     assignment_factory: Any
+    replacement_descriptor_factory: Any
 
     def accepts_provider(self, provider_kind: str) -> bool:
         return self.normalize_provider(provider_kind) in self.provider_kinds
@@ -180,6 +187,41 @@ class DeclaredAgentAdapter:
                 "agent adapter has no canonical assignment resolver",
             )
         return str(self.assignment_factory(store, row))
+
+    def replacement_descriptor_actions(
+        self,
+        *,
+        phase: str,
+        participant: str,
+        operation_id: str,
+        assignment_id: str,
+        target: Mapping[str, Any],
+        activated: bool,
+    ) -> tuple[Mapping[str, Any], ...]:
+        if not callable(self.replacement_descriptor_factory):
+            raise StorageRefusal(
+                "runtime_replacement_descriptor_invalid",
+                "agent adapter descriptor transition factory is unavailable",
+            )
+        actions = self.replacement_descriptor_factory(
+            phase=phase,
+            participant=participant,
+            operation_id=operation_id,
+            assignment_id=assignment_id,
+            target=target,
+            activated=activated,
+        )
+        if not isinstance(actions, tuple) or any(
+            not isinstance(action, Mapping)
+            or action.get("source_adapter") != self.contract.kind
+            or action.get("assignment_id") != assignment_id
+            for action in actions
+        ):
+            raise StorageRefusal(
+                "runtime_replacement_descriptor_invalid",
+                "agent adapter descriptor transition plan is malformed",
+            )
+        return tuple(dict(action) for action in actions)
 
     def verify_replacement(
         self,

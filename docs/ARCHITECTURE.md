@@ -265,9 +265,12 @@ Pi, and Cursor CLI keep native provider mechanics in dedicated adapter folders;
 Herdr advertises only its callable transport operations and tmux fails closed
 until its own adapter supplies them. Launch, restored-session reconciliation,
 and active Champion A-to-B replacement select those contracts without a
-provider/multiplexer branch in core policy. Provider model names remain
-configuration data. The source and synthetic acceptance do not claim installed
-or live-runtime portability; issue #23 still owns cutover proof.
+provider/multiplexer branch in core policy. Adapters with a canonical launch
+descriptor emit bounded declarative verify/transition actions; storage validates
+and executes those actions inside the same ownership transaction without
+interpreting the adapter kind. Provider model names remain configuration data.
+The source and synthetic acceptance do not claim installed or live-runtime
+portability; issue #23 still owns cutover proof.
 
 The skill capability matrix selects one pair from the same registered adapter
 matrix, then evaluates orthogonal harness/tool/platform/browser/forge/

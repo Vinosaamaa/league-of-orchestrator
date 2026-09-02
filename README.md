@@ -313,8 +313,11 @@ launch, route-swap, retirement, and handoff boundary before applying it. Exact
 retries adopt a uniquely proven staged successor or compensate to the predecessor;
 ambiguous recovery remains a durable obligation. The successor receives its
 handoff outbox only after verified predecessor retirement, and canonical delivery
-deduplicates the effect. Codex-to-Pi, Pi-to-Codex, and Pi provider changes are
-contract fixtures, not special core paths.
+deduplicates the effect. Direct Codex-to-Cursor-CLI and Cursor-CLI-to-Codex,
+Codex-to-Pi, Pi-to-Codex, and Pi provider changes all exercise the same A-to-B
+contract; none is a special core path. Adapter-authored descriptor transitions
+execute inside the canonical ownership transaction without provider branches
+in storage.
 
 Issue #66's inline-triage, candidate-inventory, persistent-supervision, and
 measured source-only boundaries are in the

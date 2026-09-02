@@ -82,6 +82,7 @@ class RuntimeBindingStorage(Protocol):
         expected_version: int,
         intent_digest: str,
         route_receipt: Mapping[str, Any],
+        descriptor_actions: tuple[Mapping[str, Any], ...],
         at: str,
     ) -> dict[str, Any]: ...
 
@@ -112,6 +113,7 @@ class RuntimeBindingStorage(Protocol):
         intent_digest: str,
         failure_code: str,
         receipt: Mapping[str, Any],
+        descriptor_actions: tuple[Mapping[str, Any], ...],
         at: str,
     ) -> dict[str, Any]: ...
 

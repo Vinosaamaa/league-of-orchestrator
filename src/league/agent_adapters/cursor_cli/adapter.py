@@ -1,7 +1,12 @@
 from ...adapter_types import HARNESS_CAPABILITIES, AdapterContract
 from ...provider_lifecycle import ProviderLifecycle
 from ...storage_types import StorageRefusal
-from ..base import DeclaredAgentAdapter, native_assignment, native_presentation
+from ..base import (
+    DeclaredAgentAdapter,
+    native_assignment,
+    native_presentation,
+    no_replacement_descriptor_actions,
+)
 from ..core import declared_lifecycle_operations
 
 
@@ -120,4 +125,5 @@ def adapter() -> DeclaredAgentAdapter:
         _deliver,
         _presentation,
         native_assignment,
+        no_replacement_descriptor_actions,
     )

@@ -527,14 +527,11 @@ class HerdrMultiplexerAdapter:
             )
         routing_name = target.get("routing_name")
         cwd = target.get("cwd")
+        # The staging routing name is the crash-gap occupancy fence.  A named
+        # endpoint with mismatched adapter/provider/cwd is not absence: it is
+        # an unverified possible successor and must keep replacement fenced.
         candidates = [
-            item
-            for item in self.discover()
-            if item.get("name") == routing_name
-            and item.get("agent") == adapter_kind
-            and item.get("display_agent") == provider_kind
-            and item.get("cwd") == cwd
-            and item.get("foreground_cwd") == cwd
+            item for item in self.discover() if item.get("name") == routing_name
         ]
         if not candidates:
             return None
@@ -544,6 +541,16 @@ class HerdrMultiplexerAdapter:
                 "replacement recovery found multiple staged successors",
             )
         item = dict(candidates[0])
+        if (
+            item.get("agent") != adapter_kind
+            or item.get("display_agent") != provider_kind
+            or item.get("cwd") != cwd
+            or item.get("foreground_cwd") != cwd
+        ):
+            raise StorageRefusal(
+                "runtime_replacement_identity_mismatch",
+                "staged successor does not match the replacement identity",
+            )
         session = item.get("agent_session")
         session_ref = session.get("value") if isinstance(session, Mapping) else None
         endpoint = item.get("pane_id")

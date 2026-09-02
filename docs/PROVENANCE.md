@@ -1228,3 +1228,16 @@ directly while the capability matrix claimed a neutral seam. Both commands now
 resolve `provider_session_lifecycle` through the multiplexer registry. Herdr
 owns the current implementation; tmux advertises no such capability and refuses
 before reading a migration manifest or applying a process effect.
+
+The final exact-head audit found four additional source-only gaps before
+publication. First, a missing successor receipt could be mistaken for proof of
+absence after an ambiguous crash-gap discovery. Unknown identity now records an
+open recovery obligation and retains the mutation fence; only explicit native
+absence or verified cleanup can roll back. Second, direct Cursor CLI had not
+participated in the A-to-B transaction matrix. The registered Cursor adapter now
+covers predecessor and successor success, launch-crash recovery, post-switch
+compensation, retirement, and exactly-once handoff. Third, the canonical
+pre-tool hook path now proves the same open-replacement refusal for Codex, Pi,
+and Cursor. Fourth, Pi descriptor settlement no longer branches in core
+storage: the Pi adapter emits bounded declarative actions and storage executes
+them atomically. A synthetic non-Pi adapter exercises that same descriptor seam.

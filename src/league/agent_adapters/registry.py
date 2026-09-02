@@ -97,6 +97,12 @@ class AgentAdapterRegistry:
         invalid_assignment = not callable(
             getattr(adapter, "assignment_factory", None)
         )
+        invalid_descriptor_factory = (
+            "replacement" in adapter.lifecycle_operations
+            and not callable(
+                getattr(adapter, "replacement_descriptor_factory", None)
+            )
+        )
         multiplexer_requirements = getattr(adapter, "multiplexer_requirements", None)
         invalid_multiplexer_requirements = (
             not isinstance(multiplexer_requirements, dict)
@@ -111,6 +117,7 @@ class AgentAdapterRegistry:
             unknown or missing_methods or unsupported or invalid_profiles
             or invalid_launch or invalid_delivery or invalid_providers
             or invalid_presentation or invalid_assignment or invalid_aliases
+            or invalid_descriptor_factory
             or invalid_multiplexer_requirements
         ):
             raise StorageRefusal(

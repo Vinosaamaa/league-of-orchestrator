@@ -14,6 +14,7 @@ from pathlib import Path
 import plistlib
 import stat
 import subprocess
+import sys
 import tempfile
 import time
 from typing import Any, Callable, Mapping, Protocol
@@ -218,8 +219,11 @@ def render_launchd_plist(
         not isinstance(value, dict)
         or value.get("Label") != SERVICE_LABEL
         or value.get("ProgramArguments") != ["@@AGENT_WATCHER@@", "service-run"]
-        or value.get("EnvironmentVariables") != {
-            "LEAGUE_STATE_ROOT": "@@STATE_ROOT@@"
+        or value.get("EnvironmentVariables")
+        != {
+            "LEAGUE_STATE_ROOT": "@@STATE_ROOT@@",
+            "LEAGUE_WRITER_POINTER": "@@WRITER_POINTER@@",
+            "PATH": "@@PYTHON_PATH@@",
         }
         or value.get("RunAtLoad") is not True
         or value.get("KeepAlive") != {"SuccessfulExit": False}
@@ -231,7 +235,26 @@ def render_launchd_plist(
             "launchd template does not express the supported persistent service",
         )
     value["ProgramArguments"] = [os.fspath(agent_watcher), "service-run"]
-    value["EnvironmentVariables"] = {"LEAGUE_STATE_ROOT": os.fspath(state_root)}
+    python_directory = os.fspath(Path(sys.executable).resolve().parent)
+    service_path = os.pathsep.join(
+        dict.fromkeys(
+            (
+                python_directory,
+                "/usr/local/bin",
+                "/usr/bin",
+                "/bin",
+                "/usr/sbin",
+                "/sbin",
+            )
+        )
+    )
+    value["EnvironmentVariables"] = {
+        "LEAGUE_STATE_ROOT": os.fspath(state_root),
+        "LEAGUE_WRITER_POINTER": os.fspath(
+            state_root.parent / "league-writer-pointer.json"
+        ),
+        "PATH": service_path,
+    }
     rendered = plistlib.dumps(value, fmt=plistlib.FMT_XML, sort_keys=False)
     return rendered, _sha256(template)
 

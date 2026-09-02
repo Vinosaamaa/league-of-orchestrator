@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 import plistlib
+import subprocess
 import tempfile
 import threading
 import time
@@ -26,6 +28,7 @@ from league.supervisor_service import (  # noqa: E402
     MANIFEST_SCHEMA,
     SERVICE_LABEL,
     SupervisorServiceInstaller,
+    render_launchd_plist,
 )
 from league.storage import StorageRefusal  # noqa: E402
 from lifecycle_fakes import FakeDeliveryAdapter  # noqa: E402
@@ -121,6 +124,39 @@ class SyntheticLaunchd:
 
 def sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_launchd_environment_starts_the_canonical_watcher(root: Path) -> None:
+    state, store = _multisquad_state(root, "launchd-environment-state")
+    store.close()
+    (state.parent / "league-writer-pointer.json").write_text(
+        '{"writer":"sqlite"}\n', encoding="utf-8"
+    )
+    agent_watcher = (ROOT / "bin/agent-watcher").resolve()
+    template = (ROOT / "config/league-supervisor.launchd.plist.in").resolve()
+
+    rendered, _ = render_launchd_plist(template, agent_watcher, state.resolve())
+    value = plistlib.loads(rendered)
+    environment = value["EnvironmentVariables"]
+    assert environment["LEAGUE_WRITER_POINTER"] == os.fspath(
+        state.resolve().parent / "league-writer-pointer.json"
+    )
+    assert Path(environment["PATH"].split(os.pathsep)[0]).resolve() == Path(
+        sys.executable
+    ).resolve().parent
+
+    completed = subprocess.run(
+        [str(agent_watcher), "service-status"],
+        env=environment,
+        text=True,
+        capture_output=True,
+        timeout=10,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    status = json.loads(completed.stdout)
+    assert status["schema"] == "league.supervisor-service-status.v1"
+    assert status["binding_count"] == 3
 
 
 def test_install_restart_and_exact_rollback(root: Path) -> None:
@@ -307,10 +343,14 @@ def test_install_refuses_unapproved_source_without_side_effects(root: Path) -> N
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="league-supervisor-service-") as temporary:
         root = Path(temporary)
+        test_launchd_environment_starts_the_canonical_watcher(root / "environment")
         test_install_restart_and_exact_rollback(root / "lifecycle")
         test_install_refuses_unmanaged_live_process(root / "unmanaged")
         test_install_refuses_unapproved_source_without_side_effects(root / "refusal")
-    print("PASS: launchd-owned multi-Squad service installs, starts, restarts, refuses unmanaged ownership, and rolls back exactly")
+    print(
+        "PASS: launchd-owned multi-Squad service installs, starts, restarts, "
+        "refuses unmanaged ownership, and rolls back exactly"
+    )
 
 
 if __name__ == "__main__":

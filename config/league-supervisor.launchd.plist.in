@@ -13,6 +13,10 @@
   <dict>
     <key>LEAGUE_STATE_ROOT</key>
     <string>@@STATE_ROOT@@</string>
+    <key>LEAGUE_WRITER_POINTER</key>
+    <string>@@WRITER_POINTER@@</string>
+    <key>PATH</key>
+    <string>@@PYTHON_PATH@@</string>
   </dict>
   <key>RunAtLoad</key>
   <true/>

@@ -619,6 +619,99 @@ def test_already_unified_shotcaller_session_is_adopted_without_copy(root: Path) 
     store.close()
 
 
+def test_already_unified_child_uses_bound_parent_evidence_without_legacy_profile(root: Path) -> None:
+    _state, store, _clock = create_context(root, "pi-adopt-child")
+    base = root / "pi-adopt-child"
+    worktree = base / "worktree"
+    worktree.mkdir(parents=True)
+    (worktree / ".git").mkdir()
+    unified = base / "unified-sessions"
+    child_relative = Path("--synthetic-child--") / "2026-01-01_child.jsonl"
+    parent_relative = Path("--synthetic-parent--") / "2025-12-31_parent.jsonl"
+    child = unified / child_relative
+    parent_evidence = unified / parent_relative
+    child.parent.mkdir(parents=True)
+    parent_evidence.parent.mkdir(parents=True)
+    retired_parent = base / "retired-profile" / parent_evidence.name
+    parent_payload = (
+        json.dumps(
+            {"type": "session", "version": 3, "id": PARENT_ID, "cwd": str(base.resolve())},
+            separators=(",", ":"),
+        )
+        + "\n"
+    ).encode()
+    child_payload = (
+        json.dumps(
+            {
+                "type": "session",
+                "version": 3,
+                "id": CHILD_ID,
+                "cwd": str(worktree.resolve()),
+                "parentSession": str(retired_parent.resolve()),
+            },
+            separators=(",", ":"),
+        )
+        + "\n"
+        + json.dumps({"type": "message", "id": "opaque-history", "text": "preserved"})
+        + "\n"
+    ).encode()
+    parent_evidence.write_bytes(parent_payload)
+    child.write_bytes(child_payload)
+    descriptor = _descriptor(base, worktree, "cursor", "resume")
+    descriptor.update(
+        {
+            "descriptor_id": "pi-launch:adopted:child",
+            "requested_session_id": CHILD_ID,
+            "requested_session_path": str(child.resolve()),
+            "parent_session_id": PARENT_ID,
+            "parent_session_path": str(retired_parent.resolve()),
+            "callsign": "Lux",
+            "routing_name": "lux",
+        }
+    )
+    fake = FakePiHerdr(base)
+    fake.env["LEAGUE_WORKTREE"] = str(worktree.resolve())
+    manifest = {
+        "schema": "league.pi-session-migration.v2",
+        "migration_id": "pi-adoption:child-parent-evidence",
+        "source_inventory_root": str(unified.resolve()),
+        "unified_inventory_root": str(unified.resolve()),
+        "relative_session_path": str(child_relative),
+        "expected_sha256": __import__("hashlib").sha256(child_payload).hexdigest(),
+        "parent_evidence_path": str(parent_evidence.resolve()),
+        "expected_parent_sha256": __import__("hashlib").sha256(parent_payload).hexdigest(),
+        "descriptor": descriptor,
+        "endpoint": fake.endpoint,
+    }
+    adopted = migrate_pi_session(
+        store, manifest, at="2026-01-01T00:05:00Z", runner=fake
+    )
+    assert adopted["state"] == "bound"
+    assert child.read_bytes() == child_payload
+    assert parent_evidence.read_bytes() == parent_payload
+    assert not retired_parent.exists()
+    assert len(list(unified.rglob("*.jsonl"))) == 2
+    receipt = adopted["receipt"]
+    assert receipt["parent_session_path"] == str(retired_parent.resolve())
+    assert receipt["parent_evidence_path"] == str(parent_evidence.resolve())
+
+    refused = dict(manifest)
+    refused["migration_id"] = "pi-adoption:child-tampered-parent"
+    refused["expected_parent_sha256"] = "0" * 64
+    refused_descriptor = dict(descriptor)
+    refused_descriptor["descriptor_id"] = "pi-launch:adopted:child-tampered"
+    refused["descriptor"] = refused_descriptor
+    try:
+        migrate_pi_session(store, refused, at="2026-01-01T00:05:01Z", runner=fake)
+    except StorageRefusal as exc:
+        assert exc.code == "pi_session_migration_digest_mismatch"
+    else:
+        raise AssertionError("tampered parent evidence was accepted")
+    assert store.provider_launch_descriptor(refused_descriptor["descriptor_id"]) is None
+    assert len(list(unified.rglob("*.jsonl"))) == 2
+    store.close()
+
+
 def test_provider_mapping_and_role_placement(root: Path) -> None:
     _state, store, _clock = create_context(root, "pi-placement")
     worktree = root / "pi-placement" / "worktree"
@@ -699,6 +792,7 @@ def main() -> None:
         test_provider_mapping_and_role_placement(root)
         test_unified_inventory_migration_preserves_bytes_and_lineage(root)
         test_already_unified_shotcaller_session_is_adopted_without_copy(root)
+        test_already_unified_child_uses_bound_parent_evidence_without_legacy_profile(root)
         test_unified_inventory_duplicate_scan_refuses(root)
     test_cli_exposes_explicit_pi_inputs()
     print("PASS: Pi provider launch, unified adoption, metadata, placement, and exact restart resume")

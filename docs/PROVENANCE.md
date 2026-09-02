@@ -1096,3 +1096,15 @@ instead of replacing the stable link. The install removed only that temporary
 artifact and used an atomic path replacement. Future installers must verify
 the stable link target after every switch and must not use directory-following
 `mv` semantics for release activation.
+
+The final single-profile adoption correction preserves Pi's immutable child
+history without reviving the retired provider-specific inventory. Two existing
+Champion children still contain their historical parent path, while the exact
+parent JSONL already exists in the unified inventory under the same filename.
+Migration manifest v2 therefore binds a separately verified parent-evidence
+path and digest inside the unified root. League validates its regular-file
+identity, containment, filename, digest, and session UUID, but leaves the child
+bytes and embedded parent path unchanged. Root sessions cannot declare parent
+evidence. A proposal to recreate the retired profile path with filesystem links
+was rejected because it would violate the one-active-profile contract; no such
+path is created by this release.

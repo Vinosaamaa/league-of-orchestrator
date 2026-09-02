@@ -49,6 +49,12 @@ root, unified inventory root, relative JSONL path, source digest, descriptor,
 and endpoint. An already-unified session may use the same exact source and
 destination path; it is verified and bound without copying bytes.
 
+If an immutable child still names a retired inventory path for its parent,
+manifest v2 may bind a separately retained parent file already inside the
+unified inventory. League requires the exact historical filename, a unique
+contained regular file, its manifest-bound digest, and the parent session ID;
+it never recreates the retired profile or rewrites the child JSONL.
+
 League reads only the first JSONL record for identity/cwd/parent validation,
 and the first parent record when lineage exists. It hashes the complete source,
 rejects a duplicate session ID at any other unified path or digest, copies with

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import stat
 from pathlib import Path, PurePath
 from typing import Any, Mapping
@@ -210,7 +211,13 @@ def migrate_pi_session(
         "relative_session_path", "expected_sha256", "descriptor", "endpoint",
     }
     exact = dict(manifest)
-    if set(exact) != required or exact.get("schema") != "league.pi-session-migration.v1":
+    schema = exact.get("schema")
+    if schema == "league.pi-session-migration.v2":
+        required |= {"parent_evidence_path", "expected_parent_sha256"}
+    if set(exact) != required or schema not in {
+        "league.pi-session-migration.v1",
+        "league.pi-session-migration.v2",
+    }:
         raise StorageRefusal("pi_session_migration_invalid", "Pi migration manifest fields are not exact")
     descriptor = exact.get("descriptor")
     endpoint = exact.get("endpoint")
@@ -226,9 +233,59 @@ def migrate_pi_session(
         raise StorageRefusal("pi_session_migration_digest_mismatch", "legacy Pi session digest differs from the manifest")
     parent_path = source_header.get("parentSession")
     parent_id = None
+    parent_evidence_path = None
+    parent_evidence_sha256 = None
     if parent_path is not None:
-        parent_header = _header(Path(parent_path), "legacy Pi parent session")
+        evidence = Path(parent_path)
+        if schema == "league.pi-session-migration.v2":
+            supplied_evidence = exact.get("parent_evidence_path")
+            expected_parent_sha256 = exact.get("expected_parent_sha256")
+            if (
+                not isinstance(supplied_evidence, str)
+                or not Path(supplied_evidence).is_absolute()
+                or not isinstance(expected_parent_sha256, str)
+                or re.fullmatch(r"[0-9a-f]{64}", expected_parent_sha256) is None
+            ):
+                raise StorageRefusal(
+                    "pi_session_migration_invalid",
+                    "Pi parent evidence identity is incomplete",
+                )
+            evidence = Path(supplied_evidence)
+            try:
+                relative_evidence = evidence.relative_to(unified_root)
+            except ValueError as exc:
+                raise StorageRefusal(
+                    "pi_session_migration_path_invalid",
+                    "Pi parent evidence escapes the unified inventory",
+                ) from exc
+            if (
+                evidence.resolve() != evidence
+                or evidence.name != Path(parent_path).name
+                or not relative_evidence.parts
+            ):
+                raise StorageRefusal(
+                    "pi_session_migration_path_invalid",
+                    "Pi parent evidence differs from the immutable lineage",
+                )
+            parent_header = _header(evidence, "unified Pi parent evidence")
+            parent_evidence_sha256 = _sha256(evidence)
+            if parent_evidence_sha256 != expected_parent_sha256:
+                raise StorageRefusal(
+                    "pi_session_migration_digest_mismatch",
+                    "Pi parent evidence digest differs from the manifest",
+                )
+            parent_evidence_path = str(evidence)
+        else:
+            parent_header = _header(evidence, "legacy Pi parent session")
         parent_id = parent_header["id"]
+    elif schema == "league.pi-session-migration.v2" and (
+        exact.get("parent_evidence_path") is not None
+        or exact.get("expected_parent_sha256") is not None
+    ):
+        raise StorageRefusal(
+            "pi_session_migration_invalid",
+            "root Pi sessions cannot declare parent evidence",
+        )
     descriptor = dict(descriptor)
     if (
         descriptor.get("launch_mode") != "resume"
@@ -255,7 +312,11 @@ def migrate_pi_session(
 
     prepared_descriptor = store.prepare_provider_launch(descriptor, at)
     intent = {
-        "schema": "league.pi-session-migration-intent.v1",
+        "schema": (
+            "league.pi-session-migration-intent.v2"
+            if schema == "league.pi-session-migration.v2"
+            else "league.pi-session-migration-intent.v1"
+        ),
         "migration_id": str(exact["migration_id"]),
         "descriptor_id": str(descriptor["descriptor_id"]),
         "session_id": str(source_header["id"]),
@@ -267,6 +328,13 @@ def migrate_pi_session(
         "cwd": str(source_header["cwd"]),
         "pane_id": pane_id,
     }
+    if schema == "league.pi-session-migration.v2":
+        intent.update(
+            {
+                "parent_evidence_path": parent_evidence_path,
+                "parent_evidence_sha256": parent_evidence_sha256,
+            }
+        )
     prepared = store.prepare_pi_session_migration(intent, at)
     if prepared["state"] == "bound":
         return {**prepared, "descriptor_id": descriptor["descriptor_id"]}
@@ -284,6 +352,13 @@ def migrate_pi_session(
             "parent_session_path": parent_path,
             "cwd": source_header["cwd"],
         }
+        if schema == "league.pi-session-migration.v2":
+            copied_receipt.update(
+                {
+                    "parent_evidence_path": parent_evidence_path,
+                    "parent_evidence_sha256": parent_evidence_sha256,
+                }
+            )
         prepared = store.advance_pi_session_migration(
             intent["migration_id"], prepared["intent_digest"], "intent_recorded", "copied", copied_receipt, at
         )
@@ -310,7 +385,11 @@ def migrate_pi_session(
         str(descriptor["descriptor_id"]), prepared_descriptor["version"], observation, at
     )
     final_receipt = {
-        "schema": "league.pi-session-migration-receipt.v1",
+        "schema": (
+            "league.pi-session-migration-receipt.v2"
+            if schema == "league.pi-session-migration.v2"
+            else "league.pi-session-migration-receipt.v1"
+        ),
         "session_id": source_header["id"],
         "session_path": str(destination),
         "session_sha256": expected_sha256,
@@ -319,6 +398,13 @@ def migrate_pi_session(
         "cwd": source_header["cwd"],
         "descriptor_digest": bound["descriptor_digest"],
     }
+    if schema == "league.pi-session-migration.v2":
+        final_receipt.update(
+            {
+                "parent_evidence_path": parent_evidence_path,
+                "parent_evidence_sha256": parent_evidence_sha256,
+            }
+        )
     completed = store.advance_pi_session_migration(
         intent["migration_id"], prepared["intent_digest"], "copied", "bound", final_receipt, at
     )

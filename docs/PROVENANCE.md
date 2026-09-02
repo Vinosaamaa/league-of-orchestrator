@@ -1317,3 +1317,9 @@ verified detached handoff, independent Calm and attachment policy, watcher
 takeover fencing, exact restored-runtime rebinding, and durable exact-once
 delivery. Installation and live Herdr restart acceptance remain separate,
 receipt-bearing cutover operations.
+
+Release `0.2.47` corrects the self-contained release manifest exposed by the
+0.2.46 install preflight: the hash-bound launchd template is now staged and
+verified beside the watcher binary. The operator no longer needs an issue
+worktree or any source outside the immutable installed release to run
+`service-install`.

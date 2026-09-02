@@ -14,6 +14,7 @@ from pathlib import Path
 import plistlib
 import stat
 import subprocess
+import sys
 import tempfile
 import time
 from typing import Any, Callable, Mapping, Protocol
@@ -218,8 +219,11 @@ def render_launchd_plist(
         not isinstance(value, dict)
         or value.get("Label") != SERVICE_LABEL
         or value.get("ProgramArguments") != ["@@AGENT_WATCHER@@", "service-run"]
-        or value.get("EnvironmentVariables") != {
-            "LEAGUE_STATE_ROOT": "@@STATE_ROOT@@"
+        or value.get("EnvironmentVariables")
+        != {
+            "LEAGUE_STATE_ROOT": "@@STATE_ROOT@@",
+            "LEAGUE_WRITER_POINTER": "@@WRITER_POINTER@@",
+            "PATH": "@@PYTHON_PATH@@",
         }
         or value.get("RunAtLoad") is not True
         or value.get("KeepAlive") != {"SuccessfulExit": False}
@@ -231,7 +235,26 @@ def render_launchd_plist(
             "launchd template does not express the supported persistent service",
         )
     value["ProgramArguments"] = [os.fspath(agent_watcher), "service-run"]
-    value["EnvironmentVariables"] = {"LEAGUE_STATE_ROOT": os.fspath(state_root)}
+    python_directory = os.fspath(Path(sys.executable).resolve().parent)
+    service_path = os.pathsep.join(
+        dict.fromkeys(
+            (
+                python_directory,
+                "/usr/local/bin",
+                "/usr/bin",
+                "/bin",
+                "/usr/sbin",
+                "/sbin",
+            )
+        )
+    )
+    value["EnvironmentVariables"] = {
+        "LEAGUE_STATE_ROOT": os.fspath(state_root),
+        "LEAGUE_WRITER_POINTER": os.fspath(
+            state_root.parent / "league-writer-pointer.json"
+        ),
+        "PATH": service_path,
+    }
     rendered = plistlib.dumps(value, fmt=plistlib.FMT_XML, sort_keys=False)
     return rendered, _sha256(template)
 
@@ -407,6 +430,38 @@ class SupervisorServiceInstaller:
                 "service rollback backup does not match the active manifest",
             )
 
+    def _assert_exact_rolled_back_state(self, manifest: Mapping[str, Any]) -> None:
+        if self.service_manager.is_loaded(SERVICE_LABEL):
+            raise StorageRefusal(
+                "supervisor_service_recovery_required",
+                "rolled-back service state still has a loaded launchd job",
+            )
+        self._assert_no_unmanaged_process()
+        current = _read_optional_owned_regular(self.plist_path, "restored plist")
+        backup = _read_optional_owned_regular(
+            self.backup_path, "service rollback backup"
+        )
+        previous_digest = manifest.get("previous_plist_sha256")
+        exact = (
+            (
+                previous_digest is None
+                and current is None
+                and backup is None
+            )
+            or (
+                isinstance(previous_digest, str)
+                and current is not None
+                and backup is not None
+                and _sha256(current) == previous_digest
+                and _sha256(backup) == previous_digest
+            )
+        )
+        if not exact:
+            raise StorageRefusal(
+                "supervisor_service_recovery_required",
+                "rolled-back service bytes do not match their exact prior state",
+            )
+
     def install(
         self,
         *,
@@ -456,10 +511,13 @@ class SupervisorServiceInstaller:
                     "idempotent": True,
                     "service_status": status,
                 }
-            raise StorageRefusal(
-                "supervisor_service_recovery_required",
-                "an earlier service installation must be rolled back exactly first",
-            )
+            if existing_manifest["state"] == "rolled_back":
+                self._assert_exact_rolled_back_state(existing_manifest)
+            else:
+                raise StorageRefusal(
+                    "supervisor_service_recovery_required",
+                    "an earlier service installation must be rolled back exactly first",
+                )
         if self.service_manager.is_loaded(SERVICE_LABEL):
             raise StorageRefusal(
                 "supervisor_service_conflict",
@@ -468,12 +526,16 @@ class SupervisorServiceInstaller:
         self._assert_no_unmanaged_process()
         previous = _read_optional_owned_regular(self.plist_path, "existing plist")
         if previous is not None:
-            if self.backup_path.exists():
+            existing_backup = _read_optional_owned_regular(
+                self.backup_path, "service rollback backup"
+            )
+            if existing_backup is not None and existing_backup != previous:
                 raise StorageRefusal(
                     "supervisor_service_backup_conflict",
                     "service rollback backup already exists",
                 )
-            _atomic_write(self.backup_path, previous)
+            if existing_backup is None:
+                _atomic_write(self.backup_path, previous)
         manifest = {
             "schema": MANIFEST_SCHEMA,
             "state": "prepared",

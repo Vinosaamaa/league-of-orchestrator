@@ -27,7 +27,10 @@ from league.issue_first import (  # noqa: E402
     semantic_scope_digest,
 )
 from league.sqlite_project_ops import canonical_repository  # noqa: E402
-from league.presentation import orchestrator_role_tokens  # noqa: E402
+from league.presentation import (  # noqa: E402
+    canonical_display_metadata,
+    orchestrator_role_tokens,
+)
 from league.storage_assignment import PrepareAssignmentCommand  # noqa: E402
 import league.visible_launch as visible_launch  # noqa: E402
 from league.storage_issue import (  # noqa: E402
@@ -130,6 +133,64 @@ def test_generated_task_labels_are_deterministic_two_word_names() -> None:
         assert len(expected.split()) == 2
 
 
+def test_role_specific_display_names_use_only_explicit_canonical_metadata() -> None:
+    provider_shapes = (
+        {"runtime_provider": "codex", "display_agent": "codex"},
+        {"runtime_provider": "cursor", "display_agent": "cursor"},
+        {"runtime_provider": "pi", "display_agent": "cursor"},
+        {"runtime_provider": "pi", "display_agent": "codex"},
+    )
+    for provider in provider_shapes:
+        champion = canonical_display_metadata(
+            {
+                **provider,
+                "orchestrator_role": "champion",
+                "callsign": "Lux",
+                "project_code": "LOL",
+                "task_label": "Title Repair",
+            }
+        )
+        assert champion == {
+            "title": "Lux · LOL",
+            "terminal_title": "Lux · LOL",
+            "sidebar_name": "Lux",
+            "thread_title": "Lux · LOL",
+            "project_code": "LOL",
+            "task_label": "Title Repair",
+            "orchestrator_role": "champion",
+        }
+        shotcaller = canonical_display_metadata(
+            {
+                **provider,
+                "orchestrator_role": "shotcaller",
+                "callsign": "Ashe",
+                "project_code": "LOL",
+                "task_label": "Title Repair",
+            }
+        )
+        assert shotcaller == {
+            "title": "Ashe",
+            "terminal_title": "Ashe",
+            "sidebar_name": "Ashe",
+            "thread_title": "Ashe",
+            "orchestrator_role": "shotcaller",
+        }
+        assert all(
+            provider_value not in {str(value).lower() for value in champion.values()}
+            for provider_value in provider.values()
+        )
+    assert canonical_display_metadata(
+        {
+            "orchestrator_role": "champion",
+            "callsign": "Lux",
+            "task_label": "Title Repair",
+        }
+    )["title"] == "Lux · Title Repair"
+    assert canonical_display_metadata(
+        {"orchestrator_role": "unknown", "callsign": "Lux"}
+    ) == {}
+
+
 def test_legacy_display_command_exposes_exact_owner_cas_inputs() -> None:
     result = subprocess.run(
         (str(ROOT / "bin/league"), "assign", "reconcile-legacy-display", "--help"),
@@ -166,20 +227,19 @@ def test_task_label_defaults_and_explicit_labels_stay_two_words(root: Path) -> N
     assert "[--task-label TASK_LABEL]" in help_result.stdout
 
     options = _options(root)
-    too_many_words = VisibleLaunchOptions(
-        workspace_id=options.workspace_id,
-        task_label="Too Many Words",
-        model=options.model,
-        effort=options.effort,
-        league_command=options.league_command,
-        state_root=options.state_root,
-    )
-    try:
-        _adapter(too_many_words, FakeHerdrRunner(root), None)
-    except StorageRefusal as exc:
-        assert exc.code == "launch_scope_invalid"
-    else:
-        raise AssertionError("three-word Champion task label was accepted")
+    for invalid_label in ("Singleton", "Too Many Words"):
+        try:
+            _adapter(
+                replace(options, task_label=invalid_label),
+                FakeHerdrRunner(root),
+                None,
+            )
+        except StorageRefusal as exc:
+            assert exc.code == "launch_scope_invalid"
+        else:
+            raise AssertionError(
+                f"non-two-word Champion task label was accepted: {invalid_label}"
+            )
 
 
 class FakeHerdrRunner:
@@ -849,6 +909,62 @@ def test_real_adapter_one_command_success_and_retry(root: Path) -> None:
         "assignment_context",
     )
     assert activation_delivery["effect_id"] == result["context_delivery"]["effect_sha256"]
+    store.close()
+
+
+def test_champion_project_code_is_explicit_and_survives_provider_refresh(
+    root: Path,
+) -> None:
+    store, clock, worktree = _context(root, "project-code-title")
+    options = replace(_options(root), project_code="LOL")
+    runner = FakeHerdrRunner(worktree, session_source="herdr:cursor")
+    runner.metadata_source = "herdr:cursor"
+    service = VisibleChampionLaunchService(
+        store, _adapter(options, runner, store), options, clock
+    )
+    spec = _spec(worktree, "project-code-title")
+    result = service.launch(spec)
+    receipt = result["context_delivery"]["display_receipt"]
+    assert receipt["sidebar_name"] == "Lux"
+    assert receipt["project_code"] == "LOL"
+    assert receipt["task_label"] == "Tiny Gate"
+    assert receipt["thread_title"] == "Lux · LOL"
+    assert receipt["terminal_title"] == "Lux · LOL"
+
+    contexts = len(runner.contexts)
+    runner.metadata_source = "herdr:cursor"
+    runner.state_change_seq += 1
+    runner.title = "Cursor generated title"
+    runner.tokens.update(
+        {
+            "sidebar_name": "Cursor generated title",
+            "thread_title": "Cursor generated title",
+        }
+    )
+    calls_before = len(runner.calls)
+    retry = service.launch(spec)
+    retry_calls = runner.calls[calls_before:]
+    assert retry["idempotent"] is True
+    assert retry["context_delivery"]["display_receipt"]["project_code"] == "LOL"
+    assert runner.title == "Lux · LOL"
+    assert runner.tokens["sidebar_name"] == "Lux"
+    assert runner.tokens["thread_title"] == "Lux · LOL"
+    assert len(runner.contexts) == contexts == 1
+    assert sum(
+        call[:3] == ("herdr", "pane", "report-metadata")
+        for call in retry_calls
+    ) == 1
+
+    calls_before_icon = len(runner.calls)
+    runner.tokens["status_marker"] = "idle"
+    runner.state_change_seq += 1
+    exact = service.launch(spec)
+    assert exact["idempotent"] is True
+    assert runner.tokens["status_marker"] == "idle"
+    assert not any(
+        call[:3] == ("herdr", "pane", "report-metadata")
+        for call in runner.calls[calls_before_icon:]
+    )
     store.close()
 
 
@@ -2470,12 +2586,14 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="league-visible-launch-") as temporary:
         root = Path(temporary)
         test_generated_task_labels_are_deterministic_two_word_names()
+        test_role_specific_display_names_use_only_explicit_canonical_metadata()
         test_legacy_display_command_exposes_exact_owner_cas_inputs()
         test_task_label_defaults_and_explicit_labels_stay_two_words(root)
         test_exact_resume_uses_declared_thread_and_skips_fresh_handshake(root)
         test_immediate_resume_session_still_requires_exact_process_identity(root)
         test_resume_retry_reconciles_owned_endpoint_without_second_launch(root)
         test_real_adapter_one_command_success_and_retry(root)
+        test_champion_project_code_is_explicit_and_survives_provider_refresh(root)
         test_champion_role_token_is_canonical_for_cursor_authority_and_owned_retry(root)
         test_active_retry_requires_migration18_issue_binding(root)
         test_active_retry_refuses_changed_owner_issue_before_title_read(root)

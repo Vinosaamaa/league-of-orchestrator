@@ -36,7 +36,7 @@ Nothing here installs files, changes hooks, or connects to live Roster state.
 - Prompt-once intake, complete bounded triage, request claims and states,
   explicit direct/hidden/Champion dispatch, and unresolved reconciliation.
 - Recoverable visible-Champion assignment with exact acceptance receipts,
-  settled post-context callsign/task title restoration bound to the exact
+  settled post-context role-specific title restoration bound to the exact
   metadata source and sequence, deterministic two-word display-task defaults,
   and one owner-authorized sequence-fenced League-overlay reconciliation for
   exact active pre-fix Champions without modern title receipts. The same
@@ -45,6 +45,13 @@ Nothing here installs files, changes hooks, or connects to live Roster state.
   status while repairing presentation without closing or reactivating it,
   source-bound transition outbox delivery, unique recipient effects, and fair
   backlog draining.
+- Provider-neutral presentation names derived only from explicit canonical
+  metadata: Shotcaller names are callsign-only; Champion sidebars are
+  callsign-only; and Champion thread/terminal titles are
+  `<Callsign> · <PROJECT>` when an exact catalog project code exists, otherwise
+  `<Callsign> · <Two Word Task>`. Runtime/provider labels are never embedded or
+  parsed from titles. Prompt, context, OSC, restart, and icon-only refreshes
+  cannot replace an owned name; newer user-owned presentation still wins.
 - One League-owned `orchestrator_role` presentation token, emitted only as
   `shotcaller` or `champion` from canonical role truth and covered by the same
   source/owner receipts as the title overlay. Unknown roles emit no token;
@@ -78,7 +85,9 @@ Nothing here installs files, changes hooks, or connects to live Roster state.
   endpoint identity and every provider presentation byte still match that
   attempt. League's title overlay carries explicit owner/source tokens and uses
   Herdr's provider-source authority without borrowing its source-local sequence;
-  a later provider or user presentation refuses and is preserved. Rollback
+  a provider change before ownership is published or any later user-owned
+  presentation refuses and is preserved. Once exact League ownership exists,
+  a provider name refresh is restored from canonical fields. Rollback
   either proves the exact external restoration before releasing the reservation
   or leaves that reservation as the durable retry obligation. A reserved pane
   whose route provider also exposes route tokens is admitted only through the

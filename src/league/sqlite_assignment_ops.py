@@ -2292,16 +2292,21 @@ def record_assignment_context_delivery(
         "terminal_title",
         ORCHESTRATOR_ROLE_TOKEN,
     }
+    receipt_keys = frozenset(display_receipt)
     if (
         not digest_pattern.fullmatch(context_sha256)
         or not digest_pattern.fullmatch(effect_sha256)
         or not event_id
         or byte_count < 1
         or byte_count > 4096
-        or set(display_receipt) != display_keys
+        or receipt_keys
+        not in {
+            frozenset(display_keys),
+            frozenset(display_keys | {"project_code"}),
+        }
         or not all(
             isinstance(display_receipt[key], str) and display_receipt[key]
-            for key in display_keys - {"state_change_seq"}
+            for key in receipt_keys - {"state_change_seq"}
         )
         or not isinstance(display_receipt["state_change_seq"], int)
         or display_receipt["state_change_seq"] < 0
@@ -2426,12 +2431,17 @@ def record_assignment_title_revalidation(
         "terminal_title",
         ORCHESTRATOR_ROLE_TOKEN,
     }
+    receipt_keys = frozenset(display_receipt)
     if (
         not event_id
-        or set(display_receipt) != display_keys
+        or receipt_keys
+        not in {
+            frozenset(display_keys),
+            frozenset(display_keys | {"project_code"}),
+        }
         or not all(
             isinstance(display_receipt[key], str) and display_receipt[key]
-            for key in display_keys - {"state_change_seq"}
+            for key in receipt_keys - {"state_change_seq"}
         )
         or not isinstance(display_receipt["state_change_seq"], int)
         or display_receipt["state_change_seq"] < 0

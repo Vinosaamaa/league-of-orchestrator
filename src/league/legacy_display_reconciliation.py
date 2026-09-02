@@ -53,8 +53,7 @@ def _digest(value: Any) -> str:
 
 def _canonical_title(agent: Mapping[str, Any]) -> str:
     title = agent.get("terminal_title_stripped", agent.get("terminal_title", ""))
-    value = str(title) if isinstance(title, str) else ""
-    return value.removesuffix(" | codex")
+    return str(title) if isinstance(title, str) else ""
 
 
 @dataclass(frozen=True)

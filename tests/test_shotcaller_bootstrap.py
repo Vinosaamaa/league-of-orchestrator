@@ -70,6 +70,9 @@ class RecordingHerdr:
         self.calls: list[tuple[str, ...]] = []
 
     def _agent(self) -> dict[str, object]:
+        stripped_title = self.title
+        if stripped_title.endswith(" | codex"):
+            stripped_title = stripped_title[: -len(" | codex")]
         value: dict[str, object] = {
             "agent": "codex",
             "agent_status": self.agent_status,
@@ -88,7 +91,7 @@ class RecordingHerdr:
                 else self.terminal_title_override
             ),
             "terminal_title_stripped": (
-                self.title
+                stripped_title
                 if self.terminal_title_stripped_override is None
                 else self.terminal_title_stripped_override
             ),
@@ -891,16 +894,26 @@ def test_cursor_authority_shotcaller_role_token_is_owned_and_retry_safe(
             }
         )
         calls_before = len(runner.calls)
-        try:
-            service.bootstrap(_spec())
-        except StorageRefusal as exc:
-            assert exc.code == "shotcaller_metadata_unverified"
-        else:
-            raise AssertionError("provider title refresh bypassed Shotcaller ownership")
+        refreshed = service.bootstrap(_spec())
+        assert refreshed["idempotent"] is True
+        assert runner.title == "Ashe"
+        assert runner.tokens["sidebar_name"] == "Ashe"
+        assert runner.tokens["thread_title"] == "Ashe"
         assert runner.tokens["orchestrator_role"] == "shotcaller"
-        assert not any(
+        assert sum(
             call[:3] == ("herdr", "pane", "report-metadata")
             for call in runner.calls[calls_before:]
+        ) == 1
+
+        calls_before_icon = len(runner.calls)
+        runner.tokens["status_marker"] = "working"
+        runner.state_change_seq += 1
+        exact = service.bootstrap(_spec())
+        assert exact["idempotent"] is True
+        assert runner.tokens["status_marker"] == "working"
+        assert not any(
+            call[:3] == ("herdr", "pane", "report-metadata")
+            for call in runner.calls[calls_before_icon:]
         )
 
 
@@ -1223,12 +1236,15 @@ def test_preexisting_reserved_bootstrap_rejects_residual_metadata_without_baseli
     )
 
 
-def test_completed_bootstrap_retry_refuses_later_provider_title_without_prompt(root: Path) -> None:
+def test_completed_bootstrap_retry_restores_provider_refreshed_title_without_prompt(
+    root: Path,
+) -> None:
     state, _ = migrated_state(root, "shotcaller-completed-retry")
     worktree = root / "shotcaller-completed-retry" / "worktree"
     worktree.mkdir()
     clock = FakeClock()
     runner = RecordingHerdr(worktree)
+    runner.provider_managed_presentation = True
     with SQLiteStorage(state) as store:
         _seed_available_ashe(store, clock)
         service = ShotcallerBootstrapService(
@@ -1298,17 +1314,18 @@ def test_completed_bootstrap_retry_refuses_later_provider_title_without_prompt(r
         runner.title = "Create the Shotcaller for this pane | codex"
         calls_before_retry = len(runner.calls)
 
-        try:
-            service.bootstrap(_spec())
-        except StorageRefusal as exc:
-            assert exc.code == "shotcaller_metadata_unverified"
-        else:
-            raise AssertionError("completed retry overwrote a later provider title")
+        retried = service.bootstrap(_spec())
+        assert retried == {**created, "idempotent": True}
         retry_calls = runner.calls[calls_before_retry:]
+        metadata_calls = [
+            call
+            for call in retry_calls
+            if call[:3] == ("herdr", "pane", "report-metadata")
+        ]
+        assert len(metadata_calls) == 1
         assert not any(
             call[:3]
             in {
-                ("herdr", "pane", "report-metadata"),
                 ("herdr", "agent", "rename"),
                 ("herdr", "agent", "prompt"),
                 ("herdr", "tab", "create"),
@@ -1317,8 +1334,9 @@ def test_completed_bootstrap_retry_refuses_later_provider_title_without_prompt(r
             }
             for call in retry_calls
         )
-        assert runner.metadata_source == "herdr:codex"
-        assert runner.title == "Create the Shotcaller for this pane | codex"
+        assert runner.title == "Ashe | codex"
+        assert runner.tokens["sidebar_name"] == "Ashe"
+        assert runner.tokens["thread_title"] == "Ashe"
         assert store.shotcaller_bootstrap_status(_spec().assignment_id) == {
             **created,
             "idempotent": True,
@@ -1380,6 +1398,43 @@ def test_completed_bootstrap_retry_refuses_newer_user_title_with_stale_tokens(
             **created,
             "idempotent": True,
         }
+
+
+def test_completed_bootstrap_retry_refuses_malformed_agent_status_closed(
+    root: Path,
+) -> None:
+    state, _ = migrated_state(root, "shotcaller-completed-malformed-status")
+    worktree = root / "shotcaller-completed-malformed-status" / "worktree"
+    worktree.mkdir()
+    clock = FakeClock()
+    runner = RecordingHerdr(worktree)
+    with SQLiteStorage(state) as store:
+        _seed_available_ashe(store, clock)
+        service = _service(store, clock, worktree, runner)
+        created = service.bootstrap(_spec())
+        calls_before_retry = len(runner.calls)
+        runner.agent_status = ["done"]  # type: ignore[assignment]
+
+        try:
+            _service(store, clock, worktree, runner).bootstrap(_spec())
+        except StorageRefusal as exc:
+            assert exc.code == "shotcaller_identity_unverified"
+        else:
+            raise AssertionError("malformed Shotcaller agent status was accepted")
+
+        assert store.shotcaller_bootstrap_status(_spec().assignment_id) == {
+            **created,
+            "idempotent": True,
+        }
+        assert not any(
+            call[:3]
+            in {
+                ("herdr", "agent", "rename"),
+                ("herdr", "pane", "report-metadata"),
+                ("herdr", "agent", "prompt"),
+            }
+            for call in runner.calls[calls_before_retry:]
+        )
 
 
 def test_bootstrap_metadata_and_atomic_finalization_failures_restore_exact_state(
@@ -4135,8 +4190,9 @@ def main() -> None:
         test_bootstrap_identity_mismatch_makes_no_canonical_mutation(root)
         test_preexisting_reserved_bootstrap_requires_durable_baseline_when_alias_empty(root)
         test_preexisting_reserved_bootstrap_rejects_residual_metadata_without_baseline(root)
-        test_completed_bootstrap_retry_refuses_later_provider_title_without_prompt(root)
+        test_completed_bootstrap_retry_restores_provider_refreshed_title_without_prompt(root)
         test_completed_bootstrap_retry_refuses_newer_user_title_with_stale_tokens(root)
+        test_completed_bootstrap_retry_refuses_malformed_agent_status_closed(root)
         test_bootstrap_metadata_and_atomic_finalization_failures_restore_exact_state(root)
         test_clean_rolled_back_bootstrap_residue_rebinds_same_thread_in_place(root)
         test_legacy_rolled_back_bootstrap_residue_captures_clean_live_baseline(root)

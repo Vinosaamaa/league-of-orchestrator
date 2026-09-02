@@ -49,6 +49,22 @@ marker, glyph, color, ANSI, conditional style, pane decoration, or additional
 sidebar text; any source-managed terminal renderer remains an owning-layer
 decision outside League.
 
+### Canonical naming boundary
+
+League renders names from explicit role, callsign, project-code, and two-word
+task metadata. Shotcaller sidebar/thread/terminal names are the callsign.
+Champion sidebar is the callsign; Champion thread and terminal title are
+`<Callsign> · <PROJECT>` when an exact project code is supplied and
+`<Callsign> · <Two Word Task>` otherwise. The fallback task is always exactly
+two words.
+
+Provider/runtime names are neither display inputs nor title-parsing hints.
+Codex, Cursor, and Pi-backed endpoints consume the same metadata contract;
+provider launch and Herdr rendering remain outside this issue's boundary.
+Prompt/context/OSC/restart refreshes may be repaired only under exact League
+ownership. Token-only icon/status refreshes leave correct names untouched, and
+a newer user-owned source is never overwritten.
+
 ## Layout options
 
 ### Layout A — Project Ledger (selected)

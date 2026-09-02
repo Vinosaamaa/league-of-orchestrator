@@ -2,7 +2,7 @@
 
 ## Incident
 
-The visible Champion launcher wrote and verified `<Callsign> · <Task>` before
+The visible Champion launcher wrote and verified a callsign/task title before
 delivering its launch handshake or assignment context. Herdr/Codex could then
 auto-title the visible sidebar, thread, and terminal from that prompt. League
 recorded context delivery without observing the final display state, so the
@@ -42,7 +42,8 @@ The final ordering invariant is:
 3. activate and deliver the bounded assignment context with a settled wait;
 4. require the same endpoint, thread, routing name, metadata source, agent
    authority source, and ownership token;
-5. restore `<Callsign> · <Task>` with the fresh observed sequence;
+5. restore the explicit canonical role-specific names with the fresh observed
+   sequence;
 6. require two consecutive matching sidebar, task-label, thread-title, and
    terminal-title observations at one state-change sequence;
 7. bind that source/sequence observation into the successful context receipt.
@@ -64,9 +65,15 @@ ownership-safe restoration. If a newer user-owned or unowned write is present,
 League performs no metadata mutation and records `cleanup_pending` against the
 exact runtime. Unproven cleanup remains a truthful cleanup obligation.
 
-Generated Champion task labels use a deterministic two-word default derived
-from the task summary. Explicit labels remain limited to at most two words, so
-the generated visible contract has no vague one-word fallback.
+Generated and explicit Champion task labels contain exactly two words. The
+provider-neutral naming contract is callsign-only for Shotcallers, callsign-only
+for Champion sidebars, and `<Callsign> · <PROJECT>` for Champion thread and
+terminal title when an explicit catalog project code is available, otherwise
+`<Callsign> · <Two Word Task>`. Runtime/provider labels are never embedded and
+League never parses a title to discover identity. Prompt, context, OSC,
+restart, and icon refreshes cannot replace exact owned names; a newer
+user-owned presentation remains authoritative. Provider launch behavior and
+Herdr rendering remain owned by issues #84 and the Herdr layer respectively.
 
 ## Legacy recovery invariant
 
@@ -241,8 +248,9 @@ unbound Codex pane can have a provider-generated callsign/sidebar/thread/title
 such as an owner prompt while having no routing binding and no
 `metadata_source` field. League now treats those values only as presentation:
 it infers the provider source solely from a complete, self-consistent Codex
-session/thread/identity-title envelope and normalizes Herdr's terminal
-` | codex` suffix. A real bind still requires a consistent top-level `name`,
+session/thread/identity-title envelope and consumes Herdr's explicit stripped
+terminal-title field without parsing provider suffixes. A real bind still
+requires a consistent top-level `name`,
 `routing_name`, or `routing_alias`; conflicting fields, a present invalid
 source, partial tokens, or endpoint identity drift refuse before mutation.
 

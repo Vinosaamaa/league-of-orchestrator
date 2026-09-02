@@ -795,14 +795,20 @@ class PersistentSupervisor:
         if kind == "stop":
             with self._fence_lock:
                 states = tuple(dict(state) for state in self._bindings.values())
-                if not states or message.get("bindings") != _stop_control_bindings(states):
+            expected = _stop_control_bindings(states)
+            if not states or message.get("bindings") != expected:
+                raise SupervisorUnavailable(
+                    "supervisor stop control identity is stale or incomplete"
+                )
+            with self.store_factory(self.state_root) as store:
+                self._assert_fenced_registrations(store, states)
+            with self._fence_lock:
+                current = tuple(dict(state) for state in self._bindings.values())
+                if _stop_control_bindings(current) != expected:
                     raise SupervisorUnavailable(
-                        "supervisor stop control identity is stale or incomplete"
+                        "supervisor stop control identity changed during validation"
                     )
-                with self.store_factory(self.state_root) as store:
-                    with store._transaction():
-                        self._assert_fenced_registrations(store, states)
-                        self.stop_requested.set()
+                self.stop_requested.set()
             self._response(connection, {"ok": True, "stopping": True})
             return
         if kind == "service-ping":
@@ -1658,10 +1664,21 @@ def stop_supervisor(state_root: Path, callsign: str | None = None) -> dict[str, 
             "the persistent supervisor returned no exact stop-control bindings",
         )
     try:
+        reported_callsigns = tuple(str(item["callsign"]) for item in reported)
+        if len(set(reported_callsigns)) != len(reported_callsigns):
+            raise TypeError
         with SQLiteStorage(state_root) as store:
-            bindings = tuple(
-                store.supervisor_binding(str(item["callsign"])) for item in reported
+            discovered = {
+                str(item["callsign"]): item for item in store.supervisor_bindings()
+            }
+            missing = tuple(
+                name for name in reported_callsigns if name not in discovered
             )
+            if missing:
+                if len(reported_callsigns) != 1 or callsign != reported_callsigns[0]:
+                    raise TypeError
+                discovered[reported_callsigns[0]] = store.supervisor_binding(callsign)
+            bindings = tuple(discovered[name] for name in reported_callsigns)
             registrations = store.watcher_registrations(
                 tuple(str(item["actor_agent_id"]) for item in bindings)
             )

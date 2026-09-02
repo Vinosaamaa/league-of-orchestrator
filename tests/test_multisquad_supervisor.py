@@ -208,6 +208,35 @@ def _finish_startup_recovery(store, delivery: FakeDeliveryAdapter) -> None:
     delivery.sent.clear()
 
 
+def _service_stop_controls(store: SQLiteStorage) -> list[dict[str, object]]:
+    bindings = store.supervisor_bindings()
+    registrations = store.watcher_registrations(
+        tuple(str(binding["actor_agent_id"]) for binding in bindings)
+    )
+    return [
+        {
+            "actor_agent_id": str(binding["actor_agent_id"]),
+            "watcher_id": str(
+                registrations[str(binding["actor_agent_id"])]["watcher_id"]
+            ),
+            "fence": int(registrations[str(binding["actor_agent_id"])]["fence"]),
+            "runtime_instance_id": str(binding["runtime_instance_id"]),
+            "runtime_generation": str(binding["runtime_generation"]),
+        }
+        for binding in sorted(bindings, key=lambda item: item["actor_agent_id"])
+    ]
+
+
+def _expect_supervisor_refusal(
+    locator: str, message: dict[str, object], failure: str
+) -> None:
+    try:
+        send_supervisor_message(locator, message)
+    except SupervisorUnavailable:
+        return
+    raise AssertionError(failure)
+
+
 def test_one_service_registers_three_isolated_shotcallers(root: Path) -> None:
     state, store = _multisquad_state(root, "registration")
     store.close()
@@ -265,41 +294,19 @@ def test_service_stop_requires_exact_aggregate_fences(root: Path) -> None:
     thread, errors = _start(runtime)
     try:
         locator = f"unix:{runtime.socket_path}"
-        for message in ({"kind": "stop"},):
-            try:
-                send_supervisor_message(locator, message)
-            except SupervisorUnavailable:
-                pass
-            else:
-                raise AssertionError("unscoped service Stop terminated all Squads")
-        bindings = store.supervisor_bindings()
-        registrations = store.watcher_registrations(
-            tuple(str(binding["actor_agent_id"]) for binding in bindings)
+        _expect_supervisor_refusal(
+            locator,
+            {"kind": "stop"},
+            "unscoped service Stop terminated all Squads",
         )
-        controls = [
-            {
-                "actor_agent_id": str(binding["actor_agent_id"]),
-                "watcher_id": str(
-                    registrations[str(binding["actor_agent_id"])]["watcher_id"]
-                ),
-                "fence": int(
-                    registrations[str(binding["actor_agent_id"])]["fence"]
-                ),
-                "runtime_instance_id": str(binding["runtime_instance_id"]),
-                "runtime_generation": str(binding["runtime_generation"]),
-            }
-            for binding in sorted(bindings, key=lambda item: item["actor_agent_id"])
-        ]
+        controls = _service_stop_controls(store)
         stale_controls = [dict(control) for control in controls]
         stale_controls[0]["fence"] -= 1
-        try:
-            send_supervisor_message(
-                locator, {"kind": "stop", "bindings": stale_controls}
-            )
-        except SupervisorUnavailable:
-            pass
-        else:
-            raise AssertionError("stale aggregate Stop terminated all Squads")
+        _expect_supervisor_refusal(
+            locator,
+            {"kind": "stop", "bindings": stale_controls},
+            "stale aggregate Stop terminated all Squads",
+        )
         assert thread.is_alive()
         assert supervisor_status(state)["live"]
 
@@ -344,6 +351,91 @@ def test_service_stop_requires_exact_aggregate_fences(root: Path) -> None:
         store.close()
         stop_supervisor(state, "Garen")
         thread.join(timeout=5)
+    assert not thread.is_alive() and not errors
+
+
+def test_service_stop_batch_loads_reported_bindings(root: Path) -> None:
+    state, store = _multisquad_state(root, "service-stop-batch")
+    runtime = PersistentSupervisor(
+        state,
+        lease_seconds=20,
+        renew_seconds=10,
+        wake_adapter=FakeWakeAdapter(),
+        delivery_adapter=FakeDeliveryAdapter(),
+    )
+    thread, errors = _start(runtime)
+    stop_error: BaseException | None = None
+    try:
+        with patch.object(
+            SQLiteStorage,
+            "supervisor_binding",
+            side_effect=AssertionError("service Stop performed an N+1 binding load"),
+        ):
+            stop_supervisor(state)
+    except BaseException as exc:  # pragma: no cover - asserted after safe cleanup
+        stop_error = exc
+    finally:
+        store.close()
+        if thread.is_alive():
+            stop_supervisor(state)
+        thread.join(timeout=5)
+    assert stop_error is None, stop_error
+    assert not thread.is_alive() and not errors
+
+
+def test_slow_service_stop_validation_does_not_starve_renewal(root: Path) -> None:
+    state, store = _multisquad_state(root, "service-stop-renewal")
+    runtime = PersistentSupervisor(
+        state,
+        lease_seconds=0.8,
+        renew_seconds=0.1,
+        wake_adapter=FakeWakeAdapter(),
+        delivery_adapter=FakeDeliveryAdapter(),
+    )
+    thread, errors = _start(runtime)
+    controls = _service_stop_controls(store)
+    initial_lease = str(store.watcher_registration(SHOTCALLER_ID)["leased_until"])
+    validation_entered = threading.Event()
+    release_validation = threading.Event()
+    original_validation = runtime._assert_fenced_registrations
+
+    def slow_validation(validation_store, states) -> None:
+        validation_entered.set()
+        assert release_validation.wait(timeout=3)
+        original_validation(validation_store, states)
+
+    runtime._assert_fenced_registrations = slow_validation  # type: ignore[method-assign]
+    client_errors: list[BaseException] = []
+
+    def request_stop() -> None:
+        try:
+            send_supervisor_message(
+                f"unix:{runtime.socket_path}",
+                {"kind": "stop", "bindings": controls},
+            )
+        except BaseException as exc:  # pragma: no cover - asserted below
+            client_errors.append(exc)
+
+    client = threading.Thread(target=request_stop, name="synthetic-slow-service-stop")
+    client.start()
+    renewed_during_validation = False
+    try:
+        assert validation_entered.wait(timeout=2), client_errors
+        time.sleep(0.45)
+        current = store.watcher_registration(SHOTCALLER_ID)
+        renewed_during_validation = (
+            current is not None and str(current["leased_until"]) > initial_lease
+        )
+    finally:
+        release_validation.set()
+        client.join(timeout=5)
+        thread.join(timeout=5)
+        if thread.is_alive():
+            stop_supervisor(state)
+            thread.join(timeout=5)
+        store.close()
+    assert renewed_during_validation, "slow Stop validation starved lease renewal"
+    assert not client.is_alive() and not client_errors
     assert not thread.is_alive() and not errors
 
 
@@ -930,6 +1022,8 @@ def main() -> None:
         test_service_manager_starts_one_multiplex_runtime()
         test_one_service_registers_three_isolated_shotcallers(Path(temporary))
         test_service_stop_requires_exact_aggregate_fences(Path(temporary))
+        test_service_stop_batch_loads_reported_bindings(Path(temporary))
+        test_slow_service_stop_validation_does_not_starve_renewal(Path(temporary))
         test_user_priority_generation_is_isolated_per_shotcaller(Path(temporary))
         test_attention_uses_exact_direct_fallback_without_service(Path(temporary))
         test_restart_recovers_one_lost_notification_for_exact_squad(Path(temporary))

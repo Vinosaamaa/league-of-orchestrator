@@ -430,6 +430,17 @@ class SupervisorServiceInstaller:
                 "service rollback backup does not match the active manifest",
             )
 
+    def _assert_source_manifest(self, manifest: Mapping[str, Any]) -> None:
+        _, watcher_digest, template_digest = self._source()
+        if (
+            watcher_digest != manifest["agent_watcher_sha256"]
+            or template_digest != manifest["template_sha256"]
+        ):
+            raise StorageRefusal(
+                "supervisor_service_source_mismatch",
+                "service source bytes no longer match the authorized manifest",
+            )
+
     def _assert_exact_rolled_back_state(self, manifest: Mapping[str, Any]) -> None:
         if self.service_manager.is_loaded(SERVICE_LABEL):
             raise StorageRefusal(
@@ -560,6 +571,7 @@ class SupervisorServiceInstaller:
             self.service_manager.bootstrap(SERVICE_LABEL, self.plist_path)
             loaded = True
             status = self._wait_live()
+            self._assert_source_manifest(manifest)
         except BaseException:
             try:
                 if loaded and self.service_manager.is_loaded(SERVICE_LABEL):
@@ -598,15 +610,7 @@ class SupervisorServiceInstaller:
                 "supervisor_service_recovery_required",
                 "service start requires one exact active install manifest",
             )
-        _, watcher_digest, template_digest = self._source()
-        if (
-            watcher_digest != manifest["agent_watcher_sha256"]
-            or template_digest != manifest["template_sha256"]
-        ):
-            raise StorageRefusal(
-                "supervisor_service_source_mismatch",
-                "service source bytes no longer match the authorized manifest",
-            )
+        self._assert_source_manifest(manifest)
         installed = _read_owned_regular(self.plist_path, "installed plist")
         if _sha256(installed) != manifest["installed_plist_sha256"]:
             raise StorageRefusal(
@@ -627,6 +631,18 @@ class SupervisorServiceInstaller:
             self._assert_no_unmanaged_process()
             self.service_manager.bootstrap(SERVICE_LABEL, self.plist_path)
         status = self._wait_live(previous_fences=previous_fences)
+        try:
+            self._assert_source_manifest(manifest)
+        except StorageRefusal:
+            try:
+                if self.service_manager.is_loaded(SERVICE_LABEL):
+                    self.service_manager.bootout(SERVICE_LABEL)
+            except (OSError, StorageRefusal) as rollback_exc:
+                raise StorageRefusal(
+                    "supervisor_service_rollback_failed",
+                    "source drift after service start could not be stopped safely",
+                ) from rollback_exc
+            raise
         return {
             "schema": MANIFEST_SCHEMA,
             "started": True,

@@ -215,6 +215,8 @@ def test_idle_submit_and_structured_route(root: Path) -> None:
     assert routed_payload["delivery"]["event_id"] == routed["event_id"]
     assert routed_payload["actions"][0]["argv"] == [
         "league",
+        "--state-root",
+        str(store.state_root),
         "request",
         "accept-routed",
         "--event-id",
@@ -232,16 +234,7 @@ def test_idle_submit_and_structured_route(root: Path) -> None:
     ]
     accept_command = [
         str(ROOT / "bin" / "league"),
-        "--state-root",
-        str(store.state_root),
-        "request",
-        "accept-routed",
-        "--event-id",
-        routed["event_id"],
-        "--recipient-agent-id",
-        JARVAN_ID,
-        "--runtime-instance-id",
-        CURSOR_RUNTIME,
+        *routed_payload["actions"][0]["argv"][1:],
     ]
     accepted = subprocess.run(accept_command, capture_output=True, text=True, check=False)
     assert accepted.returncode == 0, accepted.stdout + accepted.stderr
@@ -365,6 +358,7 @@ def test_ambiguous_process_unavailable_input_and_missing_ack_refuse(root: Path) 
     cases = (
         ("ambiguous", FakeCursorHerdr("idle", ambiguous_process=True), "cursor_process_ambiguous"),
         ("input", FakeCursorHerdr("idle", interactive_ready=False), "cursor_input_unavailable"),
+        ("done", FakeCursorHerdr("done"), "cursor_state_unavailable"),
         ("ack", FakeCursorHerdr("working", acknowledge=False), "cursor_steering_ack_unverified"),
     )
     for suffix, runner, reason in cases:

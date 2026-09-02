@@ -129,14 +129,20 @@ def _verify_stopped_pane(runner: CommandRunner, pane_id: str, cwd: str) -> None:
 
 def _inventory_identity(root: Path, session_id: str) -> tuple[Path, str] | None:
     count = 0
+    matches: list[tuple[Path, str]] = []
     for path in root.rglob("*.jsonl") if root.exists() else ():
         count += 1
         if count > MAX_INVENTORY_FILES:
             raise StorageRefusal("pi_session_inventory_ambiguous", "unified Pi inventory exceeds the bounded scan")
         header = _header(path, "unified Pi session")
         if header["id"] == session_id:
-            return path, _sha256(path)
-    return None
+            matches.append((path, _sha256(path)))
+    if len(matches) > 1:
+        raise StorageRefusal(
+            "pi_session_identity_duplicate",
+            "session ID exists at more than one unified Pi path",
+        )
+    return matches[0] if matches else None
 
 
 def _copy_exact(source: Path, destination: Path, inventory_root: Path, expected_sha256: str) -> str:

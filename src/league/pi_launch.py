@@ -442,7 +442,12 @@ class HerdrPiLaunchAdapter:
             "champion_agent_id": spec.champion_agent_id,
             "callsign": spec.callsign,
             "runtime_instance_id": f"runtime:{spec.champion_agent_id}",
-            "thread_id": session_id,
+            # Herdr's provider-native Pi identity is the exact JSONL path. Keep
+            # the UUID alongside it for reporting, but bind the canonical
+            # runtime/cleanup identity to the path Herdr will read back.
+            "thread_id": observation["session_path"],
+            "session_id": session_id,
+            "session_path": observation["session_path"],
             "endpoint": endpoint["pane_id"],
             "runtime_generation": runtime_generation,
             "harness_kind": "pi-thread",
@@ -538,6 +543,18 @@ def resume_pi_after_restart(
             "pane_id": pane_id,
         }
     )
+    worktree = Path(str(descriptor["cwd"]))
+    if (
+        not worktree.is_absolute()
+        or not worktree.is_dir()
+        or worktree.is_symlink()
+        or worktree.resolve() != worktree
+    ):
+        raise StorageRefusal(
+            "launch_scope_invalid",
+            "Pi restart cwd is no longer the exact authorized worktree",
+        )
+    verified_worktree_repository_root(worktree)
     adapter = HerdrPiLaunchAdapter(
         store,
         descriptor,

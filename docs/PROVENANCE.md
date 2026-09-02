@@ -1047,3 +1047,15 @@ stored receipts with unchanged foreground PIDs. The clean issue-215 worktree
 remained clean, and the issue-190 dirty/untracked inventory remained exact.
 This is a Pi provider installation and live source-candidate acceptance; it is
 not a League merge or League installation claim.
+
+Independent exact-head review then found five pre-landing contract gaps. The
+Pi runtime receipt used its UUID where Herdr cleanup reads the provider-native
+JSONL path; the receipt now binds `thread_id` to that path while reporting both
+path and UUID. The routed Cursor action omitted the required state root; the
+emitted argv now includes it and the test executes that exact argv. Restart
+did not revalidate its stored cwd before supplying scoped approval; it now
+requires the same canonical, non-symlink Git worktree before any resume. The
+inventory scan returned on its first matching UUID and could miss a later
+duplicate; it now completes the bounded scan and refuses more than one match.
+Finally, terminal Cursor status `done` was treated as idle; steering now
+refuses it without an input effect. Focused regressions cover all five fixes.

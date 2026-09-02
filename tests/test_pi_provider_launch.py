@@ -19,7 +19,10 @@ from league.pi_launch import (  # noqa: E402
     pi_start_arguments,
     resume_pi_after_restart,
 )
-from league.pi_session_migration import migrate_pi_session  # noqa: E402
+from league.pi_session_migration import (  # noqa: E402
+    _inventory_identity,
+    migrate_pi_session,
+)
 from league.storage import StorageRefusal  # noqa: E402
 from league.request_services import AssignmentSpec  # noqa: E402
 from request_lifecycle_fixture import LUX_ID, create_context  # noqa: E402
@@ -324,7 +327,9 @@ def test_fork_metadata_restart_and_duplicate_suppression(root: Path) -> None:
     receipt = adapter.launch(_spec(worktree))
     assert receipt["harness_kind"] == "pi-thread"
     assert receipt["display_agent"] == "cursor"
-    assert receipt["thread_id"] == CHILD_ID
+    assert receipt["thread_id"] == fake.session_path
+    assert receipt["session_id"] == CHILD_ID
+    assert receipt["session_path"] == fake.session_path
     assert fake.agent_get_count >= 3
     assert any(call[1:3] == ("tab", "create") for call in fake.calls)
     start = next(call for call in fake.calls if call[1:3] == ("agent", "start"))
@@ -348,7 +353,7 @@ def test_fork_metadata_restart_and_duplicate_suppression(root: Path) -> None:
         environment={"HERDR_ENV": "1"},
     )
     retried = retried_adapter.launch(_spec(worktree))
-    assert retried["thread_id"] == CHILD_ID and fake.start_count == 1
+    assert retried["thread_id"] == fake.session_path and fake.start_count == 1
 
     fake.stop_for_restart()
     resumed = resume_pi_after_restart(
@@ -375,6 +380,24 @@ def test_fork_metadata_restart_and_duplicate_suppression(root: Path) -> None:
         environment={"HERDR_ENV": "1"},
     )
     assert duplicate["idempotent"] is True and fake.start_count == 2
+
+    fake.stop_for_restart()
+    (worktree / ".git").rmdir()
+    try:
+        resume_pi_after_restart(
+            store,
+            descriptor_id=descriptor["descriptor_id"],
+            restart_id="restart:worktree-replaced",
+            pane_id=fake.endpoint["pane_id"],
+            at="2026-01-01T00:01:02Z",
+            runner=fake,
+            environment={"HERDR_ENV": "1"},
+        )
+    except StorageRefusal as exc:
+        assert exc.code == "launch_scope_invalid"
+    else:
+        raise AssertionError("restart trusted a cwd that was no longer the bound worktree")
+    assert fake.start_count == 2
     store.close()
 
 
@@ -462,6 +485,31 @@ def test_unified_inventory_migration_preserves_bytes_and_lineage(root: Path) -> 
     store.close()
 
 
+def test_unified_inventory_duplicate_scan_refuses(root: Path) -> None:
+    inventory = root / "pi-duplicate-inventory"
+    for name in ("expected", "unexpected"):
+        path = inventory / name / "same-session.jsonl"
+        path.parent.mkdir(parents=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "type": "session",
+                    "version": 3,
+                    "id": CHILD_ID,
+                    "cwd": str(root.resolve()),
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+    try:
+        _inventory_identity(inventory, CHILD_ID)
+    except StorageRefusal as exc:
+        assert exc.code == "pi_session_identity_duplicate"
+    else:
+        raise AssertionError("bounded inventory scan stopped before finding a duplicate")
+
+
 def test_provider_mapping_and_role_placement(root: Path) -> None:
     _state, store, _clock = create_context(root, "pi-placement")
     worktree = root / "pi-placement" / "worktree"
@@ -539,6 +587,7 @@ def main() -> None:
         test_fork_metadata_restart_and_duplicate_suppression(root)
         test_provider_mapping_and_role_placement(root)
         test_unified_inventory_migration_preserves_bytes_and_lineage(root)
+        test_unified_inventory_duplicate_scan_refuses(root)
     test_cli_exposes_explicit_pi_inputs()
     print("PASS: Pi provider launch, one-time fork lineage, metadata, placement, and exact restart resume")
 

@@ -18,7 +18,7 @@ def _stable_json(value: Mapping[str, Any]) -> str:
 
 
 def structured_delivery_prompt(
-    target: Mapping[str, Any], envelope: Mapping[str, Any]
+    target: Mapping[str, Any], envelope: Mapping[str, Any], *, state_root: str
 ) -> str:
     """Render one bounded envelope with a direct routed-request acceptance command."""
 
@@ -30,6 +30,8 @@ def structured_delivery_prompt(
                 "kind": "accept_routed_request",
                 "argv": [
                     "league",
+                    "--state-root",
+                    state_root,
                     "request",
                     "accept-routed",
                     "--event-id",
@@ -126,7 +128,7 @@ class HerdrCursorSteeringAdapter:
         if agent.get("interactive_ready") is not True:
             raise self._unavailable("cursor_input_unavailable")
         status = agent.get("agent_status")
-        if status not in {"idle", "done", "working", "blocked"}:
+        if status not in {"idle", "working", "blocked"}:
             raise self._unavailable("cursor_state_unavailable")
         revision = agent.get("revision")
         state_change_seq = agent.get("state_change_seq")
@@ -248,10 +250,12 @@ class HerdrCursorSteeringAdapter:
                     str(existing["receipt"].get("reason", "cursor_steering_refused"))
                 )
             raise self._unavailable("cursor_steering_outcome_ambiguous")
-        prompt = structured_delivery_prompt(target, envelope)
+        prompt = structured_delivery_prompt(
+            target, envelope, state_root=str(self.store.state_root)
+        )
         prompt_bytes = prompt.encode()
         initial = self._observe(pane_id, target)
-        if initial["status"] not in {"idle", "done", "working"}:
+        if initial["status"] not in {"idle", "working"}:
             raise self._unavailable("cursor_state_unavailable")
         action = "working_steer" if initial["status"] == "working" else "idle_submit"
         intent = {

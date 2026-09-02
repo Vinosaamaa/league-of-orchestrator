@@ -50,12 +50,17 @@ class SyntheticLaunchd:
         self.starts = 0
         self.state_root: Path | None = None
         self.fail_bootstraps = 0
+        self.before_start = None
 
     def is_loaded(self, label: str) -> bool:
         assert label == SERVICE_LABEL
         return self.loaded
 
     def _start(self, plist_path: Path) -> None:
+        before_start = self.before_start
+        self.before_start = None
+        if before_start is not None:
+            before_start()
         value = plistlib.loads(plist_path.read_bytes())
         assert value["Label"] == SERVICE_LABEL
         assert value["ProgramArguments"][1:] == ["service-run"]
@@ -291,6 +296,79 @@ def test_install_restart_and_exact_rollback(root: Path) -> None:
         raise AssertionError("attachment changed without the OS-managed service")
 
 
+def test_service_operations_refuse_source_check_use_races(root: Path) -> None:
+    for operation, name in (
+        ("start", "agent-watcher"),
+        ("start", "template"),
+        ("idempotent-install", "agent-watcher"),
+        ("idempotent-install", "template"),
+    ):
+        case = root / operation / name
+        state, store = _multisquad_state(case, "state")
+        store.close()
+        source = case / "source"
+        source.mkdir(parents=True)
+        agent_watcher = (source / "agent-watcher").resolve()
+        watcher_source = (ROOT / "bin/agent-watcher").read_bytes()
+        agent_watcher.write_bytes(watcher_source)
+        agent_watcher.chmod(0o700)
+        template = (source / "league-supervisor.launchd.plist.in").resolve()
+        template_source = (
+            ROOT / "config/league-supervisor.launchd.plist.in"
+        ).read_bytes()
+        template.write_bytes(template_source)
+        plist = (case / "service.plist").resolve()
+        launchd = SyntheticLaunchd()
+        launchd.plist_path = plist
+        installer = SupervisorServiceInstaller(
+            state_root=state.resolve(),
+            agent_watcher=agent_watcher,
+            template_path=template,
+            plist_path=plist,
+            backup_path=Path(f"{plist}.backup"),
+            manifest_path=Path(f"{plist}.manifest"),
+            service_manager=launchd,
+        )
+        installed = installer.install(
+            expected_agent_watcher_sha256=sha256(agent_watcher),
+            expected_template_sha256=sha256(template),
+        )
+        target, original = (
+            (agent_watcher, watcher_source)
+            if name == "agent-watcher"
+            else (template, template_source)
+        )
+        drift = (
+            original + b"\n# synthetic check-use drift\n"
+            if name == "agent-watcher"
+            else original + b"\n"
+        )
+        if operation == "idempotent-install":
+            launchd.bootout(SERVICE_LABEL)
+        launchd.before_start = lambda: target.write_bytes(drift)
+        refused = False
+        try:
+            if operation == "start":
+                installer.start()
+            else:
+                installer.install(
+                    expected_agent_watcher_sha256=sha256(agent_watcher),
+                    expected_template_sha256=sha256(template),
+                )
+        except StorageRefusal as exc:
+            assert exc.code == "supervisor_service_source_mismatch"
+            refused = True
+        finally:
+            target.write_bytes(original)
+            installer.rollback(
+                expected_installed_plist_sha256=installed[
+                    "installed_plist_sha256"
+                ]
+            )
+        assert refused, f"service {operation} accepted {name} check/use drift"
+        assert not launchd.loaded and launchd.starts == 2
+
+
 def test_install_refuses_unmanaged_live_process(root: Path) -> None:
     state, store = _multisquad_state(root, "unmanaged-state")
     store.close()
@@ -432,6 +510,7 @@ def main() -> None:
         root = Path(temporary)
         test_launchd_environment_starts_the_canonical_watcher(root / "environment")
         test_install_restart_and_exact_rollback(root / "lifecycle")
+        test_service_operations_refuse_source_check_use_races(root / "source-race")
         test_install_refuses_unmanaged_live_process(root / "unmanaged")
         test_failed_install_retries_only_after_exact_rollback(root / "retry")
         test_install_refuses_unapproved_source_without_side_effects(root / "refusal")

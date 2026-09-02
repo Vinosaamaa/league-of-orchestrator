@@ -585,9 +585,8 @@ class PersistentSupervisor:
             f"{actor_agent_id}\0{self.state_root}".encode("utf-8")
         ).hexdigest()[:24]
         watcher_id = f"watcher:persistent:{watcher_digest}"
-        same_live_ownership = bool(
+        same_binding = bool(
             previous is not None
-            and existing is not None
             and all(
                 previous.get(key) == binding.get(key)
                 for key in (
@@ -599,22 +598,18 @@ class PersistentSupervisor:
                     "session_ref",
                 )
             )
-            and existing["watcher_id"] == watcher_id
-            and existing["runtime_instance_id"] == binding["runtime_instance_id"]
-            and existing["wake_locator"] == _locator(self.socket_path)
-            and int(existing["fence"]) == int(previous["fence"])
-            and datetime.fromisoformat(str(existing["leased_until"])) > _now()
         )
-        fence = (
-            int(previous["fence"])
-            if same_live_ownership and previous is not None
-            else max(
-                0 if previous is None else int(previous["fence"]),
+        if previous is None:
+            fence = max(
                 0 if existing is None else int(existing["fence"]),
                 int(binding.get("fence_floor", 0)),
-            )
-            + 1
-        )
+            ) + 1
+        elif same_binding:
+            fence = int(previous["fence"])
+        else:
+            fence = max(
+                int(previous["fence"]), int(binding.get("fence_floor", 0))
+            ) + 1
         receipt = store.register_watcher(
             binding["scope_id"],
             watcher_id,
@@ -625,6 +620,12 @@ class PersistentSupervisor:
             fence,
             _at(),
             block_on_obligations=True,
+            expected_watcher_id=(
+                None if previous is None else str(previous["watcher_id"])
+            ),
+            expected_fence=(
+                None if previous is None else int(previous["fence"])
+            ),
         )
         return {
             **binding,

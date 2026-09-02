@@ -391,6 +391,22 @@ class SupervisorServiceInstaller:
                 "service manifest does not own these exact local paths",
             )
 
+    def _assert_rollback_backup(self, manifest: Mapping[str, Any]) -> None:
+        expected_digest = manifest.get("previous_plist_sha256")
+        backup = _read_optional_owned_regular(
+            self.backup_path, "service rollback backup"
+        )
+        if (
+            expected_digest is None
+            and backup is not None
+            or isinstance(expected_digest, str)
+            and (backup is None or _sha256(backup) != expected_digest)
+        ):
+            raise StorageRefusal(
+                "supervisor_service_backup_mismatch",
+                "service rollback backup does not match the active manifest",
+            )
+
     def install(
         self,
         *,
@@ -424,6 +440,7 @@ class SupervisorServiceInstaller:
                 and current is not None
                 and _sha256(current) == installed_digest
             ):
+                self._assert_rollback_backup(existing_manifest)
                 if not self.service_manager.is_loaded(SERVICE_LABEL):
                     self._assert_no_unmanaged_process()
                     self.service_manager.bootstrap(SERVICE_LABEL, self.plist_path)

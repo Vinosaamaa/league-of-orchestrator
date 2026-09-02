@@ -570,8 +570,8 @@ def test_attachment_refuses_concurrent_watcher_takeover(root: Path) -> None:
     state, store = _multisquad_state(root, "attachment-takeover")
     runtime = PersistentSupervisor(
         state,
-        lease_seconds=20,
-        renew_seconds=10,
+        lease_seconds=0.8,
+        renew_seconds=0.2,
         wake_adapter=FakeWakeAdapter(),
         delivery_adapter=FakeDeliveryAdapter(),
     )
@@ -605,10 +605,15 @@ def test_attachment_refuses_concurrent_watcher_takeover(root: Path) -> None:
     else:
         raise AssertionError("stale attachment request crossed watcher takeover")
     assert store.supervision_policy(JARVAN_ID)["attachment_mode"] == "attached"
+    thread.join(timeout=3)
+    assert not thread.is_alive(), "fenced supervisor survived its next lease renewal"
+    assert len(errors) == 1 and isinstance(errors[0], StorageRefusal)
+    assert errors[0].code == "watcher_fenced"
+    current = store.watcher_registration(JARVAN_ID)
+    assert current is not None
+    assert current["watcher_id"] == "watcher:persistent:synthetic-takeover"
+    assert current["fence"] == int(registration["fence"]) + 1
     store.close()
-    send_supervisor_message(f"unix:{runtime.socket_path}", {"kind": "stop"})
-    thread.join(timeout=5)
-    assert not thread.is_alive() and not errors
 
 
 def test_active_turn_persists_attention_without_duplicate_wake(root: Path) -> None:

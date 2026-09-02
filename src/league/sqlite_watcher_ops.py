@@ -1178,9 +1178,17 @@ def register_watcher(
     at: str,
     *,
     block_on_obligations: bool = True,
+    expected_watcher_id: str | None = None,
+    expected_fence: int | None = None,
 ) -> dict[str, Any]:
     now = _time(at, "watcher registration time")
-    if _time(leased_until, "watcher lease expiry") <= now or fence < 1 or not wake_locator:
+    if (
+        _time(leased_until, "watcher lease expiry") <= now
+        or fence < 1
+        or not wake_locator
+        or (expected_watcher_id is None) != (expected_fence is None)
+        or (expected_fence is not None and expected_fence < 1)
+    ):
         raise StorageRefusal("invalid_watcher", "watcher registration is incomplete")
     try:
         with store._transaction():
@@ -1201,6 +1209,15 @@ def register_watcher(
             existing = store.connection.execute(
                 "SELECT * FROM watcher_registrations WHERE actor_agent_id=?", (actor_agent_id,)
             ).fetchone()
+            if expected_watcher_id is not None and (
+                existing is None
+                or existing["watcher_id"] != expected_watcher_id
+                or int(existing["fence"]) != expected_fence
+            ):
+                raise StorageRefusal(
+                    "watcher_fenced",
+                    "watcher registration changed before atomic renewal",
+                )
             resuming = existing is None or _time(
                 str(existing["leased_until"]), "stored watcher lease"
             ) <= now
@@ -2114,6 +2131,9 @@ def _owner_actionable_counts(store: Any, actor_agent_id: str) -> dict[str, int]:
                        ('active','pending','accepted','working','progress','in_progress','blocked','ready_to_land')
                 )
               )) owner_decisions,
+          (SELECT COUNT(*) FROM tasks t
+            WHERE t.coordinator_agent_id=?
+              AND t.state IN ('blocked','ready_to_land')) decision_tasks,
           (SELECT COUNT(*) FROM delivery_outbox
             WHERE recipient_agent_id=? AND state='pending'
               AND attempt_count>0 AND last_outcome IS NOT NULL
@@ -2122,9 +2142,39 @@ def _owner_actionable_counts(store: Any, actor_agent_id: str) -> dict[str, int]:
             WHERE t.coordinator_agent_id=?
               AND c.cleanup_state IN ('awaiting_authority','blocked')) cleanup_decisions
         """,
-        (actor_agent_id,) * 4,
+        (actor_agent_id,) * 5,
     ).fetchone()
     return {name: int(row[name]) for name in row.keys()}
+
+
+def _persist_stop_block(
+    store: Any,
+    scope_id: str,
+    callsign: str,
+    terminal_generation: str,
+    wait_generation: int,
+    summaries: tuple[str, ...],
+) -> None:
+    reason_digest = hashlib.sha256(
+        stop_feedback_reason(callsign, wait_generation, summaries).encode("utf-8")
+    ).hexdigest()
+    store.connection.execute(
+        """
+        UPDATE watcher_scopes
+           SET last_blocked_wait_generation=?,stop_blocked=1,wait_active=1,
+               allow_stop_once=0,pending_stop_feedback_digest=?,
+               pending_stop_terminal_generation=?,
+               pending_stop_wait_generation=?
+         WHERE scope_id=?
+        """,
+        (
+            wait_generation,
+            reason_digest,
+            terminal_generation,
+            wait_generation,
+            scope_id,
+        ),
+    )
 
 
 def stop_decision(
@@ -2217,8 +2267,34 @@ def stop_decision(
                     """,
                     (scope_id,),
                 )
+            if bool(scope["allow_stop_once"]):
+                store.connection.execute(
+                    """
+                    UPDATE watcher_scopes SET allow_stop_once=0,stop_blocked=0,wait_active=0,
+                           pending_stop_feedback_digest=NULL,
+                           pending_stop_terminal_generation=NULL,
+                           pending_stop_wait_generation=NULL
+                     WHERE scope_id=?
+                    """,
+                    (scope_id,),
+                )
+                return {
+                    **common,
+                    "status": "explicit_allow_once",
+                    "decision": "allow",
+                    "priority": None,
+                }
+            wait_generation = int(scope["wait_generation"])
             if policy["attachment_mode"] == "detached":
                 if total > 0:
+                    _persist_stop_block(
+                        store,
+                        scope_id,
+                        str(actor["callsign"]),
+                        terminal_generation,
+                        wait_generation,
+                        summaries,
+                    )
                     return {
                         **common,
                         "status": "blocked_detached_owner_action",
@@ -2234,6 +2310,14 @@ def stop_decision(
                             "priority": "verified_watcher_handoff",
                             "supervision_handoff": True,
                         }
+                    _persist_stop_block(
+                        store,
+                        scope_id,
+                        str(actor["callsign"]),
+                        terminal_generation,
+                        wait_generation,
+                        summaries,
+                    )
                     return {
                         **common,
                         "status": "supervisor_unavailable",
@@ -2252,28 +2336,13 @@ def stop_decision(
                     (scope_id,),
                 )
                 return {**common, "status": "allowed", "decision": "allow", "priority": None}
-            wait_generation = int(scope["wait_generation"])
-            reason_digest = hashlib.sha256(
-                stop_feedback_reason(
-                    actor["callsign"], wait_generation, summaries
-                ).encode("utf-8")
-            ).hexdigest()
-            store.connection.execute(
-                """
-                UPDATE watcher_scopes
-                   SET last_blocked_wait_generation=?,stop_blocked=1,wait_active=1,
-                       allow_stop_once=0,pending_stop_feedback_digest=?,
-                       pending_stop_terminal_generation=?,
-                       pending_stop_wait_generation=?
-                 WHERE scope_id=?
-                """,
-                (
-                    wait_generation,
-                    reason_digest,
-                    terminal_generation,
-                    wait_generation,
-                    scope_id,
-                ),
+            _persist_stop_block(
+                store,
+                scope_id,
+                str(actor["callsign"]),
+                terminal_generation,
+                wait_generation,
+                summaries,
             )
             return {**common, "status": "blocked_attached", "decision": "block", "priority": None}
     except StorageRefusal:

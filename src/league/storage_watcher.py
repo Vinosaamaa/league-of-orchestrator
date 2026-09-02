@@ -35,6 +35,8 @@ class WatcherStorage(Protocol):
         at: str,
         *,
         block_on_obligations: bool = True,
+        expected_watcher_id: str | None = None,
+        expected_fence: int | None = None,
     ) -> dict[str, Any]: ...
 
     def supervisor_binding(self, callsign: Optional[str] = None) -> dict[str, Any]: ...

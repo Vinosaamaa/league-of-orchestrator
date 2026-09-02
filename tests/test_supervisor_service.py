@@ -161,6 +161,27 @@ def test_install_restart_and_exact_rollback(root: Path) -> None:
         item["actor_agent_id"]: item["fence"] for item in first["bindings"]
     }
 
+    backup.unlink()
+    try:
+        installer.install(
+            expected_agent_watcher_sha256=sha256(agent_watcher),
+            expected_template_sha256=sha256(template),
+        )
+    except StorageRefusal as exc:
+        assert exc.code == "supervisor_service_backup_mismatch"
+    else:
+        raise AssertionError("idempotent install claimed a missing rollback backup")
+    backup.write_bytes(b"changed synthetic rollback bytes\n")
+    try:
+        installer.install(
+            expected_agent_watcher_sha256=sha256(agent_watcher),
+            expected_template_sha256=sha256(template),
+        )
+    except StorageRefusal as exc:
+        assert exc.code == "supervisor_service_backup_mismatch"
+    else:
+        raise AssertionError("idempotent install claimed a changed rollback backup")
+    backup.write_bytes(prior)
     exact_retry = installer.install(
         expected_agent_watcher_sha256=sha256(agent_watcher),
         expected_template_sha256=sha256(template),

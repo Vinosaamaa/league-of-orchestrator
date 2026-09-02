@@ -3505,6 +3505,8 @@ class SQLiteStorage(SQLiteTransactionCore):
         at: str,
         *,
         block_on_obligations: bool = True,
+        expected_watcher_id: str | None = None,
+        expected_fence: int | None = None,
     ) -> dict[str, Any]:
         return register_watcher_operation(
             self,
@@ -3517,6 +3519,8 @@ class SQLiteStorage(SQLiteTransactionCore):
             fence,
             at,
             block_on_obligations=block_on_obligations,
+            expected_watcher_id=expected_watcher_id,
+            expected_fence=expected_fence,
         )
 
     def supervisor_binding(self, callsign: Optional[str] = None) -> dict[str, Any]:

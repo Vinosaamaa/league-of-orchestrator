@@ -1236,6 +1236,7 @@ def test_cli_rollover_refresh_bindings_is_scoped_and_settled_retry_is_effect_fre
             "expected_snapshot_digest": "d" * 64,
             "expected_snapshot_version": 2,
             "expires_at": "2026-01-01T01:00:00Z",
+            "multiplexer_kind": "herdr",
             "operation_id": "rollover:synthetic",
             "predecessor_agent_id": "agent:old",
             "refresh_id": "refresh:synthetic",

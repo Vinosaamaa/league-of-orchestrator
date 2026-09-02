@@ -3944,6 +3944,18 @@ class SQLiteStorage(SQLiteTransactionCore):
             self, request, at
         )
 
+    def begin_runtime_replacement_effect(
+        self,
+        operation_id: str,
+        expected_version: int,
+        intent_digest: str,
+        effect: str,
+        at: str,
+    ) -> dict[str, Any]:
+        return sqlite_runtime_replacement_ops.begin_runtime_replacement_effect(
+            self, operation_id, expected_version, intent_digest, effect, at
+        )
+
     def record_replacement_successor_verified(
         self,
         operation_id: str,
@@ -4040,6 +4052,17 @@ class SQLiteStorage(SQLiteTransactionCore):
             intent_digest,
             failure_code,
             at,
+        )
+
+    def resume_runtime_replacement_recovery(
+        self,
+        operation_id: str,
+        expected_version: int,
+        intent_digest: str,
+        at: str,
+    ) -> dict[str, Any]:
+        return sqlite_runtime_replacement_ops.resume_runtime_replacement_recovery(
+            self, operation_id, expected_version, intent_digest, at
         )
 
     def runtime_replacement_status(

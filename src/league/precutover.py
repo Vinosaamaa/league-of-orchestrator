@@ -1515,6 +1515,12 @@ def _integrated_lifecycle(home: Path, source_root: Path) -> dict[str, Any]:
                 at=clock.now(),
             )
         )
+        store.set_supervision_attachment(
+            "synthetic-precutover-scope",
+            SHOTCALLER_ID,
+            "detached",
+            clock.now(),
+        )
         stop_after = store.stop_decision(
             "synthetic-precutover-scope",
             SHOTCALLER_ID,

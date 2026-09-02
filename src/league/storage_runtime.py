@@ -58,6 +58,15 @@ class RuntimeBindingStorage(Protocol):
         self, request: Mapping[str, Any], at: str
     ) -> dict[str, Any]: ...
 
+    def begin_runtime_replacement_effect(
+        self,
+        operation_id: str,
+        expected_version: int,
+        intent_digest: str,
+        effect: str,
+        at: str,
+    ) -> dict[str, Any]: ...
+
     def record_replacement_successor_verified(
         self,
         operation_id: str,
@@ -112,6 +121,14 @@ class RuntimeBindingStorage(Protocol):
         expected_version: int,
         intent_digest: str,
         failure_code: str,
+        at: str,
+    ) -> dict[str, Any]: ...
+
+    def resume_runtime_replacement_recovery(
+        self,
+        operation_id: str,
+        expected_version: int,
+        intent_digest: str,
         at: str,
     ) -> dict[str, Any]: ...
 

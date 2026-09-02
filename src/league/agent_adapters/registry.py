@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from ..storage_types import StorageRefusal
+from ..multiplexer_adapters.contract import MULTIPLEXER_OPERATIONS
 from .core import (
     ADAPTER_OPERATIONS,
     OPERATION_CAPABILITIES,
@@ -96,10 +97,21 @@ class AgentAdapterRegistry:
         invalid_assignment = not callable(
             getattr(adapter, "assignment_factory", None)
         )
+        multiplexer_requirements = getattr(adapter, "multiplexer_requirements", None)
+        invalid_multiplexer_requirements = (
+            not isinstance(multiplexer_requirements, dict)
+            or not set(multiplexer_requirements) <= adapter.lifecycle_operations
+            or any(
+                not isinstance(required, frozenset)
+                or not required <= MULTIPLEXER_OPERATIONS
+                for required in multiplexer_requirements.values()
+            )
+        )
         if (
             unknown or missing_methods or unsupported or invalid_profiles
             or invalid_launch or invalid_delivery or invalid_providers
             or invalid_presentation or invalid_assignment or invalid_aliases
+            or invalid_multiplexer_requirements
         ):
             raise StorageRefusal(
                 "adapter_contract_invalid",

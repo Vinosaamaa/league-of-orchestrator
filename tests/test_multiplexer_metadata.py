@@ -870,7 +870,8 @@ def test_adapter_capabilities_are_truthful() -> None:
             "calling_context", "discover", "routing", "placement", "metadata",
             "title", "delivery", "steering_delivery", "close",
             "visible_launch", "shotcaller_bootstrap", "rollover_reconciliation",
-            "production_cleanup", "runtime_replacement",
+            "production_cleanup", "provider_session_lifecycle",
+            "runtime_replacement",
         }
     )
     assert registry.adapter("tmux").capabilities == frozenset()

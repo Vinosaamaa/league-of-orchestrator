@@ -265,21 +265,14 @@ def production_capability_matrix() -> dict[str, Any]:
     pairs = builtin_contract_registry().capability_matrix()["pairs"]
     agents = builtin_agent_adapter_registry()
     multiplexers = builtin_multiplexer_adapter_registry()
-    mux_requirements = {
-        "launch": frozenset({"visible_launch"}),
-        "resume": frozenset({"visible_launch"}),
-        "steer": frozenset({"delivery"}),
-        "title": frozenset({"title"}),
-        "delivery": frozenset({"delivery"}),
-        "retirement": frozenset({"production_cleanup"}),
-        "cleanup": frozenset({"production_cleanup"}),
-    }
     for pair in pairs:
         multiplexer = multiplexers.adapter(str(pair["backend"]))
         agent = agents.adapter(str(pair["harness"]))
         pair["lifecycle_operations"] = {}
         for operation in sorted(agent.lifecycle_operations):
-            required = mux_requirements.get(operation, frozenset())
+            required = agent.multiplexer_requirements.get(
+                operation, frozenset()
+            )
             pair["lifecycle_operations"][operation] = (
                 "supported"
                 if required <= multiplexer.capabilities

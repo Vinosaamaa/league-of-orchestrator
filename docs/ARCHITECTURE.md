@@ -259,14 +259,15 @@ performs no hosted mutation.
 
 ## Portability boundary
 
-The repository-local runtime core uses opaque namespaced session identity and
-declared capabilities. Codex+Herdr and Codex+tmux remain named contracts, and a
-deterministic Pi adapter proves the shared lifecycle without being labeled a
-real-runtime canary. The imported live watcher is unchanged: its Champion UUID,
-Codex hook, Herdr/tmux branch, and Herdr launch assumptions remain until issue
-#23 verifies and authorizes a cutover. Provider model names remain configuration
-data. Repository-local portability is implemented without claiming installed
-portability.
+The repository-local runtime core uses opaque namespaced session identity,
+declared capabilities, and explicit agent and multiplexer registries. Codex,
+Pi, and Cursor CLI keep native provider mechanics in dedicated adapter folders;
+Herdr advertises only its callable transport operations and tmux fails closed
+until its own adapter supplies them. Launch, restored-session reconciliation,
+and active Champion A-to-B replacement select those contracts without a
+provider/multiplexer branch in core policy. Provider model names remain
+configuration data. The source and synthetic acceptance do not claim installed
+or live-runtime portability; issue #23 still owns cutover proof.
 
 The skill capability matrix selects one pair from the same registered adapter
 matrix, then evaluates orthogonal harness/tool/platform/browser/forge/

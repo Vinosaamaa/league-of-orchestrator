@@ -40,7 +40,11 @@ OPERATION_METHODS = {
     "delivery": ("deliver",),
     "retirement": ("exit",),
     "cleanup": ("exit",),
-    "replacement": ("verify_replacement", "retire_replacement"),
+    "replacement": (
+        "recover_replacement",
+        "verify_replacement",
+        "retire_replacement",
+    ),
 }
 
 OPERATION_CAPABILITIES = {
@@ -100,10 +104,15 @@ class SharedLifecyclePolicy:
         exact_binding: bool = True,
         actor_role: str | None = None,
         delegated_by_shotcaller: bool = False,
+        mutation_fenced: bool = False,
     ) -> LifecycleDecision:
         if not exact_binding:
             return LifecycleDecision(event.operation, "refuse", "runtime_binding_mismatch")
         if event.operation == "pre_tool_authorization":
+            if mutation_fenced:
+                return LifecycleDecision(
+                    event.operation, "refuse", "runtime_replacement_fenced"
+                )
             role_authorized = actor_role == "shotcaller" or (
                 actor_role in {"champion", "hidden-worker"}
                 and delegated_by_shotcaller
@@ -122,11 +131,14 @@ class AgentLifecycleAdapter(Protocol):
     lifecycle_operations: frozenset[str]
     hook_profile: Mapping[str, Mapping[str, Any]]
     visible_launch_factory: Any
+    multiplexer_requirements: Mapping[str, frozenset[str]]
+    process_names: frozenset[str]
 
     def accepts_provider(self, provider_kind: str) -> bool: ...
     def normalize_provider(self, provider_kind: str) -> str: ...
     def canonical_presentation(self, **inputs: Any) -> Mapping[str, Any]: ...
     def canonical_assignment(self, *, store: Any, row: Mapping[str, Any]) -> str: ...
+    def recover_replacement(self, **inputs: Any) -> Mapping[str, Any] | None: ...
     def verify_replacement(self, **inputs: Any) -> Mapping[str, Any]: ...
     def retire_replacement(self, **inputs: Any) -> Mapping[str, Any]: ...
 

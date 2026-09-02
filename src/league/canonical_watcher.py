@@ -19,6 +19,7 @@ from .agent_adapters import SharedLifecyclePolicy, builtin_agent_adapter_registr
 from .multiplexer_adapters import builtin_multiplexer_adapter_registry
 from .sqlite_store import DEFAULT_BUSY_TIMEOUT_MS, SQLiteStorage
 from .sqlite_watcher_ops import _obligation_counts, stop_feedback_reason
+from .sqlite_runtime_replacement_ops import runtime_replacement_mutation_fenced
 from .storage import RuntimeRegistrationCommand, StorageRefusal
 from .persistent_supervisor import (
     PersistentSupervisor,
@@ -597,6 +598,7 @@ def _pre_tool_output(
     exact_binding: bool,
     actor_role: str | None,
     delegated_by_shotcaller: bool,
+    mutation_fenced: bool = False,
 ) -> dict[str, Any]:
     adapter, profile = _hook_profile(command, "pre_tool_authorization")
     session = payload.get(str(profile["session_field"]))
@@ -624,6 +626,7 @@ def _pre_tool_output(
         exact_binding=exact_binding,
         actor_role=actor_role,
         delegated_by_shotcaller=delegated_by_shotcaller,
+        mutation_fenced=mutation_fenced,
     )
     return {
         "decision": decision.outcome,
@@ -714,6 +717,10 @@ def handle_brokered_hook(
                 actor_role=actor_role,
                 delegated_by_shotcaller=_delegation_verified(
                     store, actor_id, actor_role
+                ),
+                mutation_fenced=bool(
+                    actor_id
+                    and runtime_replacement_mutation_fenced(store, actor_id)
                 ),
             ),
             "capture": None,
@@ -1242,6 +1249,10 @@ def main(argv: list[str] | None = None) -> int:
                     actor_role=actor_role,
                     delegated_by_shotcaller=_delegation_verified(
                         store, actor_id, actor_role
+                    ),
+                    mutation_fenced=bool(
+                        actor_id
+                        and runtime_replacement_mutation_fenced(store, actor_id)
                     ),
                 )
             )

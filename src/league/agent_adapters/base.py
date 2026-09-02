@@ -147,6 +147,7 @@ class DeclaredAgentAdapter:
     provider_aliases: Mapping[str, str]
     launch_profile: Any
     hook_profile: Mapping[str, Mapping[str, Any]]
+    multiplexer_requirements: Mapping[str, frozenset[str]]
     visible_launch_factory: Any
     delivery_handler: Any
     presentation_factory: Any
@@ -209,6 +210,35 @@ class DeclaredAgentAdapter:
             target=target,
         )
 
+    def recover_replacement(
+        self,
+        *,
+        target: Mapping[str, Any],
+        multiplexer: Any,
+    ) -> Mapping[str, Any] | None:
+        if "replacement" not in self.lifecycle_operations:
+            raise StorageRefusal(
+                "runtime_replacement_adapter_unsupported",
+                "agent adapter does not support runtime replacement",
+            )
+        provider_kind = target.get("provider_kind")
+        if not isinstance(provider_kind, str) or not self.accepts_provider(provider_kind):
+            raise StorageRefusal(
+                "runtime_replacement_provider_mismatch",
+                "provider does not belong to the selected agent adapter",
+            )
+        if "runtime_replacement" not in multiplexer.capabilities:
+            raise StorageRefusal(
+                "runtime_replacement_multiplexer_unsupported",
+                "multiplexer does not support exact runtime replacement",
+            )
+        return multiplexer.replacement_recover(
+            adapter_kind=self.contract.kind,
+            provider_kind=provider_kind,
+            process_names=self.process_names,
+            target=target,
+        )
+
     def retire_replacement(
         self,
         *,
@@ -216,7 +246,6 @@ class DeclaredAgentAdapter:
         target: Mapping[str, Any],
         multiplexer: Any,
     ) -> Mapping[str, Any]:
-        verified = self.verify_replacement(target=target, multiplexer=multiplexer)
         return multiplexer.replacement_retire(
             operation_id=operation_id,
             adapter_kind=self.contract.kind,
@@ -224,7 +253,6 @@ class DeclaredAgentAdapter:
             process_names=self.process_names,
             exit_prompt=str(self.launch_profile.exit_prompt),
             target=target,
-            verification=verified,
         )
 
     def translate_event(self, native_event: str, payload: Mapping[str, Any]) -> LifecycleEvent:

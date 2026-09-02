@@ -4,10 +4,14 @@
 from __future__ import annotations
 
 import tempfile
+import hashlib
+import json
 from pathlib import Path
+import subprocess
 import sys
 from types import SimpleNamespace
 from typing import Any, Mapping
+import uuid
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -15,13 +19,14 @@ sys.path[:0] = [str(ROOT / "src"), str(ROOT / "tests")]
 
 from league.agent_adapters.registry import AgentAdapterRegistry  # noqa: E402
 from league.multiplexer_adapters.registry import MultiplexerAdapterRegistry  # noqa: E402
+from league.multiplexer_adapters.herdr import HerdrMultiplexerAdapter  # noqa: E402
 from league.request_services import AssignmentService, AssignmentSpec  # noqa: E402
 from league.runtime_replacement import (  # noqa: E402
     RuntimeReplacementService,
     RuntimeReplacementSpec,
 )
 from league.storage import StorageRefusal  # noqa: E402
-from lifecycle_fakes import FakeIds, issue_bound_spec  # noqa: E402
+from lifecycle_fakes import FakeDeliveryAdapter, FakeIds, issue_bound_spec  # noqa: E402
 from request_lifecycle_fixture import (  # noqa: E402
     GAREN_RUNTIME,
     LUX_ID,
@@ -30,6 +35,101 @@ from request_lifecycle_fixture import (  # noqa: E402
     dispatch_request,
 )
 from storage_fixture import SHOTCALLER_ID  # noqa: E402
+
+
+class InjectedCrash(BaseException):
+    pass
+
+
+class CrashAfterCommitStore:
+    def __init__(self, store: Any, method_name: str) -> None:
+        self.store = store
+        self.method_name = method_name
+        self.crashed = False
+
+    def __getattr__(self, name: str) -> Any:
+        value = getattr(self.store, name)
+        if name != self.method_name or self.crashed:
+            return value
+
+        def invoke(*args: Any, **kwargs: Any) -> Any:
+            result = value(*args, **kwargs)
+            self.crashed = True
+            raise InjectedCrash(f"synthetic crash after {name} commit")
+
+        return invoke
+
+
+class HerdrRouteCompensationRunner:
+    def __init__(self, root: Path) -> None:
+        cwd = str(root.resolve())
+        self.list_calls = 0
+        self.agents = {
+            "pane:a": {
+                "workspace_id": "w1",
+                "tab_id": "tab:a",
+                "pane_id": "pane:a",
+                "terminal_id": "terminal:a",
+                "name": "lux",
+                "agent": "codex",
+                "display_agent": "codex",
+                "cwd": cwd,
+                "foreground_cwd": cwd,
+                "agent_session": {"value": "session:a", "source": "herdr:codex"},
+                "state_change_seq": 1,
+            },
+            "pane:b": {
+                "workspace_id": "w1",
+                "tab_id": "tab:b",
+                "pane_id": "pane:b",
+                "terminal_id": "terminal:b",
+                "name": "staging_test",
+                "agent": "pi",
+                "display_agent": "cursor",
+                "cwd": cwd,
+                "foreground_cwd": cwd,
+                "agent_session": {"value": "session:b", "source": "herdr:pi"},
+                "state_change_seq": 1,
+            },
+        }
+
+    def run(self, arguments: Any, timeout_seconds: int = 30):
+        del timeout_seconds
+        command = tuple(arguments)
+        result: dict[str, Any] | None = None
+        if command[1:3] == ("agent", "list"):
+            self.list_calls += 1
+            agents = [dict(item) for item in self.agents.values()]
+            if self.list_calls == 4:
+                for item in agents:
+                    if item["pane_id"] == "pane:b":
+                        item["name"] = "staging_test"
+            result = {"agents": agents}
+        elif command[1:3] == ("agent", "get"):
+            result = {"agent": dict(self.agents[command[3]])}
+        elif command[1:3] == ("pane", "get"):
+            result = {"pane": dict(self.agents[command[3]])}
+        elif command[1:3] == ("pane", "process-info"):
+            pane_id = command[command.index("--pane") + 1]
+            item = self.agents[pane_id]
+            result = {
+                "process_info": {
+                    "foreground_processes": [
+                        {
+                            "argv0": item["agent"],
+                            "cwd": item["cwd"],
+                            "pid": 100 if pane_id == "pane:a" else 200,
+                            "process_start": "synthetic-start",
+                        }
+                    ]
+                }
+            }
+        elif command[1:3] == ("agent", "rename"):
+            self.agents[command[3]]["name"] = command[4]
+        else:
+            raise AssertionError(command)
+        stdout = "" if result is None else json.dumps({"result": result})
+        return subprocess.CompletedProcess(command, 0, stdout, "")
 
 
 class InitialLaunch:
@@ -45,7 +145,11 @@ class InitialLaunch:
             "champion_agent_id": spec.champion_agent_id,
             "callsign": spec.callsign,
             "runtime_instance_id": f"runtime:{spec.champion_agent_id}",
-            "thread_id": f"session:{self.runtime_kind}:{spec.champion_agent_id}",
+            "thread_id": (
+                str((Path(spec.worktree) / f"{spec.champion_agent_id}.jsonl").resolve())
+                if self.runtime_kind == "pi"
+                else f"session:{self.runtime_kind}:{spec.champion_agent_id}"
+            ),
             "endpoint": f"terminal:{self.runtime_kind}:{spec.champion_agent_id}",
             "runtime_generation": f"generation:{self.runtime_kind}:1",
             "harness_kind": f"{self.runtime_kind}-thread",
@@ -61,9 +165,12 @@ class InitialLaunch:
 
 
 class ReplacementDriver:
-    def __init__(self, owner: "FakeAgentAdapter", launch: Mapping[str, Any]) -> None:
+    def __init__(
+        self, owner: "FakeAgentAdapter", launch: Mapping[str, Any], store: Any
+    ) -> None:
         self.owner = owner
         self.launch_inputs = dict(launch)
+        self.store = store
         self.created_endpoint = False
         self.launch_receipt: dict[str, Any] | None = None
 
@@ -75,7 +182,11 @@ class ReplacementDriver:
         target = {
             "agent_id": spec.champion_agent_id,
             "runtime_instance_id": self.launch_inputs["runtime_instance_id"],
-            "session_ref": f"session:{self.owner.kind}:{spec.champion_agent_id}",
+            "session_ref": (
+                str((Path(spec.worktree) / f"{spec.champion_agent_id}.jsonl").resolve())
+                if self.owner.kind == "pi"
+                else f"session:{self.owner.kind}:{spec.champion_agent_id}"
+            ),
             "endpoint": f"terminal:{self.owner.kind}:{spec.champion_agent_id}",
             "runtime_generation": f"generation:{self.owner.kind}:2",
             "cwd": spec.worktree,
@@ -105,6 +216,19 @@ class ReplacementDriver:
             "worktree": spec.worktree,
             "capabilities": list(spec.required_capabilities),
         }
+        if self.owner.kind == "pi":
+            bind_pi_descriptor(
+                self.store,
+                descriptor_id=self.launch_inputs["launch_descriptor_id"],
+                assignment_id=spec.assignment_id,
+                receipt=self.launch_receipt,
+                provider_kind=target["provider_kind"],
+                callsign=str(spec.callsign),
+                routing_name=str(spec.routing_name),
+            )
+        if self.owner.crash_after_launch:
+            self.owner.crash_after_launch = False
+            raise InjectedCrash("synthetic crash after successor launch")
         return dict(self.launch_receipt)
 
     def cleanup(self, _receipt: Mapping[str, Any] | None) -> bool:
@@ -125,14 +249,26 @@ class FakeAgentAdapter:
         self.presentation_factory = lambda **inputs: inputs
         self.native_events = {}
         self.multiplexer: FakeMultiplexer
+        self.process_names = frozenset({kind})
         self.launches = 0
         self.launch_fails = False
+        self.crash_after_launch = False
 
     def accepts_provider(self, provider_kind: str) -> bool:
         return provider_kind in self.provider_kinds
 
     def visible_launch(self, **inputs: Any) -> ReplacementDriver:
-        return ReplacementDriver(self, inputs["launch"])
+        return ReplacementDriver(self, inputs["launch"], inputs["store"])
+
+    def recover_replacement(
+        self, *, target: Mapping[str, Any], multiplexer: "FakeMultiplexer"
+    ) -> Mapping[str, Any] | None:
+        return multiplexer.replacement_recover(
+            adapter_kind=self.kind,
+            provider_kind=target["provider_kind"],
+            process_names=self.process_names,
+            target=target,
+        )
 
     def verify_replacement(
         self, *, target: Mapping[str, Any], multiplexer: "FakeMultiplexer"
@@ -151,7 +287,6 @@ class FakeAgentAdapter:
         target: Mapping[str, Any],
         multiplexer: "FakeMultiplexer",
     ) -> Mapping[str, Any]:
-        verification = self.verify_replacement(target=target, multiplexer=multiplexer)
         return multiplexer.replacement_retire(
             operation_id=operation_id,
             adapter_kind=self.kind,
@@ -159,7 +294,6 @@ class FakeAgentAdapter:
             process_names=frozenset({self.kind}),
             exit_prompt="exit",
             target=target,
-            verification=verification,
         )
 
     # Registry validation only requires advertised methods.  These hooks keep
@@ -178,6 +312,40 @@ class FakeMultiplexer:
         self.route_rollbacks = 0
         self.retirements = 0
         self.fail_retirement = False
+        self.crash_after_predecessor_rename = False
+        self.crash_after_successor_rename = False
+        self.crash_after_retirement = False
+
+    def replacement_recover(self, **inputs: Any) -> Mapping[str, Any] | None:
+        target = dict(inputs["target"])
+        native = self.native.get(str(target["agent_id"]))
+        if native is None:
+            return None
+        self.replacement_verify(target={**target, **native}, **{
+            key: inputs[key]
+            for key in ("adapter_kind", "provider_kind", "process_names")
+        })
+        return {
+            "verified": True,
+            "assignment_id": target["assignment_id"],
+            "task_id": target["task_id"],
+            "champion_agent_id": target["agent_id"],
+            "callsign": target["callsign"],
+            "runtime_instance_id": target["runtime_instance_id"],
+            "thread_id": native["session_ref"],
+            "endpoint": native["endpoint"],
+            "runtime_generation": native["runtime_generation"],
+            "harness_kind": target["harness_kind"],
+            "backend_kind": self.kind,
+            "routing_name": target["routing_name"],
+            "display_agent": target["provider_kind"],
+            "repository": target["repository"],
+            "issue": target["issue"],
+            "branch": target["branch"],
+            "worktree": target["cwd"],
+            "capabilities": list(target["required_capabilities"]),
+            "recovered": True,
+        }
 
     def replacement_verify(self, **inputs: Any) -> Mapping[str, Any]:
         target = dict(inputs["target"])
@@ -207,9 +375,19 @@ class FakeMultiplexer:
         predecessor = self.native[str(inputs["predecessor"]["agent_id"])]
         successor = self.native[str(inputs["successor"]["agent_id"])]
         predecessor_staging = f"retired_{inputs['operation_id'].split(':')[-1]}"
-        predecessor["routing_name"] = predecessor_staging
-        successor["routing_name"] = inputs["predecessor"]["routing_name"]
-        self.route_swaps += 1
+        canonical = inputs["predecessor"]["routing_name"]
+        staging = inputs["successor"]["routing_name"]
+        if predecessor["routing_name"] == canonical:
+            predecessor["routing_name"] = predecessor_staging
+            if self.crash_after_predecessor_rename:
+                self.crash_after_predecessor_rename = False
+                raise InjectedCrash("synthetic crash after predecessor rename")
+        if successor["routing_name"] == staging:
+            successor["routing_name"] = canonical
+            self.route_swaps += 1
+            if self.crash_after_successor_rename:
+                self.crash_after_successor_rename = False
+                raise InjectedCrash("synthetic crash after successor rename")
         return {
             "verified": True,
             "operation_id": inputs["operation_id"],
@@ -236,6 +414,9 @@ class FakeMultiplexer:
             raise RuntimeError("synthetic predecessor retirement failure")
         self.native.pop(str(target["agent_id"]), None)
         self.retirements += 1
+        if self.crash_after_retirement:
+            self.crash_after_retirement = False
+            raise InjectedCrash("synthetic crash after predecessor retirement")
         return {
             "verified": True,
             "operation_id": inputs["operation_id"],
@@ -255,6 +436,71 @@ def refused(operation: Any, code: str) -> None:
         assert exc.code == code, (exc.code, code)
         return
     raise AssertionError(f"expected refusal {code}")
+
+
+def bind_pi_descriptor(
+    store: Any,
+    *,
+    descriptor_id: str,
+    assignment_id: str,
+    receipt: Mapping[str, Any],
+    provider_kind: str,
+    callsign: str,
+    routing_name: str,
+) -> None:
+    session_id = str(uuid.uuid5(uuid.NAMESPACE_URL, descriptor_id))
+    worktree = str(Path(str(receipt["worktree"])).resolve())
+    descriptor = {
+        "schema": "league.pi-launch-descriptor.v1",
+        "descriptor_id": descriptor_id,
+        "assignment_id": assignment_id,
+        "runtime_kind": "pi",
+        "provider_kind": provider_kind,
+        "model": "synthetic-model",
+        "effort": "high",
+        "cwd": worktree,
+        "worktree_binding": hashlib.sha256(worktree.encode()).hexdigest(),
+        "role": "champion",
+        "placement": "new_tab",
+        "callsign": callsign,
+        "project_code": "LOO",
+        "task_label": "Runtime Replace",
+        "routing_name": routing_name,
+        "workspace_id": "w1",
+        "creator_pane_id": None,
+        "state_root": str(Path(worktree).parent.resolve()),
+        "release_root": str(ROOT.resolve()),
+        "launch_mode": "create",
+        "requested_session_id": session_id,
+        "requested_session_path": None,
+        "parent_session_id": None,
+        "parent_session_path": None,
+    }
+    prepared = store.prepare_provider_launch(descriptor, "2026-01-01T00:00:00Z")
+    store.bind_provider_launch(
+        descriptor_id,
+        prepared["version"],
+        {
+            "schema": "league.pi-launch-observation.v1",
+            "runtime_kind": "pi",
+            "provider_kind": provider_kind,
+            "session_id": session_id,
+            "session_path": str(receipt["thread_id"]),
+            "parent_session_path": None,
+            "cwd": worktree,
+            "role": "champion",
+            "placement": "new_tab",
+            "callsign": callsign,
+            "project_code": "LOO",
+            "task_label": "Runtime Replace",
+            "routing_name": routing_name,
+            "workspace_id": "w1",
+            "tab_id": "tab:" + descriptor_id,
+            "pane_id": str(receipt["endpoint"]),
+            "terminal_id": str(receipt["endpoint"]),
+        },
+        "2026-01-01T00:00:00Z",
+    )
 
 
 def active_fixture(root: Path, runtime_kind: str, provider_kind: str):
@@ -292,6 +538,16 @@ def active_fixture(root: Path, runtime_kind: str, provider_kind: str):
         "SELECT * FROM tasks WHERE task_id=?", (spec.task_id,)
     ).fetchone()
     assert assignment is not None and agent is not None and task is not None
+    if runtime_kind == "pi":
+        bind_pi_descriptor(
+            store,
+            descriptor_id=f"pi-launch:{spec.assignment_id}",
+            assignment_id=spec.assignment_id,
+            receipt=json.loads(assignment["acceptance_receipt_json"]),
+            provider_kind=provider_kind,
+            callsign=str(agent["callsign"]),
+            routing_name=str(agent["routing_name"]),
+        )
     return store, clock, dict(assignment), dict(agent), dict(task), worktree
 
 
@@ -351,7 +607,14 @@ def service_fixture(store: Any, clock: Any, mux: FakeMultiplexer):
         agents._adapters[adapter.kind] = adapter
     multiplexers = MultiplexerAdapterRegistry()
     multiplexers.register(mux)
-    return RuntimeReplacementService(store, agents, multiplexers, clock), codex, pi
+    delivery = FakeDeliveryAdapter()
+    return (
+        RuntimeReplacementService(
+            store, agents, multiplexers, clock, delivery_adapter=delivery
+        ),
+        codex,
+        pi,
+    )
 
 
 def test_adapter_neutral_replacement_matrix_and_exact_retry(root: Path) -> None:
@@ -409,7 +672,188 @@ def test_adapter_neutral_replacement_matrix_and_exact_retry(root: Path) -> None:
             "SELECT COUNT(*) FROM delivery_outbox WHERE outbox_id=?",
             (result["outbox_id"],),
         ).fetchone()[0] == 1
+        assert len(service.delivery_adapter.sent) == 1
+        if old_kind == "pi" or new_kind == "pi":
+            descriptors = store.connection.execute(
+                """
+                SELECT descriptor_id,state FROM provider_launch_descriptors
+                 WHERE assignment_id=? ORDER BY descriptor_id
+                """,
+                (assignment["task_assignment_id"],),
+            ).fetchall()
+            assert sum(row["state"] == "active" for row in descriptors) == int(
+                new_kind == "pi"
+            )
+            assert all(
+                row["state"] != "active" or row["descriptor_id"] == f"runtime-replacement:{spec.request['operation_id']}"
+                for row in descriptors
+            )
         store.close()
+
+
+def test_crash_boundaries_resume_without_duplicate_native_effects(root: Path) -> None:
+    cases = (
+        "successor-launch",
+        "predecessor-rename",
+        "successor-rename",
+        "predecessor-retirement",
+    )
+    for case in cases:
+        case_root = root / case
+        case_root.mkdir(parents=True)
+        store, clock, assignment, agent, task, worktree = active_fixture(
+            case_root, "codex", "codex"
+        )
+        mux = FakeMultiplexer()
+        mux.native[LUX_ID] = {
+            "agent_id": LUX_ID,
+            "runtime_instance_id": assignment["runtime_instance_id"],
+            "session_ref": agent["thread_id"],
+            "endpoint": agent["address"],
+            "runtime_generation": "generation:codex:1",
+            "cwd": agent["worktree"],
+            "routing_name": agent["routing_name"],
+            "provider_kind": "codex",
+            "adapter_kind": "codex",
+        }
+        service, _, pi = service_fixture(store, clock, mux)
+        spec = replacement_spec(
+            assignment, agent, task, worktree, "pi", "cursor", case
+        )
+        if case == "successor-launch":
+            pi.crash_after_launch = True
+        elif case == "predecessor-rename":
+            mux.crash_after_predecessor_rename = True
+        elif case == "successor-rename":
+            mux.crash_after_successor_rename = True
+        else:
+            mux.crash_after_retirement = True
+        try:
+            service.replace(spec)
+        except InjectedCrash:
+            pass
+        else:
+            raise AssertionError(f"{case} did not interrupt at its native effect gap")
+        interrupted = store.runtime_replacement_status(spec.request["operation_id"])
+        assert interrupted is not None
+        assert interrupted["state"] in {"launching", "route_swapping", "retiring"}
+        if case == "successor-launch":
+            refused(
+                lambda: store.transition(
+                    LUX_ID,
+                    agent["version"],
+                    "working",
+                    "synthetic overlapping predecessor write",
+                    clock.now(),
+                ),
+                "runtime_replacement_fenced",
+            )
+        result = service.replace(spec)
+        assert result["state"] == "completed", (case, result)
+        assert pi.launches == 1
+        assert mux.route_swaps == 1
+        assert len(service.delivery_adapter.sent) == 1
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM delivery_outbox WHERE outbox_id=?",
+            (result["outbox_id"],),
+        ).fetchone()[0] == 1
+        store.close()
+
+
+def test_committed_receipt_crashes_resume_exactly_once(root: Path) -> None:
+    cases = {
+        "record_replacement_successor_verified": ("successor_verified", "successor"),
+        "activate_runtime_replacement": ("activated", "activation"),
+        "record_replacement_predecessor_retired": ("predecessor_retired", "retired"),
+        "complete_runtime_replacement": ("completed", "complete"),
+    }
+    for method_name, (expected_state, suffix) in cases.items():
+        case_root = root / method_name
+        case_root.mkdir(parents=True)
+        store, clock, assignment, agent, task, worktree = active_fixture(
+            case_root, "codex", "codex"
+        )
+        mux = FakeMultiplexer()
+        mux.native[LUX_ID] = {
+            "agent_id": LUX_ID,
+            "runtime_instance_id": assignment["runtime_instance_id"],
+            "session_ref": agent["thread_id"],
+            "endpoint": agent["address"],
+            "runtime_generation": "generation:codex:1",
+            "cwd": agent["worktree"],
+            "routing_name": agent["routing_name"],
+            "provider_kind": "codex",
+            "adapter_kind": "codex",
+        }
+        wrapped = CrashAfterCommitStore(store, method_name)
+        service, _, pi = service_fixture(wrapped, clock, mux)
+        spec = replacement_spec(
+            assignment, agent, task, worktree, "pi", "cursor", suffix
+        )
+        try:
+            service.replace(spec)
+        except InjectedCrash:
+            pass
+        else:
+            raise AssertionError(f"{method_name} did not crash after its commit")
+        interrupted = store.runtime_replacement_status(spec.request["operation_id"])
+        assert interrupted is not None and interrupted["state"] == expected_state
+        result = service.replace(spec)
+        assert result["state"] == "completed", (method_name, result)
+        assert pi.launches == 1
+        assert mux.route_swaps == 1
+        assert len(service.delivery_adapter.sent) == 1
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM delivery_outbox WHERE outbox_id=?",
+            (result["outbox_id"],),
+        ).fetchone()[0] == 1
+        store.close()
+
+
+def test_herdr_final_route_readback_failure_compensates(root: Path) -> None:
+    root.mkdir(parents=True)
+    runner = HerdrRouteCompensationRunner(root)
+    multiplexer = HerdrMultiplexerAdapter(runner=runner, binary="herdr")
+    predecessor_item = runner.agents["pane:a"]
+    successor_item = runner.agents["pane:b"]
+    predecessor = {
+        "agent_id": "agent:a",
+        "runtime_instance_id": "runtime:a",
+        "session_ref": "session:a",
+        "endpoint": "pane:a",
+        "runtime_generation": multiplexer.runtime_generation(
+            predecessor_item, "session:a"
+        ),
+        "cwd": str(root.resolve()),
+        "routing_name": "lux",
+    }
+    successor = {
+        "agent_id": "agent:b",
+        "runtime_instance_id": "runtime:b",
+        "session_ref": "session:b",
+        "endpoint": "pane:b",
+        "runtime_generation": multiplexer.runtime_generation(
+            successor_item, "session:b"
+        ),
+        "cwd": str(root.resolve()),
+        "routing_name": "staging_test",
+    }
+    refused(
+        lambda: multiplexer.replacement_route_swap(
+            operation_id="replacement:route-readback",
+            predecessor=predecessor,
+            successor=successor,
+            predecessor_adapter_kind="codex",
+            predecessor_provider_kind="codex",
+            predecessor_process_names=frozenset({"codex"}),
+            successor_adapter_kind="pi",
+            successor_provider_kind="cursor",
+            successor_process_names=frozenset({"pi"}),
+        ),
+        "runtime_replacement_route_unverified",
+    )
+    assert runner.agents["pane:a"]["name"] == "lux"
+    assert runner.agents["pane:b"]["name"] == "staging_test"
 
 
 def test_post_switch_retirement_failure_compensates_to_predecessor(root: Path) -> None:
@@ -464,6 +908,13 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="league-runtime-replacement-") as temporary:
         root = Path(temporary)
         test_adapter_neutral_replacement_matrix_and_exact_retry(root / "matrix")
+        crashes = root / "crashes"
+        crashes.mkdir()
+        test_crash_boundaries_resume_without_duplicate_native_effects(crashes)
+        receipts = root / "receipt-crashes"
+        receipts.mkdir()
+        test_committed_receipt_crashes_resume_exactly_once(receipts)
+        test_herdr_final_route_readback_failure_compensates(root / "herdr-route")
         rollback = root / "rollback"
         rollback.mkdir()
         test_post_switch_retirement_failure_compensates_to_predecessor(rollback)

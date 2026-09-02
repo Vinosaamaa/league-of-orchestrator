@@ -1211,3 +1211,20 @@ failures:
 
 No installation, live Herdr restart, live agent discovery, prompt, steering,
 cleanup, migration, or cutover is claimed by these source and synthetic tests.
+
+The independent #84 repository audit found that the first generic replacement
+candidate persisted only launch and completion receipts, leaving process-crash
+gaps around successor creation, route promotion, and predecessor retirement.
+Schema 23 now records an intent state before every external effect, fences task,
+agent, and pre-tool mutation while the operation is open, adopts only one exact
+staged successor, and compensates verified post-switch failures. Synthetic
+faults cover interruption after launch, both route renames, physical retirement,
+and each canonical receipt commit. Pi descriptors settle to one resumable owner,
+and the service layer dispatches the successor handoff exactly once after the
+predecessor retirement receipt commits.
+
+The same audit found that public Pi resume and migration commands selected Herdr
+directly while the capability matrix claimed a neutral seam. Both commands now
+resolve `provider_session_lifecycle` through the multiplexer registry. Herdr
+owns the current implementation; tmux advertises no such capability and refuses
+before reading a migration manifest or applying a process effect.

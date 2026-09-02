@@ -80,10 +80,6 @@ from .visible_launch import (
     derived_champion_agent_id,
     derive_task_label,
 )
-from .pi_launch import (
-    resume_pi_after_restart,
-)
-from .pi_session_migration import migrate_pi_session
 from .display_replay import replay_restored_display
 from .restored_agent import reconcile_restored_agents, utc_now
 from .legacy_display_reconciliation import (
@@ -743,12 +739,14 @@ def _add_runtime_commands(groups: argparse._SubParsersAction) -> None:
     )
     for name in ("descriptor-id", "restart-id", "pane-id", "at"):
         resume_launch.add_argument(f"--{name}", required=True)
+    resume_launch.add_argument("--multiplexer-kind", default="herdr")
     resume_launch.add_argument("--startup-timeout-ms", type=int, default=120_000)
     migrate_pi = commands.add_parser(
         "migrate-pi-session",
         help="Copy one stopped legacy Pi JSONL into the unified inventory and bind its exact resume descriptor.",
     )
     migrate_pi.add_argument("--manifest", type=Path, required=True)
+    migrate_pi.add_argument("--multiplexer-kind", default="herdr")
     migrate_pi.add_argument("--at", required=True)
     replay = commands.add_parser(
         "replay-restored-display",
@@ -2175,23 +2173,37 @@ def _runtime_matrix(_: Storage, __: argparse.Namespace) -> CommandResult:
 
 
 def _runtime_resume_launch(store: Storage, args: argparse.Namespace) -> CommandResult:
-    return resume_pi_after_restart(
-        store,
+    multiplexer = builtin_multiplexer_adapter_registry(
+        herdr_runner=SubprocessRunner()
+    ).adapter(args.multiplexer_kind)
+    if "provider_session_lifecycle" not in multiplexer.capabilities:
+        raise StorageRefusal(
+            "provider_session_multiplexer_unsupported",
+            "selected multiplexer cannot resume an exact provider session",
+        )
+    return multiplexer.resume_provider_session(
+        store=store,
         descriptor_id=args.descriptor_id,
         restart_id=args.restart_id,
         pane_id=args.pane_id,
         at=args.at,
-        runner=SubprocessRunner(),
         startup_timeout_ms=args.startup_timeout_ms,
     ), None
 
 
 def _runtime_migrate_pi_session(store: Storage, args: argparse.Namespace) -> CommandResult:
-    return migrate_pi_session(
-        store,
-        _read_json_object(args.manifest),
+    multiplexer = builtin_multiplexer_adapter_registry(
+        herdr_runner=SubprocessRunner()
+    ).adapter(args.multiplexer_kind)
+    if "provider_session_lifecycle" not in multiplexer.capabilities:
+        raise StorageRefusal(
+            "provider_session_multiplexer_unsupported",
+            "selected multiplexer cannot migrate an exact provider session",
+        )
+    return multiplexer.migrate_provider_session(
+        store=store,
+        manifest=_read_json_object(args.manifest),
         at=args.at,
-        runner=SubprocessRunner(),
     ), None
 
 

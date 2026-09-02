@@ -27,7 +27,7 @@ Nothing here installs files, changes hooks, or connects to live Roster state.
 - Synthetic examples, authoring schemas, and focused local regression tests.
 - One standard-library SQLite implementation behind a `Storage` protocol and
   stable `league` command facade.
-- Twenty-two contiguous checksummed schema migrations, a loaded-runtime WAL gate,
+- Twenty-three contiguous checksummed schema migrations, a loaded-runtime WAL gate,
   verified backups, integrity checks, expected-version writes, and bounded contention.
 - A strict manifest importer covering every canonical issue-#18 artifact
   family, with dry-run digest confirmation before apply.
@@ -305,6 +305,17 @@ idempotently or fails closed without process creation. No blocking startup
 barrier, duplicate presentation store, launchd dependency, or extra coordinator
 is part of this path. The plugin has not been installed or exercised against
 live League state.
+
+An active Champion runtime can be replaced with `league assign replace-runtime`.
+The command resolves both agent adapters and the multiplexer through their
+registries, freezes predecessor and successor mutations, and records each native
+launch, route-swap, retirement, and handoff boundary before applying it. Exact
+retries adopt a uniquely proven staged successor or compensate to the predecessor;
+ambiguous recovery remains a durable obligation. The successor receives its
+handoff outbox only after verified predecessor retirement, and canonical delivery
+deduplicates the effect. Codex-to-Pi, Pi-to-Codex, and Pi provider changes are
+contract fixtures, not special core paths.
+
 Issue #66's inline-triage, candidate-inventory, persistent-supervision, and
 measured source-only boundaries are in the
 [issue #66 benchmark report](docs/research/issue-66-inline-triage-supervision-benchmark.md).

@@ -187,6 +187,7 @@ class HerdrPiLaunchAdapter:
         *,
         at: str,
         runner: CommandRunner | None = None,
+        multiplexer: Any | None = None,
         startup_timeout_ms: int = 120_000,
         environment: Mapping[str, str] | None = None,
     ) -> None:
@@ -194,7 +195,7 @@ class HerdrPiLaunchAdapter:
         self.descriptor = dict(descriptor)
         self.at = at
         self.runner = runner or SubprocessRunner()
-        self.multiplexer = builtin_multiplexer_adapter_registry(
+        self.multiplexer = multiplexer or builtin_multiplexer_adapter_registry(
             herdr_runner=self.runner, herdr_binary="herdr"
         ).adapter("herdr")
         self.startup_timeout_ms = startup_timeout_ms
@@ -642,6 +643,7 @@ def resume_pi_after_restart(
     pane_id: str,
     at: str,
     runner: CommandRunner | None = None,
+    multiplexer: Any | None = None,
     startup_timeout_ms: int = 120_000,
     environment: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
@@ -670,6 +672,7 @@ def resume_pi_after_restart(
         descriptor,
         at=at,
         runner=runner,
+        multiplexer=multiplexer,
         startup_timeout_ms=startup_timeout_ms,
         environment=environment,
     )

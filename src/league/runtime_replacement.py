@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import Any, Mapping
 
+from .canonical_delivery import dispatch_event
 from .request_services import AssignmentSpec, LaunchAdapterError
 from .storage_types import StorageRefusal
 
@@ -26,11 +27,13 @@ class RuntimeReplacementService:
         agent_registry: Any,
         multiplexer_registry: Any,
         clock: Any,
+        delivery_adapter: Any | None = None,
     ) -> None:
         self.store = store
         self.agent_registry = agent_registry
         self.multiplexer_registry = multiplexer_registry
         self.clock = clock
+        self.delivery_adapter = delivery_adapter
 
     @staticmethod
     def _target(
@@ -56,6 +59,54 @@ class RuntimeReplacementService:
         if isinstance(exc, LaunchAdapterError):
             return exc.failure_class
         return f"runtime_replacement_{type(exc).__name__.lower()}"
+
+    @staticmethod
+    def _launch_target(prepared: Mapping[str, Any]) -> dict[str, Any]:
+        return {
+            **dict(prepared["successor"]),
+            "assignment_id": prepared["assignment_id"],
+            "task_id": prepared["task_id"],
+            "callsign": prepared["launch"]["callsign"],
+            "harness_kind": prepared["successor"]["harness_kind"],
+            "repository": prepared["launch"]["repository"],
+            "issue": prepared["launch"]["issue"],
+            "branch": prepared["launch"]["branch"],
+            "cwd": prepared["launch"]["worktree"],
+            "required_capabilities": list(
+                prepared["launch"]["required_capabilities"]
+            ),
+        }
+
+    def _dispatch_completed(self, result: Mapping[str, Any]) -> dict[str, Any]:
+        event_id = result.get("event_id") or result.get("handoff_event_id")
+        outbox_id = result.get("outbox_id") or result.get("handoff_outbox_id")
+        recipient = result.get("recipient_agent_id") or result.get(
+            "successor_agent_id"
+        )
+        if any(not isinstance(value, str) or not value for value in (
+            event_id,
+            outbox_id,
+            recipient,
+        )):
+            raise StorageRefusal(
+                "runtime_replacement_completion_invalid",
+                "completed replacement lacks its exact handoff identity",
+            )
+        delivery = dispatch_event(
+            self.store,
+            outbox_id=outbox_id,
+            event_id=event_id,
+            recipient_agent_id=recipient,
+            at=self.clock.now(),
+            adapter=self.delivery_adapter,
+        )
+        return {
+            **dict(result),
+            "event_id": event_id,
+            "outbox_id": outbox_id,
+            "recipient_agent_id": recipient,
+            "delivery": delivery,
+        }
 
     def _rollback(
         self,
@@ -163,10 +214,24 @@ class RuntimeReplacementService:
             )
 
         prepared = self.store.prepare_runtime_replacement(request, self.clock.now())
-        if prepared["state"] in {"completed", "rolled_back", "recovery_required"}:
+        if prepared["state"] == "completed":
+            status = self.store.runtime_replacement_status(
+                str(prepared["operation_id"])
+            )
+            assert isinstance(status, Mapping)
+            return self._dispatch_completed(status)
+        if prepared["state"] == "rolled_back":
             return self.store.runtime_replacement_status(
                 str(prepared["operation_id"])
             )
+        if prepared["state"] == "recovery_required":
+            resumed = self.store.resume_runtime_replacement_recovery(
+                str(prepared["operation_id"]),
+                int(prepared["version"]),
+                str(prepared["intent_digest"]),
+                self.clock.now(),
+            )
+            prepared = {**prepared, **resumed, "recovery_state": None}
         predecessor_adapter = self.agent_registry.adapter(
             str(prepared["predecessor"]["adapter_kind"])
         )
@@ -180,15 +245,23 @@ class RuntimeReplacementService:
                 "runtime_replacement_adapter_unsupported",
                 "predecessor adapter/provider does not support runtime replacement",
             )
-        predecessor_verification = predecessor_adapter.verify_replacement(
-            target=prepared["predecessor"], multiplexer=multiplexer
-        )
-
         successor_receipt = prepared.get("successor_receipt")
         route_receipt = prepared.get("route_receipt")
         retirement_receipt = prepared.get("retirement_receipt")
         driver = None
+        launched_here = False
         if prepared["state"] == "prepared":
+            effect = self.store.begin_runtime_replacement_effect(
+                str(prepared["operation_id"]),
+                int(prepared["version"]),
+                str(prepared["intent_digest"]),
+                "launch",
+                self.clock.now(),
+            )
+            prepared = {**prepared, **effect}
+            launched_here = effect["idempotent"] is False
+
+        if prepared["state"] == "launching":
             launch = {
                 **dict(spec.launch_inputs),
                 "assignment_id": prepared["assignment_id"],
@@ -205,40 +278,60 @@ class RuntimeReplacementService:
                 "at": self.clock.now(),
             }
             try:
-                driver = successor_adapter.visible_launch(
-                    store=self.store,
-                    options=spec.launch_options,
-                    multiplexer=multiplexer,
-                    startup_timeout_ms=spec.startup_timeout_ms,
-                    launch=launch,
-                )
-                assignment = AssignmentSpec(
-                    assignment_id=str(prepared["assignment_id"]),
-                    request_id=str(prepared["launch"]["request_id"]),
-                    claim_token="replacement-fenced",
-                    task_id=str(prepared["task_id"]),
-                    task_summary=str(prepared["launch"]["task_summary"]),
-                    coordinator_agent_id=str(
-                        prepared["launch"]["coordinator_agent_id"]
-                    ),
-                    champion_agent_id=str(prepared["successor"]["agent_id"]),
-                    repository=str(prepared["launch"]["repository"]),
-                    issue=int(prepared["launch"]["issue"]),
-                    branch=str(prepared["launch"]["branch"]),
-                    worktree=str(prepared["launch"]["worktree"]),
-                    issue_receipt=None,
-                    required_capabilities=tuple(
-                        prepared["launch"]["required_capabilities"]
-                    ),
-                    callsign=str(prepared["launch"]["callsign"]),
-                    routing_name=str(prepared["successor"]["routing_name"]),
-                    launch_operation_id=str(prepared["operation_id"]),
-                )
-                successor_receipt = driver.launch(assignment)
-                if isinstance(successor_receipt, dict):
-                    successor_receipt["runtime_instance_id"] = prepared["successor"][
-                        "runtime_instance_id"
-                    ]
+                if launched_here:
+                    driver = successor_adapter.visible_launch(
+                        store=self.store,
+                        options=spec.launch_options,
+                        multiplexer=multiplexer,
+                        startup_timeout_ms=spec.startup_timeout_ms,
+                        launch=launch,
+                    )
+                    assignment = AssignmentSpec(
+                        assignment_id=str(prepared["assignment_id"]),
+                        request_id=str(prepared["launch"]["request_id"]),
+                        claim_token="replacement-fenced",
+                        task_id=str(prepared["task_id"]),
+                        task_summary=str(prepared["launch"]["task_summary"]),
+                        coordinator_agent_id=str(
+                            prepared["launch"]["coordinator_agent_id"]
+                        ),
+                        champion_agent_id=str(prepared["successor"]["agent_id"]),
+                        repository=str(prepared["launch"]["repository"]),
+                        issue=int(prepared["launch"]["issue"]),
+                        branch=str(prepared["launch"]["branch"]),
+                        worktree=str(prepared["launch"]["worktree"]),
+                        issue_receipt=None,
+                        required_capabilities=tuple(
+                            prepared["launch"]["required_capabilities"]
+                        ),
+                        callsign=str(prepared["launch"]["callsign"]),
+                        routing_name=str(prepared["successor"]["routing_name"]),
+                        launch_operation_id=str(prepared["operation_id"]),
+                    )
+                    successor_receipt = driver.launch(assignment)
+                    if isinstance(successor_receipt, dict):
+                        successor_receipt["runtime_instance_id"] = prepared[
+                            "successor"
+                        ]["runtime_instance_id"]
+                else:
+                    successor_receipt = successor_adapter.recover_replacement(
+                        target=self._launch_target(prepared),
+                        multiplexer=multiplexer,
+                    )
+                    if successor_receipt is None:
+                        return self._rollback(
+                            prepared=prepared,
+                            successor_adapter=successor_adapter,
+                            multiplexer=multiplexer,
+                            failure=StorageRefusal(
+                                "runtime_replacement_launch_interrupted",
+                                "no exact staged successor survived the launch boundary",
+                            ),
+                            route_receipt=None,
+                            successor_receipt=None,
+                            driver=None,
+                            activated=False,
+                        )
                 successor_target = self._target(
                     prepared["successor"], successor_receipt
                 )
@@ -276,18 +369,31 @@ class RuntimeReplacementService:
                 )
 
         if prepared["state"] == "successor_verified":
+            effect = self.store.begin_runtime_replacement_effect(
+                str(prepared["operation_id"]),
+                int(prepared["version"]),
+                str(prepared["intent_digest"]),
+                "route_swap",
+                self.clock.now(),
+            )
+            prepared = {**prepared, **effect}
+
+        if prepared["state"] == "route_swapping":
             assert isinstance(successor_receipt, Mapping)
             successor_target = self._target(prepared["successor"], successor_receipt)
             try:
-                successor_verification = successor_adapter.verify_replacement(
-                    target=successor_target, multiplexer=multiplexer
-                )
                 route_receipt = multiplexer.replacement_route_swap(
                     operation_id=prepared["operation_id"],
                     predecessor=prepared["predecessor"],
                     successor=successor_target,
-                    predecessor_verification=predecessor_verification,
-                    successor_verification=successor_verification,
+                    predecessor_adapter_kind=predecessor_adapter.contract.kind,
+                    predecessor_provider_kind=prepared["predecessor"][
+                        "provider_kind"
+                    ],
+                    predecessor_process_names=predecessor_adapter.process_names,
+                    successor_adapter_kind=successor_adapter.contract.kind,
+                    successor_provider_kind=prepared["successor"]["provider_kind"],
+                    successor_process_names=successor_adapter.process_names,
                 )
                 activated = self.store.activate_runtime_replacement(
                     str(prepared["operation_id"]),
@@ -315,6 +421,16 @@ class RuntimeReplacementService:
                 )
 
         if prepared["state"] == "activated":
+            effect = self.store.begin_runtime_replacement_effect(
+                str(prepared["operation_id"]),
+                int(prepared["version"]),
+                str(prepared["intent_digest"]),
+                "retirement",
+                self.clock.now(),
+            )
+            prepared = {**prepared, **effect}
+
+        if prepared["state"] == "retiring":
             assert isinstance(route_receipt, Mapping)
             predecessor_target = {
                 **prepared["predecessor"],
@@ -355,7 +471,7 @@ class RuntimeReplacementService:
 
         if prepared["state"] == "predecessor_retired":
             assert isinstance(retirement_receipt, Mapping)
-            return self.store.complete_runtime_replacement(
+            completed = self.store.complete_runtime_replacement(
                 str(prepared["operation_id"]),
                 int(prepared["version"]),
                 str(prepared["intent_digest"]),
@@ -364,6 +480,7 @@ class RuntimeReplacementService:
                 f"outbox:{prepared['operation_id']}:handoff",
                 self.clock.now(),
             )
+            return self._dispatch_completed(completed)
         return self.store.runtime_replacement_status(str(prepared["operation_id"]))
 
 

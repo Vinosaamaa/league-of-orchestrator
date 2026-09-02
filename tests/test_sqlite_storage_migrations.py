@@ -147,7 +147,7 @@ def test_transactional_upgrade_backup_and_rollback(root: Path) -> None:
             (20, "autonomous-protected-gate-authority-propagation", "b36865213f931b6522f2f8c807dcea60c3949a08eab05772c6ad8567fbdcf71a"),
             (21, "cursor-steering-intent-receipt", "7f6029e3d16a361afda80eab6d04624f99a50a4d37a0a2a4bd0fca3fc471bd66"),
             (22, "pi-provider-launch-descriptor", "00db025c97fd622984900c4db9712a2e3f3ea34125bed2af770c1e04d8aed83f"),
-            (23, "adapter-neutral-champion-runtime-replacement", "0623cdc52c9b539ea13f481399e7ad2743c39b0ef5835ec15f2a2f824f88f8af"),
+            (23, "adapter-neutral-champion-runtime-replacement", "b7c70f0db8bd4ccc8135f7d3d8b7471a470220cad6b86e86614f67415df75251"),
         ]
         assert store.connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
 

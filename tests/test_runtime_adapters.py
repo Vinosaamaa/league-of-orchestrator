@@ -138,6 +138,42 @@ def test_runtime_matrix_cli_and_unsupported_create(root: Path) -> None:
         assert pair["lifecycle_operations"]["launch"] == "supported"
     assert production_pairs[("cursor", "tmux")]["semantic_availability"] == "contract-only"
     assert production_pairs[("cursor", "tmux")]["lifecycle_operations"]["launch"] == "driver_unavailable"
+    for provider in ("codex", "cursor", "pi"):
+        assert production_pairs[(provider, "tmux")]["lifecycle_operations"][
+            "replacement"
+        ] == "driver_unavailable"
+    resume = invoke_cli(
+        state,
+        "runtime",
+        "resume-launch",
+        "--descriptor-id",
+        "descriptor:synthetic",
+        "--restart-id",
+        "restart:synthetic",
+        "--pane-id",
+        "pane:synthetic",
+        "--multiplexer-kind",
+        "tmux",
+        "--at",
+        AT3,
+        expected=2,
+    )
+    assert resume["ok"] is False
+    assert resume["error"]["code"] == "provider_session_multiplexer_unsupported"
+    migrate = invoke_cli(
+        state,
+        "runtime",
+        "migrate-pi-session",
+        "--manifest",
+        str(root / "unread-manifest.json"),
+        "--multiplexer-kind",
+        "tmux",
+        "--at",
+        AT3,
+        expected=2,
+    )
+    assert migrate["ok"] is False
+    assert migrate["error"]["code"] == "provider_session_multiplexer_unsupported"
     with SQLiteStorage(state) as store:
         unavailable = RuntimeLifecycle(store, builtin_contract_registry())
         try:
@@ -383,7 +419,8 @@ def test_multiplexer_registry_and_fail_closed_tmux_restore() -> None:
             "calling_context", "discover", "routing", "placement", "metadata", "title",
             "delivery", "steering_delivery", "close", "visible_launch",
             "shotcaller_bootstrap", "rollover_reconciliation",
-            "production_cleanup", "runtime_replacement",
+            "production_cleanup", "provider_session_lifecycle",
+            "runtime_replacement",
         }
     )
     assert registry.adapter("tmux").capabilities == frozenset()

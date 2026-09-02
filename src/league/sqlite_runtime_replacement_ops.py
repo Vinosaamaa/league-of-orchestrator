@@ -165,10 +165,105 @@ def _requirements(store: Any, assignment_id: str) -> tuple[str, ...]:
     return result
 
 
+def _pi_descriptor(
+    store: Any,
+    *,
+    assignment_id: str,
+    session_ref: str,
+    states: tuple[str, ...] = ("active",),
+) -> sqlite3.Row:
+    placeholders = ",".join("?" for _ in states)
+    rows = store.connection.execute(
+        f"""
+        SELECT * FROM provider_launch_descriptors
+         WHERE assignment_id=? AND session_path=? AND state IN ({placeholders})
+         ORDER BY descriptor_id
+        """,
+        (assignment_id, session_ref, *states),
+    ).fetchall()
+    if len(rows) != 1:
+        raise StorageRefusal(
+            "runtime_replacement_descriptor_ambiguous",
+            "Pi runtime replacement requires one exact provider descriptor",
+        )
+    return rows[0]
+
+
+def _settle_pi_descriptors_for_activation(
+    store: Any,
+    row: Mapping[str, Any],
+    intent: Mapping[str, Any],
+    successor: Mapping[str, Any],
+    at: str,
+) -> None:
+    predecessor_kind = str(intent["predecessor_adapter_kind"])
+    if predecessor_kind == "pi":
+        predecessor = _pi_descriptor(
+            store,
+            assignment_id=str(row["assignment_id"]),
+            session_ref=str(intent["snapshot"]["runtime"]["session_ref"]),
+        )
+        store.connection.execute(
+            """
+            UPDATE provider_launch_descriptors
+               SET state='blocked',version=version+1,updated_at=?
+             WHERE descriptor_id=? AND state='active'
+            """,
+            (at, predecessor["descriptor_id"]),
+        )
+    if row["successor_adapter_kind"] == "pi":
+        successor_descriptor = _pi_descriptor(
+            store,
+            assignment_id=str(row["assignment_id"]),
+            session_ref=str(successor["thread_id"]),
+        )
+        expected_id = f"runtime-replacement:{row['operation_id']}"
+        if successor_descriptor["descriptor_id"] != expected_id:
+            raise StorageRefusal(
+                "runtime_replacement_descriptor_mismatch",
+                "successor Pi descriptor is not the exact replacement launch",
+            )
+
+
+def _settle_pi_descriptors_for_rollback(
+    store: Any,
+    row: Mapping[str, Any],
+    intent: Mapping[str, Any],
+    *,
+    activated: bool,
+    at: str,
+) -> None:
+    if row["successor_adapter_kind"] == "pi":
+        expected_id = f"runtime-replacement:{row['operation_id']}"
+        store.connection.execute(
+            """
+            UPDATE provider_launch_descriptors
+               SET state='blocked',version=version+1,updated_at=?
+             WHERE descriptor_id=? AND assignment_id=? AND state='active'
+            """,
+            (at, expected_id, row["assignment_id"]),
+        )
+    if activated and str(intent["predecessor_adapter_kind"]) == "pi":
+        predecessor = _pi_descriptor(
+            store,
+            assignment_id=str(row["assignment_id"]),
+            session_ref=str(intent["snapshot"]["runtime"]["session_ref"]),
+            states=("blocked",),
+        )
+        store.connection.execute(
+            """
+            UPDATE provider_launch_descriptors
+               SET state='active',version=version+1,updated_at=?
+             WHERE descriptor_id=? AND state='blocked'
+            """,
+            (at, predecessor["descriptor_id"]),
+        )
+
+
 def prepare_runtime_replacement(
     store: Any, request: Mapping[str, Any], at: str
 ) -> dict[str, Any]:
-    """Freeze exact predecessor ownership without mutating it."""
+    """Freeze exact predecessor ownership behind one durable open-operation fence."""
 
     _time(at, "runtime replacement preparation time")
     exact = _request(request)
@@ -349,6 +444,114 @@ def prepare_runtime_replacement(
     return _prepared_result(row, intent, idempotent=False)
 
 
+_EFFECT_TRANSITIONS = {
+    "launch": ("prepared", "launching"),
+    "route_swap": ("successor_verified", "route_swapping"),
+    "retirement": ("activated", "retiring"),
+}
+
+
+def begin_runtime_replacement_effect(
+    store: Any,
+    operation_id: str,
+    expected_version: int,
+    intent_digest: str,
+    effect: str,
+    at: str,
+) -> dict[str, Any]:
+    """Durably fence an external effect before it can touch a native runtime."""
+
+    _time(at, "runtime replacement effect time")
+    if effect not in _EFFECT_TRANSITIONS:
+        raise StorageRefusal(
+            "runtime_replacement_effect_invalid",
+            "runtime replacement effect is unsupported",
+        )
+    source, target = _EFFECT_TRANSITIONS[effect]
+    with store._transaction():
+        row = _row(store, "runtime_replacements", "operation_id", operation_id)
+        if row["intent_digest"] != intent_digest:
+            raise StorageRefusal(
+                "runtime_replacement_conflict",
+                "runtime replacement intent digest changed",
+            )
+        if row["state"] == target:
+            return {
+                "operation_id": operation_id,
+                "state": target,
+                "version": int(row["version"]),
+                "idempotent": True,
+            }
+        if row["state"] != source or int(row["version"]) != expected_version:
+            raise StorageRefusal(
+                "runtime_replacement_effect_conflict",
+                "runtime replacement is not at the exact effect boundary",
+            )
+        next_version = expected_version + 1
+        store.connection.execute(
+            """
+            UPDATE runtime_replacements
+               SET state=?,version=?,updated_at=?
+             WHERE operation_id=? AND state=? AND version=?
+            """,
+            (target, next_version, at, operation_id, source, expected_version),
+        )
+    return {
+        "operation_id": operation_id,
+        "state": target,
+        "version": next_version,
+        "idempotent": False,
+    }
+
+
+def assert_runtime_replacement_mutation_allowed(
+    store: Any,
+    *,
+    agent_id: str | None = None,
+    task_id: str | None = None,
+    assignment_id: str | None = None,
+) -> None:
+    """Fence predecessor writes while an exact replacement owns the assignment."""
+
+    if not any((agent_id, task_id, assignment_id)):
+        return
+    row = store.connection.execute(
+        """
+        SELECT operation_id FROM runtime_replacements
+         WHERE state IN (
+           'prepared','launching','successor_verified','route_swapping',
+           'activated','retiring','predecessor_retired','recovery_required'
+         )
+           AND ((? IS NOT NULL AND predecessor_agent_id=?)
+             OR (? IS NOT NULL AND task_id=?)
+             OR (? IS NOT NULL AND assignment_id=?))
+         LIMIT 1
+        """,
+        (agent_id, agent_id, task_id, task_id, assignment_id, assignment_id),
+    ).fetchone()
+    if row is not None:
+        raise StorageRefusal(
+            "runtime_replacement_fenced",
+            "an open runtime replacement owns this predecessor mutation boundary",
+        )
+
+
+def runtime_replacement_mutation_fenced(store: Any, agent_id: str) -> bool:
+    return store.connection.execute(
+        """
+        SELECT 1 FROM runtime_replacements r
+          JOIN agent_instances a ON a.task_id=r.task_id
+         WHERE a.agent_id=? AND a.retired_at IS NULL
+           AND r.state IN (
+             'prepared','launching','successor_verified','route_swapping',
+             'activated','retiring','predecessor_retired','recovery_required'
+           )
+         LIMIT 1
+        """,
+        (agent_id,),
+    ).fetchone() is not None
+
+
 def _prepared_result(
     row: Mapping[str, Any], intent: Mapping[str, Any], *, idempotent: bool
 ) -> dict[str, Any]:
@@ -382,6 +585,7 @@ def _prepared_result(
             "adapter_kind": row["successor_adapter_kind"],
             "provider_kind": row["successor_provider_kind"],
             "multiplexer_kind": row["multiplexer_kind"],
+            "harness_kind": intent["request"]["successor_harness_kind"],
             "routing_name": row["staging_routing_name"],
         },
         "launch": {
@@ -421,6 +625,7 @@ def _prepared_result(
             if row["retirement_receipt_json"]
             else None
         ),
+        "recovery_state": row["recovery_state"],
         "idempotent": idempotent,
     }
 
@@ -445,7 +650,14 @@ def record_successor_verified(
                     "runtime_replacement_conflict",
                     "runtime replacement intent digest changed",
                 )
-            if row["state"] in {"successor_verified", "activated", "completed"}:
+            if row["state"] in {
+                "successor_verified",
+                "route_swapping",
+                "activated",
+                "retiring",
+                "predecessor_retired",
+                "completed",
+            }:
                 stored = _object(
                     row["successor_receipt_json"], "runtime_replacement_receipt_conflict"
                 )
@@ -484,7 +696,7 @@ def record_successor_verified(
             launch = _prepared_result(row, intent, idempotent=True)["launch"]
             capabilities = observed.get("capabilities")
             exact = bool(
-                row["state"] == "prepared"
+                row["state"] == "launching"
                 and int(row["version"]) == expected_version
                 and required <= set(observed)
                 and observed.get("verified") is True
@@ -539,7 +751,7 @@ def record_successor_verified(
                 """
                 UPDATE runtime_replacements
                    SET state='successor_verified',successor_receipt_json=?,version=?,updated_at=?
-                 WHERE operation_id=? AND state='prepared' AND version=?
+                 WHERE operation_id=? AND state='launching' AND version=?
                 """,
                 (_json(observed), next_version, at, operation_id, expected_version),
             )
@@ -582,7 +794,9 @@ def activate_runtime_replacement(
                     "runtime_replacement_conflict",
                     "runtime replacement intent digest changed",
                 )
-            if row["state"] in {"activated", "completed"}:
+            if row["state"] in {
+                "activated", "retiring", "predecessor_retired", "completed"
+            }:
                 stored = _object(
                     row["route_receipt_json"], "runtime_replacement_route_conflict"
                 )
@@ -605,7 +819,7 @@ def activate_runtime_replacement(
             old_task = snapshot["task"]
             old_callsign = snapshot["callsign_assignment"]
             route_exact = bool(
-                row["state"] == "successor_verified"
+                row["state"] == "route_swapping"
                 and int(row["version"]) == expected_version
                 and route.get("verified") is True
                 and route.get("operation_id") == operation_id
@@ -830,12 +1044,15 @@ def activate_runtime_replacement(
                     row["successor_agent_id"],
                 ),
             )
+            _settle_pi_descriptors_for_activation(
+                store, row, intent, successor, at
+            )
             next_version = expected_version + 1
             store.connection.execute(
                 """
                 UPDATE runtime_replacements
                    SET state='activated',route_receipt_json=?,version=?,updated_at=?
-                 WHERE operation_id=? AND state='successor_verified' AND version=?
+                 WHERE operation_id=? AND state='route_swapping' AND version=?
                 """,
                 (_json(route), next_version, at, operation_id, expected_version),
             )
@@ -1048,6 +1265,14 @@ def complete_runtime_replacement(
                     expected_version,
                 ),
             )
+            store.connection.execute(
+                """
+                UPDATE obligations
+                   SET state='satisfied',next_attention_at=NULL,updated_at=?
+                 WHERE dedupe_key=? AND state='open'
+                """,
+                (at, f"runtime-replacement:{operation_id}"),
+            )
     except StorageRefusal:
         raise
     except sqlite3.IntegrityError as exc:
@@ -1110,7 +1335,7 @@ def record_predecessor_retired(
                     "idempotent": True,
                 }
             exact = bool(
-                row["state"] == "activated"
+                row["state"] == "retiring"
                 and int(row["version"]) == expected_version
                 and retirement.get("verified") is True
                 and retirement.get("operation_id") == operation_id
@@ -1134,7 +1359,7 @@ def record_predecessor_retired(
                 UPDATE runtime_replacements
                    SET state='predecessor_retired',retirement_receipt_json=?,
                        version=?,updated_at=?
-                 WHERE operation_id=? AND state='activated' AND version=?
+                 WHERE operation_id=? AND state='retiring' AND version=?
                 """,
                 (
                     _json(retirement),
@@ -1207,9 +1432,15 @@ def rollback_runtime_replacement(
                     "version": int(row["version"]),
                     "idempotent": True,
                 }
-            if row["state"] not in {"prepared", "successor_verified", "activated"} or int(
-                row["version"]
-            ) != expected_version:
+            rollback_states = {
+                "prepared",
+                "launching",
+                "successor_verified",
+                "route_swapping",
+                "activated",
+                "retiring",
+            }
+            if row["state"] not in rollback_states or int(row["version"]) != expected_version:
                 raise StorageRefusal(
                     "runtime_replacement_rollback_conflict",
                     "replacement is not at the exact rollback boundary",
@@ -1219,7 +1450,8 @@ def rollback_runtime_replacement(
             assignment = _row(
                 store, "task_assignments", "task_assignment_id", row["assignment_id"]
             )
-            if row["state"] == "activated":
+            activated = row["state"] in {"activated", "retiring"}
+            if activated:
                 if rollback.get("route_rollback_verified") is not True:
                     raise StorageRefusal(
                         "runtime_replacement_rollback_unverified",
@@ -1252,6 +1484,9 @@ def rollback_runtime_replacement(
                         "runtime_replacement_rollback_unverified",
                         "predecessor authority changed before rollback settlement",
                     )
+            _settle_pi_descriptors_for_rollback(
+                store, row, intent, activated=activated, at=at
+            )
             next_version = expected_version + 1
             store.connection.execute(
                 """
@@ -1268,6 +1503,14 @@ def rollback_runtime_replacement(
                     operation_id,
                     expected_version,
                 ),
+            )
+            store.connection.execute(
+                """
+                UPDATE obligations
+                   SET state='satisfied',next_attention_at=NULL,updated_at=?
+                 WHERE dedupe_key=? AND state='open'
+                """,
+                (at, f"runtime-replacement:{operation_id}"),
             )
     except StorageRefusal:
         raise
@@ -1476,12 +1719,16 @@ def record_runtime_replacement_recovery(
                 "operation_id": operation_id,
                 "state": "recovery_required",
                 "version": int(row["version"]),
+                "recovery_state": row["recovery_state"],
                 "idempotent": True,
             }
         if int(row["version"]) != expected_version or row["state"] not in {
             "prepared",
+            "launching",
             "successor_verified",
+            "route_swapping",
             "activated",
+            "retiring",
             "predecessor_retired",
         }:
             raise StorageRefusal(
@@ -1489,13 +1736,22 @@ def record_runtime_replacement_recovery(
                 "replacement recovery state changed",
             )
         next_version = expected_version + 1
+        recovery_state = str(row["state"])
         store.connection.execute(
             """
             UPDATE runtime_replacements
-               SET state='recovery_required',failure_code=?,version=?,updated_at=?
+               SET state='recovery_required',failure_code=?,recovery_state=?,
+                   version=?,updated_at=?
              WHERE operation_id=? AND version=?
             """,
-            (failure_code, next_version, at, operation_id, expected_version),
+            (
+                failure_code,
+                recovery_state,
+                next_version,
+                at,
+                operation_id,
+                expected_version,
+            ),
         )
         obligation_id = f"obligation:runtime-replacement:{_digest(operation_id)[:24]}"
         store.connection.execute(
@@ -1530,7 +1786,61 @@ def record_runtime_replacement_recovery(
         "operation_id": operation_id,
         "state": "recovery_required",
         "version": next_version,
+        "recovery_state": recovery_state,
         "obligation_id": obligation_id,
+        "idempotent": False,
+    }
+
+
+def resume_runtime_replacement_recovery(
+    store: Any,
+    operation_id: str,
+    expected_version: int,
+    intent_digest: str,
+    at: str,
+) -> dict[str, Any]:
+    """Resume the exact pre-failure state; the same request remains the authority."""
+
+    _time(at, "runtime replacement recovery resume time")
+    with store._transaction():
+        row = _row(store, "runtime_replacements", "operation_id", operation_id)
+        if row["intent_digest"] != intent_digest:
+            raise StorageRefusal(
+                "runtime_replacement_conflict",
+                "runtime replacement intent digest changed",
+            )
+        if row["state"] != "recovery_required" or int(row["version"]) != expected_version:
+            raise StorageRefusal(
+                "runtime_replacement_recovery_conflict",
+                "replacement is not at the exact recovery boundary",
+            )
+        recovery_state = row["recovery_state"]
+        if recovery_state not in {
+            "prepared",
+            "launching",
+            "successor_verified",
+            "route_swapping",
+            "activated",
+            "retiring",
+            "predecessor_retired",
+        }:
+            raise StorageRefusal(
+                "runtime_replacement_recovery_conflict",
+                "replacement recovery state is invalid",
+            )
+        next_version = expected_version + 1
+        store.connection.execute(
+            """
+            UPDATE runtime_replacements
+               SET state=?,recovery_state=NULL,failure_code=NULL,version=?,updated_at=?
+             WHERE operation_id=? AND state='recovery_required' AND version=?
+            """,
+            (recovery_state, next_version, at, operation_id, expected_version),
+        )
+    return {
+        "operation_id": operation_id,
+        "state": recovery_state,
+        "version": next_version,
         "idempotent": False,
     }
 
@@ -1563,6 +1873,7 @@ def runtime_replacement_status(store: Any, operation_id: str) -> dict[str, Any] 
         "handoff_event_id": row["handoff_event_id"],
         "handoff_outbox_id": row["handoff_outbox_id"],
         "failure_code": row["failure_code"],
+        "recovery_state": row["recovery_state"],
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }
@@ -1610,11 +1921,14 @@ def runtime_replacement_launch_context(
 
 __all__ = [
     "activate_runtime_replacement",
+    "assert_runtime_replacement_mutation_allowed",
+    "begin_runtime_replacement_effect",
     "complete_runtime_replacement",
     "prepare_runtime_replacement",
     "record_runtime_replacement_recovery",
     "record_predecessor_retired",
     "record_successor_verified",
+    "resume_runtime_replacement_recovery",
     "rollback_runtime_replacement",
     "runtime_replacement_status",
     "runtime_replacement_launch_context",

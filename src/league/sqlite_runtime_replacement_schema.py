@@ -69,7 +69,7 @@ STATEMENTS = (
       canonical_routing_name TEXT NOT NULL,
       staging_routing_name TEXT NOT NULL,
       state TEXT NOT NULL CHECK (
-        state IN ('prepared','successor_verified','activated','predecessor_retired','completed','rolled_back','recovery_required')
+        state IN ('prepared','launching','successor_verified','route_swapping','activated','retiring','predecessor_retired','completed','rolled_back','recovery_required')
       ),
       intent_json TEXT NOT NULL,
       intent_digest TEXT NOT NULL CHECK (length(intent_digest)=64),
@@ -81,6 +81,7 @@ STATEMENTS = (
       handoff_outbox_id TEXT,
       rollback_receipt_json TEXT,
       failure_code TEXT,
+      recovery_state TEXT,
       version INTEGER NOT NULL CHECK (version > 0),
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
@@ -88,8 +89,8 @@ STATEMENTS = (
     """,
     """
     CREATE UNIQUE INDEX ux_runtime_replacement_open_assignment
-      ON runtime_replacements(assignment_id)
-     WHERE state IN ('prepared','successor_verified','activated','predecessor_retired','recovery_required')
+     ON runtime_replacements(assignment_id)
+     WHERE state IN ('prepared','launching','successor_verified','route_swapping','activated','retiring','predecessor_retired','recovery_required')
     """,
     "CREATE UNIQUE INDEX ux_runtime_replacement_successor_agent ON runtime_replacements(successor_agent_id)",
     "CREATE UNIQUE INDEX ux_runtime_replacement_successor_runtime ON runtime_replacements(successor_runtime_instance_id)",

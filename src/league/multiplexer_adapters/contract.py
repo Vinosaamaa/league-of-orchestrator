@@ -24,6 +24,7 @@ MULTIPLEXER_OPERATIONS = frozenset(
         "shotcaller_bootstrap",
         "rollover_reconciliation",
         "production_cleanup",
+        "provider_session_lifecycle",
         "runtime_replacement",
     }
 )
@@ -46,7 +47,12 @@ MULTIPLEXER_OPERATION_METHODS = {
         "rollover_descendant_driver",
     ),
     "production_cleanup": ("cleanup_drivers",),
+    "provider_session_lifecycle": (
+        "resume_provider_session",
+        "migrate_provider_session",
+    ),
     "runtime_replacement": (
+        "replacement_recover",
         "replacement_verify",
         "replacement_route_swap",
         "replacement_route_rollback",
@@ -126,6 +132,12 @@ class MultiplexerAdapter(Protocol):
     def rollover_descendant_driver(self) -> Any: ...
 
     def cleanup_drivers(self, **inputs: Any) -> tuple[Any, Any]: ...
+
+    def resume_provider_session(self, **inputs: Any) -> Mapping[str, Any]: ...
+
+    def migrate_provider_session(self, **inputs: Any) -> Mapping[str, Any]: ...
+
+    def replacement_recover(self, **inputs: Any) -> Mapping[str, Any] | None: ...
 
     def replacement_verify(self, **inputs: Any) -> Mapping[str, Any]: ...
 

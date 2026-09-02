@@ -52,6 +52,7 @@ class HerdrMultiplexerAdapter:
             "calling_context", "discover", "routing", "placement", "metadata", "title",
             "delivery", "steering_delivery", "close", "visible_launch", "shotcaller_bootstrap",
             "rollover_reconciliation", "production_cleanup",
+            "provider_session_lifecycle",
             "runtime_replacement",
         }
     )
@@ -91,6 +92,7 @@ class HerdrMultiplexerAdapter:
                 inputs["descriptor"],
                 at=inputs["at"],
                 runner=self.runner,
+                multiplexer=self,
                 startup_timeout_ms=inputs["startup_timeout_ms"],
             )
         if agent_kind in {"codex", "cursor"}:
@@ -141,6 +143,63 @@ class HerdrMultiplexerAdapter:
                 inputs["store"], identity, inputs["runner"], inputs["at"]
             ),
         )
+
+    def resume_provider_session(self, **inputs: Any) -> Mapping[str, Any]:
+        from ...pi_launch import resume_pi_after_restart
+
+        return resume_pi_after_restart(
+            inputs["store"],
+            descriptor_id=inputs["descriptor_id"],
+            restart_id=inputs["restart_id"],
+            pane_id=inputs["pane_id"],
+            at=inputs["at"],
+            runner=self.runner,
+            multiplexer=self,
+            startup_timeout_ms=inputs["startup_timeout_ms"],
+            environment=inputs.get("environment"),
+        )
+
+    def migrate_provider_session(self, **inputs: Any) -> Mapping[str, Any]:
+        from ...pi_session_migration import migrate_pi_session
+
+        return migrate_pi_session(
+            inputs["store"],
+            inputs["manifest"],
+            at=inputs["at"],
+            runner=self.runner,
+            multiplexer=self,
+        )
+
+    def verify_stopped_provider_endpoint(self, *, pane_id: str, cwd: str) -> None:
+        info = self._command(
+            (self.binary, "pane", "process-info", "--pane", pane_id),
+            "Herdr controlled provider restart boundary",
+        ).get("process_info")
+        processes = info.get("foreground_processes") if isinstance(info, Mapping) else None
+        shell_pid = info.get("shell_pid") if isinstance(info, Mapping) else None
+        foreground_group = (
+            info.get("foreground_process_group_id")
+            if isinstance(info, Mapping)
+            else None
+        )
+        shell_only = (
+            isinstance(processes, list)
+            and len(processes) == 1
+            and isinstance(processes[0], Mapping)
+            and processes[0].get("pid") == shell_pid
+            and processes[0].get("argv0") in {"zsh", "bash", "fish", "sh"}
+            and processes[0].get("cwd") == cwd
+        )
+        if (
+            not isinstance(processes, list)
+            or not isinstance(shell_pid, int)
+            or foreground_group != shell_pid
+            or (processes and not shell_only)
+        ):
+            raise StorageRefusal(
+                "pi_session_migration_runtime_active",
+                "provider migration requires the exact shell-only restart boundary",
+            )
 
     def _command(self, arguments: Sequence[str], label: str) -> dict[str, Any]:
         return _result(self.runner.run(arguments, timeout_seconds=30), label)
@@ -448,6 +507,91 @@ class HerdrMultiplexerAdapter:
             inputs["store"], at=inputs["at"], runner=invoke
         ).send(inputs["target"], inputs["envelope"])
 
+    def replacement_recover(self, **inputs: Any) -> Mapping[str, Any] | None:
+        """Adopt one exact staged successor after a launch/receipt crash gap."""
+
+        target = inputs.get("target")
+        adapter_kind = inputs.get("adapter_kind")
+        provider_kind = inputs.get("provider_kind")
+        process_names = inputs.get("process_names")
+        if (
+            not isinstance(target, Mapping)
+            or not isinstance(adapter_kind, str)
+            or not isinstance(provider_kind, str)
+            or not isinstance(process_names, frozenset)
+            or not process_names
+        ):
+            raise StorageRefusal(
+                "runtime_replacement_identity_invalid",
+                "replacement recovery identity is incomplete",
+            )
+        routing_name = target.get("routing_name")
+        cwd = target.get("cwd")
+        candidates = [
+            item
+            for item in self.discover()
+            if item.get("name") == routing_name
+            and item.get("agent") == adapter_kind
+            and item.get("display_agent") == provider_kind
+            and item.get("cwd") == cwd
+            and item.get("foreground_cwd") == cwd
+        ]
+        if not candidates:
+            return None
+        if len(candidates) != 1:
+            raise StorageRefusal(
+                "runtime_replacement_identity_ambiguous",
+                "replacement recovery found multiple staged successors",
+            )
+        item = dict(candidates[0])
+        session = item.get("agent_session")
+        session_ref = session.get("value") if isinstance(session, Mapping) else None
+        endpoint = item.get("pane_id")
+        if not isinstance(session_ref, str) or not session_ref or not isinstance(endpoint, str) or not endpoint:
+            raise StorageRefusal(
+                "runtime_replacement_identity_ambiguous",
+                "staged successor lacks an exact native session or endpoint",
+            )
+        runtime_generation = self.runtime_generation(item, session_ref)
+        observed_target = {
+            **dict(target),
+            "session_ref": session_ref,
+            "endpoint": endpoint,
+            "runtime_generation": runtime_generation,
+        }
+        verification = self.replacement_verify(
+            adapter_kind=adapter_kind,
+            provider_kind=provider_kind,
+            process_names=process_names,
+            target=observed_target,
+        )
+        if verification.get("verified") is not True:
+            raise StorageRefusal(
+                "runtime_replacement_successor_unverified",
+                "staged successor recovery did not verify",
+            )
+        return {
+            "verified": True,
+            "assignment_id": target.get("assignment_id"),
+            "task_id": target.get("task_id"),
+            "champion_agent_id": target.get("agent_id"),
+            "callsign": target.get("callsign"),
+            "runtime_instance_id": target.get("runtime_instance_id"),
+            "thread_id": session_ref,
+            "endpoint": endpoint,
+            "runtime_generation": runtime_generation,
+            "harness_kind": target.get("harness_kind"),
+            "backend_kind": self.kind,
+            "routing_name": routing_name,
+            "display_agent": provider_kind,
+            "repository": target.get("repository"),
+            "issue": target.get("issue"),
+            "branch": target.get("branch"),
+            "worktree": cwd,
+            "capabilities": list(target.get("required_capabilities") or ()),
+            "recovered": True,
+        }
+
     def replacement_verify(self, **inputs: Any) -> Mapping[str, Any]:
         """Bind one replacement participant to an exact native process/session."""
 
@@ -579,19 +723,13 @@ class HerdrMultiplexerAdapter:
         operation_id = inputs.get("operation_id")
         predecessor = dict(inputs.get("predecessor") or {})
         successor = dict(inputs.get("successor") or {})
-        predecessor_verification = dict(
-            inputs.get("predecessor_verification") or {}
-        )
-        successor_verification = dict(inputs.get("successor_verification") or {})
         if (
             not isinstance(operation_id, str)
             or not operation_id
-            or predecessor_verification.get("verified") is not True
-            or successor_verification.get("verified") is not True
         ):
             raise StorageRefusal(
                 "runtime_replacement_route_invalid",
-                "route swap requires two exact verified participants",
+                "route swap requires one exact operation identity",
             )
         canonical = predecessor.get("routing_name")
         staging = successor.get("routing_name")
@@ -611,64 +749,10 @@ class HerdrMultiplexerAdapter:
             for item in self.discover()
             if isinstance(item.get("name"), str) and item["name"]
         }
-        if (
-            occupied.get(str(canonical)) != predecessor.get("endpoint")
-            or occupied.get(str(staging)) != successor.get("endpoint")
-            or (
-                predecessor_staging in occupied
-                and occupied[predecessor_staging] != predecessor.get("endpoint")
-            )
-        ):
-            raise StorageRefusal(
-                "runtime_replacement_route_occupied",
-                "replacement route ownership changed before the swap",
-            )
-        self._effect(
-            (
-                self.binary,
-                "agent",
-                "rename",
-                str(predecessor["endpoint"]),
-                predecessor_staging,
-            ),
-            "Herdr predecessor staging route",
-        )
-        try:
-            self._effect(
-                (
-                    self.binary,
-                    "agent",
-                    "rename",
-                    str(successor["endpoint"]),
-                    str(canonical),
-                ),
-                "Herdr successor canonical route",
-            )
-        except Exception:
-            self._effect(
-                (
-                    self.binary,
-                    "agent",
-                    "rename",
-                    str(predecessor["endpoint"]),
-                    str(canonical),
-                ),
-                "Herdr predecessor route rollback",
-            )
-            raise
-        after = {
-            str(item.get("pane_id")): str(item.get("name"))
-            for item in self.discover()
-        }
-        if (
-            after.get(str(predecessor["endpoint"])) != predecessor_staging
-            or after.get(str(successor["endpoint"])) != canonical
-        ):
-            raise StorageRefusal(
-                "runtime_replacement_route_unverified",
-                "replacement routes did not verify after promotion",
-            )
-        return {
+        predecessor_endpoint = str(predecessor.get("endpoint", ""))
+        successor_endpoint = str(successor.get("endpoint", ""))
+        by_endpoint = {endpoint: name for name, endpoint in occupied.items()}
+        route_receipt = {
             "schema": "league.runtime-replacement-route.v1",
             "verified": True,
             "operation_id": operation_id,
@@ -677,9 +761,96 @@ class HerdrMultiplexerAdapter:
             "canonical_routing_name": canonical,
             "predecessor_staging_routing_name": predecessor_staging,
             "successor_previous_routing_name": staging,
-            "predecessor_endpoint": predecessor.get("endpoint"),
-            "successor_endpoint": successor.get("endpoint"),
+            "predecessor_endpoint": predecessor_endpoint,
+            "successor_endpoint": successor_endpoint,
         }
+        if (
+            by_endpoint.get(predecessor_endpoint) not in {canonical, predecessor_staging}
+            or by_endpoint.get(successor_endpoint) not in {staging, canonical}
+            or any(
+                name in occupied and occupied[name] not in {predecessor_endpoint, successor_endpoint}
+                for name in (str(canonical), str(staging), predecessor_staging)
+            )
+        ):
+            raise StorageRefusal(
+                "runtime_replacement_route_occupied",
+                "replacement route ownership changed before the swap",
+            )
+        predecessor_current = by_endpoint.get(predecessor_endpoint)
+        successor_current = by_endpoint.get(successor_endpoint)
+        for participant, current_route, adapter_key, provider_key, process_key in (
+            (
+                predecessor,
+                predecessor_current,
+                "predecessor_adapter_kind",
+                "predecessor_provider_kind",
+                "predecessor_process_names",
+            ),
+            (
+                successor,
+                successor_current,
+                "successor_adapter_kind",
+                "successor_provider_kind",
+                "successor_process_names",
+            ),
+        ):
+            current_target = {**participant, "routing_name": current_route}
+            verification = self.replacement_verify(
+                adapter_kind=inputs.get(adapter_key),
+                provider_kind=inputs.get(provider_key),
+                process_names=inputs.get(process_key),
+                target=current_target,
+            )
+            if verification.get("verified") is not True:
+                raise StorageRefusal(
+                    "runtime_replacement_route_unverified",
+                    "route swap participant did not retain exact native identity",
+                )
+        try:
+            if by_endpoint.get(predecessor_endpoint) == canonical:
+                self._effect(
+                    (
+                        self.binary,
+                        "agent",
+                        "rename",
+                        predecessor_endpoint,
+                        predecessor_staging,
+                    ),
+                    "Herdr predecessor staging route",
+                )
+            if by_endpoint.get(successor_endpoint) == staging:
+                self._effect(
+                    (
+                        self.binary,
+                        "agent",
+                        "rename",
+                        successor_endpoint,
+                        str(canonical),
+                    ),
+                    "Herdr successor canonical route",
+                )
+            after = {
+                str(item.get("pane_id")): str(item.get("name"))
+                for item in self.discover()
+            }
+            if (
+                after.get(predecessor_endpoint) != predecessor_staging
+                or after.get(successor_endpoint) != canonical
+            ):
+                raise StorageRefusal(
+                    "runtime_replacement_route_unverified",
+                    "replacement routes did not verify after promotion",
+                )
+        except Exception as exc:
+            try:
+                self.replacement_route_rollback(route_receipt=route_receipt)
+            except Exception as rollback_exc:
+                raise StorageRefusal(
+                    "runtime_replacement_route_recovery_required",
+                    "replacement route compensation could not be verified",
+                ) from rollback_exc
+            raise exc
+        return route_receipt
 
     def replacement_route_rollback(self, **inputs: Any) -> Mapping[str, Any]:
         route = dict(inputs.get("route_receipt") or {})
@@ -729,29 +900,78 @@ class HerdrMultiplexerAdapter:
 
     def replacement_retire(self, **inputs: Any) -> Mapping[str, Any]:
         target = dict(inputs.get("target") or {})
-        verification = dict(inputs.get("verification") or {})
         operation_id = inputs.get("operation_id")
         exit_prompt = inputs.get("exit_prompt")
+        adapter_kind = inputs.get("adapter_kind")
+        provider_kind = inputs.get("provider_kind")
+        process_names = inputs.get("process_names")
         if (
-            verification.get("verified") is not True
-            or not isinstance(operation_id, str)
+            not isinstance(operation_id, str)
             or not operation_id
             or not isinstance(exit_prompt, str)
             or not exit_prompt
+            or not isinstance(adapter_kind, str)
+            or not adapter_kind
+            or not isinstance(provider_kind, str)
+            or not provider_kind
+            or not isinstance(process_names, frozenset)
+            or not process_names
         ):
             raise StorageRefusal(
                 "runtime_replacement_retirement_unverified",
                 "predecessor retirement lacks exact verification",
             )
-        self.delivery(str(target["routing_name"]), exit_prompt, wait=True)
-        endpoint = RestoredEndpoint(
-            str(operation_id),
-            str(verification["workspace_id"]),
-            str(verification["tab_id"]),
-            str(verification["pane_id"]),
-            str(verification["terminal_id"]),
-        )
-        self.close(endpoint, placement="tab")
+        endpoint_id = str(target.get("endpoint", ""))
+        session_ref = str(target.get("session_ref", ""))
+        routing_name = str(target.get("routing_name", ""))
+        inventory = list(self.discover())
+        endpoint_matches = [
+            item for item in inventory if item.get("pane_id") == endpoint_id
+        ]
+        if len(endpoint_matches) > 1:
+            raise StorageRefusal(
+                "runtime_replacement_retirement_unverified",
+                "predecessor endpoint is ambiguous",
+            )
+        if endpoint_matches:
+            verification = self.replacement_verify(
+                adapter_kind=adapter_kind,
+                provider_kind=provider_kind,
+                process_names=process_names,
+                target=target,
+            )
+            if verification.get("verified") is not True:
+                raise StorageRefusal(
+                    "runtime_replacement_retirement_unverified",
+                    "predecessor retirement lacks exact native proof",
+                )
+            self.delivery(routing_name, exit_prompt, wait=True)
+            endpoint = RestoredEndpoint(
+                str(operation_id),
+                str(verification["workspace_id"]),
+                str(verification["tab_id"]),
+                str(verification["pane_id"]),
+                str(verification["terminal_id"]),
+            )
+            self.close(endpoint, placement="tab")
+        after = list(self.discover())
+        conflicts = []
+        for item in after:
+            session = item.get("agent_session")
+            observed_session = (
+                session.get("value") if isinstance(session, Mapping) else None
+            )
+            if (
+                item.get("pane_id") == endpoint_id
+                or item.get("name") == routing_name
+                or observed_session == session_ref
+            ):
+                conflicts.append(item)
+        if conflicts:
+            raise StorageRefusal(
+                "runtime_replacement_retirement_unverified",
+                "predecessor identity remained after retirement",
+            )
         return {
             "schema": "league.runtime-replacement-retirement.v1",
             "verified": True,

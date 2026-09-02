@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .sqlite_request_ops import _active_claim, _bounded_public_text, _request_row, _time
+from .sqlite_runtime_replacement_ops import assert_runtime_replacement_mutation_allowed
 from .sqlite_project_ops import canonical_repository, resolve_project_routing_identity
 from .sqlite_callsign_ops import (
     _reserve_in_transaction,
@@ -2866,6 +2867,15 @@ def _validated_transition_context(
     assignment = store.connection.execute(
         "SELECT * FROM task_assignments WHERE task_id=?", (task_id,)
     ).fetchone()
+    assert_runtime_replacement_mutation_allowed(
+        store,
+        task_id=task_id,
+        assignment_id=(
+            None
+            if assignment is None
+            else str(assignment["task_assignment_id"])
+        ),
+    )
     if task is None or assignment is None or assignment["state"] != "active":
         raise StorageRefusal("assignment_inactive", "task has no active verified assignment")
     if assignment["assignment_role"] == "hidden-worker":

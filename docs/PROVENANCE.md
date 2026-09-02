@@ -1332,3 +1332,10 @@ system Python with an SQLite runtime too old for the canonical WAL database.
 The ordinary launcher contract remains unchanged, and a clean-environment
 integration regression proves that the rendered service invokes the canonical
 multi-Squad watcher.
+
+Release `0.2.49` makes that failed installation recoverable through the same
+supported installer. A retry may replace a `rolled_back` manifest only after
+proving that launchd is unloaded, no unmanaged watcher is live, and the exact
+prior plist and rollback backup bytes are still restored. Both absent-prior and
+existing-prior cases prove failed-start rollback, retry, live startup, and a
+second exact rollback without manual file or database edits.

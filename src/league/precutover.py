@@ -1352,10 +1352,10 @@ def _integrated_lifecycle(home: Path, source_root: Path) -> dict[str, Any]:
         )
         store.register_watcher(
             "synthetic-precutover-scope",
-            "watcher:synthetic-precutover",
+            "watcher:persistent:synthetic-precutover",
             SHOTCALLER_ID,
             "runtime:precutover-shotcaller",
-            "wake:synthetic-precutover",
+            "unix:/tmp/league-precutover-synthetic.sock",
             clock.after(600),
             1,
             clock.now(),

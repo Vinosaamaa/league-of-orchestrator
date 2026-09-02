@@ -20,9 +20,10 @@ pending Squad registration, role-aware hidden-scientist assignments, versioned
 provider routing, and parent-request progress/outbox state. The storage layer
 also implements the canonical prompt/request lifecycle, exact owner return,
 adapter-neutral runtime binding, recoverable teardown, advisory project
-catalog, and bounded project-grouped Roster. Installation, live migration,
-cutover, autonomous planning, and an interactive Roster controller remain out
-of scope.
+catalog, and bounded project-grouped Roster. The source includes a hash-bound
+watcher-service install/start/rollback operation; executing it against live
+state, live migration/cutover, autonomous planning, and an interactive Roster
+controller remain out of scope for this change.
 
 ## Current modules
 
@@ -34,6 +35,11 @@ The repository keeps the proven runtime and new storage boundary separate:
   preflight and reservation rollback, hidden-worker allocation, optional Lead
   relay, semantic model routing, task-resource checks, and fail-closed teardown.
 - `bin/agent-watcher` is a path-resolving launcher with no domain behavior.
+  `canonical_watcher.py` brokers canonical hooks and service commands;
+  `persistent_supervisor.py` owns the one root-scoped event runtime;
+  `supervisor_service.py` owns exact launchd install/start/rollback; and
+  `restored_agent.py` verifies/rebinds the already-live watcher before metadata
+  replay after Herdr restoration.
 - `schema/`, `examples/`, and `config/` define the public authoring surface.
 - `tests/` exercises the imported behavior with temporary synthetic fixtures.
 - `src/league/storage.py` composes the only domain-facing persistence interface
@@ -174,8 +180,10 @@ The repository-local SQLite path is separately testable:
    scientists require exact owner/request/subtask/model/effort/reason/budgets,
    remain outside the visible Roster, and deliver terminal-only.
 8. The role-aware Stop decision combines unresolved requests, active tasks,
-   assignments, deliveries, and cleanup, while blocking at most once per fresh
-   wait generation and yielding to ordinary user messages.
+   assignments, deliveries, and cleanup. An attached Shotcaller blocks every
+   unchanged Stop while obligations remain. A detached Shotcaller still blocks
+   owner action and permits delegated-only handoff only to its exact verified
+   persistent watcher. Ordinary user messages keep priority.
 9. Schema v4 evolves v3's one-per-task cleanup obligation rather than adding a
    competing lifecycle record. Request/assignment paths may create the initial
    obligation; verified teardown atomically advances it with ownership,
@@ -225,10 +233,25 @@ The repository-local SQLite path is separately testable:
 20. Exact project roots and full evidence remain classified `local_only`.
     Every remote adapter validates the final rendered bytes with the same
     fail-closed policy immediately before invoking its injected transport.
+21. Persistent supervision has five independent invariants:
+    - service ownership: one OS-service-manager-owned process, root lock, and
+      Unix socket multiplex all active Squad Shotcallers beneath one canonical
+      root; no model turn or Herdr plugin owns `service-run`;
+    - startup ordering: hash-bound install/start verifies all bindings live
+      before Herdr restoration; rollback restores only exact prior plist bytes;
+    - binding isolation: watcher registration, lease fence, generation, cursor,
+      wake target, notification policy, attachment mode, and recovery remain
+      keyed to one Shotcaller/Squad;
+    - delivery/Stop ordering: an active `request turn` defers attention;
+      attached Stop always blocks obligations, while detached Stop permits only
+      delegated-only work with an exact live detachment receipt; and
+    - recovery: exact-once delivery, restored Codex/Pi watcher rebind, metadata
+      replay, and lost-notification recovery remain per-Shotcaller and execute
+      outside model inference.
 
-`src/agent_watcher.py` does not import `league`. The filesystem baseline is the
-only live writer until issue #23 switches every consumer at one authorized
-generation; there is no dual canonical write path.
+`src/agent_watcher.py` does not import `league`. The launcher chooses either the
+preserved filesystem path or the exact SQLite writer-pointer path; there is no
+dual canonical write path.
 
 `src/league/acceptance.py` is the issue-#23 repository-local harness. It owns
 explicit-root sentinels, deterministic fake adapters, fixture migration parity,

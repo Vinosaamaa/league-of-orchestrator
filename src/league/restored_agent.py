@@ -93,7 +93,14 @@ class SupervisorWatcherAdapter:
             else supervisor_wake_locator(Path(self.store.state_root))
         )
         try:
-            response = send_supervisor_message(locator, {"kind": "ping"}, timeout_seconds=0.5)
+            response = send_supervisor_message(
+                locator,
+                {
+                    "kind": "ping",
+                    "actor_agent_id": str(presentation["agent_id"]),
+                },
+                timeout_seconds=0.5,
+            )
         except (SupervisorUnavailable, StorageRefusal) as exc:
             raise StorageRefusal(
                 "restored_agent_watcher_unavailable",
@@ -173,7 +180,12 @@ class SupervisorWatcherAdapter:
         current = self.store.watcher_registration(str(presentation["agent_id"]))
         try:
             verified = send_supervisor_message(
-                str(preflight["locator"]), {"kind": "ping"}, timeout_seconds=0.5
+                str(preflight["locator"]),
+                {
+                    "kind": "ping",
+                    "actor_agent_id": str(presentation["agent_id"]),
+                },
+                timeout_seconds=0.5,
             )
         except (SupervisorUnavailable, StorageRefusal) as exc:
             raise StorageRefusal(
@@ -217,7 +229,12 @@ class SupervisorWatcherAdapter:
             )
         try:
             observed = send_supervisor_message(
-                str(registration["wake_locator"]), {"kind": "ping"}, timeout_seconds=0.5
+                str(registration["wake_locator"]),
+                {
+                    "kind": "ping",
+                    "actor_agent_id": str(presentation["agent_id"]),
+                },
+                timeout_seconds=0.5,
             )
         except (SupervisorUnavailable, StorageRefusal) as exc:
             raise StorageRefusal(

@@ -705,7 +705,7 @@ def test_in_place_bootstrap_creates_shotcaller_without_layout_or_squad_registrat
     turn_pid = turn.pid
     assert turn.stdin is not None and turn.stdout is not None
     intake = json.loads(turn.stdout.readline())
-    assert intake["result"]["phase"] == "intake"
+    assert intake.get("result", {}).get("phase") == "intake", intake
     assert [row["body"] for row in intake["result"]["prompts"]] == [prompt_body]
     turn.stdin.write(
         json.dumps(

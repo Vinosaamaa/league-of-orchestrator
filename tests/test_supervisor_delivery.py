@@ -170,15 +170,23 @@ def test_transition_commits_then_service_delivers_once(root: Path) -> None:
         first = run_json(command, env)["result"]
         assert first["delivery"]["state"] == "scheduled"
         deadline = time.monotonic() + 3
-        while len(adapter.sent) < 1 and time.monotonic() < deadline:
+        matching = []
+        while not matching and time.monotonic() < deadline:
+            matching = [
+                item for item in adapter.sent
+                if item.envelope["event_id"] == first["event_id"]
+            ]
             time.sleep(0.01)
-        assert len(adapter.sent) == 1
-        assert adapter.sent[0].envelope["event_id"] == first["event_id"]
+        assert len(matching) == 1
 
         duplicate = run_json(command, env)["result"]
         assert duplicate["idempotent"] and duplicate["delivery"]["state"] == "scheduled"
         time.sleep(0.1)
-        assert len(adapter.sent) == 1
+        matching = [
+            item for item in adapter.sent
+            if item.envelope["event_id"] == first["event_id"]
+        ]
+        assert len(matching) == 1
         with SQLiteStorage(state) as observer:
             row = observer.connection.execute(
                 "SELECT state,attempt_count FROM delivery_outbox WHERE outbox_id=?",
@@ -239,6 +247,7 @@ def test_stop_exposes_missing_supervisor_without_handoff(root: Path) -> None:
     )
     assert result["decision"] == "block"
     assert result["reason"].startswith("supervisor_unavailable:")
+    assert "agent-watcher service-start" in result["reason"]
     assert "no handoff was claimed" in result["reason"]
     with SQLiteStorage(state) as observer:
         after = observer.connection.execute("SELECT COUNT(*) FROM watcher_scopes").fetchone()[0]
@@ -286,14 +295,15 @@ def test_restart_reconcile_real_supervisor_and_exactly_once_delivery(
         assert status["live"] is True and status["monitor_live"] is True
         assert herdr.processes == original_processes
         by_name = {item["name"]: item for item in herdr.agents}
-        for callsign, provider, role in (
-            ("ashe", "codex", "shotcaller"),
-            ("ambessa", "cursor", "champion"),
-            ("heimerdinger", "codex", "champion"),
-            ("kaisa", "cursor", "champion"),
-            ("vayne", "cursor", "champion"),
+        for callsign, runtime_kind, provider, role in (
+            ("ashe", "codex", "codex", "shotcaller"),
+            ("ambessa", "pi", "cursor", "champion"),
+            ("heimerdinger", "pi", "codex", "champion"),
+            ("kaisa", "pi", "cursor", "champion"),
+            ("vayne", "cursor", "cursor", "champion"),
         ):
             agent = by_name[callsign]
+            assert agent["agent"] == runtime_kind
             assert agent["display_agent"] == provider
             assert agent["tokens"]["orchestrator_role"] == role
             assert agent["terminal_title"]
@@ -319,9 +329,14 @@ def test_restart_reconcile_real_supervisor_and_exactly_once_delivery(
         first = run_json(command, env)["result"]
         assert first["delivery"]["state"] == "scheduled"
         deadline = time.monotonic() + 3
-        while len(delivery.sent) < 1 and time.monotonic() < deadline:
+        matching = []
+        while not matching and time.monotonic() < deadline:
+            matching = [
+                item for item in delivery.sent
+                if item.envelope["event_id"] == first["event_id"]
+            ]
             time.sleep(0.01)
-        assert len(delivery.sent) == 1
+        assert len(matching) == 1
         with SQLiteStorage(state) as store:
             duplicate = handoff_transition_delivery(
                 store,
@@ -332,7 +347,11 @@ def test_restart_reconcile_real_supervisor_and_exactly_once_delivery(
             )
         assert duplicate["state"] == "scheduled"
         time.sleep(0.1)
-        assert len(delivery.sent) == 1
+        matching = [
+            item for item in delivery.sent
+            if item.envelope["event_id"] == first["event_id"]
+        ]
+        assert len(matching) == 1
         with SQLiteStorage(state) as store:
             outbox = store.connection.execute(
                 "SELECT state,attempt_count FROM delivery_outbox WHERE outbox_id=?",

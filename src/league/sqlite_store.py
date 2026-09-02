@@ -83,13 +83,17 @@ from .sqlite_outbox_ops import outbox_envelope as outbox_envelope_operation
 from .sqlite_outbox_ops import pending_backlog as pending_backlog_operation
 from .sqlite_watcher_ops import release_watcher as release_watcher_operation
 from .sqlite_watcher_ops import supervisor_binding as supervisor_binding_operation
+from .sqlite_watcher_ops import supervisor_bindings as supervisor_bindings_operation
+from .sqlite_watcher_ops import supervision_owner as supervision_owner_operation
+from .sqlite_watcher_ops import begin_shotcaller_turn as begin_shotcaller_turn_operation
+from .sqlite_watcher_ops import commit_shotcaller_turn as commit_shotcaller_turn_operation
+from .sqlite_watcher_ops import abort_shotcaller_turn as abort_shotcaller_turn_operation
 from .sqlite_watcher_ops import watcher_registration as watcher_registration_operation
+from .sqlite_watcher_ops import watcher_registrations as watcher_registrations_operation
 from .sqlite_watcher_ops import apply_supervision_delivery_policy as apply_supervision_delivery_policy_operation
 from .sqlite_watcher_ops import champion_stop_decision as champion_stop_decision_operation
 from .sqlite_watcher_ops import configure_supervision_policy as configure_supervision_policy_operation
 from .sqlite_watcher_ops import set_supervision_attachment as set_supervision_attachment_operation
-from .sqlite_watcher_ops import pause_calm_supervision as pause_calm_supervision_operation
-from .sqlite_watcher_ops import resume_calm_supervision as resume_calm_supervision_operation
 from .sqlite_watcher_ops import record_supervision_fault as record_supervision_fault_operation
 from .sqlite_watcher_ops import runtime_monitor_candidates as runtime_monitor_candidates_operation
 from .sqlite_watcher_ops import silent_supervision_updates as silent_supervision_updates_operation
@@ -3085,6 +3089,19 @@ class SQLiteStorage(SQLiteTransactionCore):
 
         return commit_request_turn(self, owner_agent_id, actions, at)
 
+    def commit_interactive_request_turn(
+        self,
+        owner_agent_id: str,
+        turn_token: str,
+        actions: tuple[Any, ...],
+        at: str,
+    ) -> dict[str, Any]:
+        from .sqlite_request_ops import commit_interactive_request_turn
+
+        return commit_interactive_request_turn(
+            self, owner_agent_id, turn_token, actions, at
+        )
+
     def request_turn_boundary(self, owner_agent_id: str) -> dict[str, Any]:
         from .sqlite_request_ops import request_turn_boundary
 
@@ -3488,6 +3505,8 @@ class SQLiteStorage(SQLiteTransactionCore):
         at: str,
         *,
         block_on_obligations: bool = True,
+        expected_watcher_id: str | None = None,
+        expected_fence: int | None = None,
     ) -> dict[str, Any]:
         return register_watcher_operation(
             self,
@@ -3500,15 +3519,47 @@ class SQLiteStorage(SQLiteTransactionCore):
             fence,
             at,
             block_on_obligations=block_on_obligations,
+            expected_watcher_id=expected_watcher_id,
+            expected_fence=expected_fence,
         )
 
     def supervisor_binding(self, callsign: Optional[str] = None) -> dict[str, Any]:
         return supervisor_binding_operation(self, callsign)
 
+    def supervisor_bindings(
+        self, *, limit: int = 64
+    ) -> tuple[dict[str, Any], ...]:
+        return supervisor_bindings_operation(self, limit=limit)
+
+    def supervision_owner(self, actor_agent_id: str) -> Optional[str]:
+        return supervision_owner_operation(self, actor_agent_id)
+
+    def begin_shotcaller_turn(
+        self, actor_agent_id: str, turn_token: str, at: str
+    ) -> dict[str, Any]:
+        return begin_shotcaller_turn_operation(self, actor_agent_id, turn_token, at)
+
+    def commit_shotcaller_turn(
+        self, actor_agent_id: str, turn_token: str, at: str
+    ) -> dict[str, Any]:
+        return commit_shotcaller_turn_operation(self, actor_agent_id, turn_token, at)
+
+    def abort_shotcaller_turn(
+        self, actor_agent_id: str, turn_token: str, at: str
+    ) -> dict[str, Any]:
+        return abort_shotcaller_turn_operation(self, actor_agent_id, turn_token, at)
+
     def watcher_registration(
         self, actor_agent_id: str
     ) -> Optional[dict[str, Any]]:
         return watcher_registration_operation(self, actor_agent_id)
+
+    def watcher_registrations(
+        self, actor_agent_ids: tuple[str, ...], *, limit: int = 64
+    ) -> dict[str, dict[str, Any]]:
+        return watcher_registrations_operation(
+            self, actor_agent_ids, limit=limit
+        )
 
     def watcher_readiness(
         self, actor_agent_id: str
@@ -3562,9 +3613,18 @@ class SQLiteStorage(SQLiteTransactionCore):
         actor_agent_id: str,
         mode: str,
         at: str,
+        *,
+        expected_watcher_id: str | None = None,
+        expected_fence: int | None = None,
     ) -> dict[str, Any]:
         return set_supervision_attachment_operation(
-            self, scope_id, actor_agent_id, mode, at
+            self,
+            scope_id,
+            actor_agent_id,
+            mode,
+            at,
+            expected_watcher_id=expected_watcher_id,
+            expected_fence=expected_fence,
         )
 
     def apply_supervision_delivery_policy(
@@ -3603,8 +3663,22 @@ class SQLiteStorage(SQLiteTransactionCore):
         fence: int,
         at: str,
     ) -> dict[str, Any]:
-        return pause_calm_supervision_operation(
-            self, actor_agent_id, watcher_id, fence, at
+        """Deprecated exact-fence alias for model detachment."""
+
+        policy = self.supervision_policy(actor_agent_id)
+        if policy["scope_id"] is None:
+            raise StorageRefusal(
+                "supervisor_unavailable",
+                "attachment changes require one verified live persistent watcher",
+            )
+        return set_supervision_attachment_operation(
+            self,
+            str(policy["scope_id"]),
+            actor_agent_id,
+            "detached",
+            at,
+            expected_watcher_id=watcher_id,
+            expected_fence=fence,
         )
 
     def resume_calm_supervision(
@@ -3614,8 +3688,22 @@ class SQLiteStorage(SQLiteTransactionCore):
         fence: int,
         at: str,
     ) -> dict[str, Any]:
-        return resume_calm_supervision_operation(
-            self, actor_agent_id, watcher_id, fence, at
+        """Deprecated exact-fence alias for model attachment."""
+
+        policy = self.supervision_policy(actor_agent_id)
+        if policy["scope_id"] is None:
+            raise StorageRefusal(
+                "supervisor_unavailable",
+                "attachment changes require one verified live persistent watcher",
+            )
+        return set_supervision_attachment_operation(
+            self,
+            str(policy["scope_id"]),
+            actor_agent_id,
+            "attached",
+            at,
+            expected_watcher_id=watcher_id,
+            expected_fence=fence,
         )
 
     def champion_stop_decision(

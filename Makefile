@@ -28,6 +28,8 @@ REQUEST_LIFECYCLE_TESTS := \
 	tests/test_shotcaller_stop.py \
 	tests/test_canonical_watcher.py \
 	tests/test_persistent_supervisor.py \
+	tests/test_multisquad_supervisor.py \
+	tests/test_supervisor_service.py \
 	tests/test_supervisor_delivery.py \
 	tests/test_calm_supervision.py \
 	tests/test_request_reconciliation.py \

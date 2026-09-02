@@ -11,6 +11,7 @@ import os
 import secrets
 import sys
 import time
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterator
@@ -23,6 +24,8 @@ from .sqlite_runtime_replacement_ops import runtime_replacement_mutation_fenced
 from .storage import RuntimeRegistrationCommand, StorageRefusal
 from .persistent_supervisor import (
     PersistentSupervisor,
+    attach_shotcaller,
+    detach_shotcaller,
     notify_user_message,
     pause_supervisor,
     resume_supervisor,
@@ -96,6 +99,50 @@ def _needs_invocation_identity(command: str) -> bool:
     return profile.get("invocation_identity") is True
 
 
+def _service_paths() -> dict[str, Path]:
+    repository_root = Path(__file__).resolve().parents[2]
+    plist = Path(
+        os.environ.get(
+            "LEAGUE_SUPERVISOR_PLIST",
+            Path.home()
+            / "Library/LaunchAgents/io.league-of-orchestrator.supervisor.plist",
+        )
+    )
+    return {
+        "agent_watcher": Path(
+            os.environ.get(
+                "LEAGUE_AGENT_WATCHER", repository_root / "bin/agent-watcher"
+            )
+        ),
+        "template": Path(
+            os.environ.get(
+                "LEAGUE_SUPERVISOR_TEMPLATE",
+                repository_root / "config/league-supervisor.launchd.plist.in",
+            )
+        ),
+        "plist": plist,
+        "backup": Path(
+            os.environ.get(
+                "LEAGUE_SUPERVISOR_BACKUP", f"{plist}.league-backup"
+            )
+        ),
+        "manifest": Path(
+            os.environ.get(
+                "LEAGUE_SUPERVISOR_MANIFEST", f"{plist}.league-install.json"
+            )
+        ),
+    }
+
+
+def _add_service_file_options(parser: argparse.ArgumentParser) -> None:
+    paths = _service_paths()
+    parser.add_argument("--agent-watcher", type=Path, default=paths["agent_watcher"])
+    parser.add_argument("--template", type=Path, default=paths["template"])
+    parser.add_argument("--plist", type=Path, default=paths["plist"])
+    parser.add_argument("--backup", type=Path, default=paths["backup"])
+    parser.add_argument("--manifest", type=Path, default=paths["manifest"])
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="agent-watcher")
     parser.add_argument("--shotcaller")
@@ -115,7 +162,29 @@ def _parser() -> argparse.ArgumentParser:
     service_resume.add_argument("--renew-seconds", type=float, default=20)
     commands.add_parser("service-status")
     commands.add_parser("service-stop")
-    commands.add_parser("service-pause")
+    commands.add_parser("attach-shotcaller")
+    commands.add_parser("detach-shotcaller")
+    commands.add_parser(
+        "service-pause", help="Deprecated alias for detach-shotcaller."
+    )
+    service_install = commands.add_parser(
+        "service-install",
+        help="Hash-bind, install, start, and verify the user LaunchAgent.",
+    )
+    _add_service_file_options(service_install)
+    service_install.add_argument("--expected-agent-watcher-sha256", required=True)
+    service_install.add_argument("--expected-template-sha256", required=True)
+    service_start = commands.add_parser(
+        "service-start", help="Start or restart one exact installed LaunchAgent."
+    )
+    _add_service_file_options(service_start)
+    service_rollback = commands.add_parser(
+        "service-rollback",
+        help="Stop the owned LaunchAgent and restore its exact prior plist.",
+    )
+    _add_service_file_options(service_rollback)
+    service_rollback.add_argument("--expected-installed-plist-sha256", required=True)
+    service_rollback.add_argument("--expected-backup-sha256")
     supervise = commands.add_parser("supervise")
     supervise.add_argument("--poll-seconds", type=float, default=1.0)
     deliver = commands.add_parser("deliver")
@@ -134,6 +203,19 @@ def _parser() -> argparse.ArgumentParser:
 def _state_root() -> Path:
     configured = os.environ.get("LEAGUE_STATE_ROOT")
     return Path(configured) if configured else Path.home() / ".local/state/league"
+
+
+def _service_installer(args: argparse.Namespace) -> Any:
+    from .supervisor_service import SupervisorServiceInstaller
+
+    return SupervisorServiceInstaller(
+        state_root=_state_root().resolve(),
+        agent_watcher=args.agent_watcher.resolve(),
+        template_path=args.template.resolve(),
+        plist_path=args.plist.expanduser().resolve(),
+        backup_path=args.backup.expanduser().resolve(),
+        manifest_path=args.manifest.expanduser().resolve(),
+    )
 
 
 def _adapter_kind_for_command(command: str) -> str | None:
@@ -262,8 +344,9 @@ def _champion_stop_output(command: str, result: dict[str, Any]) -> dict[str, Any
 
 def _supervisor_unavailable_stop_output(command: str) -> dict[str, str]:
     reason = (
-        "supervisor_unavailable: League persistent supervision is unavailable; "
-        "no handoff was claimed."
+        "supervisor_unavailable: League's OS-managed persistent watcher is not live; "
+        "no handoff was claimed. Run `agent-watcher service-start` through the "
+        "supported owner release path, verify `service-status`, then retry Stop."
     )
     return (
         {"decision": "block", "reason": reason}
@@ -678,11 +761,22 @@ def _notify_direct_user_priority(
     return notify_user_message(store, actor_id, str(captured["prompt_id"]))
 
 
-def handle_brokered_hook(
-    store: SQLiteStorage, hook: dict[str, Any]
-) -> dict[str, Any]:
-    """Execute one validated hook inside the persistent canonical-state owner."""
+@dataclass(frozen=True)
+class BrokeredHookContext:
+    command: Any
+    payload: Any
+    capture_event_id: Any
+    args: argparse.Namespace
+    actor: Any
+    actor_id: str | None
+    callsign: str | None
+    actor_role: str | None
+    scope: str | None
 
+
+def brokered_hook_context(
+    store: SQLiteStorage, hook: dict[str, Any]
+) -> BrokeredHookContext:
     command = hook.get("command")
     payload = hook.get("payload")
     shotcaller = hook.get("shotcaller")
@@ -708,6 +802,37 @@ def handle_brokered_hook(
     callsign = None if actor is None else str(actor[1])
     actor_role = None if actor is None else str(actor[2])
     scope = None if actor is None else _scope(store, actor_id, str(callsign))
+    return BrokeredHookContext(
+        command=command,
+        payload=payload,
+        capture_event_id=capture_event_id,
+        args=args,
+        actor=actor,
+        actor_id=actor_id,
+        callsign=callsign,
+        actor_role=actor_role,
+        scope=scope,
+    )
+
+
+def handle_brokered_hook(
+    store: SQLiteStorage,
+    hook: dict[str, Any],
+    *,
+    context: BrokeredHookContext | None = None,
+) -> dict[str, Any]:
+    """Execute one validated hook inside the persistent canonical-state owner."""
+
+    resolved = context or brokered_hook_context(store, hook)
+    command = resolved.command
+    payload = resolved.payload
+    capture_event_id = resolved.capture_event_id
+    args = resolved.args
+    actor = resolved.actor
+    actor_id = resolved.actor_id
+    callsign = resolved.callsign
+    actor_role = resolved.actor_role
+    scope = resolved.scope
     if command in PRE_TOOL_HOOK_ADAPTERS:
         return {
             "hook_output": _pre_tool_output(
@@ -724,12 +849,14 @@ def handle_brokered_hook(
                 ),
             ),
             "capture": None,
+            "actor_agent_id": actor_id,
         }
     if command in STOP_HOOK_ADAPTERS:
         if actor is None:
             return {
                 "hook_output": _supervisor_unavailable_stop_output(str(command)),
                 "capture": None,
+                "actor_agent_id": None,
             }
         assert actor_id is not None and callsign is not None and scope is not None
         terminal, _ = _stop_generation(command, args, payload)
@@ -742,6 +869,7 @@ def handle_brokered_hook(
             return {
                 "hook_output": _champion_stop_output(command, result),
                 "capture": None,
+                "actor_agent_id": actor_id,
             }
         result = store.stop_decision(
             scope,
@@ -763,7 +891,12 @@ def handle_brokered_hook(
                     tuple(result.get("unresolved_summaries", ())),
                 ),
             }
-        return {"hook_output": output, "capture": None}
+        return {
+            "hook_output": output,
+            "capture": None,
+            "actor_agent_id": actor_id,
+            "supervision_handoff": result.get("supervision_handoff") is True,
+        }
     captured = _capture_prompt(
         store,
         scope,
@@ -776,6 +909,7 @@ def handle_brokered_hook(
     priority_eligible = _priority_eligible_capture(actor_id, actor_role, captured)
     return {
         "hook_output": {},
+        "actor_agent_id": actor_id,
         "capture": {
             "prompt_id": captured.get("prompt_id"),
             "idempotent": bool(captured.get("idempotent", False)),
@@ -1115,6 +1249,11 @@ def main(argv: list[str] | None = None) -> int:
         "service-status",
         "service-stop",
         "service-pause",
+        "service-install",
+        "service-start",
+        "service-rollback",
+        "attach-shotcaller",
+        "detach-shotcaller",
         "status",
     }:
         raise StorageRefusal(
@@ -1128,8 +1267,35 @@ def main(argv: list[str] | None = None) -> int:
             lease_seconds=args.lease_seconds,
             renew_seconds=args.renew_seconds,
         ).run()
+    if args.command == "service-install":
+        _emit(
+            _service_installer(args).install(
+                expected_agent_watcher_sha256=args.expected_agent_watcher_sha256,
+                expected_template_sha256=args.expected_template_sha256,
+            )
+        )
+        return 0
+    if args.command == "service-start":
+        _emit(_service_installer(args).start())
+        return 0
+    if args.command == "service-rollback":
+        _emit(
+            _service_installer(args).rollback(
+                expected_installed_plist_sha256=(
+                    args.expected_installed_plist_sha256
+                ),
+                expected_backup_sha256=args.expected_backup_sha256,
+            )
+        )
+        return 0
     if args.command == "service-resume":
         _emit(resume_supervisor(_state_root(), args.shotcaller))
+        return 0
+    if args.command == "attach-shotcaller":
+        _emit(attach_shotcaller(_state_root(), args.shotcaller))
+        return 0
+    if args.command == "detach-shotcaller":
+        _emit(detach_shotcaller(_state_root(), args.shotcaller))
         return 0
     if args.command == "service-status":
         _emit(supervisor_status(_state_root(), args.shotcaller))

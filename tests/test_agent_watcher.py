@@ -131,7 +131,9 @@ def test_controls_and_stop_hook(root: Path, state: Path, environment: dict[str, 
     run(["allow-stop", "--once"], root=root, state=state, environment=environment)
     assert json.loads(run(["codex-stop-hook"], root=root, state=state, environment=environment).stdout) == {}
     blocked = json.loads(run(["codex-stop-hook"], root=root, state=state, environment=environment).stdout)
-    assert blocked["decision"] == "block"
+    repeated = json.loads(run(["codex-stop-hook"], root=root, state=state, environment=environment).stdout)
+    assert blocked["decision"] == repeated["decision"] == "block"
+    assert "Every unchanged Stop remains blocked" in repeated["reason"]
     assert (root / "Garen" / "champions" / "Zilean" / "status.json").read_bytes() == before
 
 
@@ -253,7 +255,7 @@ def main():
         test_bounded_failure_fails_open(root / "failure", state / "failure", environment)
         test_teardown_fails_closed(root / "teardown", state / "teardown", environment)
         test_legacy_teardown_proof_is_refused(root / "teardown-plan", state / "teardown-plan", environment)
-    print("PASS: controls, one-shot Stop permission, durable offsets/deduplication, silent liveness, material wake, bounded failure, and fail-closed teardown")
+    print("PASS: controls, explicit one-shot override, repeated attached Stop blocking, durable offsets/deduplication, silent liveness, material wake, bounded failure, and fail-closed teardown")
 
 
 if __name__ == "__main__":

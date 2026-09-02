@@ -1053,6 +1053,32 @@ def commit_request_turn(
     return {"owner_agent_id": owner_agent_id, "actions": receipts}
 
 
+def commit_interactive_request_turn(
+    store: Any,
+    owner_agent_id: str,
+    turn_token: str,
+    actions: tuple[AnswerRequestCommand | RequestResultCommand, ...],
+    at: str,
+) -> dict[str, Any]:
+    """Commit request effects and the matching supervisor turn atomically."""
+
+    from .sqlite_watcher_ops import commit_shotcaller_turn
+
+    try:
+        with store._transaction():
+            committed = commit_request_turn(store, owner_agent_id, actions, at)
+            supervision = commit_shotcaller_turn(
+                store, owner_agent_id, turn_token, at
+            )
+    except StorageRefusal:
+        raise
+    except sqlite3.DatabaseError as exc:
+        raise store._translate_database_error(
+            exc, "interactive request turn commit conflicted with canonical state"
+        ) from exc
+    return {**committed, "supervision": supervision}
+
+
 def request_turn_boundary(store: Any, owner_agent_id: str) -> dict[str, Any]:
     """Return the full Stop-equivalent obligation boundary on the open connection."""
 

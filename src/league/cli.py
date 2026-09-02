@@ -3917,6 +3917,7 @@ SCHEMA_INVENTORY = (
     "league-mode-status.schema.json",
     "league-mode-action-receipt.schema.json",
     "league-protected-gate-receipt.schema.json",
+    "league-supervisor-service-status.schema.json",
     "league-repository-issue.schema.json",
     "league-issue-selection-receipt.schema.json",
 )
@@ -4172,6 +4173,85 @@ def _run(args: argparse.Namespace) -> CommandResult:
         return handler(store, args)
 
 
+def _run_interactive_request_turn(
+    store: Storage, args: argparse.Namespace, source: BinaryIO, sink: BinaryIO
+) -> tuple[dict[str, Any], None]:
+    begin_at = _turn_time(args.at)
+    turn_token = f"request-turn:{uuid.uuid4()}"
+    store.begin_shotcaller_turn(args.owner_agent_id, turn_token, begin_at)
+    request_state_committed = False
+    try:
+        intake = store.untriaged_intake(
+            args.owner_agent_id,
+            limit=args.limit,
+            max_bytes=args.max_bytes,
+            candidate_limit=args.candidate_limit,
+            candidate_max_bytes=args.candidate_max_bytes,
+        )
+        sink.write(_envelope_bytes("request.turn", result={"phase": "intake", **intake}))
+        sink.flush()
+        expected_prompt_ids = tuple(prompt["prompt_id"] for prompt in intake["prompts"])
+        begin_payload = _turn_begin_payload(source, intake, expected_prompt_ids)
+        decisions, new_requests = _mechanize_turn_decisions(
+            intake, begin_payload["decisions"], begin_at
+        )
+        begun = store.begin_request_turn(
+            args.owner_agent_id,
+            expected_prompt_ids,
+            decisions,
+            _turn_dispatch_plans(begin_payload["plans"], begin_at, new_requests),
+            begin_at,
+            expected_candidate_digest=intake["candidate_inventory"]["snapshot_digest"],
+            candidate_limit=args.candidate_limit,
+            candidate_max_bytes=args.candidate_max_bytes,
+        )
+        for request, route in zip(new_requests, begun["routing"]):
+            route["mechanical"] = {
+                "request_id": request["request_id"],
+                "claim_token": _turn_mechanical_id("claim", request["request_id"]),
+            }
+        sink.write(
+            _envelope_bytes(
+                "request.turn",
+                result={
+                    "phase": "begun",
+                    **begun,
+                    "unresolved": store.request_turn_boundary(args.owner_agent_id),
+                },
+            )
+        )
+        sink.flush()
+        commit_payload = _read_turn_payload(source)
+        if set(commit_payload) != {"actions"}:
+            raise StorageRefusal(
+                "invalid_turn_payload",
+                "turn commit input must contain only an actions array",
+            )
+        commit_at = _turn_time(args.at)
+        committed = store.commit_interactive_request_turn(
+            args.owner_agent_id,
+            turn_token,
+            _turn_commit_actions(
+                commit_payload["actions"], commit_at, new_requests, begun
+            ),
+            commit_at,
+        )
+        request_state_committed = True
+        return (
+            {
+                "phase": "committed",
+                **committed,
+                "unresolved": store.request_turn_boundary(args.owner_agent_id),
+            },
+            None,
+        )
+    finally:
+        if not request_state_committed:
+            store.abort_shotcaller_turn(
+                args.owner_agent_id, turn_token, _turn_time(args.at)
+            )
+
+
 def main(
     argv: Optional[list[str]] = None,
     *,
@@ -4185,74 +4265,8 @@ def main(
         if command == "request.turn":
             with _open(args) as store:
                 source = input_stream or sys.stdin.buffer
-                begin_at = _turn_time(args.at)
-                intake = store.untriaged_intake(
-                    args.owner_agent_id,
-                    limit=args.limit,
-                    max_bytes=args.max_bytes,
-                    candidate_limit=args.candidate_limit,
-                    candidate_max_bytes=args.candidate_max_bytes,
-                )
-                sink.write(
-                    _envelope_bytes(command, result={"phase": "intake", **intake})
-                )
-                sink.flush()
-                expected_prompt_ids = tuple(
-                    prompt["prompt_id"] for prompt in intake["prompts"]
-                )
-                begin_payload = _turn_begin_payload(
-                    source, intake, expected_prompt_ids
-                )
-                decisions, new_requests = _mechanize_turn_decisions(
-                    intake, begin_payload["decisions"], begin_at
-                )
-                begun = store.begin_request_turn(
-                    args.owner_agent_id,
-                    expected_prompt_ids,
-                    decisions,
-                    _turn_dispatch_plans(begin_payload["plans"], begin_at, new_requests),
-                    begin_at,
-                    expected_candidate_digest=intake["candidate_inventory"]["snapshot_digest"],
-                    candidate_limit=args.candidate_limit,
-                    candidate_max_bytes=args.candidate_max_bytes,
-                )
-                for request, route in zip(new_requests, begun["routing"]):
-                    route["mechanical"] = {
-                        "request_id": request["request_id"],
-                        "claim_token": _turn_mechanical_id("claim", request["request_id"]),
-                    }
-                sink.write(
-                    _envelope_bytes(
-                        command,
-                        result={
-                            "phase": "begun",
-                            **begun,
-                            "unresolved": store.request_turn_boundary(args.owner_agent_id),
-                        },
-                    )
-                )
-                sink.flush()
-                commit_payload = _read_turn_payload(source)
-                if set(commit_payload) != {"actions"}:
-                    raise StorageRefusal(
-                        "invalid_turn_payload",
-                        "turn commit input must contain only an actions array",
-                    )
-                commit_at = _turn_time(args.at)
-                committed = store.commit_request_turn(
-                    args.owner_agent_id,
-                    _turn_commit_actions(
-                        commit_payload["actions"], commit_at, new_requests, begun
-                    ),
-                    commit_at,
-                )
-                result, raw = (
-                    {
-                        "phase": "committed",
-                        **committed,
-                        "unresolved": store.request_turn_boundary(args.owner_agent_id),
-                    },
-                    None,
+                result, raw = _run_interactive_request_turn(
+                    store, args, source, sink
                 )
         else:
             result, raw = _run(args)

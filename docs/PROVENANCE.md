@@ -31,7 +31,7 @@ used for that comparison.
 
 | Candidate path | Toolkit source path | Source SHA-256 | Adaptation |
 | --- | --- | --- | --- |
-| `src/agent_watcher.py` | `agent_watcher.py` | `ab77f3f0d97cb1b09e34c005c45e90b94a8c0e0612f115169bc62827e524e0d7` | None; byte-for-byte import. |
+| `src/agent_watcher.py` | `agent_watcher.py` | `ab77f3f0d97cb1b09e34c005c45e90b94a8c0e0612f115169bc62827e524e0d7` | Originally byte-for-byte; issue #66 deliberately removes the universal automatic second-Stop allowance while retaining the explicit operator one-shot override. |
 | `bin/agent-watcher` | `agent-watcher` | `3a049f5315e131bda3deed22cbd18f5b14f7d54b2821fcb8dddbda3d9fbba034` | Launch target changed to `src/agent_watcher.py`. |
 | `config/agent-routing.example.json` | `global-agent-instructions/agent-routing.example.json` | `2d475dd727526336b6635d4cf7b9af14c7e2497456ebdff3117ae4adcea3bbdb` | None. |
 | `tests/test_agent_watcher.py` | `shell-completions/test-agent-watcher.py` | `203540768c12be053871cf287f5c7a32cf28319eac9be0f2e0d38f634fabad70` | CLI path, description, synthetic identity, and test-only subprocess ceilings. |
@@ -751,14 +751,13 @@ with renewable/fenced ownership. Stop remains an omission backstop and does not
 merge requests. A source launchd template declares the intended owner boundary
 but is neither rendered nor installed.
 
-The deliberate supervision follow-up adds Calm filtering plus durable
-supervising/paused policy state, one exact pause receipt, bounded resume
-reconciliation, one-shot Champion Stop protection, and fenced canonical
-runtime reconciliation. Calm with supervision on keeps an event-driven wait
-outside model inference and uses the registered Unix socket. Calm with
-supervision off ends the model turn while the non-model monitor and its lease
-remain live; routine transitions stay silent and attention uses the verified
-exact-once direct recipient path. Real owner prompts keep priority.
+The deliberate supervision follow-up keeps notification and model attachment as
+independent axes. `all_material`/`calm` controls only filtering; Calm persists
+routine transitions silently in every attachment state. `attached`/`detached`
+controls only model participation while the non-model monitor, lease, and socket
+stay live. Attached delivery uses the fenced watcher channel; detached delivery
+uses the exact-once direct recipient path; attach returns a bounded silent-event
+reconciliation. Real owner prompts keep priority.
 
 Normal transition delivery is immediate. A missing runtime gets one
 configurable 60-second grace before CAS-safe reconciliation. A 300-second
@@ -767,25 +766,77 @@ renews silently every 20 seconds, ownership expires after 60 seconds, and the
 launchd template throttles restart to five seconds. The retained one-second
 `supervise` loop is diagnostic compatibility, not the production runtime.
 
-Owner-source installed 0.2.28 truth remains distinct: its foreground legacy
-loop has a 30-second runtime snapshot, two matching observations (about 60
-seconds) before a stall fallback, and a 300-second liveness deadline that only
-resets silently. It has no separate OS timer or always-running liveness process,
-and both timers vanish when the foreground loop exits. Those legacy timers are
-not the source candidate behavior. The launchd/socket source in this change
-remains uninstalled.
+Installed 0.2.45 truth remains distinct. Read-only owner evidence showed the
+release healthy but `agent-watcher --shotcaller Ashe service-status` returned
+`live:false`, `monitor_live:false`, `reason:registration_missing`;
+`service-resume` refused `supervisor_not_live`, and no persistent service process
+existed. The source candidate therefore adds a hash-authorized launchd
+install/start/restart/rollback controller around the existing template. This
+change does not execute that controller, install the Herdr plugin, restart Herdr,
+or mutate live canonical state.
 
-The post-0.2.35 issue-#66 Stop correction treats Codex `turn_id` as a turn
-scope, not a per-prompt event key. Each real `UserPromptSubmit` invocation
-mints one opaque League capture identity, carries that same identity through a
-broker retry or direct fallback, and binds it to the immutable prompt/source
-provenance. Two genuine same-turn invocations therefore remain distinct even
-when their prompt bytes are identical. Stop rearms only from a committed
-durable wait event; a fresh-looking terminal identifier alone cannot add a
-second block. The exact pending League feedback remains one-time suppressed,
-and the matching Stop retry is allowed. This source-only correction adds no
-schema migration and performs no installation, hook mutation, live
-reconciliation, or runtime cutover.
+The post-0.2.35 issue-#66 capture correction still treats Codex `turn_id` as a
+turn scope, not a per-prompt event key. Each real `UserPromptSubmit` invocation
+mints one opaque League capture identity, carries it through broker retry or
+direct fallback, and binds it to immutable prompt/source provenance. Two genuine
+same-turn invocations remain distinct even when bytes match. This successor
+intentionally supersedes the old anti-loop behavior: an attached Shotcaller now
+blocks every unchanged Stop while any obligation remains. A detached Shotcaller
+blocks owner-actionable work and may allow delegated-only work only when the
+stored lease, runtime generation, Unix locator, watcher ID, and fence still match
+its detachment receipt. Exact League feedback suppression remains one-time, but
+it never grants Stop. The legacy focused regression is
+`tests/test_agent_watcher.py`; canonical repeated-Stop and detachment coverage is
+in `tests/test_shotcaller_stop.py`.
+
+The issue-#123 successor deliberately replaces the one-binding physical
+supervisor assumption with one root-scoped service that discovers active Squad
+Shotcallers and holds an independent durable fence for each. Root lock/socket
+ownership remains singular, but binding registration, cursor, generation,
+priority, notification policy, attachment, recovery, and delivery identity never
+cross Squads. The launchd controller accepts only exact source/template hashes,
+preserves one exact prior plist and manifest, uses RunAtLoad plus failed-exit
+restart, waits for aggregate live status, restarts through the OS manager, and
+rolls back only matching installed/backup bytes. `service-run` is never launched
+by a model turn.
+
+The installed Herdr asynchronous restore command remains provider- and
+multiplexer-neutral. It now requires the OS watcher to be live before restart,
+pings the exact Shotcaller actor, CAS-rebinds only that restored runtime and
+watcher fence, verifies it again, then replays metadata for restored Codex and Pi
+sessions (including Pi with Codex or Cursor provider). It never creates, resumes,
+prompts, or closes a process.
+
+### Current-main reconciliation and encountered failures
+
+This successor reconciles reviewed PR-#126 head
+`ac6ce35b3a46c78b62afdd6018bda8aacc325d19` with `origin/main`
+`02376107ebf2544191cea5de0571ecaf26bfea1c` (the League 0.2.45 / PR-#138
+line) without replacing its Codex, Pi, Cursor CLI, Herdr, or tmux adapter
+contracts. The reconciliation encountered and retained the following bounded
+failure evidence:
+
+| Failure | Resolution / remaining owner action |
+| --- | --- |
+| Installed 0.2.45 had no watcher registration/process; status reported `registration_missing` and attachment resume refused `supervisor_not_live`. | Added the source-only exact launchd install/start/restart/rollback path and actionable Stop/attachment refusal. Ashe still owns installation and live proof. |
+| Main integration conflicted in the roadmap, hook broker, and persistent runtime. | Kept #84 adapter-neutral broker/restore behavior and merged it with actor-targeted, per-Squad bindings; focused provider/multiplexer and multi-Squad tests cover the result. |
+| The first restored-agent focused run rebound Ashe successfully but status still read the empty active-Squad registration snapshot for the explicit compatibility binding. | Status now reads the resolved exact actor registration in the same canonical snapshot; restored Codex/Pi metadata and watcher delivery pass. |
+| Old Calm tests expected pause to mutate monitor state and old committed-turn tests expected attached Stop handoff. | Replaced them with the independent four-state notification/attachment matrix and repeated attached-Stop blocking. Deprecated names are aliases only. |
+| The first rollback assertion expected one top-level aggregate reason. | Aggregate status remains per-Squad and the test now verifies every binding's `registration_missing` reason. |
+| The first exact-once delivery assertion counted unrelated seeded startup backlog. | Exact-once acceptance now counts only the target event identity and separately proves one outbox attempt and one recipient receipt. |
+| Short test leases exposed a fence race: routine renewal rotated the fence, so a status/publish snapshot could become stale while the same process still owned the service; detachment receipts also expired semantically on renewal. | Routine renewal now extends the same exact live-owner fence; only process startup, stale-owner takeover, or restored-runtime rebind advances it. Five repeated delivery runs and restart fence assertions pass. |
+| The first affected request-turn run omitted `turn_commit_pending` from attached aggregate obligations after the detachment split. | The attached aggregate now retains the pending-turn guard; the grouped request lifecycle passes. |
+| Main's runtime-replacement pre-tool test expected the pre-#123 two-field broker result. | Its exact expectation now includes the resolved `actor_agent_id` required for per-Squad dispatch; the full provider-neutral runtime lifecycle passes. |
+| The first acceptance run used a legacy synthetic wake locator for direct detachment. | The fixture now declares the same persistent/Unix identity required by production while remaining temporary and effect-free. |
+| Main's in-place Shotcaller bootstrap has a valid pre-Squad request turn, but the first multi-Squad integration required an active Squad too early. | Turn ownership again accepts one exact active Shotcaller; only OS service discovery requires an active Squad. Bootstrap and multi-Squad gates both pass. |
+| Fresh exact-head review found attachment authorization could validate the old service fence before the transaction but create a receipt for a concurrent takeover fence. | The service now passes its exact watcher ID and fence into the attachment transaction; a focused takeover race proves stale attachment refuses without changing policy. |
+| Independent review of exact head `c3edada152fad2e7f8c77ae894ce99c9d60167d7` found detached Stop could hand off `blocked` or `ready_to_land` tasks as delegated-only work. | Those task states are now explicit owner-actionable decisions in detached mode; focused regressions prove both remain blocked. |
+| The same review found every detached block path returned before persisting its Stop receipt, while the explicit one-shot override was cleared without first being consumed. | One transaction-local helper now persists the blocked/wait/feedback tuple for attached, detached-owner, and unavailable-supervisor refusals; `allow-stop --once` is checked and consumed first, and the immediately following Stop blocks again. |
+| The same review found an old supervisor could raise its own fence after takeover, including during restored-runtime rebind. | Every renewal and rebind now supplies the previous watcher ID/fence as an atomic storage CAS; a synthetic takeover remains canonical through the old process's next renewal, which exits fenced. |
+| The same review found `test-all` did not execute the multi-Squad service acceptance and an idempotent install trusted its manifest's rollback claim without re-reading the backup. | The multi-Squad test is now in the required request-lifecycle gate, and idempotent install validates exact backup presence and hash before reporting `rollback_ready`. |
+
+No row above involved a live install, Herdr restart, canonical-state mutation,
+real multiplexer effect, or provider call.
 
 The 3×3 prompt-size/intent-count matrix measures exact capture, JSON sideband,
 candidate linking, SQLite commit, and one-process completion on synthetic

@@ -137,6 +137,15 @@ def test_interactive_turn_uses_one_process_and_one_ordered_batch(root: Path) -> 
         "First exact owner prompt",
         "Second distinct exact owner prompt",
     ]
+    with SQLiteStorage(state) as observer:
+        active_turn_stop = observer.stop_decision(
+            "watcher:Garen",
+            SHOTCALLER_ID,
+            "terminal:request-turn-active",
+            clock.now(),
+        )
+    assert active_turn_stop["decision"] == "block", active_turn_stop
+    assert active_turn_stop["obligations"]["turn_commit_pending"] == 1, active_turn_stop
     decisions = {
         "candidate_inventory_digest": intake["result"]["candidate_inventory"]["digest"],
         "decisions": [
@@ -545,6 +554,83 @@ def test_turn_limit_refuses_before_intake(root: Path) -> None:
         assert observer.untriaged_intake(SHOTCALLER_ID)["returned_count"] == 1
 
 
+def test_supervision_commit_failure_rolls_back_request_effect_and_aborts_turn(
+    root: Path,
+) -> None:
+    state, store, clock = create_context(root, "turn-supervision-rollback")
+    _capture(store, clock, "prompt:rollback", "Answer then inject supervisor commit failure")
+    candidate_digest = store.untriaged_intake(SHOTCALLER_ID)["candidate_inventory"][
+        "digest"
+    ]
+    store.close()
+    source = BytesIO(
+        (
+            json.dumps(
+                {
+                    "candidate_inventory_digest": candidate_digest,
+                    "decisions": [_semantic_decision("Answer the rollback request")],
+                    "plans": [_semantic_plan()],
+                },
+                separators=(",", ":"),
+            )
+            + "\n"
+            + json.dumps(
+                {
+                    "actions": [
+                        {
+                            "kind": "answer",
+                            "request_index": 1,
+                            "content": "This answer must roll back.",
+                            "resolution_summary": "Synthetic rollback answer",
+                        }
+                    ]
+                },
+                separators=(",", ":"),
+            )
+            + "\n"
+        ).encode()
+    )
+    sink = BytesIO()
+    with patch(
+        "league.sqlite_watcher_ops.commit_shotcaller_turn",
+        side_effect=StorageRefusal(
+            "shotcaller_turn_conflict", "synthetic supervisor commit failure"
+        ),
+    ):
+        code = league_main(
+            [
+                "--state-root",
+                str(state),
+                "request",
+                "turn",
+                "--owner-agent-id",
+                SHOTCALLER_ID,
+                "--at",
+                clock.now(),
+            ],
+            input_stream=source,
+            output=sink,
+        )
+    assert code == 2
+    responses = [json.loads(line) for line in sink.getvalue().splitlines()]
+    assert responses[-1]["error"]["code"] == "shotcaller_turn_conflict"
+    with SQLiteStorage(state) as observer:
+        unresolved = observer.unresolved_requests(SHOTCALLER_ID)
+        assert len(unresolved["requests"]) == 1
+        assert unresolved["requests"][0]["state"] != "answered"
+        recovered = observer.begin_shotcaller_turn(
+            SHOTCALLER_ID,
+            "turn-token:rollback-recovery",
+            clock.now(),
+        )
+        assert recovered["active"] and not recovered["committed"]
+        observer.abort_shotcaller_turn(
+            SHOTCALLER_ID,
+            "turn-token:rollback-recovery",
+            clock.now(),
+        )
+
+
 def _submit_semantic(process: subprocess.Popen[str], payload: dict) -> dict:
     assert process.stdin is not None and process.stdout is not None
     process.stdin.write(json.dumps(payload, separators=(",", ":")) + "\n")
@@ -608,6 +694,7 @@ def main() -> None:
         test_truncated_candidates_fence_only_external_dispatch(root)
         test_changed_candidates_fence_external_dispatch(root)
         test_turn_limit_refuses_before_intake(root)
+        test_supervision_commit_failure_rolls_back_request_effect_and_aborts_turn(root)
     print(
         "PASS: one request-turn process emits exact intake, atomically begins ordered model "
         "triage/routing, commits answers, and returns the final unresolved boundary"

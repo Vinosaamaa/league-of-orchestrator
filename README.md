@@ -3,14 +3,15 @@
 League of Orchestrator is a small, local-first lifecycle layer for coordinating
 Summoners, Shotcallers, and Champions across agent harnesses and terminal
 backends. It preserves exact identity, durable progress, narrow authority, and
-proof-gated cleanup without introducing a service or control plane.
+proof-gated cleanup without introducing a remote or centralized control plane.
 
 The repository baseline was established by
 [issue #2](https://github.com/Vinosaamaa/league-of-orchestrator/issues/2). The
 repository-local SQLite store and command facade are tracked by
 [issue #19](https://github.com/Vinosaamaa/league-of-orchestrator/issues/19),
 under the [project plan in #1](https://github.com/Vinosaamaa/league-of-orchestrator/issues/1).
-Nothing here installs files, changes hooks, or connects to live Roster state.
+The checkout performs no implicit install, hook change, or live Roster access;
+the watcher service installer runs only as an explicit, hash-authorized command.
 
 ## Baseline in this candidate
 
@@ -112,9 +113,10 @@ Nothing here installs files, changes hooks, or connects to live Roster state.
 - One active-turn semantic sideband with a 12-row/24 KiB same-owner candidate
   shortlist, version-fenced duplicate/follow-up links, and external-dispatch
   refusal when the complete candidate inventory is unavailable or changed.
-- One source-only persistent event supervisor with renewable/fenced ownership,
-  exact prompt and Champion-event wake, asynchronous orphan recovery, and a
-  service-manager template that is not installed by this repository work.
+- One persistent event supervisor with renewable/fenced per-Squad ownership,
+  exact prompt and Champion-event wake, asynchronous orphan recovery, and an
+  explicit hash-bound launchd install/start/rollback path. This repository work
+  does not execute that path against the owner machine.
 - One explicit same-owner duplicate-request reconciliation command; Stop remains
   omission detection and never performs semantic cleanup.
 - Opaque capability-based harness/backend bindings, typed task resources, and
@@ -188,8 +190,9 @@ The proven watcher remains one deep module. The new storage slice is a small
 modular monolith: one composite `Storage` interface with cohesive administrative,
 lifecycle, delivery, and transfer subprotocols; one `SQLiteStorage` facade over
 a shared connection/transaction core and focused SQL operation modules; one
-import planner; and one CLI. The watcher does not import it yet, so this feature
-branch cannot become a second live canonical writer.
+import planner; and one CLI. The preserved filesystem watcher does not import
+League; the launcher selects the canonical watcher only when the exact SQLite
+writer pointer is active, so there is no dual canonical writer.
 
 ## Local development
 
@@ -256,12 +259,11 @@ and the [issue #83 incident analysis](docs/incident-83-cleanup-reopen.md).
 The repository now proves a staged-inactive release, exact read-only shadow,
 backup/restore rehearsal, and deterministic proposed-mutation manifest through
 `league acceptance preflight`; that command writes only beneath its explicit
-temporary root and stops at `awaiting_authority`. The repository does not yet
-own or perform live installation. The currently installed
-watcher and rollback process remain owned by `terminal-environment-toolkit`
-until a later migration proves source/installed parity and rollback from this
-repository. See [migration](docs/MIGRATION.md) and
-[provenance](docs/PROVENANCE.md).
+temporary root and stops at `awaiting_authority`. The repository does not perform live installation implicitly. The supported
+watcher-service operation requires exact source digests, preserves the exact
+prior LaunchAgent bytes, verifies live status, and emits the rollback digest;
+release authority must still run it as a separate cutover. See
+[migration](docs/MIGRATION.md) and [provenance](docs/PROVENANCE.md).
 
 Inspect the stable command inventory without creating state:
 
@@ -278,7 +280,10 @@ contracts are [command](schema/league-command-output.schema.json),
 [import report](schema/league-import-report.schema.json), and
 [export](schema/league-export.schema.json) JSON Schemas. The advisory surfaces
 add [project catalog](schema/league-project-catalog.schema.json) and
-[Roster snapshot](schema/league-roster-snapshot.schema.json) contracts.
+[Roster snapshot](schema/league-roster-snapshot.schema.json) contracts. The
+multiplex service status uses the strict
+[supervisor service](schema/league-supervisor-service-status.schema.json)
+schema; each binding retains the existing per-Shotcaller status schema.
 
 The grouped request-lifecycle command and transaction map is documented in
 [request lifecycle](docs/REQUEST_LIFECYCLE.md). Its implementation is inert
@@ -299,12 +304,14 @@ ID/path, canonical metadata, and two stable readbacks before activation.
 The provider-neutral restart callback is `league runtime
 reconcile-restored-agent --multiplexer-kind herdr`. The bundled asynchronous
 [Herdr integration](integrations/herdr/league-restore/README.md) invokes it once
-after Herdr restores panes and exposes its API. A brief native fallback title is
-allowed while exact sessions become discoverable. Reconciliation then converges
-idempotently or fails closed without process creation. No blocking startup
-barrier, duplicate presentation store, launchd dependency, or extra coordinator
-is part of this path. The plugin has not been installed or exercised against
-live League state.
+after Herdr restores panes and exposes its API. The OS-managed watcher must
+already be live: reconciliation verifies and rebinds each Shotcaller watcher
+before replaying metadata, and refuses rather than starting a service from a
+model/plugin turn. A brief native fallback title is allowed while exact sessions
+become discoverable. Reconciliation then converges idempotently or fails closed
+without process creation. No blocking Herdr startup barrier, duplicate
+presentation store, or extra coordinator is part of this path. The plugin has
+not been installed or exercised against live League state.
 
 An active Champion runtime can be replaced with `league assign replace-runtime`.
 The command resolves both agent adapters and the multiplexer through their
@@ -324,34 +331,64 @@ Issue #66's inline-triage, candidate-inventory, persistent-supervision, and
 measured source-only boundaries are in the
 [issue #66 benchmark report](docs/research/issue-66-inline-triage-supervision-benchmark.md).
 The normal Shotcaller path opens one `request turn` process; the same active
-model authors its semantic JSON. `agent-watcher service-run` is an external
-service-manager surface, never an active-turn command. The inert launchd
-template is not an install receipt.
+model authors its semantic JSON. `agent-watcher service-run` is the internal
+LaunchAgent program, never an active-turn or Herdr-plugin command. One physical
+service per canonical state root discovers all active Squad Shotcallers and
+multiplexes a separate fenced registration, cursor, generation, wake target,
+notification policy, attachment state, and recovery lane for each. It does not
+create one process per Squad.
 
-The repository-local supervisor supports `all_material` and Calm (`calm`) wake
-policies. Calm commits every transition but suppresses routine Champion
-progress. With supervision on, the Shotcaller remains in an event-driven wait
-outside model inference and attention arrives through the fenced Unix socket.
-`agent-watcher service-pause` turns Calm supervision off: the model turn ends,
-the non-model monitor, watcher lease, socket, and global hooks stay active, and
-attention uses the verified exact-once direct recipient path. `service-resume`
-restores the attached wait and returns one bounded silent-transition
-reconciliation. Real owner prompts retain priority in both variants.
+The repository-local supervisor has two independent axes. `all_material` versus
+Calm (`calm`) controls notifications; Calm commits every transition but keeps
+routine Champion progress silent. `attach-shotcaller` versus
+`detach-shotcaller` controls whether the model is attached while the same
+non-model monitor, lease, socket, and global hooks remain live. Attached
+attention uses the fenced watcher channel. Detached attention uses the exact-once
+direct recipient channel, while real owner prompts retain priority. Attaching
+returns one bounded silent-transition reconciliation. The deprecated
+`service-pause`/`service-resume` names are aliases for detach/attach and do not
+change the notification policy.
 
 Normal delivery is immediate IPC, not polling. Missing runtime truth gets one
 configurable 60-second grace before CAS-safe reconciliation. A 300-second
 SQLite audit is recovery-only for lost notifications or service restart and
 never invokes a model when healthy. The service renews its silent lease every
-20 seconds, the lease expires after 60 seconds, and the inert launchd template
-uses a five-second restart throttle.
+20 seconds, the lease expires after 60 seconds, and launchd uses a five-second
+failed-exit restart throttle.
 
-Installed 0.2.28 has no always-running watchdog or OS-owned supervision timer.
-Its legacy foreground `supervise` loop keeps a 30-second runtime snapshot and
-requires two matching observations (about 60 seconds) before a stall fallback;
-its separate 300-second liveness deadline only resets silently and performs no
-health operation. Both timers disappear when that foreground command exits.
-These legacy timers are not the candidate design. The source launchd/socket
-service described here is not installed.
+While a Shotcaller owns an active `request turn`, attention events remain
+durable but do not start a second model turn. An attached Shotcaller blocks every
+unchanged Stop while any owner or delegated obligation remains; there is no
+universal second-Stop allowance. A detached Shotcaller blocks owner-actionable
+work and may end only delegated work after the exact persistent watcher lease,
+runtime generation, locator, and fence match its durable detachment receipt.
+
+Installed 0.2.45 was observed healthy as a release, but its Ashe service status
+was `live:false`, `monitor_live:false`, `reason:registration_missing`; attachment
+resume refused `supervisor_not_live`, and no persistent service process existed.
+This source fixes that missing supported lifecycle, but no installation or live
+restart was performed here.
+
+The supported macOS operator sequence is explicit and hash-bound:
+
+```sh
+watcher_sha=$(shasum -a 256 ./bin/agent-watcher | awk '{print $1}')
+template_sha=$(shasum -a 256 config/league-supervisor.launchd.plist.in | awk '{print $1}')
+LEAGUE_STATE_ROOT=/absolute/canonical/state ./bin/agent-watcher service-install \
+  --expected-agent-watcher-sha256 "$watcher_sha" \
+  --expected-template-sha256 "$template_sha"
+LEAGUE_STATE_ROOT=/absolute/canonical/state ./bin/agent-watcher service-start
+LEAGUE_STATE_ROOT=/absolute/canonical/state ./bin/agent-watcher service-status
+```
+
+Install preserves an exact prior user LaunchAgent, starts the one root-scoped
+service, and succeeds only after every active Squad binding reports live. Use the
+installed-plist and optional backup digests from that receipt with
+`service-rollback`; rollback unloads the owned label and restores or removes only
+the exact installed plist. Release authority must complete this sequence before
+Herdr restoration, because the asynchronous plugin verifies/rebinds the watcher
+and never starts it.
+
 The adapter, resource, cleanup, and routing contracts are documented in
 [runtime lifecycle](docs/runtime-lifecycle.md) and remain equally repository-local.
 The custom-root provenance and capability boundary is documented in

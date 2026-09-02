@@ -19,6 +19,7 @@ from request_lifecycle_fixture import (  # noqa: E402
     dispatch_request,
 )
 from league.storage import OutboxDispatchIdentity, PrepareAssignmentCommand  # noqa: E402
+from league.sqlite_watcher_ops import stop_feedback_reason  # noqa: E402
 from league.request_services import AssignmentSpec  # noqa: E402
 from lifecycle_fakes import issue_bound_spec  # noqa: E402
 from storage_fixture import CHAMPION_ID, REPOSITORY, SHOTCALLER_ID  # noqa: E402
@@ -27,10 +28,10 @@ from storage_fixture import CHAMPION_ID, REPOSITORY, SHOTCALLER_ID  # noqa: E402
 def register_watcher(store, clock, scope="Garen-lifecycle", *, block=True, fence=1):
     return store.register_watcher(
         scope,
-        f"watcher:{scope}",
+        f"watcher:persistent:{scope}",
         SHOTCALLER_ID,
         GAREN_RUNTIME,
-        f"wake:{scope}",
+        f"unix:/tmp/league-test-{scope}.sock",
         clock.after(300),
         fence,
         clock.now(),
@@ -144,6 +145,7 @@ def test_attached_shotcaller_blocks_every_stop_with_obligations(root: Path) -> N
 def test_detachment_requires_verified_live_watcher_handoff(root: Path) -> None:
     _, store, clock = create_context(root, "priority-stop")
     capture_p100(store, clock)
+    add_combined_obligations(store, clock)
     register_watcher(store, clock)
     user = store.note_user_message(
         "Garen-lifecycle", SHOTCALLER_ID, clock.now()
@@ -161,25 +163,146 @@ def test_detachment_requires_verified_live_watcher_handoff(root: Path) -> None:
     allowed = store.stop_decision(
         "Garen-lifecycle", SHOTCALLER_ID, "terminal:explicit", clock.now()
     )
-    assert allowed["decision"] == "block" and allowed["status"] == "blocked_attached"
+    assert allowed["decision"] == "allow"
+    assert allowed["status"] == "explicit_allow_once"
+    consumed = store.stop_decision(
+        "Garen-lifecycle", SHOTCALLER_ID, "terminal:explicit", clock.now()
+    )
+    assert consumed["decision"] == "block" and consumed["status"] == "blocked_attached"
+    scope = store.connection.execute(
+        "SELECT allow_stop_once FROM watcher_scopes WHERE scope_id='Garen-lifecycle'"
+    ).fetchone()
+    assert scope["allow_stop_once"] == 0
     detached = store.set_supervision_attachment(
         "Garen-lifecycle", SHOTCALLER_ID, "detached", clock.now()
     )
-    assert detached["detachment_receipt"]["wake_locator"] == "wake:Garen-lifecycle"
+    assert detached["detachment_receipt"]["wake_locator"] == (
+        "unix:/tmp/league-test-Garen-lifecycle.sock"
+    )
+    owner_action = store.stop_decision(
+        "Garen-lifecycle", SHOTCALLER_ID, "terminal:detached-owner", clock.now()
+    )
+    assert owner_action["decision"] == "block"
+    assert owner_action["status"] == "blocked_detached_owner_action"
+    scope = store.connection.execute(
+        """
+        SELECT stop_blocked,wait_active,last_blocked_wait_generation,
+               pending_stop_feedback_digest,pending_stop_terminal_generation,
+               pending_stop_wait_generation
+          FROM watcher_scopes WHERE scope_id='Garen-lifecycle'
+        """
+    ).fetchone()
+    assert scope["stop_blocked"] == 1 and scope["wait_active"] == 1
+    assert scope["last_blocked_wait_generation"] == owner_action["wait_generation"]
+    assert scope["pending_stop_terminal_generation"] == "terminal:detached-owner"
+    assert scope["pending_stop_wait_generation"] == owner_action["wait_generation"]
+    assert scope["pending_stop_feedback_digest"] is not None
+    feedback = stop_feedback_reason(
+        "Garen",
+        owner_action["wait_generation"],
+        tuple(owner_action["unresolved_summaries"]),
+    )
+    assert store.consume_stop_feedback(
+        "Garen-lifecycle",
+        SHOTCALLER_ID,
+        "terminal:detached-owner",
+        feedback,
+    )
+    assert not store.consume_stop_feedback(
+        "Garen-lifecycle",
+        SHOTCALLER_ID,
+        "terminal:detached-owner",
+        feedback,
+    )
+    with store._transaction():
+        store.connection.execute(
+            "UPDATE requests SET state='answered' WHERE owner_agent_id=?",
+            (SHOTCALLER_ID,),
+        )
     handed_off = store.stop_decision(
         "Garen-lifecycle", SHOTCALLER_ID, "terminal:detached", clock.now()
     )
     assert handed_off["decision"] == "allow"
     assert handed_off["status"] == "detached_handoff_verified"
     store.release_watcher(
-        "watcher:Garen-lifecycle", SHOTCALLER_ID, 1, clock.now()
+        "watcher:persistent:Garen-lifecycle", SHOTCALLER_ID, 1, clock.now()
     )
     unavailable = store.stop_decision(
         "Garen-lifecycle", SHOTCALLER_ID, "terminal:no-watcher", clock.now()
     )
     assert unavailable["decision"] == "block"
     assert unavailable["status"] == "supervisor_unavailable", unavailable
+    scope = store.connection.execute(
+        """
+        SELECT stop_blocked,wait_active,last_blocked_wait_generation,
+               pending_stop_feedback_digest,pending_stop_terminal_generation,
+               pending_stop_wait_generation
+          FROM watcher_scopes WHERE scope_id='Garen-lifecycle'
+        """
+    ).fetchone()
+    assert scope["stop_blocked"] == 1 and scope["wait_active"] == 1
+    assert scope["last_blocked_wait_generation"] == unavailable["wait_generation"]
+    assert scope["pending_stop_terminal_generation"] == "terminal:no-watcher"
+    assert scope["pending_stop_wait_generation"] == unavailable["wait_generation"]
+    assert scope["pending_stop_feedback_digest"] is not None
     assert user["user_message_generation"] == 1
+    store.close()
+
+
+def test_detached_stop_blocks_owner_decision_task_states(root: Path) -> None:
+    _, store, clock = create_context(root, "detached-decision-states")
+    capture_p100(store, clock)
+    add_combined_obligations(store, clock)
+    register_watcher(store, clock)
+    store.set_supervision_attachment(
+        "Garen-lifecycle", SHOTCALLER_ID, "detached", clock.now()
+    )
+    with store._transaction():
+        store.connection.execute("UPDATE requests SET state='answered'")
+        store.connection.execute(
+            "UPDATE tasks SET state='blocked' WHERE task_id='task:pending'"
+        )
+    blocked = store.stop_decision(
+        "Garen-lifecycle", SHOTCALLER_ID, "terminal:blocked-task", clock.now()
+    )
+    assert blocked["decision"] == "block"
+    assert blocked["status"] == "blocked_detached_owner_action"
+    assert blocked["obligations"]["decision_tasks"] == 1
+    feedback = stop_feedback_reason("Garen", blocked["wait_generation"])
+    assert store.consume_stop_feedback(
+        "Garen-lifecycle",
+        SHOTCALLER_ID,
+        "terminal:blocked-task",
+        feedback,
+    )
+    assert not store.consume_stop_feedback(
+        "Garen-lifecycle",
+        SHOTCALLER_ID,
+        "terminal:blocked-task",
+        feedback,
+    )
+
+    with store._transaction():
+        store.connection.execute(
+            "UPDATE tasks SET state='ready_to_land' WHERE task_id='task:pending'"
+        )
+    ready = store.stop_decision(
+        "Garen-lifecycle", SHOTCALLER_ID, "terminal:ready-task", clock.now()
+    )
+    assert ready["decision"] == "block"
+    assert ready["status"] == "blocked_detached_owner_action"
+    assert ready["obligations"]["decision_tasks"] == 1
+    scope = store.connection.execute(
+        """
+        SELECT stop_blocked,wait_active,pending_stop_feedback_digest,
+               pending_stop_terminal_generation,pending_stop_wait_generation
+          FROM watcher_scopes WHERE scope_id='Garen-lifecycle'
+        """
+    ).fetchone()
+    assert scope["stop_blocked"] == 1 and scope["wait_active"] == 1
+    assert scope["pending_stop_feedback_digest"] is not None
+    assert scope["pending_stop_terminal_generation"] == "terminal:ready-task"
+    assert scope["pending_stop_wait_generation"] == ready["wait_generation"]
     store.close()
 
 
@@ -248,6 +371,7 @@ def main() -> None:
         root = Path(temporary)
         test_attached_shotcaller_blocks_every_stop_with_obligations(root)
         test_detachment_requires_verified_live_watcher_handoff(root)
+        test_detached_stop_blocks_owner_decision_task_states(root)
         test_role_awareness_reconciliation_and_distinct_leases(root)
     print("PASS: attached obligations block every Stop, detached handoff is verified, stale output refuses, and user priority is preserved")
 

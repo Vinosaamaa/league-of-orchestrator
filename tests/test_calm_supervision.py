@@ -23,9 +23,9 @@ from league.persistent_supervisor import (  # noqa: E402
     DEFAULT_RECOVERY_SECONDS,
     DEFAULT_RENEW_SECONDS,
     PersistentSupervisor,
+    attach_shotcaller,
+    detach_shotcaller,
     notify_user_message,
-    pause_supervisor,
-    resume_supervisor,
     send_supervisor_message,
     stop_supervisor,
     supervisor_status,
@@ -326,7 +326,7 @@ def test_registration_and_silent_reconciliation_are_atomic(root: Path) -> None:
         store.close()
 
 
-def _exercise_calm_event_ipc_pause_resume_and_recovery(
+def _exercise_calm_event_ipc_detach_attach_and_recovery(
     state: Path,
     store: SQLiteStorage,
     active: dict[str, object],
@@ -353,10 +353,13 @@ def _exercise_calm_event_ipc_pause_resume_and_recovery(
     assert notify_user_message(store, SHOTCALLER_ID, "owner-priority")
     assert runtime.user_priority_generation == priority_generation + 1
 
-    paused = pause_supervisor(state, "Garen")
-    assert paused["paused"] and paused["live"] and paused["monitor_live"]
-    assert paused["hooks_changed"] is False
-    assert paused["in_flight_count"] == 2
+    detached = detach_shotcaller(state, "Garen")
+    assert detached["attachment_mode"] == "detached"
+    assert detached["mode"] == "calm"
+    assert detached["live"] and detached["monitor_live"]
+    assert detached["runtime_state"] == "supervising"
+    assert detached["hooks_changed"] is False
+    assert detached["in_flight_count"] == 2
     assert thread.is_alive() and supervisor_status(state, "Garen")["live"]
 
     routine = _transition(store, active, 4, "working", "routine")
@@ -378,7 +381,7 @@ def _exercise_calm_event_ipc_pause_resume_and_recovery(
     )
     assert store.champion_stop_decision(LUX_ID, "terminal:two", _at())["status"] == "fresh_transition"
     direct = FakeDeliveryAdapter()
-    paused_explicit = dispatch_event(
+    detached_explicit = dispatch_event(
         store,
         outbox_id=str(explicit["outbox_id"]),
         event_id=str(explicit["event_id"]),
@@ -386,7 +389,7 @@ def _exercise_calm_event_ipc_pause_resume_and_recovery(
         at=_at(),
         adapter=direct,
     )
-    assert paused_explicit["state"] == "delivered"
+    assert detached_explicit["state"] == "delivered"
     assert len(direct.sent) == 1 and direct.sent[0].channel == "direct"
     repeated_explicit = dispatch_event(
         store,
@@ -400,18 +403,18 @@ def _exercise_calm_event_ipc_pause_resume_and_recovery(
     assert len(direct.sent) == 1
     assert not first_wakes.wait_for("event:explicit", timeout=0.1)
 
-    resumed = resume_supervisor(state, "Garen")
-    assert resumed["live"] and resumed["runtime_state"] == "supervising"
-    reconciliation = resumed["silent_reconciliation"]
+    attached = attach_shotcaller(state, "Garen")
+    assert attached["live"] and attached["runtime_state"] == "supervising"
+    assert attached["attachment_mode"] == "attached"
+    reconciliation = attached["silent_reconciliation"]
     assert reconciliation["returned_count"] >= 1
     assert any(row["event_id"] == "event:routine" for row in reconciliation["updates"])
 
     target = store.delivery_target(SHOTCALLER_ID, _at())
     assert target is not None and target["channel"] == "watcher"
-    deadline = time.monotonic() + 2
-    while supervisor_status(state, "Garen")["fence"] == target["fence"]:
-        assert time.monotonic() < deadline
-        time.sleep(0.02)
+    # Renewal extends the lease without rotating a live owner's fence. Exercise
+    # stale-fence refusal with the immediately preceding synthetic fence.
+    target["fence"] = int(target["fence"]) - 1
     try:
         InstalledDeliveryAdapter().send(
             "watcher",
@@ -444,7 +447,7 @@ def _exercise_calm_event_ipc_pause_resume_and_recovery(
         delay = min(delay * 2, 0.1)
     assert recovered["state"] == "delivered"
 
-def test_calm_event_ipc_pause_resume_and_recovery(root: Path) -> None:
+def test_calm_event_ipc_detach_attach_and_recovery(root: Path) -> None:
     state, store, active = _active_champion(root)
     first_wakes = FakeWakeAdapter()
     runtime = PersistentSupervisor(
@@ -458,7 +461,7 @@ def test_calm_event_ipc_pause_resume_and_recovery(root: Path) -> None:
     )
     thread, errors = _start(runtime)
     try:
-        _exercise_calm_event_ipc_pause_resume_and_recovery(
+        _exercise_calm_event_ipc_detach_attach_and_recovery(
             state, store, active, first_wakes, runtime, thread
         )
     finally:
@@ -472,7 +475,7 @@ def test_calm_event_ipc_pause_resume_and_recovery(root: Path) -> None:
     assert not thread.is_alive() and not errors
 
 
-def test_paused_stop_and_unreachable_are_bounded(root: Path) -> None:
+def test_detached_stop_and_unreachable_are_bounded(root: Path) -> None:
     _, state, _ = seeded_state(root, "calm-paused-stop")
     with SQLiteStorage(state) as store:
         store.register_runtime(
@@ -496,34 +499,36 @@ def test_paused_stop_and_unreachable_are_bounded(root: Path) -> None:
         registered_at = _at()
         store.register_watcher(
             scope,
-            "watcher:paused-stop",
+            "watcher:persistent:detached-stop",
             SHOTCALLER_ID,
             GAREN_RUNTIME,
-            "unix:/synthetic/calm-paused-stop.sock",
+            "unix:/synthetic/calm-detached-stop.sock",
             lease,
             1,
             registered_at,
         )
         retry = store.register_watcher(
             scope,
-            "watcher:paused-stop",
+            "watcher:persistent:detached-stop",
             SHOTCALLER_ID,
             GAREN_RUNTIME,
-            "unix:/synthetic/calm-paused-stop.sock",
+            "unix:/synthetic/calm-detached-stop.sock",
             lease,
             1,
             registered_at,
         )
         assert retry["idempotent"] and retry["mode"] == "calm"
         assert retry["runtime_state"] == "supervising"
-        store.pause_calm_supervision(
-            SHOTCALLER_ID, "watcher:paused-stop", 1, _at()
+        detached = store.set_supervision_attachment(
+            scope, SHOTCALLER_ID, "detached", _at()
         )
+        assert detached["attachment_mode"] == "detached"
         delegated_only = store.stop_decision(
             scope, SHOTCALLER_ID, "terminal:delegated", _at(), block_on_fresh_terminal=True
         )
         assert delegated_only["decision"] == "allow"
-        assert delegated_only["supervision_state"] == "paused"
+        assert delegated_only["supervision_state"] == "supervising"
+        assert delegated_only["status"] == "detached_handoff_verified"
 
         first = store.champion_stop_decision(CHAMPION_ID, "terminal:champion", _at())
         second = store.champion_stop_decision(CHAMPION_ID, "terminal:champion", _at())
@@ -547,7 +552,11 @@ def test_paused_stop_and_unreachable_are_bounded(root: Path) -> None:
             scope, SHOTCALLER_ID, "terminal:actionable", _at(), block_on_fresh_terminal=True
         )
         assert actionable["decision"] == "block" and repeated["decision"] == "block"
-        assert actionable["status"] == repeated["status"] == "blocked_attached"
+        assert (
+            actionable["status"]
+            == repeated["status"]
+            == "blocked_detached_owner_action"
+        )
         assert actionable["obligations"]["untriaged_prompts"] == 1
 
     liveness_state, liveness_store, _ = _active_champion(root, "calm-liveness")
@@ -570,8 +579,9 @@ def test_paused_stop_and_unreachable_are_bounded(root: Path) -> None:
         runtime_observer=missing,
     )
     monitor_thread, monitor_errors = _start(monitor)
-    paused = pause_supervisor(liveness_state, "Garen")
-    assert paused["wake_policy"] == "calm_paused" and monitor_thread.is_alive()
+    detached = detach_shotcaller(liveness_state, "Garen")
+    assert detached["wake_policy"] == "calm" and monitor_thread.is_alive()
+    assert detached["attachment_mode"] == "detached"
     deadline = time.monotonic() + 2
     delay_seconds = 0.01
     while missing.calls < 2:
@@ -619,7 +629,7 @@ def test_paused_stop_and_unreachable_are_bounded(root: Path) -> None:
     assert direct.sent[0].channel == "direct"
     assert direct.sent[0].envelope["event_id"] == reconciled_rows[0]["event_id"]
     assert not wake.wait_for(reconciled_rows[0]["event_id"], timeout=0.1)
-    summary = resume_supervisor(liveness_state, "Garen")["silent_reconciliation"]
+    summary = attach_shotcaller(liveness_state, "Garen")["silent_reconciliation"]
     assert all(row["event_id"] != reconciled_rows[0]["event_id"] for row in summary["updates"])
     stop_supervisor(liveness_state, "Garen")
     monitor_thread.join(timeout=5)
@@ -682,12 +692,12 @@ def main() -> None:
         test_final_policy_and_timer_matrix()
         test_in_flight_attention_delivery_is_not_dispatched_twice(root)
         test_registration_and_silent_reconciliation_are_atomic(root)
-        test_calm_event_ipc_pause_resume_and_recovery(root)
-        test_paused_stop_and_unreachable_are_bounded(root)
+        test_calm_event_ipc_detach_attach_and_recovery(root)
+        test_detached_stop_and_unreachable_are_bounded(root)
         test_runtime_loss_grace_cancels_on_recovery(root)
     print(
         "PASS: final Calm ON/OFF matrix, owner priority, immediate IPC/direct attention, "
-        "60/300/20/60/5 timer contract, pause/resume, silent replay, stale fencing, "
+        "60/300/20/60/5 timer contract, detach/attach, silent replay, stale fencing, "
         "lost-notification recovery, grace cancellation, Stop guards, and one unreachable event"
     )
 

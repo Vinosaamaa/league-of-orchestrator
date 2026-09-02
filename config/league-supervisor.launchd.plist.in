@@ -7,8 +7,6 @@
   <key>ProgramArguments</key>
   <array>
     <string>@@AGENT_WATCHER@@</string>
-    <string>--shotcaller</string>
-    <string>@@SHOTCALLER@@</string>
     <string>service-run</string>
   </array>
   <key>EnvironmentVariables</key>

@@ -1075,6 +1075,7 @@ def test_provider_pre_tool_hooks_observe_open_replacement_fence(root: Path) -> N
                 "reason_code": "runtime_replacement_fenced",
             },
             "capture": None,
+            "actor_agent_id": agent["agent_id"],
         }
         store.close()
 

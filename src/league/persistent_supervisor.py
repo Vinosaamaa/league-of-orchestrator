@@ -400,6 +400,7 @@ def notify_user_message(store: Any, actor_agent_id: str, prompt_id: str) -> bool
             locator,
             {
                 "kind": "user-message",
+                "actor_agent_id": actor_agent_id,
                 "prompt_id": prompt_id,
                 "fence": target["fence"],
                 "runtime_generation": target["generation"],
@@ -522,6 +523,7 @@ class PersistentSupervisor:
         self._fence = 0
         self._binding: dict[str, Any] = {}
         self._watcher_id = ""
+        self._bindings: dict[str, dict[str, Any]] = {}
         self.registration_receipt: dict[str, Any] | None = None
         self._executor: ThreadPoolExecutor | None = None
         self._work_slots = threading.BoundedSemaphore(max_accepted_work)
@@ -538,10 +540,19 @@ class PersistentSupervisor:
         with self._priority_lock:
             return self._user_priority_generation
 
-    def _publish_user_priority(self) -> None:
-        with self._priority_lock:
-            self._user_priority_generation += 1
-            self.user_priority.set()
+    def _publish_user_priority(self, actor_agent_id: str) -> None:
+        with self._fence_lock:
+            state = self._bindings.get(actor_agent_id)
+            if state is None:
+                raise SupervisorUnavailable(
+                    "user priority does not name an active Shotcaller binding"
+                )
+            with self._priority_lock:
+                state["user_priority_generation"] = (
+                    int(state.get("user_priority_generation", 0)) + 1
+                )
+                self._user_priority_generation += 1
+                self.user_priority.set()
 
     def _submit(self, function: Callable[..., Any], *args: Any) -> bool:
         executor = self._executor
@@ -564,42 +575,159 @@ class PersistentSupervisor:
     def _lease_expiry(self) -> str:
         return _at(_now() + timedelta(seconds=self.lease_seconds))
 
+    def _register_binding(
+        self, store: Any, binding: dict[str, Any]
+    ) -> dict[str, Any]:
+        actor_agent_id = str(binding["actor_agent_id"])
+        existing = store.watcher_registration(actor_agent_id)
+        previous = self._bindings.get(actor_agent_id)
+        watcher_digest = hashlib.sha256(
+            f"{actor_agent_id}\0{self.state_root}".encode("utf-8")
+        ).hexdigest()[:24]
+        watcher_id = f"watcher:persistent:{watcher_digest}"
+        same_binding = bool(
+            previous is not None
+            and all(
+                previous.get(key) == binding.get(key)
+                for key in (
+                    "scope_id",
+                    "squad_id",
+                    "runtime_instance_id",
+                    "runtime_generation",
+                    "endpoint",
+                    "session_ref",
+                )
+            )
+        )
+        if previous is None:
+            fence = max(
+                0 if existing is None else int(existing["fence"]),
+                int(binding.get("fence_floor", 0)),
+            ) + 1
+        elif same_binding:
+            fence = int(previous["fence"])
+        else:
+            fence = max(
+                int(previous["fence"]), int(binding.get("fence_floor", 0))
+            ) + 1
+        receipt = store.register_watcher(
+            binding["scope_id"],
+            watcher_id,
+            actor_agent_id,
+            binding["runtime_instance_id"],
+            _locator(self.socket_path),
+            self._lease_expiry(),
+            fence,
+            _at(),
+            block_on_obligations=True,
+            expected_watcher_id=(
+                None if previous is None else str(previous["watcher_id"])
+            ),
+            expected_fence=(
+                None if previous is None else int(previous["fence"])
+            ),
+        )
+        return {
+            **binding,
+            "watcher_id": watcher_id,
+            "fence": fence,
+            "receipt": receipt,
+            "user_priority_generation": (
+                0
+                if previous is None
+                else int(previous.get("user_priority_generation", 0))
+            ),
+        }
+
+    @staticmethod
+    def _release_removed_bindings(
+        store: Any, states: tuple[dict[str, Any], ...]
+    ) -> None:
+        for state in states:
+            try:
+                store.release_watcher(
+                    str(state["watcher_id"]),
+                    str(state["actor_agent_id"]),
+                    int(state["fence"]),
+                    _at(),
+                )
+            except StorageRefusal as exc:
+                if exc.code != "watcher_fenced":
+                    raise
+
     def _register(self) -> dict[str, Any]:
         with self.store_factory(self.state_root) as store:
-            binding = store.supervisor_binding(self.callsign)
-            existing = store.watcher_registration(binding["actor_agent_id"])
-            with self._fence_lock:
-                self._fence = max(
-                    self._fence,
-                    0 if existing is None else int(existing["fence"]),
-                ) + 1
-                fence = self._fence
-                watcher_digest = hashlib.sha256(
-                    f"{binding['actor_agent_id']}\0{self.state_root}".encode("utf-8")
-                ).hexdigest()[:24]
-                self._watcher_id = f"watcher:persistent:{watcher_digest}"
-                self._binding = binding
-                receipt = store.register_watcher(
-                    binding["scope_id"],
-                    self._watcher_id,
-                    binding["actor_agent_id"],
-                    binding["runtime_instance_id"],
-                    _locator(self.socket_path),
-                    self._lease_expiry(),
-                    fence,
-                    _at(),
-                    block_on_obligations=True,
+            bindings = (
+                (store.supervisor_binding(self.callsign),)
+                if self.callsign is not None
+                else store.supervisor_bindings()
+            )
+            if not bindings:
+                raise StorageRefusal(
+                    "supervisor_binding_invalid",
+                    "persistent supervision requires at least one active Squad Shotcaller",
                 )
-            return receipt
+            receipts: list[dict[str, Any]] = []
+            next_states: dict[str, dict[str, Any]] = {}
+            with self._fence_lock:
+                for binding in bindings:
+                    state = self._register_binding(store, binding)
+                    actor_agent_id = str(state["actor_agent_id"])
+                    next_states[actor_agent_id] = state
+                    receipts.append(state["receipt"])
+                removed = tuple(
+                    state
+                    for actor_id, state in self._bindings.items()
+                    if actor_id not in next_states
+                )
+                self._bindings = next_states
+                primary = sorted(
+                    next_states.values(), key=lambda item: (item["callsign"], item["actor_agent_id"])
+                )[0]
+                self._binding = primary
+                self._watcher_id = str(primary["watcher_id"])
+                self._fence = int(primary["fence"])
+            self._release_removed_bindings(store, removed)
+            if len(receipts) == 1:
+                return receipts[0]
+            return {
+                "schema": "league.supervisor-service-status.v1",
+                "binding_count": len(receipts),
+                "bindings": receipts,
+                "idempotent": all(receipt["idempotent"] for receipt in receipts),
+            }
 
-    def _assert_fenced_registration(self, store: Any, fence: int) -> None:
-        registration = store.watcher_registration(self._binding["actor_agent_id"])
+    def _binding_state(self, actor_agent_id: str | None) -> dict[str, Any]:
+        with self._fence_lock:
+            if actor_agent_id is not None:
+                state = self._bindings.get(actor_agent_id)
+                if state is not None:
+                    return dict(state)
+            if len(self._bindings) == 1:
+                return dict(next(iter(self._bindings.values())))
+        raise SupervisorUnavailable("supervisor message does not name an active Shotcaller binding")
+
+    def _assert_fenced_registration(
+        self, store: Any, state: dict[str, Any], fence: int
+    ) -> None:
+        registrations = store.watcher_registrations(
+            (str(state["actor_agent_id"]),)
+        )
+        registration = registrations.get(str(state["actor_agent_id"]))
+        self._validate_fenced_registration(state, fence, registration)
+
+    def _validate_fenced_registration(
+        self,
+        state: dict[str, Any],
+        fence: int,
+        registration: dict[str, Any] | None,
+    ) -> None:
         if (
             registration is None
-            or registration["watcher_id"] != self._watcher_id
+            or registration["watcher_id"] != state["watcher_id"]
             or int(registration["fence"]) != fence
             or registration["runtime_instance_id"]
-            != self._binding["runtime_instance_id"]
+            != state["runtime_instance_id"]
             or registration["wake_locator"] != _locator(self.socket_path)
             or datetime.fromisoformat(str(registration["leased_until"])) <= _now()
         ):
@@ -608,22 +736,34 @@ class PersistentSupervisor:
                 "persistent supervisor no longer owns the exact live watcher lease",
             )
 
+    def _assert_fenced_registrations(
+        self, store: Any, states: tuple[dict[str, Any], ...]
+    ) -> None:
+        registrations = store.watcher_registrations(
+            tuple(str(state["actor_agent_id"]) for state in states)
+        )
+        for state in states:
+            self._validate_fenced_registration(
+                state,
+                int(state["fence"]),
+                registrations.get(str(state["actor_agent_id"])),
+            )
+
     def _release(self) -> None:
-        if not self._binding or not self._watcher_id:
-            return
         with self._fence_lock:
-            fence = self._fence
-        try:
-            with self.store_factory(self.state_root) as store:
-                store.release_watcher(
-                    self._watcher_id,
-                    self._binding["actor_agent_id"],
-                    fence,
-                    _at(),
-                )
-        except StorageRefusal as exc:
-            if exc.code != "watcher_fenced":
-                raise
+            states = tuple(dict(state) for state in self._bindings.values())
+        with self.store_factory(self.state_root) as store:
+            for state in states:
+                try:
+                    store.release_watcher(
+                        str(state["watcher_id"]),
+                        str(state["actor_agent_id"]),
+                        int(state["fence"]),
+                        _at(),
+                    )
+                except StorageRefusal as exc:
+                    if exc.code != "watcher_fenced":
+                        raise
 
     def _response(self, connection: socket.socket, value: dict[str, Any]) -> None:
         try:
@@ -632,25 +772,80 @@ class PersistentSupervisor:
             connection.close()
 
     def _dispatch_message(
-        self, connection: socket.socket, message: dict[str, Any], fence: int
+        self, connection: socket.socket, message: dict[str, Any]
     ) -> None:
         kind = message.get("kind")
+        if kind == "stop":
+            self._response(connection, {"ok": True, "stopping": True})
+            self.stop_requested.set()
+            return
+        if kind == "service-ping":
+            with self._fence_lock:
+                states = tuple(
+                    dict(state)
+                    for state in sorted(
+                        self._bindings.values(),
+                        key=lambda item: (item["squad_id"], item["actor_agent_id"]),
+                    )
+                )
+            with self.store_factory(self.state_root) as store:
+                self._assert_fenced_registrations(store, states)
+            self._response(
+                connection,
+                {
+                    "ok": True,
+                    "schema": "league.supervisor-service-status.v1",
+                    "live": True,
+                    "event_driven": True,
+                    "binding_count": len(states),
+                    "bindings": [
+                        {
+                            "callsign": state["callsign"],
+                            "actor_agent_id": state["actor_agent_id"],
+                            "squad_id": state["squad_id"],
+                            "fence": state["fence"],
+                            "notification_policy": state["receipt"].get(
+                                "mode", "all_material"
+                            ),
+                            "attachment_mode": state["receipt"].get(
+                                "attachment_mode", "attached"
+                            ),
+                            "live": True,
+                            "monitor_live": True,
+                        }
+                        for state in states
+                    ],
+                    "monitor_live": True,
+                },
+            )
+            return
+        actor_agent_id = message.get("actor_agent_id")
+        if kind == "champion-event" and isinstance(message.get("envelope"), dict):
+            actor_agent_id = message["envelope"].get("recipient_agent_id")
         if kind == "hook":
-            from .canonical_watcher import handle_brokered_hook
+            from .canonical_watcher import brokered_hook_context, handle_brokered_hook
 
             hook = message.get("hook")
             if not isinstance(hook, dict):
                 raise SupervisorUnavailable("supervisor hook request is malformed")
             with self.store_factory(self.state_root) as store:
-                self._assert_fenced_registration(store, fence)
-                result = handle_brokered_hook(store, hook)
+                context = brokered_hook_context(store, hook)
+                owner_agent_id = (
+                    None
+                    if context.actor_id is None
+                    else store.supervision_owner(context.actor_id)
+                )
+                state = self._binding_state(owner_agent_id)
+                fence = int(state["fence"])
+                self._assert_fenced_registration(store, state, fence)
+                result = handle_brokered_hook(store, hook, context=context)
             capture = result.get("capture")
             published_user_priority = bool(
                 isinstance(capture, dict)
                 and capture.get("priority_eligible") is True
             )
             if published_user_priority:
-                self._publish_user_priority()
+                self._publish_user_priority(str(state["actor_agent_id"]))
             self._response(
                 connection,
                 {
@@ -660,6 +855,10 @@ class PersistentSupervisor:
                     "priority": "user" if published_user_priority else None,
                 },
             )
+            if result.get("supervision_handoff") is True:
+                self._submit(
+                    self._recover_pending, str(state["actor_agent_id"])
+                )
             if (
                 isinstance(capture, dict)
                 and capture.get("state") == "quarantined"
@@ -667,6 +866,10 @@ class PersistentSupervisor:
             ):
                 self._schedule_semantic_recovery((str(capture["prompt_id"]),))
             return
+        state = self._binding_state(
+            actor_agent_id if isinstance(actor_agent_id, str) else None
+        )
+        fence = int(state["fence"])
         if kind == "ping":
             self._response(
                 connection,
@@ -675,13 +878,17 @@ class PersistentSupervisor:
                     "schema": "league.supervisor-status.v1",
                     "live": True,
                     "event_driven": True,
-                    "callsign": self._binding["callsign"],
+                    "callsign": state["callsign"],
+                    "actor_agent_id": state["actor_agent_id"],
+                    "squad_id": state["squad_id"],
                     "fence": fence,
-                    "actor_agent_id": self._binding["actor_agent_id"],
-                    "runtime_instance_id": self._binding["runtime_instance_id"],
-                    "runtime_generation": self._binding["runtime_generation"],
-                    "endpoint": self._binding["endpoint"],
-                    "session_ref": self._binding["session_ref"],
+                    "runtime_instance_id": state["runtime_instance_id"],
+                    "runtime_generation": state["runtime_generation"],
+                    "endpoint": state["endpoint"],
+                    "session_ref": state["session_ref"],
+                    "user_priority_generation": int(
+                        state.get("user_priority_generation", 0)
+                    ),
                 },
             )
             return
@@ -700,46 +907,60 @@ class PersistentSupervisor:
                 for key in required
             ):
                 raise SupervisorUnavailable("supervisor restore identity is incomplete")
+            if message["actor_agent_id"] != state["actor_agent_id"]:
+                raise SupervisorUnavailable("supervisor restore owner is not exact")
             with self.store_factory(self.state_root) as store:
-                binding = store.supervisor_binding(self.callsign)
-            if any(binding[key] != message[key] for key in required):
-                raise SupervisorUnavailable("supervisor restore identity is not canonical")
-            receipt = self._register()
+                binding = store.supervisor_binding(str(state["callsign"]))
+                if any(binding[key] != message[key] for key in required):
+                    raise SupervisorUnavailable(
+                        "supervisor restore identity is not canonical"
+                    )
+                with self._fence_lock:
+                    current = self._bindings.get(str(state["actor_agent_id"]))
+                    if current is None or int(current["fence"]) != fence:
+                        raise SupervisorUnavailable(
+                            "supervisor restore binding changed concurrently"
+                        )
+                    restored = self._register_binding(store, binding)
+                    self._bindings[str(restored["actor_agent_id"])] = restored
+                    primary = sorted(
+                        self._bindings.values(),
+                        key=lambda item: (item["callsign"], item["actor_agent_id"]),
+                    )[0]
+                    self._binding = primary
+                    self._watcher_id = str(primary["watcher_id"])
+                    self._fence = int(primary["fence"])
             self._response(
                 connection,
                 {
                     "ok": True,
                     "schema": "league.supervisor-restore-binding.v1",
-                    "callsign": self._binding["callsign"],
-                    "actor_agent_id": self._binding["actor_agent_id"],
-                    "runtime_instance_id": self._binding["runtime_instance_id"],
-                    "runtime_generation": self._binding["runtime_generation"],
-                    "endpoint": self._binding["endpoint"],
-                    "session_ref": self._binding["session_ref"],
-                    "fence": receipt["fence"],
-                    "watcher_id": receipt["watcher_id"],
+                    "callsign": restored["callsign"],
+                    "actor_agent_id": restored["actor_agent_id"],
+                    "runtime_instance_id": restored["runtime_instance_id"],
+                    "runtime_generation": restored["runtime_generation"],
+                    "endpoint": restored["endpoint"],
+                    "session_ref": restored["session_ref"],
+                    "fence": restored["fence"],
+                    "watcher_id": restored["watcher_id"],
                     "idempotent": False,
                 },
             )
             return
-        if kind == "stop":
-            self._response(connection, {"ok": True, "stopping": True, "fence": fence})
-            self.stop_requested.set()
-            return
         if (
             message.get("fence") != fence
-            or message.get("runtime_generation") != self._binding["runtime_generation"]
+            or message.get("runtime_generation") != state["runtime_generation"]
         ):
             raise SupervisorUnavailable("supervisor wake identity is stale")
         if kind == "user-message":
             with self.store_factory(self.state_root) as store:
-                self._assert_fenced_registration(store, fence)
-            self._publish_user_priority()
+                self._assert_fenced_registration(store, state, fence)
+            self._publish_user_priority(str(state["actor_agent_id"]))
             self._response(connection, {"ok": True, "priority": "user", "fence": fence})
             return
         if kind == "outbox-ready":
             if (
-                message.get("recipient_agent_id") != self._binding["actor_agent_id"]
+                message.get("recipient_agent_id") != state["actor_agent_id"]
                 or not all(
                     isinstance(message.get(key), str) and message[key]
                     for key in ("outbox_id", "event_id")
@@ -770,25 +991,48 @@ class PersistentSupervisor:
             )
             self._schedule_runtime_observation(force=True)
             return
-        if kind in {"calm-pause", "calm-resume"}:
+        if kind in {
+            "attach-shotcaller",
+            "detach-shotcaller",
+            "calm-pause",
+            "calm-resume",
+        }:
+            attachment_mode = (
+                "detached"
+                if kind in {"detach-shotcaller", "calm-pause"}
+                else "attached"
+            )
             with self.store_factory(self.state_root) as store:
-                result = (
-                    store.pause_calm_supervision
-                    if kind == "calm-pause"
-                    else store.resume_calm_supervision
-                )(
-                    self._binding["actor_agent_id"],
-                    self._watcher_id,
-                    fence,
+                result = store.set_supervision_attachment(
+                    str(state["scope_id"]),
+                    str(state["actor_agent_id"]),
+                    attachment_mode,
                     _at(),
+                    expected_watcher_id=str(state["watcher_id"]),
+                    expected_fence=fence,
                 )
-            self._response(connection, {"ok": True, **result})
+            with self._fence_lock:
+                current = self._bindings.get(str(state["actor_agent_id"]))
+                if current is not None and int(current["fence"]) == fence:
+                    current["receipt"] = {
+                        **dict(current.get("receipt", {})),
+                        "mode": result["notification_policy"],
+                        "runtime_state": "supervising",
+                        "wake_policy": (
+                            "normal"
+                            if result["notification_policy"] == "all_material"
+                            else "calm"
+                        ),
+                        "attachment_mode": result["attachment_mode"],
+                        "silent_reconciliation": result["silent_reconciliation"],
+                    }
+            self._response(connection, {"ok": True, "fence": fence, **result})
             return
         if kind != "champion-event" or not isinstance(message.get("envelope"), dict):
             raise SupervisorUnavailable("supervisor message kind is unsupported")
         with self.store_factory(self.state_root) as store:
-            self._assert_fenced_registration(store, fence)
-        self.wake_adapter.send(self._binding, message["envelope"])
+            self._assert_fenced_registration(store, state, fence)
+        self.wake_adapter.send(state, message["envelope"])
         self._response(
             connection,
             {
@@ -815,9 +1059,7 @@ class PersistentSupervisor:
             message = json.loads(bytes(payload))
             if not isinstance(message, dict):
                 raise SupervisorUnavailable("supervisor message is malformed")
-            with self._fence_lock:
-                fence = self._fence
-            self._dispatch_message(connection, message, fence)
+            self._dispatch_message(connection, message)
         except StorageRefusal as exc:
             self._response(
                 connection,
@@ -840,14 +1082,18 @@ class PersistentSupervisor:
             except OSError:
                 connection.close()
 
-    def _recover_pending(self) -> None:
+    def _recover_pending(self, actor_agent_id: str | None = None) -> None:
         from .canonical_delivery import dispatch_event
 
         try:
+            with self._fence_lock:
+                active_actor_ids = set(self._bindings)
+            if actor_agent_id is not None:
+                active_actor_ids.intersection_update({actor_agent_id})
             with self.store_factory(self.state_root) as store:
                 rows = store.pending_backlog(_at(), limit=100, per_recipient=20)
                 for row in rows:
-                    if row["recipient_agent_id"] != self._binding["actor_agent_id"]:
+                    if row["recipient_agent_id"] not in active_actor_ids:
                         continue
                     dispatch_event(
                         store,
@@ -866,8 +1112,9 @@ class PersistentSupervisor:
         from .canonical_delivery import dispatch_event
 
         try:
+            state = self._binding_state(recipient_agent_id)
             with self.store_factory(self.state_root) as store:
-                self._assert_fenced_registration(store, self._fence)
+                self._assert_fenced_registration(store, state, int(state["fence"]))
                 dispatch_event(
                     store,
                     outbox_id=outbox_id,
@@ -894,24 +1141,36 @@ class PersistentSupervisor:
             return
         self._schedule_semantic_recovery(tuple(backlog["prompt_ids"]))
 
-    def _record_monitor_fault(self, fault_kind: str, fault_key: str) -> None:
+    def _record_monitor_fault(
+        self,
+        fault_kind: str,
+        fault_key: str,
+        actor_agent_id: str | None = None,
+    ) -> None:
         from .canonical_delivery import dispatch_event
 
-        try:
-            with self.store_factory(self.state_root) as store:
-                fault = store.record_supervision_fault(
-                    self._binding["actor_agent_id"], fault_kind, fault_key, _at()
-                )
-                dispatch_event(
-                    store,
-                    outbox_id=fault["outbox_id"],
-                    event_id=fault["event_id"],
-                    recipient_agent_id=fault["recipient_agent_id"],
-                    at=_at(),
-                    adapter=self.delivery_adapter,
-                )
-        except (StorageRefusal, SupervisorUnavailable):
-            return
+        with self._fence_lock:
+            recipients = (
+                (actor_agent_id,)
+                if actor_agent_id is not None
+                else tuple(sorted(self._bindings))
+            )
+        for recipient_agent_id in recipients:
+            try:
+                with self.store_factory(self.state_root) as store:
+                    fault = store.record_supervision_fault(
+                        recipient_agent_id, fault_kind, fault_key, _at()
+                    )
+                    dispatch_event(
+                        store,
+                        outbox_id=fault["outbox_id"],
+                        event_id=fault["event_id"],
+                        recipient_agent_id=fault["recipient_agent_id"],
+                        at=_at(),
+                        adapter=self.delivery_adapter,
+                    )
+            except (StorageRefusal, SupervisorUnavailable):
+                continue
 
     def _apply_runtime_observation(
         self,
@@ -920,13 +1179,16 @@ class PersistentSupervisor:
         observation: dict[str, str] | None,
         policy: dict[str, Any],
         now: float,
+        owner_agent_id: str,
     ) -> None:
         from .canonical_delivery import dispatch_event
 
         assignment_id = str(candidate["assignment_id"])
         if observation is None:
             self._record_monitor_fault(
-                "runtime_observation_refused", f"missing_result:{assignment_id}"
+                "runtime_observation_refused",
+                f"missing_result:{assignment_id}",
+                owner_agent_id,
             )
             return
         state = observation.get("state")
@@ -951,7 +1213,9 @@ class PersistentSupervisor:
             return
         if state not in {"missing", "mismatch"}:
             self._record_monitor_fault(
-                "runtime_observation_refused", f"invalid_result:{assignment_id}"
+                "runtime_observation_refused",
+                f"invalid_result:{assignment_id}",
+                owner_agent_id,
             )
             return
         with self._monitor_lock:
@@ -990,7 +1254,9 @@ class PersistentSupervisor:
             )
         except StorageRefusal as exc:
             self._record_monitor_fault(
-                "runtime_reconciliation_refused", f"{assignment_id}:{exc.code}"
+                "runtime_reconciliation_refused",
+                f"{assignment_id}:{exc.code}",
+                owner_agent_id,
             )
         finally:
             with self._monitor_lock:
@@ -998,45 +1264,62 @@ class PersistentSupervisor:
 
     def _observe_runtime_candidates(self) -> None:
         now = time.monotonic()
+        with self._fence_lock:
+            owners = tuple(sorted(self._bindings))
+        candidate_ids: set[str] = set()
+        owner_batches: dict[
+            str, tuple[tuple[dict[str, Any], ...], dict[str, Any]]
+        ] = {}
+        all_candidates: list[dict[str, Any]] = []
+        with self.store_factory(self.state_root) as store:
+            for owner_agent_id in owners:
+                try:
+                    batch = store.runtime_monitor_candidates(owner_agent_id, limit=50)
+                    policy = store.supervision_policy(owner_agent_id)
+                except StorageRefusal as exc:
+                    self._record_monitor_fault(
+                        "runtime_observation_refused", exc.code, owner_agent_id
+                    )
+                    continue
+                if batch["truncated"]:
+                    self._record_monitor_fault(
+                        "runtime_observation_refused",
+                        "candidate_inventory_truncated",
+                        owner_agent_id,
+                    )
+                    continue
+                candidates = tuple(batch["candidates"])
+                owner_batches[owner_agent_id] = (candidates, policy)
+                all_candidates.extend(candidates)
+                candidate_ids.update(
+                    str(candidate["assignment_id"]) for candidate in candidates
+                )
         try:
-            with self.store_factory(self.state_root) as store:
-                batch = store.runtime_monitor_candidates(
-                    self._binding["actor_agent_id"], limit=50
-                )
-                policy = store.supervision_policy(self._binding["actor_agent_id"])
-            if batch["truncated"]:
-                self._record_monitor_fault(
-                    "runtime_observation_refused", "candidate_inventory_truncated"
-                )
-                with self._monitor_lock:
-                    self._next_runtime_observation = now + self.recovery_seconds
-                return
-            candidates = tuple(batch["candidates"])
-            observations = self.runtime_observer.observe(candidates)
+            observations = self.runtime_observer.observe(tuple(all_candidates))
         except StorageRefusal as exc:
-            self._record_monitor_fault("runtime_observation_refused", exc.code)
-            with self._monitor_lock:
-                self._next_runtime_observation = now + self.recovery_seconds
-            return
+            for owner_agent_id in owner_batches:
+                self._record_monitor_fault(
+                    "runtime_observation_refused", exc.code, owner_agent_id
+                )
+            observations = {}
+            owner_batches = {}
+        with self.store_factory(self.state_root) as store:
+            for owner_agent_id, (candidates, policy) in owner_batches.items():
+                for candidate in candidates:
+                    assignment_id = str(candidate["assignment_id"])
+                    self._apply_runtime_observation(
+                        store,
+                        candidate,
+                        observations.get(assignment_id),
+                        policy,
+                        now,
+                        owner_agent_id,
+                    )
 
-        candidate_ids = {str(candidate["assignment_id"]) for candidate in candidates}
         with self._monitor_lock:
             for assignment_id in tuple(self._runtime_suspicions):
                 if assignment_id not in candidate_ids:
                     self._runtime_suspicions.pop(assignment_id, None)
-
-        with self.store_factory(self.state_root) as store:
-            for candidate in candidates:
-                assignment_id = str(candidate["assignment_id"])
-                self._apply_runtime_observation(
-                    store,
-                    candidate,
-                    observations.get(assignment_id),
-                    policy,
-                    now,
-                )
-
-        with self._monitor_lock:
             deadlines = [deadline for _, deadline in self._runtime_suspicions.values()]
             self._next_runtime_observation = (
                 min(deadlines) if deadlines else now + self.recovery_seconds
@@ -1109,22 +1392,69 @@ class PersistentSupervisor:
             self.registration_receipt = receipt
             self.ready.set()
             if emit_ready:
+                with self._fence_lock:
+                    states = tuple(
+                        dict(state)
+                        for state in sorted(
+                            self._bindings.values(),
+                            key=lambda item: (item["callsign"], item["actor_agent_id"]),
+                        )
+                    )
+                if len(states) == 1:
+                    state = states[0]
+                    ready_payload = {
+                        "schema": "league.supervisor-status.v1",
+                        "live": True,
+                        "event_driven": True,
+                        "callsign": state["callsign"],
+                        "fence": state["fence"],
+                        "lease_seconds": self.lease_seconds,
+                        "recovery_seconds": self.recovery_seconds,
+                        "mode": state["receipt"].get("mode", "all_material"),
+                        "runtime_state": state["receipt"].get(
+                            "runtime_state", "supervising"
+                        ),
+                        "wake_policy": state["receipt"].get(
+                            "wake_policy", "normal"
+                        ),
+                        "attachment_mode": state["receipt"].get(
+                            "attachment_mode", "attached"
+                        ),
+                        "monitor_live": True,
+                        "silent_reconciliation": state["receipt"].get(
+                            "silent_reconciliation"
+                        ),
+                    }
+                else:
+                    ready_payload = {
+                        "schema": "league.supervisor-service-status.v1",
+                        "live": True,
+                        "event_driven": True,
+                        "binding_count": len(states),
+                        "bindings": [
+                            {
+                                "callsign": state["callsign"],
+                                "actor_agent_id": state["actor_agent_id"],
+                                "squad_id": state["squad_id"],
+                                "fence": state["fence"],
+                                "notification_policy": state["receipt"].get(
+                                    "mode", "all_material"
+                                ),
+                                "attachment_mode": state["receipt"].get(
+                                    "attachment_mode", "attached"
+                                ),
+                                "live": True,
+                                "monitor_live": True,
+                            }
+                            for state in states
+                        ],
+                        "lease_seconds": self.lease_seconds,
+                        "recovery_seconds": self.recovery_seconds,
+                        "monitor_live": True,
+                    }
                 print(
                     json.dumps(
-                        {
-                            "schema": "league.supervisor-status.v1",
-                            "live": True,
-                            "event_driven": True,
-                            "callsign": self._binding["callsign"],
-                            "fence": receipt["fence"],
-                            "lease_seconds": self.lease_seconds,
-                            "recovery_seconds": self.recovery_seconds,
-                            "mode": receipt.get("mode", "all_material"),
-                            "runtime_state": receipt.get("runtime_state", "supervising"),
-                            "wake_policy": receipt.get("wake_policy", "normal"),
-                            "monitor_live": True,
-                            "silent_reconciliation": receipt.get("silent_reconciliation"),
-                        },
+                        ready_payload,
                         sort_keys=True,
                         separators=(",", ":"),
                     ),
@@ -1175,8 +1505,58 @@ class PersistentSupervisor:
 
 def supervisor_status(state_root: Path, callsign: str | None = None) -> dict[str, Any]:
     with SQLiteStorage(state_root) as store:
+        bindings = store.supervisor_bindings()
+        registrations = store.watcher_registrations(
+            tuple(str(binding["actor_agent_id"]) for binding in bindings)
+        )
+    if callsign is None:
+        if not bindings:
+            raise StorageRefusal(
+                "supervisor_binding_invalid",
+                "persistent supervision requires at least one active Squad Shotcaller",
+            )
+        missing = len(registrations) != len(bindings) or any(
+            registration is None
+            or not str(registration["wake_locator"]).startswith("unix:")
+            for registration in registrations.values()
+        )
+        if not missing:
+            first = registrations[bindings[0]["actor_agent_id"]]
+            assert first is not None
+            try:
+                response = send_supervisor_message(
+                    str(first["wake_locator"]),
+                    {"kind": "service-ping"},
+                    timeout_seconds=0.5,
+                )
+                return {key: value for key, value in response.items() if key != "ok"}
+            except SupervisorUnavailable:
+                pass
+        reason = "registration_missing" if missing else "process_unreachable"
+        return {
+            "schema": "league.supervisor-service-status.v1",
+            "live": False,
+            "event_driven": True,
+            "binding_count": len(bindings),
+            "bindings": [
+                {
+                    "callsign": binding["callsign"],
+                    "actor_agent_id": binding["actor_agent_id"],
+                    "squad_id": binding["squad_id"],
+                    "live": False,
+                    "monitor_live": False,
+                    "reason": reason,
+                }
+                for binding in bindings
+            ],
+            "monitor_live": False,
+        }
+    with SQLiteStorage(state_root) as store:
         binding = store.supervisor_binding(callsign)
-        registration = store.watcher_registration(binding["actor_agent_id"])
+        # Explicit callsigns may resolve through the restored-agent/source-canary
+        # compatibility binding rather than the active-Squad aggregate above.
+        # Read that exact owner's registration from the same canonical snapshot.
+        registration = store.watcher_registration(str(binding["actor_agent_id"]))
         policy = store.supervision_policy(binding["actor_agent_id"])
     base = {
         "schema": "league.supervisor-status.v1",
@@ -1185,6 +1565,7 @@ def supervisor_status(state_root: Path, callsign: str | None = None) -> dict[str
         "mode": policy["mode"],
         "runtime_state": policy["runtime_state"],
         "wake_policy": policy["wake_policy"],
+        "attachment_mode": policy["attachment_mode"],
     }
     if registration is None or not str(registration["wake_locator"]).startswith("unix:"):
         return {
@@ -1195,7 +1576,9 @@ def supervisor_status(state_root: Path, callsign: str | None = None) -> dict[str
         }
     try:
         response = send_supervisor_message(
-            str(registration["wake_locator"]), {"kind": "ping"}, timeout_seconds=0.5
+            str(registration["wake_locator"]),
+            {"kind": "ping", "actor_agent_id": binding["actor_agent_id"]},
+            timeout_seconds=0.5,
         )
     except SupervisorUnavailable:
         return {
@@ -1216,6 +1599,9 @@ def supervisor_status(state_root: Path, callsign: str | None = None) -> dict[str
         "lease_valid": lease_valid,
         "identity_valid": identity_valid,
         "fence": int(registration["fence"]),
+        "user_priority_generation": int(
+            response.get("user_priority_generation", 0)
+        ),
     }
 
 
@@ -1226,7 +1612,10 @@ def stop_supervisor(state_root: Path, callsign: str | None = None) -> dict[str, 
             "supervisor_not_live", "the exact persistent supervisor is not live"
         )
     with SQLiteStorage(state_root) as store:
-        binding = store.supervisor_binding(callsign)
+        if status["schema"] == "league.supervisor-service-status.v1":
+            binding = store.supervisor_bindings()[0]
+        else:
+            binding = store.supervisor_binding(callsign)
         registration = store.watcher_registration(binding["actor_agent_id"])
     assert registration is not None
     send_supervisor_message(
@@ -1237,6 +1626,16 @@ def stop_supervisor(state_root: Path, callsign: str | None = None) -> dict[str, 
     while time.monotonic() < deadline:
         current = supervisor_status(state_root, callsign)
         if not current["live"]:
+            if status["schema"] == "league.supervisor-service-status.v1":
+                return {
+                    "schema": "league.supervisor-service-status.v1",
+                    "event_driven": True,
+                    "live": False,
+                    "stopped": True,
+                    "binding_count": status["binding_count"],
+                    "bindings": current["bindings"],
+                    "monitor_live": False,
+                }
             return {
                 "schema": "league.supervisor-status.v1",
                 "callsign": binding["callsign"],
@@ -1253,11 +1652,27 @@ def stop_supervisor(state_root: Path, callsign: str | None = None) -> dict[str, 
     )
 
 
-def pause_supervisor(state_root: Path, callsign: str | None = None) -> dict[str, Any]:
+def set_shotcaller_attachment(
+    state_root: Path,
+    callsign: str | None,
+    attachment_mode: str,
+    *,
+    deprecated_alias: str | None = None,
+) -> dict[str, Any]:
+    if not callsign:
+        raise StorageRefusal(
+            "shotcaller_required",
+            "attachment changes require one exact Shotcaller callsign",
+        )
+    if attachment_mode not in {"attached", "detached"}:
+        raise StorageRefusal(
+            "supervision_attachment_invalid", "attachment mode is unsupported"
+        )
     status = supervisor_status(state_root, callsign)
     if not status["live"]:
         raise StorageRefusal(
-            "supervisor_not_live", "the exact persistent supervisor is not live"
+            "supervisor_not_live",
+            "the OS-managed persistent watcher is not live; run the supported service-start operation before changing attachment",
         )
     with SQLiteStorage(state_root) as store:
         binding = store.supervisor_binding(callsign)
@@ -1266,75 +1681,67 @@ def pause_supervisor(state_root: Path, callsign: str | None = None) -> dict[str,
     response = send_supervisor_message(
         str(registration["wake_locator"]),
         {
-            "kind": "calm-pause",
+            "kind": (
+                "detach-shotcaller"
+                if attachment_mode == "detached"
+                else "attach-shotcaller"
+            ),
+            "actor_agent_id": binding["actor_agent_id"],
             "fence": int(registration["fence"]),
             "runtime_generation": binding["runtime_generation"],
         },
         timeout_seconds=1,
     )
-    deadline = time.monotonic() + 5
-    while time.monotonic() < deadline:
-        with SQLiteStorage(state_root) as store:
-            policy = store.supervision_policy(binding["actor_agent_id"])
-            current = store.watcher_registration(binding["actor_agent_id"])
-        if (
-            current is not None
-            and current["watcher_id"] == registration["watcher_id"]
-            and policy["runtime_state"] == "paused"
-        ):
-            return {
-                "schema": "league.supervisor-status.v1",
-                "callsign": binding["callsign"],
-                "event_driven": True,
-                "live": True,
-                "paused": True,
-                "mode": "calm",
-                "runtime_state": "paused",
-                "wake_policy": "calm_paused",
-                "hooks_changed": False,
-                "monitor_live": True,
-                "fence": response["fence"],
-                "in_flight_count": response["in_flight_count"],
-            }
-        time.sleep(0.02)
-    raise StorageRefusal(
-        "supervisor_pause_timeout", "Calm supervisor did not pause within its bound"
-    )
-
-
-def resume_supervisor(state_root: Path, callsign: str | None = None) -> dict[str, Any]:
-    status = supervisor_status(state_root, callsign)
-    if not status["live"]:
-        raise StorageRefusal(
-            "supervisor_not_live", "the persistent runtime monitor is not live"
-        )
-    with SQLiteStorage(state_root) as store:
-        binding = store.supervisor_binding(callsign)
-        registration = store.watcher_registration(binding["actor_agent_id"])
-    assert registration is not None
-    response = send_supervisor_message(
-        str(registration["wake_locator"]),
-        {
-            "kind": "calm-resume",
-            "fence": int(registration["fence"]),
-            "runtime_generation": binding["runtime_generation"],
-        },
-        timeout_seconds=1,
-    )
-    return {
+    result = {
         "schema": "league.supervisor-status.v1",
         "callsign": binding["callsign"],
         "event_driven": True,
         "live": True,
-        "paused": False,
-        "mode": "calm",
+        "mode": response["notification_policy"],
         "runtime_state": "supervising",
-        "wake_policy": "calm",
+        "wake_policy": (
+            "normal"
+            if response["notification_policy"] == "all_material"
+            else "calm"
+        ),
+        "attachment_mode": response["attachment_mode"],
         "hooks_changed": False,
         "monitor_live": True,
         "fence": response["fence"],
+        "in_flight_count": response["in_flight_count"],
         "silent_reconciliation": response["silent_reconciliation"],
     }
+    if deprecated_alias is not None:
+        result["deprecated_alias"] = deprecated_alias
+    return result
+
+
+def detach_shotcaller(
+    state_root: Path, callsign: str | None = None
+) -> dict[str, Any]:
+    return set_shotcaller_attachment(state_root, callsign, "detached")
+
+
+def attach_shotcaller(
+    state_root: Path, callsign: str | None = None
+) -> dict[str, Any]:
+    return set_shotcaller_attachment(state_root, callsign, "attached")
+
+
+def pause_supervisor(state_root: Path, callsign: str | None = None) -> dict[str, Any]:
+    """Deprecated compatibility alias for ``detach-shotcaller``."""
+
+    return set_shotcaller_attachment(
+        state_root, callsign, "detached", deprecated_alias="service-pause"
+    )
+
+
+def resume_supervisor(state_root: Path, callsign: str | None = None) -> dict[str, Any]:
+    """Deprecated compatibility alias for ``attach-shotcaller``."""
+
+    return set_shotcaller_attachment(
+        state_root, callsign, "attached", deprecated_alias="service-resume"
+    )
 
 
 __all__ = [
@@ -1347,8 +1754,11 @@ __all__ = [
     "handoff_transition_delivery",
     "notify_user_message",
     "send_supervisor_message",
+    "attach_shotcaller",
+    "detach_shotcaller",
     "pause_supervisor",
     "resume_supervisor",
+    "set_shotcaller_attachment",
     "stop_supervisor",
     "supervisor_status",
 ]

@@ -403,10 +403,7 @@ def delivery_target(store: Any, recipient_agent_id: str, at: str) -> Optional[di
     )
     if watcher_eligible:
         supervision = store.supervision_policy(recipient_agent_id)
-        if not (
-            supervision["mode"] == "calm"
-            and supervision["runtime_state"] == "paused"
-        ):
+        if supervision["attachment_mode"] == "attached":
             return {
                 "channel": "watcher",
                 "runtime_instance_id": watcher["runtime_instance_id"],

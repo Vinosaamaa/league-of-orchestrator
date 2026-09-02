@@ -78,7 +78,7 @@
       "properties": {
         "schema": {"const": "league.backup.v1"},
         "sha256": {"$ref": "#/$defs/sha256"},
-        "database_schema_version": {"const": 19},
+        "database_schema_version": {"const": 22},
         "integrity": {"const": "ok"},
         "foreign_key_violations": {"const": 0},
         "policy": {"$ref": "league-acceptance-receipt.schema.json#/$defs/connectionPolicy"}
@@ -340,7 +340,7 @@
       "type": "object",
       "required": ["to_version", "journal_mode", "integrity"],
       "properties": {
-        "to_version": {"const": 19},
+        "to_version": {"const": 22},
         "journal_mode": {"const": "DELETE"},
         "integrity": {"const": true}
       },

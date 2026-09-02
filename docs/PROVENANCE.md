@@ -1251,3 +1251,10 @@ PR #136 merged the independently audited #84 candidate at tree
 next unallocated immutable install identity to those provider-lifecycle bytes;
 the release delta changes only the version contract, its deterministic staging
 expectations, and this provenance record.
+
+Release `0.2.45` accepts the retained minimal schema-1 routing shape produced
+by the historical installer (`schema` plus exact tier selections). The
+migration preserves those tiers, supplies the conservative schema-3
+`WORKER_STRONG` policy and unevaluated fast-tier evidence, rejects unknown or
+malformed fields, backs up the original bytes, and retains exact rollback. It
+does not silently select Luna for the strongest tier.

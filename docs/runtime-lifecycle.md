@@ -126,7 +126,9 @@ match. An unsupported pair refuses without a fallback. Herdr uses structured
 `agent list` and exact-pane `process-info`; only an explicit structured
 `pane_not_found` failure envelope on stderr with exit status 1 establishes pane
 absence. Successful process inspection is accepted only as bounded structured
-JSON on stdout. tmux remains explicitly unsupported until
+JSON on stdout. Both streams require finite JSON and exactly one top-level
+member: `result` on success or `error` on failure. Mixed result/error envelopes
+and non-finite constants fail closed. tmux remains explicitly unsupported until
 its adapter can provide equivalent owner-source evidence.
 
 One bounded `BEGIN IMMEDIATE` transaction rechecks the immutable runtime/session/

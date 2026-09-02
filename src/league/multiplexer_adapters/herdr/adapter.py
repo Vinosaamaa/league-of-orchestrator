@@ -51,6 +51,10 @@ def _session_value(item: Mapping[str, Any]) -> Any:
     return session.get("value") if isinstance(session, Mapping) else None
 
 
+def _reject_nonfinite_json_constant(_constant: str) -> Any:
+    raise ValueError("non-finite JSON constants are not accepted")
+
+
 def _stopped_retirement_process_envelope(
     payload: Any,
 ) -> Mapping[str, Any]:
@@ -76,8 +80,11 @@ def _stopped_retirement_process_envelope(
             "Herdr process inspection output was empty or outside its byte bound",
         )
     try:
-        envelope = json.loads(payload)
-    except (TypeError, json.JSONDecodeError) as exc:
+        envelope = json.loads(
+            payload,
+            parse_constant=_reject_nonfinite_json_constant,
+        )
+    except (TypeError, ValueError) as exc:
         raise StorageRefusal(
             "stopped_retirement_process_unavailable",
             "Herdr process inspection returned malformed JSON",
@@ -1098,7 +1105,10 @@ class HerdrMultiplexerAdapter:
                 )
             process_envelope = _stopped_retirement_process_envelope(completed.stdout)
             process_result = process_envelope.get("result")
-            if not isinstance(process_result, Mapping):
+            if (
+                set(process_envelope) != {"result"}
+                or not isinstance(process_result, Mapping)
+            ):
                 raise StorageRefusal(
                     "stopped_retirement_process_unavailable",
                     "Herdr process inspection returned no success result",
@@ -1113,7 +1123,8 @@ class HerdrMultiplexerAdapter:
             process_envelope = _stopped_retirement_process_envelope(completed.stderr)
             process_error = process_envelope.get("error")
             if (
-                not isinstance(process_error, Mapping)
+                set(process_envelope) != {"error"}
+                or not isinstance(process_error, Mapping)
                 or process_error.get("code") != "pane_not_found"
             ):
                 raise StorageRefusal(

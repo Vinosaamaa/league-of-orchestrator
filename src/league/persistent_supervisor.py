@@ -310,6 +310,21 @@ def supervisor_wake_locator(state_root: Path) -> str:
     return _locator(_socket_path(state_root.resolve()))
 
 
+def _stop_control_bindings(
+    states: tuple[Mapping[str, Any], ...],
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "actor_agent_id": str(state["actor_agent_id"]),
+            "watcher_id": str(state["watcher_id"]),
+            "fence": int(state["fence"]),
+            "runtime_instance_id": str(state["runtime_instance_id"]),
+            "runtime_generation": str(state["runtime_generation"]),
+        }
+        for state in sorted(states, key=lambda item: str(item["actor_agent_id"]))
+    ]
+
+
 def _path_from_locator(locator: str) -> Path:
     if not locator.startswith("unix:"):
         raise SupervisorUnavailable("watcher locator is not event-driven")
@@ -776,8 +791,17 @@ class PersistentSupervisor:
     ) -> None:
         kind = message.get("kind")
         if kind == "stop":
+            with self._fence_lock:
+                states = tuple(dict(state) for state in self._bindings.values())
+                if not states or message.get("bindings") != _stop_control_bindings(states):
+                    raise SupervisorUnavailable(
+                        "supervisor stop control identity is stale or incomplete"
+                    )
+                with self.store_factory(self.state_root) as store:
+                    with store._transaction():
+                        self._assert_fenced_registrations(store, states)
+                        self.stop_requested.set()
             self._response(connection, {"ok": True, "stopping": True})
-            self.stop_requested.set()
             return
         if kind == "service-ping":
             with self._fence_lock:
@@ -1612,14 +1636,51 @@ def stop_supervisor(state_root: Path, callsign: str | None = None) -> dict[str, 
             "supervisor_not_live", "the exact persistent supervisor is not live"
         )
     with SQLiteStorage(state_root) as store:
-        if status["schema"] == "league.supervisor-service-status.v1":
-            binding = store.supervisor_bindings()[0]
-        else:
-            binding = store.supervisor_binding(callsign)
-        registration = store.watcher_registration(binding["actor_agent_id"])
-    assert registration is not None
+        binding = (
+            store.supervisor_bindings()[0]
+            if status["schema"] == "league.supervisor-service-status.v1"
+            else store.supervisor_binding(callsign)
+        )
+        registration = store.watcher_registration(str(binding["actor_agent_id"]))
+    if registration is None:
+        raise StorageRefusal(
+            "supervisor_not_live",
+            "the exact persistent supervisor binding changed before stop",
+        )
+    locator = str(registration["wake_locator"])
+    service = send_supervisor_message(locator, {"kind": "service-ping"})
+    reported = service.get("bindings")
+    if not isinstance(reported, list) or not reported:
+        raise StorageRefusal(
+            "supervisor_not_live",
+            "the persistent supervisor returned no exact stop-control bindings",
+        )
+    try:
+        with SQLiteStorage(state_root) as store:
+            bindings = tuple(
+                store.supervisor_binding(str(item["callsign"])) for item in reported
+            )
+            registrations = store.watcher_registrations(
+                tuple(str(item["actor_agent_id"]) for item in bindings)
+            )
+            if len(registrations) != len(bindings):
+                raise StorageRefusal(
+                    "supervisor_not_live",
+                    "the exact persistent supervisor binding set changed before stop",
+                )
+            control_states = tuple(
+                {**item, **registrations[str(item["actor_agent_id"])]}
+                for item in bindings
+            )
+    except (KeyError, TypeError) as exc:
+        raise StorageRefusal(
+            "supervisor_not_live",
+            "the persistent supervisor stop-control identity is malformed",
+        ) from exc
     send_supervisor_message(
-        str(registration["wake_locator"]), {"kind": "stop"}, timeout_seconds=1
+        locator,
+        {"kind": "stop", "bindings": _stop_control_bindings(control_states)},
+        timeout_seconds=1,
     )
     deadline = time.monotonic() + 5
     retry_delay = 0.1

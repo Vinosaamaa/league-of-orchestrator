@@ -22,6 +22,7 @@ from league.persistent_supervisor import (  # noqa: E402
     detach_shotcaller,
     notify_user_message,
     send_supervisor_message,
+    stop_supervisor,
     supervisor_status,
 )
 from league.canonical_delivery import dispatch_event  # noqa: E402
@@ -247,7 +248,60 @@ def test_one_service_registers_three_isolated_shotcallers(root: Path) -> None:
         }
     finally:
         if runtime.ready.is_set():
-            send_supervisor_message(f"unix:{runtime.socket_path}", {"kind": "stop"})
+            stop_supervisor(state)
+        thread.join(timeout=5)
+    assert not thread.is_alive() and not errors
+
+
+def test_service_stop_requires_exact_aggregate_fences(root: Path) -> None:
+    state, store = _multisquad_state(root, "service-stop-fences")
+    runtime = PersistentSupervisor(
+        state,
+        lease_seconds=0.8,
+        renew_seconds=0.2,
+        wake_adapter=FakeWakeAdapter(),
+        delivery_adapter=FakeDeliveryAdapter(),
+    )
+    thread, errors = _start(runtime)
+    try:
+        locator = f"unix:{runtime.socket_path}"
+        for message in ({"kind": "stop"},):
+            try:
+                send_supervisor_message(locator, message)
+            except SupervisorUnavailable:
+                pass
+            else:
+                raise AssertionError("unscoped service Stop terminated all Squads")
+        bindings = store.supervisor_bindings()
+        registrations = store.watcher_registrations(
+            tuple(str(binding["actor_agent_id"]) for binding in bindings)
+        )
+        controls = [
+            {
+                "actor_agent_id": str(binding["actor_agent_id"]),
+                "watcher_id": str(
+                    registrations[str(binding["actor_agent_id"])]["watcher_id"]
+                ),
+                "fence": int(
+                    registrations[str(binding["actor_agent_id"])]["fence"]
+                ),
+                "runtime_instance_id": str(binding["runtime_instance_id"]),
+                "runtime_generation": str(binding["runtime_generation"]),
+            }
+            for binding in sorted(bindings, key=lambda item: item["actor_agent_id"])
+        ]
+        controls[0] = {**controls[0], "fence": controls[0]["fence"] - 1}
+        try:
+            send_supervisor_message(locator, {"kind": "stop", "bindings": controls})
+        except SupervisorUnavailable:
+            pass
+        else:
+            raise AssertionError("stale aggregate Stop terminated all Squads")
+        assert thread.is_alive()
+        assert supervisor_status(state)["live"]
+    finally:
+        store.close()
+        stop_supervisor(state, "Garen")
         thread.join(timeout=5)
     assert not thread.is_alive() and not errors
 
@@ -356,7 +410,7 @@ def test_user_priority_generation_is_isolated_per_shotcaller(root: Path) -> None
         } == {"Garen": 1, "Jarvan": 1, "Azir": 1}
     finally:
         store.close()
-        send_supervisor_message(f"unix:{runtime.socket_path}", {"kind": "stop"})
+        stop_supervisor(state)
         thread.join(timeout=5)
     assert not thread.is_alive() and not errors
 
@@ -402,7 +456,7 @@ def test_restart_recovers_one_lost_notification_for_exact_squad(root: Path) -> N
         actor_id: store.watcher_registration(actor_id)["fence"]
         for actor_id in (SHOTCALLER_ID, JARVAN_ID, AZIR_ID)
     }
-    send_supervisor_message(f"unix:{first.socket_path}", {"kind": "stop"})
+    stop_supervisor(state)
     first_thread.join(timeout=5)
     assert not first_thread.is_alive() and not first_errors
 
@@ -435,7 +489,7 @@ def test_restart_recovers_one_lost_notification_for_exact_squad(root: Path) -> N
         assert all(second_fences[actor] > first_fences[actor] for actor in first_fences)
     finally:
         store.close()
-        send_supervisor_message(f"unix:{restarted.socket_path}", {"kind": "stop"})
+        stop_supervisor(state)
         restarted_thread.join(timeout=5)
     assert not restarted_thread.is_alive() and not restarted_errors
 
@@ -483,7 +537,7 @@ def test_brokered_prompt_resolves_and_wakes_only_its_shotcaller(root: Path) -> N
         assert statuses["Azir"]["user_priority_generation"] == 0
     finally:
         store.close()
-        send_supervisor_message(f"unix:{runtime.socket_path}", {"kind": "stop"})
+        stop_supervisor(state)
         thread.join(timeout=5)
     assert not thread.is_alive() and not errors
 
@@ -561,7 +615,7 @@ def test_notification_and_attachment_axes_are_isolated_per_squad(root: Path) -> 
         assert all_material_attached["attachment_mode"] == "attached"
     finally:
         store.close()
-        send_supervisor_message(f"unix:{runtime.socket_path}", {"kind": "stop"})
+        stop_supervisor(state)
         thread.join(timeout=5)
     assert not thread.is_alive() and not errors
 
@@ -652,7 +706,7 @@ def test_active_turn_persists_attention_without_duplicate_wake(root: Path) -> No
         assert delivery.sent == [] and wake.calls == []
     finally:
         store.close()
-        send_supervisor_message(f"unix:{runtime.socket_path}", {"kind": "stop"})
+        stop_supervisor(state)
         thread.join(timeout=5)
     assert not thread.is_alive() and not errors
 
@@ -745,7 +799,7 @@ def test_discovery_observation_and_aggregate_status_are_batched(root: Path) -> N
         assert status["live"] and status["binding_count"] == 3
         assert status_messages == [{"kind": "service-ping"}]
     finally:
-        send_supervisor_message(f"unix:{runtime.socket_path}", {"kind": "stop"})
+        stop_supervisor(state)
         thread.join(timeout=5)
     assert not thread.is_alive() and not errors
 
@@ -825,7 +879,7 @@ def test_attached_committed_turn_still_blocks_pending_attention(root: Path) -> N
         assert delivery.sent == []
     finally:
         store.close()
-        send_supervisor_message(f"unix:{runtime.socket_path}", {"kind": "stop"})
+        stop_supervisor(state)
         thread.join(timeout=5)
     assert not thread.is_alive() and not errors
 
@@ -834,6 +888,7 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="league-multisquad-supervisor-") as temporary:
         test_service_manager_starts_one_multiplex_runtime()
         test_one_service_registers_three_isolated_shotcallers(Path(temporary))
+        test_service_stop_requires_exact_aggregate_fences(Path(temporary))
         test_user_priority_generation_is_isolated_per_shotcaller(Path(temporary))
         test_attention_uses_exact_direct_fallback_without_service(Path(temporary))
         test_restart_recovers_one_lost_notification_for_exact_squad(Path(temporary))

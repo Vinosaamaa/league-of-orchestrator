@@ -21,6 +21,55 @@ class RuntimeBindingStorage(Protocol):
         at: str,
     ) -> dict[str, Any]: ...
 
+    def prepare_provider_launch(
+        self, descriptor: Mapping[str, Any], at: str
+    ) -> dict[str, Any]: ...
+
+    def bind_provider_launch(
+        self,
+        descriptor_id: str,
+        expected_version: int,
+        observation: Mapping[str, Any],
+        at: str,
+    ) -> dict[str, Any]: ...
+
+    def provider_launch_descriptor(
+        self, descriptor_id: str
+    ) -> Optional[dict[str, Any]]: ...
+
+    def claim_provider_restart(
+        self,
+        descriptor_id: str,
+        restart_id: str,
+        pane_id: str,
+        at: str,
+    ) -> dict[str, Any]: ...
+
+    def complete_provider_restart(
+        self,
+        descriptor_id: str,
+        restart_id: str,
+        intent_digest: str,
+        receipt: Mapping[str, Any],
+        at: str,
+    ) -> dict[str, Any]: ...
+
+    def prepare_pi_session_migration(
+        self, intent: Mapping[str, Any], at: str
+    ) -> dict[str, Any]: ...
+
+    def advance_pi_session_migration(
+        self,
+        migration_id: str,
+        intent_digest: str,
+        expected_state: str,
+        next_state: str,
+        receipt: Mapping[str, Any],
+        at: str,
+    ) -> dict[str, Any]: ...
+
+    def pi_session_migration(self, migration_id: str) -> Optional[dict[str, Any]]: ...
+
     def runtime_binding(self, binding_id: str) -> Optional[dict[str, Any]]: ...
 
     def update_runtime_binding(

@@ -23,6 +23,8 @@ REQUEST_LIFECYCLE_TESTS := \
 	tests/test_assignment_dispatch.py \
 	tests/test_request_concurrency.py \
 	tests/test_transition_delivery.py \
+	tests/test_cursor_steering.py \
+	tests/test_pi_provider_launch.py \
 	tests/test_shotcaller_stop.py \
 	tests/test_canonical_watcher.py \
 	tests/test_persistent_supervisor.py \

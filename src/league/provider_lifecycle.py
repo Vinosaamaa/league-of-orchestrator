@@ -40,6 +40,7 @@ class ProviderLifecycle:
         state_root: Path,
         release_root: Path,
         resume_session: str | None,
+        provider_kind: str | None = None,
     ) -> tuple[str, ...]:
         if resume_session is not None:
             if not self.supports_resume:
@@ -91,15 +92,21 @@ class ProviderLifecycle:
                 "launch_integration_unavailable",
                 "Pi canonical watcher is missing from the exact League release",
             )
+        if provider_kind not in {"cursor", "codex"}:
+            raise StorageRefusal(
+                "launch_provider_invalid",
+                "Pi launch requires an explicit Cursor or Codex provider",
+            )
         arguments = [
+            "--approve",
+            "--provider",
+            "cursor" if provider_kind == "cursor" else "openai-codex",
             "--model",
             model,
             "--thinking",
             effort,
             "--extension",
             str(integration),
-            "--session-dir",
-            str(state_root / "provider-sessions" / "pi"),
         ]
         if resume_session is not None:
             arguments.extend(("--session", resume_session))

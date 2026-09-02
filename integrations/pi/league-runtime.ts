@@ -3,24 +3,31 @@
 
 import crypto from "node:crypto";
 import fs from "node:fs";
-import net from "node:net";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 
-const stateRoot = process.env.LEAGUE_STATE_ROOT;
-const watcher = process.env.LEAGUE_WATCHER_COMMAND;
-const worktree = process.env.LEAGUE_WORKTREE;
-const sandboxProfile = process.env.LEAGUE_PI_SANDBOX_PROFILE;
-const paneId = process.env.HERDR_PANE_ID;
-const socketPath = process.env.HERDR_SOCKET_PATH;
+let stateRoot = process.env.LEAGUE_STATE_ROOT;
+let watcher = process.env.LEAGUE_WATCHER_COMMAND;
+let worktree = process.env.LEAGUE_WORKTREE;
+let sandboxProfile = process.env.LEAGUE_PI_SANDBOX_PROFILE;
+let paneId = process.env.HERDR_PANE_ID;
+let runtimeKind = process.env.LEAGUE_RUNTIME_KIND;
+let providerKind = process.env.LEAGUE_PROVIDER_KIND;
+let launchRole = process.env.LEAGUE_LAUNCH_ROLE;
+let launchPlacement = process.env.LEAGUE_LAUNCH_PLACEMENT;
+let callsign = process.env.LEAGUE_CALLSIGN;
+let projectCode = process.env.LEAGUE_PROJECT_CODE;
+let taskLabel = process.env.LEAGUE_TASK_LABEL;
+let routingAlias = process.env.LEAGUE_ROUTING_ALIAS;
+let descriptorDigest = process.env.LEAGUE_LAUNCH_DESCRIPTOR_DIGEST;
 
 function exactRoot(value: string | undefined): string | undefined {
   if (!value || !path.isAbsolute(value) || value === "/") return undefined;
   return path.resolve(value);
 }
 
-const exactStateRoot = exactRoot(stateRoot);
-const exactWorktree = exactRoot(worktree);
+let exactStateRoot = exactRoot(stateRoot);
+let exactWorktree = exactRoot(worktree);
 
 function quoted(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
@@ -67,43 +74,155 @@ function runWatcher(
   }
 }
 
-function reportExactSession(sessionId: string): void {
-  if (
-    process.env.HERDR_ENV !== "1" ||
-    !socketPath ||
-    !paneId ||
-    !sessionId
-  ) return;
-  const endpoint = process.platform === "win32" ? `\\\\.\\pipe\\${socketPath}` : socketPath;
-  const request = {
-    id: `league:pi:${Date.now()}:${crypto.randomUUID()}`,
-    method: "pane.report_agent_session",
-    params: {
-      pane_id: paneId,
-      source: "league:pi",
-      agent: "pi",
-      seq: Date.now() * 1000 + 999,
-      agent_session_id: sessionId,
-    },
-  };
-  const socket = net.createConnection(endpoint);
-  socket.on("error", () => socket.destroy());
-  socket.on("connect", () => {
-    socket.end(`${JSON.stringify(request)}\n`);
+type SessionIdentity = {
+  id: string;
+  file: string;
+  parentFile?: string;
+};
+
+function exactMetadataInputs(): boolean {
+  return Boolean(
+    paneId &&
+      runtimeKind === "pi" &&
+      (providerKind === "cursor" || providerKind === "codex") &&
+      (launchRole === "shotcaller" || launchRole === "champion") &&
+      (launchPlacement === "sibling_pane" || launchPlacement === "new_tab") &&
+      callsign &&
+      projectCode &&
+      taskLabel &&
+      routingAlias &&
+      descriptorDigest,
+  );
+}
+
+let metadataSeq = Date.now() * 1000;
+
+function reportLeagueMetadata(session: SessionIdentity): void {
+  if (!exactMetadataInputs()) return;
+  const threadTitle =
+    launchRole === "shotcaller"
+      ? callsign!
+      : `${callsign} · ${projectCode}|${taskLabel}`;
+  const source = `league:pi-launch:${descriptorDigest!.slice(0, 16)}`;
+  const tokens = [
+    `runtime_kind=${runtimeKind}`,
+    `provider_kind=${providerKind}`,
+    `role=${launchRole}`,
+    `placement=${launchPlacement}`,
+    `sidebar_name=${callsign}`,
+    `project_code=${projectCode}`,
+    `task_label=${taskLabel}`,
+    `routing_alias=${routingAlias}`,
+    `session_id=${session.id}`,
+    `session_path=${session.file}`,
+    `thread_title=${threadTitle}`,
+    "activation_phase=session_started",
+    `launch_runtime_kind=${runtimeKind}`,
+    `launch_provider_kind=${providerKind}`,
+    `launch_role=${launchRole}`,
+    `launch_placement=${launchPlacement}`,
+    `launch_callsign=${callsign}`,
+    `launch_project_code=${projectCode}`,
+    `launch_task_label=${taskLabel}`,
+    `launch_routing_alias=${routingAlias}`,
+    `launch_session_id=${session.id}`,
+    `launch_session_path_digest=${crypto.createHash("sha256").update(session.file).digest("hex")}`,
+    `launch_descriptor_sha256=${descriptorDigest}`,
+    "launch_activation_phase=session_started",
+  ];
+  if (session.parentFile) {
+    tokens.push(`parent_session_path=${session.parentFile}`);
+    tokens.push(
+      `launch_parent_digest=${crypto.createHash("sha256").update(session.parentFile).digest("hex")}`,
+    );
+  }
+  const commandArguments = [
+    "pane",
+    "report-metadata",
+    paneId!,
+    "--source",
+    source,
+    "--applies-to-source",
+    "herdr:pi",
+    "--agent",
+    "pi",
+    "--display-agent",
+    providerKind!,
+    "--title",
+    threadTitle,
+    "--seq",
+    String(++metadataSeq),
+  ];
+  for (const token of tokens) commandArguments.push("--token", token);
+  spawnSync("herdr", commandArguments, {
+    encoding: "utf8",
+    timeout: 5000,
+    maxBuffer: 1024 * 1024,
   });
-  socket.setTimeout(1500, () => socket.destroy());
 }
 
 export default function (pi) {
-  let sessionId: string | undefined;
+  const flags = [
+    "pane-id", "state-root", "watcher-command", "worktree", "sandbox-profile",
+    "runtime-kind", "provider-kind", "role", "placement", "callsign",
+    "project-code", "task-label", "routing-alias", "descriptor-digest",
+  ];
+  for (const name of flags) {
+    pi.registerFlag(`league-${name}`, {
+      description: `League durable launch ${name}`,
+      type: "string",
+    });
+  }
+  const supplied = (name: string, fallback: string | undefined) => {
+    const value = pi.getFlag(`league-${name}`);
+    return typeof value === "string" && value ? value : fallback;
+  };
+  stateRoot = supplied("state-root", stateRoot);
+  paneId = supplied("pane-id", paneId);
+  watcher = supplied("watcher-command", watcher);
+  worktree = supplied("worktree", worktree);
+  sandboxProfile = supplied("sandbox-profile", sandboxProfile);
+  runtimeKind = supplied("runtime-kind", runtimeKind);
+  providerKind = supplied("provider-kind", providerKind);
+  launchRole = supplied("role", launchRole);
+  launchPlacement = supplied("placement", launchPlacement);
+  callsign = supplied("callsign", callsign);
+  projectCode = supplied("project-code", projectCode);
+  taskLabel = supplied("task-label", taskLabel);
+  routingAlias = supplied("routing-alias", routingAlias);
+  descriptorDigest = supplied("descriptor-digest", descriptorDigest);
+  exactStateRoot = exactRoot(stateRoot);
+  exactWorktree = exactRoot(worktree);
+  let sessionIdentity: SessionIdentity | undefined;
   let inputId: string | undefined;
 
-  function refreshSession(ctx): string | undefined {
-    const observed = ctx?.sessionManager?.getSessionId?.();
-    sessionId = typeof observed === "string" && observed ? observed : undefined;
-    if (sessionId) reportExactSession(sessionId);
-    return sessionId;
+  function refreshSession(ctx): SessionIdentity | undefined {
+    const id = ctx?.sessionManager?.getSessionId?.();
+    const file = ctx?.sessionManager?.getSessionFile?.();
+    const parentFile = ctx?.sessionManager?.getHeader?.()?.parentSession;
+    sessionIdentity =
+      typeof id === "string" && id && typeof file === "string" && path.isAbsolute(file)
+        ? {
+            id,
+            file: path.resolve(file),
+            parentFile:
+              typeof parentFile === "string" && path.isAbsolute(parentFile)
+                ? path.resolve(parentFile)
+                : undefined,
+          }
+        : undefined;
+    if (sessionIdentity) reportLeagueMetadata(sessionIdentity);
+    return sessionIdentity;
   }
+
+  pi.registerCommand("league-sync", {
+    description: "Republish exact League session and launch metadata",
+    handler: async (_args, ctx) => {
+      if (!refreshSession(ctx)) {
+        ctx.ui.notify("League session identity is unavailable.", "error");
+      }
+    },
+  });
 
   pi.on("session_start", (_event, ctx) => {
     refreshSession(ctx);
@@ -127,7 +246,8 @@ export default function (pi) {
     inputId = crypto.randomUUID();
     const captured = runWatcher("pi-input-hook", {
       hook_event_name: "PiInput",
-      session_id: exactSession,
+      session_id: exactSession.id,
+      session_path: exactSession.file,
       input_id: inputId,
       prompt: event.text,
     });
@@ -143,7 +263,8 @@ export default function (pi) {
     if (!exactSession || !inputId) return;
     const result = runWatcher("pi-stop-hook", {
       hook_event_name: "PiStop",
-      session_id: exactSession,
+      session_id: exactSession.id,
+      session_path: exactSession.file,
       input_id: inputId,
     });
     if (!result) {

@@ -798,6 +798,11 @@ Current main's issue-coupled continuation, rollover-snapshot, scoped
 autonomous-delivery, and request-reconciliation migrations remain canonical
 schemas 16 through 19. Issue #81 appends protected-gate authority propagation
 as schema 20; it does not renumber, replace, or mutate any earlier migration.
+Issue #84 appends Cursor steering intent/effect receipts as schema 21. It does
+not rewrite delivery history or treat a terminal command's exit status as
+proof that Cursor accepted the steer.
+The same issue appends Pi provider launch, unified-session migration, and
+restart-effect receipts as schema 22. It does not alter any earlier migration.
 The deterministic acceptance dry-run report follows the current schema target. Its
 legacy-source digest and exact
 post-import parity digest remain unchanged; only the truthful target-version
@@ -911,3 +916,134 @@ version. Route events,
 agent updates, snapshot rows, and the rollover pointer share one transaction;
 fault or CAS failure rolls all of them back. No schema, live rollover, hook,
 installation, layout, process, task owner, or successor row changes here.
+
+## Cursor CLI steering provenance
+
+Issue #84 preserves the existing canonical delivery/outbox boundary and adds
+one provider-specific effect adapter behind it. The defect was that generic
+direct delivery treated every interactive agent as an idle prompt target. That
+cannot safely steer a working Cursor CLI: one Enter submits an idle prompt,
+while Cursor's working-state interrupt contract is literal text followed by
+two Enter keys. An exit-zero input command alone also cannot prove that the
+same Cursor session observed the input.
+
+The adapter therefore binds the canonical runtime generation to exact live
+Herdr evidence: pane, Cursor session, routing name when present, interactive
+readiness, status, revision, state-change sequence, one foreground
+`cursor-agent` process, PID, and foreground process group. It uses only
+supported direct Herdr commands. It does not scrape a transcript or run a
+Python or heredoc command wrapper. Idle/done delivery uses `herdr agent prompt`
+for literal text plus one Enter. Working delivery records its intent, repeats
+the complete observation, sends literal text, records that phase, repeats the
+unchanged observation again, and only then sends exactly two Enter keys.
+
+Schema 21 records prompt length and digest rather than prompt bytes. A retry
+after a proved effect returns the same receipt without terminal input. A retry
+after a refusal returns the same refusal. A retry after an incomplete intent or
+text phase refuses as outcome-ambiguous, preventing duplicate text or a second
+interrupt. Wrong pane, replaced session, route/provider mismatch, unavailable
+input, missing or ambiguous process, state race, command ambiguity, and absent
+post-effect state advance all fail closed.
+
+Routed-request prompts carry a versioned structured envelope plus the complete
+`league request accept-routed` argument vector. That stable command derives its
+lease and deterministic claim token from current canonical state, so the
+Cursor Shotcaller does not reconstruct internal timestamps or claim details.
+`league delivery dispatch` exposes the state-aware provider selection through
+the stable CLI.
+
+Focused synthetic installed-adapter tests cover idle submit, working steer,
+the pre-interrupt state race, duplicate retry, wrong pane, replaced session,
+ambiguous/missing process, unavailable input, post-steer acknowledgement, and
+idempotent routed acceptance. The migration test proves schema-20-to-21 crash
+rollback and exact retry. This source candidate does not install League, steer
+a live Cursor process, replay an event, replace a Champion, clean up a runtime,
+or claim owner-visible acceptance.
+
+## Pi provider lifecycle and unified-inventory provenance
+
+The live integration failure that triggered the schema-22 slice had four
+separate causes. A restored Herdr layout did not restart Pi. The runtime record
+did not receive Pi's exact session path. Pi's native late title overwrote the
+canonical callsign/task presentation. Finally, three Cursor-backed Pi sessions
+were absent from plain Pi's All-session resume view.
+
+The last failure came from a temporary wrapper created by Kuma. It selected
+Cursor correctly but also set a provider-specific Pi home. That turned a
+provider choice into a second session pool, so sessions written there were
+invisible to the standard unified Pi inventory. The wrapper has since been
+deleted. This candidate has no wrapper dependency and never sets
+`PI_CODING_AGENT_DIR` or `--session-dir`; Cursor and Codex are provider
+arguments to one Pi runtime and one inventory.
+
+The durable launch descriptor records runtime, provider, model, effort, exact
+cwd, role, placement, callsign, project code, two-word task label, routing
+name, session mode, lineage, and release/state roots. A new project fork can
+occur once for an exact parent path plus cwd. Restarts use the bound child
+session path, never fork again. One restart intent/effect key prevents a retry
+from starting a second process or session.
+
+Pi's trust prompt is treated as pre-activation. League first verifies the
+assigned worktree as the exact repository root and only then supplies Pi's
+scoped `--approve` input for that cwd; it does not change global trust. The Pi
+extension reports canonical metadata only after native `session_start` exposes
+an absolute session file and ID. Activation requires exact cwd, one Pi process,
+provider/session/descriptor metadata, canonical title, and two consecutive
+stable readbacks. A late native `π - session - folder` title therefore cannot
+win the activation race.
+
+For legacy sessions, migration is permitted only when the exact restored Herdr
+pane is shell-only. League reads the first JSONL record, verifies the parent
+session's first record when present, bounds the unified inventory scan, rejects
+duplicate IDs or changed bytes, and creates a mode-0600 destination with
+exclusive create and fsync. It never rewrites the JSONL or parent path. Crash
+retries recognize the same digest and finish the descriptor bind without
+creating a second identity.
+
+Implementation failures were kept as regression evidence. The first focused
+test used a private SQLite timestamp helper that the storage facade does not
+expose; the implementation now uses a local strict RFC3339 validator. The
+first late-title test injected the native title into the start-command receipt
+instead of the first live readback; the fake now models the real ordering. The
+schema-21 rollback test initially advanced through the new schema-22 target;
+it now pins its intended target while schema 22 has its own crash/rollback
+test. None of these failures changed live Pi sessions.
+
+The controlled three-session acceptance found additional provider-faithful
+boundaries. Unified Pi initially had no Cursor credential even though the
+provider documents automatic desktop/CLI discovery; a no-session canary failed
+closed, then the supported `/login cursor` flow succeeded and the canary passed.
+Herdr represents a shell-only pane as one shell process, not always an empty
+process list, so the guard now accepts only the exact shell PID/process group,
+known shell executable, and stored cwd. Pi rejected the first extension load
+because a strict-mode local binding used the reserved name `arguments`; the
+binding was renamed and an explicit extension-load smoke was added.
+
+Restored panes also do not propagate League or pane environment into the new Pi
+child. Every required launch field, including the exact pane, is now a Pi CLI
+extension flag. Herdr metadata retains higher-priority legacy token names and
+bounds token/path length, so launch proof uses collision-free `launch_*`
+metadata, native session paths when available, and SHA-256 for paths and parent
+lineage. A first parent-digest key exceeded Herdr's supported key length and was
+shortened. A nanosecond metadata sequence exceeded Herdr's safe numeric range;
+the adapter now matches Pi's microsecond-scale sequence.
+
+Two attempted metadata commands used a dotted name and then a command added
+after an explicit-extension reload. Pi treated each as a model prompt because
+dotted names are not parsed as slash commands and `/reload` does not retain a
+new CLI-explicit extension command in that already-running process. Both turns
+were interrupted after read-only discovery commands; the issue worktree stayed
+clean. Exact restart reconciliation now lives in the launcher, not a reload
+command. Herdr also accepted but did not expose a supplemental native session
+report for one already-detected legacy pane. For exact resume only, League uses
+the byte-bound durable path plus launch path digest and exact process/cwd; fresh
+create/fork still requires Herdr's native absolute session path.
+
+Final live acceptance copied the three stopped JSONLs byte-for-byte into the
+unified inventory, preserved both Champion parent paths, showed all three in
+plain `pi --resume` under All, resumed the exact stored children and cwd, and
+returned effect-applied receipts. Repeating all three restart IDs returned the
+stored receipts with unchanged foreground PIDs. The clean issue-215 worktree
+remained clean, and the issue-190 dirty/untracked inventory remained exact.
+This is a Pi provider installation and live source-candidate acceptance; it is
+not a League merge or League installation claim.

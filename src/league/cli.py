@@ -15,7 +15,7 @@ from typing import Any, BinaryIO, Callable, Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from . import MAX_ACCEPTANCE_SENTINEL_PATHS, __version__
-from .adapters import builtin_contract_registry
+from .adapters import builtin_contract_registry, production_capability_matrix
 from .artifacts import ArtifactLifecycle
 from .cleanup import CleanupExecutor, CleanupFaultEvent, CleanupPlanner
 from .continuation import (
@@ -80,6 +80,12 @@ from .visible_launch import (
     derived_champion_agent_id,
     derive_task_label,
 )
+from .pi_launch import (
+    HerdrPiLaunchAdapter,
+    deterministic_pi_session_id,
+    resume_pi_after_restart,
+)
+from .pi_session_migration import migrate_pi_session
 from .legacy_display_reconciliation import (
     HerdrLegacyDisplayAdapter,
     LegacyDisplayReconciliationService,
@@ -510,6 +516,11 @@ def _add_delivery_commands(groups: argparse._SubParsersAction) -> None:
     backlog.add_argument("--at", required=True)
     backlog.add_argument("--limit", type=int, default=100)
     backlog.add_argument("--per-recipient", type=int, default=2)
+    dispatch = commands.add_parser(
+        "dispatch", help="Dispatch one exact source event through its verified provider adapter."
+    )
+    for name in ("outbox-id", "event-id", "recipient-agent-id"):
+        dispatch.add_argument(f"--{name}", required=True)
 
 
 def _add_project_commands(groups: argparse._SubParsersAction) -> None:
@@ -706,6 +717,19 @@ def _add_runtime_commands(groups: argparse._SubParsersAction) -> None:
     runtime = groups.add_parser("runtime", help="Inspect registered harness/backend capabilities.")
     commands = runtime.add_subparsers(dest="action", required=True)
     commands.add_parser("matrix", help="Report supported, unsupported, and unverified adapter operations.")
+    resume_launch = commands.add_parser(
+        "resume-launch",
+        help="Resume one exact durable Pi session in its restored Herdr pane once per restart.",
+    )
+    for name in ("descriptor-id", "restart-id", "pane-id", "at"):
+        resume_launch.add_argument(f"--{name}", required=True)
+    resume_launch.add_argument("--startup-timeout-ms", type=int, default=120_000)
+    migrate_pi = commands.add_parser(
+        "migrate-pi-session",
+        help="Copy one stopped legacy Pi JSONL into the unified inventory and bind its exact resume descriptor.",
+    )
+    migrate_pi.add_argument("--manifest", type=Path, required=True)
+    migrate_pi.add_argument("--at", required=True)
 
 
 def _add_skill_commands(groups: argparse._SubParsersAction) -> None:
@@ -997,6 +1021,12 @@ def _add_request_commands(groups: argparse._SubParsersAction) -> None:
     )
     for name in ("request-id", "runtime-instance-id", "claim-token", "leased-until", "at"):
         accept.add_argument(f"--{name}", required=True)
+    accept_routed = commands.add_parser(
+        "accept-routed",
+        help="Accept one structured routed delivery using canonical current time and exact runtime.",
+    )
+    for name in ("event-id", "recipient-agent-id", "runtime-instance-id"):
+        accept_routed.add_argument(f"--{name}", required=True)
     progress = commands.add_parser(
         "progress", help="Emit immediate requester progress or coalesce a changed routine aggregate."
     )
@@ -1137,6 +1167,15 @@ def _add_assignment_commands(groups: argparse._SubParsersAction) -> None:
     ):
         launch.add_argument(f"--{name}", required=True)
     launch.add_argument("--task-label")
+    launch.add_argument("--runtime-kind", choices=("codex", "pi"), default="codex")
+    launch.add_argument("--provider-kind", choices=("cursor", "codex"), default="codex")
+    launch.add_argument("--project-code")
+    launch.add_argument("--release-root")
+    launch.add_argument("--session-mode", choices=("create", "fork", "resume"), default="create")
+    launch.add_argument("--session-id")
+    launch.add_argument("--session-path")
+    launch.add_argument("--parent-session-id")
+    launch.add_argument("--parent-session-path")
     launch.add_argument("--issue", type=int, required=True)
     launch.add_argument("--assignment-id")
     launch.add_argument("--champion-agent-id")
@@ -1999,7 +2038,28 @@ def _read_bounded_text(path: Path, maximum: int, label: str) -> str:
 
 
 def _runtime_matrix(_: Storage, __: argparse.Namespace) -> CommandResult:
-    return builtin_contract_registry().capability_matrix(), None
+    return production_capability_matrix(), None
+
+
+def _runtime_resume_launch(store: Storage, args: argparse.Namespace) -> CommandResult:
+    return resume_pi_after_restart(
+        store,
+        descriptor_id=args.descriptor_id,
+        restart_id=args.restart_id,
+        pane_id=args.pane_id,
+        at=args.at,
+        runner=SubprocessRunner(),
+        startup_timeout_ms=args.startup_timeout_ms,
+    ), None
+
+
+def _runtime_migrate_pi_session(store: Storage, args: argparse.Namespace) -> CommandResult:
+    return migrate_pi_session(
+        store,
+        _read_json_object(args.manifest),
+        at=args.at,
+        runner=SubprocessRunner(),
+    ), None
 
 
 def _skill_contract(args: argparse.Namespace) -> dict[str, Any]:
@@ -2594,6 +2654,19 @@ def _request_claim(store: Storage, args: argparse.Namespace) -> CommandResult:
     ), None
 
 
+def _request_accept_routed(store: Storage, args: argparse.Namespace) -> CommandResult:
+    observed = datetime.now().astimezone()
+    at = observed.isoformat(timespec="seconds")
+    leased_until = (observed + timedelta(minutes=15)).isoformat(timespec="seconds")
+    return store.accept_routed_delivery(
+        args.event_id,
+        args.recipient_agent_id,
+        args.runtime_instance_id,
+        leased_until,
+        at,
+    ), None
+
+
 def _request_release(store: Storage, args: argparse.Namespace) -> CommandResult:
     return store.release_request_claim(
         args.request_id, args.runtime_instance_id, args.claim_token, args.at
@@ -2897,9 +2970,81 @@ def _assign_launch(store: Storage, args: argparse.Namespace) -> CommandResult:
         required_capabilities=tuple(args.requires),
     )
     runner = SubprocessRunner()
-    adapter = HerdrCodexLaunchAdapter(
-        options, runner, resume_thread_id=resume_thread_id
-    )
+    if args.runtime_kind == "codex":
+        if args.provider_kind != "codex" or any(
+            value is not None
+            for value in (
+                args.project_code,
+                args.release_root,
+                args.session_id,
+                args.session_path,
+                args.parent_session_id,
+                args.parent_session_path,
+            )
+        ) or args.session_mode != "create":
+            raise StorageRefusal(
+                "launch_scope_invalid",
+                "Codex runtime cannot accept Pi provider/session inputs",
+            )
+        adapter = HerdrCodexLaunchAdapter(
+            options, runner, resume_thread_id=resume_thread_id
+        )
+    else:
+        if resume_thread_id is not None:
+            raise StorageRefusal(
+                "launch_resume_unsupported",
+                "Pi launch uses its explicit provider session descriptor, not a Codex archive",
+            )
+        if not args.project_code:
+            raise StorageRefusal(
+                "launch_scope_invalid",
+                "Pi launch requires an explicit project code",
+            )
+        descriptor_id = f"pi-launch:{assignment_id}"
+        requested_session_id = args.session_id
+        if args.session_mode == "create" and requested_session_id is None:
+            requested_session_id = deterministic_pi_session_id(descriptor_id)
+        release_root = Path(
+            args.release_root or Path(league_command).parent.parent
+        ).resolve()
+        descriptor = {
+            "schema": "league.pi-launch-descriptor.v1",
+            "descriptor_id": descriptor_id,
+            "assignment_id": assignment_id,
+            "runtime_kind": "pi",
+            "provider_kind": args.provider_kind,
+            "model": args.model,
+            "effort": args.effort,
+            "cwd": str(Path(args.worktree).resolve()),
+            "role": "champion",
+            "placement": "new_tab",
+            "callsign": "pending",
+            "project_code": args.project_code,
+            "task_label": options.task_label,
+            "routing_name": "pending",
+            "workspace_id": workspace_id,
+            "creator_pane_id": None,
+            "state_root": str(args.state_root.resolve()),
+            "release_root": str(release_root),
+            "launch_mode": args.session_mode,
+            "requested_session_id": requested_session_id,
+            "requested_session_path": (
+                str(Path(args.session_path).resolve()) if args.session_path else None
+            ),
+            "parent_session_id": args.parent_session_id,
+            "parent_session_path": (
+                str(Path(args.parent_session_path).resolve())
+                if args.parent_session_path
+                else None
+            ),
+        }
+        adapter = HerdrPiLaunchAdapter(
+            store,
+            descriptor,
+            at=_turn_time(),
+            runner=runner,
+            startup_timeout_ms=args.startup_timeout_ms,
+        )
     verifier = GitHubIssueVerifier(
         runner,
         selection_receipt_digest=args.issue_selection_receipt_digest,
@@ -3060,6 +3205,19 @@ def _delivery_backlog(store: Storage, args: argparse.Namespace) -> CommandResult
             args.at, limit=args.limit, per_recipient=args.per_recipient
         )
     }, None
+
+
+def _delivery_dispatch(store: Storage, args: argparse.Namespace) -> CommandResult:
+    from .canonical_delivery import dispatch_event
+
+    at = datetime.now().astimezone().isoformat(timespec="seconds")
+    return dispatch_event(
+        store,
+        outbox_id=args.outbox_id,
+        event_id=args.event_id,
+        recipient_agent_id=args.recipient_agent_id,
+        at=at,
+    ), None
 
 
 def _hook_register_runtime(store: Storage, args: argparse.Namespace) -> CommandResult:
@@ -3235,6 +3393,7 @@ HANDLERS: dict[str, CommandHandler] = {
     "delivery.ack-outbox": _delivery_ack_outbox,
     "delivery.fail-outbox": _delivery_fail_outbox,
     "delivery.backlog": _delivery_backlog,
+    "delivery.dispatch": _delivery_dispatch,
     "project.put": _project_put,
     "project.resolve": _project_resolve,
     "project.list": _project_list,
@@ -3250,6 +3409,8 @@ HANDLERS: dict[str, CommandHandler] = {
     "task.transfer-owner": _task_transfer,
     "task.transition": _task_transition,
     "runtime.matrix": _runtime_matrix,
+    "runtime.resume-launch": _runtime_resume_launch,
+    "runtime.migrate-pi-session": _runtime_migrate_pi_session,
     "routing.choose": _routing_choose,
     "routing.escalate": _routing_escalate,
     "routing.outcome": _routing_outcome,
@@ -3269,6 +3430,7 @@ HANDLERS: dict[str, CommandHandler] = {
     "request.bind-prompt": _request_bind_prompt,
     "request.claim": _request_claim,
     "request.accept": _request_claim,
+    "request.accept-routed": _request_accept_routed,
     "request.release": _request_release,
     "request.dispatch": _request_dispatch,
     "request.decide-route": _request_decide_route,

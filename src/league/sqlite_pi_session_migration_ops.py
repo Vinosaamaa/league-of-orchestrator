@@ -44,7 +44,13 @@ def _validate_intent(value: Mapping[str, Any]) -> dict[str, Any]:
         "parent_session_id", "parent_session_path", "cwd", "pane_id",
     }
     exact = dict(value)
-    if set(exact) != required or exact.get("schema") != "league.pi-session-migration-intent.v1":
+    schema = exact.get("schema")
+    if schema == "league.pi-session-migration-intent.v2":
+        required |= {"parent_evidence_path", "parent_evidence_sha256"}
+    if set(exact) != required or schema not in {
+        "league.pi-session-migration-intent.v1",
+        "league.pi-session-migration-intent.v2",
+    }:
         raise StorageRefusal("pi_session_migration_invalid", "Pi migration intent fields are not exact")
     if (
         not SAFE_ID.fullmatch(str(exact.get("migration_id", "")))
@@ -72,8 +78,25 @@ def _validate_intent(value: Mapping[str, Any]) -> dict[str, Any]:
         )
     ):
         raise StorageRefusal("pi_session_migration_invalid", "Pi parent lineage is incomplete")
-    if exact["source_session_path"] == exact["destination_session_path"]:
-        raise StorageRefusal("pi_session_migration_invalid", "source and unified Pi paths must differ")
+    if schema == "league.pi-session-migration-intent.v2":
+        evidence_path = exact["parent_evidence_path"]
+        evidence_sha256 = exact["parent_evidence_sha256"]
+        if parent_id is None:
+            if evidence_path is not None or evidence_sha256 is not None:
+                raise StorageRefusal(
+                    "pi_session_migration_invalid",
+                    "root Pi sessions cannot declare parent evidence",
+                )
+        elif (
+            not isinstance(evidence_path, str)
+            or not Path(evidence_path).is_absolute()
+            or evidence_path == "/"
+            or not SHA256.fullmatch(str(evidence_sha256 or ""))
+        ):
+            raise StorageRefusal(
+                "pi_session_migration_invalid",
+                "Pi parent evidence identity is incomplete",
+            )
     return exact
 
 

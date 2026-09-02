@@ -16,6 +16,7 @@ sys.path[:0] = [str(ROOT / "src"), str(ROOT / "tests")]
 from league.pi_launch import (  # noqa: E402
     HerdrPiLaunchAdapter,
     deterministic_pi_session_id,
+    pi_metadata_source,
     pi_start_arguments,
     resume_pi_after_restart,
 )
@@ -108,6 +109,9 @@ class FakePiHerdr:
                 "launch_session_id": self.session_id,
                 "launch_session_path_digest": __import__("hashlib").sha256(self.session_path.encode()).hexdigest(),
                 "launch_descriptor_sha256": self.env["LEAGUE_LAUNCH_DESCRIPTOR_DIGEST"],
+                "launch_descriptor_id": self.env["LEAGUE_LAUNCH_DESCRIPTOR_ID"],
+                "launch_state_root": self.env["LEAGUE_STATE_ROOT"],
+                "launch_metadata_source": self.env["LEAGUE_LAUNCH_METADATA_SOURCE"],
                 "launch_activation_phase": "session_started",
             })
         if self.parent_path:
@@ -120,7 +124,7 @@ class FakePiHerdr:
             "interactive_ready": True,
             "name": self.env["LEAGUE_ROUTING_ALIAS"],
             "display_agent": provider,
-            "metadata_source": "league:pi-launch:" + self.env["LEAGUE_LAUNCH_DESCRIPTOR_DIGEST"][:16],
+            "metadata_source": self.env["LEAGUE_LAUNCH_METADATA_SOURCE"],
             "cwd": self.env["LEAGUE_WORKTREE"],
             "foreground_cwd": self.env["LEAGUE_WORKTREE"],
             "terminal_title": title,
@@ -187,6 +191,8 @@ class FakePiHerdr:
                 "league-task-label": "LEAGUE_TASK_LABEL",
                 "league-routing-alias": "LEAGUE_ROUTING_ALIAS",
                 "league-descriptor-digest": "LEAGUE_LAUNCH_DESCRIPTOR_DIGEST",
+                "league-descriptor-id": "LEAGUE_LAUNCH_DESCRIPTOR_ID",
+                "league-metadata-source": "LEAGUE_LAUNCH_METADATA_SOURCE",
             }
             for flag, key in explicit.items():
                 option = f"--{flag}"
@@ -408,6 +414,10 @@ def test_fork_metadata_restart_and_duplicate_suppression(root: Path) -> None:
     restart_start = [call for call in fake.calls if call[1:3] == ("agent", "start")][-1]
     assert "--session" in restart_start and stored["session_path"] in restart_start
     assert "--fork" not in restart_start
+    assert "--league-metadata-source" in restart_start
+    reports = [call for call in fake.calls if call[1:3] == ("pane", "report-metadata")]
+    assert any("--clear-token" in call and "launch_descriptor_digest" in call for call in reports)
+    assert any("--applies-to-source" in call and "launch_metadata_source=" in " ".join(call) for call in reports)
     duplicate = resume_pi_after_restart(
         store,
         descriptor_id=descriptor["descriptor_id"],
@@ -549,6 +559,166 @@ def test_unified_inventory_duplicate_scan_refuses(root: Path) -> None:
         raise AssertionError("bounded inventory scan stopped before finding a duplicate")
 
 
+def test_already_unified_shotcaller_session_is_adopted_without_copy(root: Path) -> None:
+    _state, store, _clock = create_context(root, "pi-adopt")
+    base = root / "pi-adopt"
+    project_folder = base / "project-folder"
+    project_folder.mkdir(parents=True)
+    unified = base / "unified-sessions"
+    relative = Path("--synthetic-project--") / "2026-01-01_shotcaller.jsonl"
+    session = unified / relative
+    session.parent.mkdir(parents=True)
+    payload = (
+        json.dumps(
+            {
+                "type": "session",
+                "version": 3,
+                "id": CHILD_ID,
+                "cwd": str(project_folder.resolve()),
+            },
+            separators=(",", ":"),
+        )
+        + "\n"
+    ).encode()
+    session.write_bytes(payload)
+    descriptor = _descriptor(base, project_folder, "cursor", "resume")
+    descriptor.update(
+        {
+            "descriptor_id": "pi-launch:adopted:shotcaller",
+            "assignment_id": "shotcaller:job-journey",
+            "role": "shotcaller",
+            "placement": "sibling_pane",
+            "creator_pane_id": "w1:p1",
+            "requested_session_id": CHILD_ID,
+            "requested_session_path": str(session.resolve()),
+            "parent_session_id": None,
+            "parent_session_path": None,
+            "callsign": "Ambessa",
+            "project_code": "JJ",
+            "task_label": "Squad Control",
+            "routing_name": "ambessa",
+        }
+    )
+    fake = FakePiHerdr(base)
+    fake.env["LEAGUE_WORKTREE"] = str(project_folder.resolve())
+    manifest = {
+        "schema": "league.pi-session-migration.v1",
+        "migration_id": "pi-adoption:shotcaller",
+        "source_inventory_root": str(unified.resolve()),
+        "unified_inventory_root": str(unified.resolve()),
+        "relative_session_path": str(relative),
+        "expected_sha256": __import__("hashlib").sha256(payload).hexdigest(),
+        "descriptor": descriptor,
+        "endpoint": fake.endpoint,
+    }
+    adopted = migrate_pi_session(
+        store, manifest, at="2026-01-01T00:04:00Z", runner=fake
+    )
+    assert adopted["state"] == "bound"
+    assert session.read_bytes() == payload
+    stored = store.provider_launch_descriptor(descriptor["descriptor_id"])
+    assert stored["session_path"] == str(session.resolve())
+    assert stored["role"] == "shotcaller"
+    assert migrate_pi_session(
+        store, manifest, at="2026-01-01T00:04:01Z", runner=fake
+    )["idempotent"] is True
+    assert len(list(unified.rglob("*.jsonl"))) == 1
+    store.close()
+
+
+def test_already_unified_child_uses_bound_parent_evidence_without_legacy_profile(root: Path) -> None:
+    _state, store, _clock = create_context(root, "pi-adopt-child")
+    base = root / "pi-adopt-child"
+    worktree = base / "worktree"
+    worktree.mkdir(parents=True)
+    (worktree / ".git").mkdir()
+    unified = base / "unified-sessions"
+    child_relative = Path("--synthetic-child--") / "2026-01-01_child.jsonl"
+    parent_relative = Path("--synthetic-parent--") / "2025-12-31_parent.jsonl"
+    child = unified / child_relative
+    parent_evidence = unified / parent_relative
+    child.parent.mkdir(parents=True)
+    parent_evidence.parent.mkdir(parents=True)
+    retired_parent = base / "retired-profile" / parent_evidence.name
+    parent_payload = (
+        json.dumps(
+            {"type": "session", "version": 3, "id": PARENT_ID, "cwd": str(base.resolve())},
+            separators=(",", ":"),
+        )
+        + "\n"
+    ).encode()
+    child_payload = (
+        json.dumps(
+            {
+                "type": "session",
+                "version": 3,
+                "id": CHILD_ID,
+                "cwd": str(worktree.resolve()),
+                "parentSession": str(retired_parent.resolve()),
+            },
+            separators=(",", ":"),
+        )
+        + "\n"
+        + json.dumps({"type": "message", "id": "opaque-history", "text": "preserved"})
+        + "\n"
+    ).encode()
+    parent_evidence.write_bytes(parent_payload)
+    child.write_bytes(child_payload)
+    descriptor = _descriptor(base, worktree, "cursor", "resume")
+    descriptor.update(
+        {
+            "descriptor_id": "pi-launch:adopted:child",
+            "requested_session_id": CHILD_ID,
+            "requested_session_path": str(child.resolve()),
+            "parent_session_id": PARENT_ID,
+            "parent_session_path": str(retired_parent.resolve()),
+            "callsign": "Lux",
+            "routing_name": "lux",
+        }
+    )
+    fake = FakePiHerdr(base)
+    fake.env["LEAGUE_WORKTREE"] = str(worktree.resolve())
+    manifest = {
+        "schema": "league.pi-session-migration.v2",
+        "migration_id": "pi-adoption:child-parent-evidence",
+        "source_inventory_root": str(unified.resolve()),
+        "unified_inventory_root": str(unified.resolve()),
+        "relative_session_path": str(child_relative),
+        "expected_sha256": __import__("hashlib").sha256(child_payload).hexdigest(),
+        "parent_evidence_path": str(parent_evidence.resolve()),
+        "expected_parent_sha256": __import__("hashlib").sha256(parent_payload).hexdigest(),
+        "descriptor": descriptor,
+        "endpoint": fake.endpoint,
+    }
+    adopted = migrate_pi_session(
+        store, manifest, at="2026-01-01T00:05:00Z", runner=fake
+    )
+    assert adopted["state"] == "bound"
+    assert child.read_bytes() == child_payload
+    assert parent_evidence.read_bytes() == parent_payload
+    assert not retired_parent.exists()
+    assert len(list(unified.rglob("*.jsonl"))) == 2
+    receipt = adopted["receipt"]
+    assert receipt["parent_session_path"] == str(retired_parent.resolve())
+    assert receipt["parent_evidence_path"] == str(parent_evidence.resolve())
+
+    refused = dict(manifest)
+    refused["migration_id"] = "pi-adoption:child-tampered-parent"
+    refused["expected_parent_sha256"] = "0" * 64
+    refused_descriptor = dict(descriptor)
+    refused_descriptor["descriptor_id"] = "pi-launch:adopted:child-tampered"
+    refused["descriptor"] = refused_descriptor
+    try:
+        migrate_pi_session(store, refused, at="2026-01-01T00:05:01Z", runner=fake)
+    except StorageRefusal as exc:
+        assert exc.code == "pi_session_migration_digest_mismatch"
+    else:
+        raise AssertionError("tampered parent evidence was accepted")
+    assert store.provider_launch_descriptor(refused_descriptor["descriptor_id"]) is None
+    assert len(list(unified.rglob("*.jsonl"))) == 2
+    store.close()
+
+
 def test_provider_mapping_and_role_placement(root: Path) -> None:
     _state, store, _clock = create_context(root, "pi-placement")
     worktree = root / "pi-placement" / "worktree"
@@ -561,7 +731,9 @@ def test_provider_mapping_and_role_placement(root: Path) -> None:
         arguments = pi_start_arguments(descriptor)
         assert arguments[arguments.index("--provider") + 1] == cli_provider
 
-    descriptor = _descriptor(root / "pi-placement", worktree, "codex", "create")
+    project_folder = root / "pi-placement" / "project-folder"
+    project_folder.mkdir()
+    descriptor = _descriptor(root / "pi-placement", project_folder, "codex", "create")
     descriptor.update(
         {
             "descriptor_id": "pi-launch:shotcaller:placement",
@@ -581,7 +753,7 @@ def test_provider_mapping_and_role_placement(root: Path) -> None:
         runner=fake,
         environment={"HERDR_ENV": "1"},
     )
-    receipt = adapter.launch(_spec(worktree))
+    receipt = adapter.launch(_spec(project_folder))
     assert receipt["display_agent"] == "codex"
     assert any(call[1:3] == ("pane", "split") for call in fake.calls)
     assert not any(call[1:3] == ("tab", "create") for call in fake.calls)
@@ -590,6 +762,31 @@ def test_provider_mapping_and_role_placement(root: Path) -> None:
     assert agent["tokens"]["task_label"] == "Session Restore"
     assert agent["tokens"]["sidebar_name"] == "Lux"
     store.close()
+
+
+def test_pi_metadata_source_reuses_owned_legacy_source(root: Path) -> None:
+    worktree = root / "pi-metadata-source" / "worktree"
+    worktree.mkdir(parents=True)
+    descriptor = _descriptor(root / "pi-metadata-source", worktree, "cursor", "resume")
+    descriptor.update(
+        {
+            "descriptor_digest": "b" * 64,
+            "routing_name": "lux",
+        }
+    )
+    legacy = {
+        "launch_runtime_kind": "pi",
+        "launch_routing_alias": "lux",
+        "launch_descriptor_sha256": "a" * 64,
+    }
+    assert pi_metadata_source(descriptor, legacy) == f"league:pi-launch:{'a' * 16}"
+    explicit = {**legacy, "launch_metadata_source": "league:pi-launch:stable"}
+    assert pi_metadata_source(descriptor, explicit) == "league:pi-launch:stable"
+    assert pi_metadata_source(
+        {**descriptor, "metadata_source": "league:pi-launch:carried"}
+    ) == "league:pi-launch:carried"
+    foreign = {**legacy, "launch_routing_alias": "other"}
+    assert pi_metadata_source(descriptor, foreign) == f"league:pi-launch:{'b' * 16}"
 
 
 def test_cli_exposes_explicit_pi_inputs() -> None:
@@ -625,10 +822,13 @@ def main() -> None:
         root = Path(directory)
         test_fork_metadata_restart_and_duplicate_suppression(root)
         test_provider_mapping_and_role_placement(root)
+        test_pi_metadata_source_reuses_owned_legacy_source(root)
         test_unified_inventory_migration_preserves_bytes_and_lineage(root)
+        test_already_unified_shotcaller_session_is_adopted_without_copy(root)
+        test_already_unified_child_uses_bound_parent_evidence_without_legacy_profile(root)
         test_unified_inventory_duplicate_scan_refuses(root)
     test_cli_exposes_explicit_pi_inputs()
-    print("PASS: Pi provider launch, one-time fork lineage, metadata, placement, and exact restart resume")
+    print("PASS: Pi provider launch, unified adoption, metadata, placement, and exact restart resume")
 
 
 if __name__ == "__main__":

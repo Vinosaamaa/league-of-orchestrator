@@ -1073,3 +1073,60 @@ before choosing the runtime branch, even though Pi owns an explicit session
 descriptor. That lookup now exists only in the Codex branch. The focused Pi
 provider and visible-launch suites cover the replacement behavior, and the
 full repository gate passes without touching a live Pi process.
+
+Installed 0.2.39 acceptance then exposed four source-only blind spots. The
+release manifest did not include the Pi extension or sandbox profile, the
+exact resume command had no Herdr-startup caller, migration rejected sessions
+already stored in the unified inventory, and restart applied Champion Git
+worktree proof to Shotcallers intentionally rooted at a non-Git project
+folder. The corrective release stages both integration files explicitly,
+allows byte-identical in-place adoption only at the same shell-only boundary,
+keeps exact Git identity mandatory for Champions, and binds a Shotcaller to
+the exact project-directory device and inode. Launch metadata now carries the
+durable descriptor ID and state root required by the Herdr startup plugin;
+the plugin derives one generation from the live socket identity and invokes
+the existing effect-fenced resume command. Focused acceptance covers the
+installed file manifest, already-unified adoption, role-aware cwd binding,
+and repeated same-generation recovery. A live three-agent restart remains the
+final installed gate.
+
+The same install found a macOS pointer-update hazard: moving a temporary
+symlink onto a stable symlink whose target is a directory followed the target
+instead of replacing the stable link. The install removed only that temporary
+artifact and used an atomic path replacement. Future installers must verify
+the stable link target after every switch and must not use directory-following
+`mv` semantics for release activation.
+
+The final single-profile adoption correction preserves Pi's immutable child
+history without reviving the retired provider-specific inventory. Two existing
+Champion children still contain their historical parent path, while the exact
+parent JSONL already exists in the unified inventory under the same filename.
+Migration manifest v2 therefore binds a separately verified parent-evidence
+path and digest inside the unified root. League validates its regular-file
+identity, containment, filename, digest, and session UUID, but leaves the child
+bytes and embedded parent path unchanged. Root sessions cannot declare parent
+evidence. A proposal to recreate the retired profile path with filesystem links
+was rejected because it would violate the one-active-profile contract; no such
+path is created by this release.
+
+The first 0.2.41 installation staging attempt also refused before activation
+because the prior installed Python release had accumulated bytecode cache files.
+The repository-local launchers previously depended on the caller to suppress
+bytecode, and the staged acceptance environment accidentally supplied that
+setting, hiding the installed-shape defect. Both League launchers now suppress
+bytecode themselves. Acceptance removes the masking environment for launcher
+checks, executes both launchers, and then compares every post-execution staged
+file and digest with the source-owned release manifest. The rejected staging
+directory was never activated and contained no canonical data.
+
+The first adopted Shotcaller resume then exposed a Herdr metadata-capacity
+boundary that the fake adapter did not model. The new descriptor digest selected
+a second League metadata source while the old source already contributed enough
+tokens to reach Herdr's limit. Pi started with the exact session, but the
+post-start metadata report refused before the restart effect was committed.
+The same intent was preserved and completed without starting another process by
+reusing the owner-verified prior source and clearing only redundant League-owned
+legacy runtime/session tokens. The permanent launcher now derives that source
+only from matching Pi routing metadata, passes it explicitly to the Pi extension,
+and publishes a reduced non-duplicative token set. Native Pi session identity,
+toolkit presentation tokens, JSONL bytes, and Job Journey state remain unchanged.

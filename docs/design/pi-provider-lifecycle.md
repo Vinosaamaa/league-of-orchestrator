@@ -42,10 +42,25 @@ the canonical pane label.
 
 ## Unified-inventory migration
 
-Migration of an existing isolated session occurs only at a controlled restart
-boundary where Herdr proves the exact pane has returned to its shell and has no
-foreground process. A strict manifest binds the legacy inventory root, unified
-inventory root, relative JSONL path, source digest, descriptor, and endpoint.
+Migration or adoption of an existing session occurs only at a controlled
+restart boundary where Herdr proves the exact pane has returned to its shell
+and has no foreground process. A strict manifest binds the source inventory
+root, unified inventory root, relative JSONL path, source digest, descriptor,
+and endpoint. An already-unified session may use the same exact source and
+destination path; it is verified and bound without copying bytes.
+
+If an immutable child still names a retired inventory path for its parent,
+manifest v2 may bind a separately retained parent file already inside the
+unified inventory. League requires the exact historical filename, a unique
+contained regular file, its manifest-bound digest, and the parent session ID;
+it never recreates the retired profile or rewrites the child JSONL.
+
+Restart metadata reuses one exact League-owned Herdr source. A legacy source is
+derived only from matching Pi runtime, routing, and descriptor tokens; later
+restarts carry that source explicitly. Before adding the durable descriptor ID
+and state root, League removes only its redundant legacy runtime/session tokens.
+This keeps the combined pane metadata beneath Herdr's fixed token limit without
+clearing native Pi or toolkit-owned identity and presentation fields.
 
 League reads only the first JSONL record for identity/cwd/parent validation,
 and the first parent record when lineage exists. It hashes the complete source,
@@ -54,7 +69,7 @@ exclusive mode-0600 creation, fsyncs, and verifies the same digest. Source
 bytes and the embedded parent path are unchanged. Durable intent, copy, bind,
 and restart receipts make interruption and retry effect-safe.
 
-After migration, plain `pi --resume` with the All tab is the inventory
+After migration or adoption, plain `pi --resume` with the All tab is the inventory
 acceptance boundary. Herdr then starts `pi --session <exact-child-path>` in the
 stored cwd. All launch metadata, including pane identity, is passed as explicit
 Pi arguments rather than inherited environment. A restart ID can apply that

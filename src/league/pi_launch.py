@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import subprocess
 import time
 import uuid
@@ -14,7 +15,21 @@ from typing import Any, Mapping, Sequence
 from .request_services import AssignmentSpec, LaunchAdapterError
 from .storage_types import StorageRefusal
 from .visible_launch import MAX_CONTEXT_BYTES, CommandRunner, SubprocessRunner
-from .worktree import exact_worktree_binding
+from .worktree import exact_launch_cwd_binding
+
+
+METADATA_SOURCE = re.compile(r"^league:pi-launch:[A-Za-z0-9._:-]{1,64}$")
+SHA256 = re.compile(r"^[0-9a-f]{64}$")
+REDUNDANT_LEGACY_TOKENS = (
+    "launch_descriptor_digest",
+    "activation_phase",
+    "placement",
+    "provider_kind",
+    "role",
+    "runtime_kind",
+    "session_id",
+    "session_path",
+)
 
 
 def _digest(value: Mapping[str, Any]) -> str:
@@ -40,6 +55,34 @@ def _pi_provider(provider_kind: str) -> str:
     if provider_kind == "codex":
         return "openai-codex"
     raise StorageRefusal("provider_launch_descriptor_invalid", "Pi provider must be cursor or codex")
+
+
+def pi_metadata_source(
+    descriptor: Mapping[str, Any], tokens: Mapping[str, Any] | None = None
+) -> str:
+    exact_tokens = tokens if isinstance(tokens, Mapping) else {}
+    owned = (
+        exact_tokens.get("launch_runtime_kind") == "pi"
+        and exact_tokens.get("launch_routing_alias") == descriptor.get("routing_name")
+    )
+    explicit = exact_tokens.get("launch_metadata_source")
+    if owned and isinstance(explicit, str) and METADATA_SOURCE.fullmatch(explicit):
+        return explicit
+    prior_digest = exact_tokens.get("launch_descriptor_sha256")
+    if not isinstance(prior_digest, str) or not SHA256.fullmatch(prior_digest):
+        prior_digest = exact_tokens.get("launch_descriptor_digest")
+    if owned and isinstance(prior_digest, str) and SHA256.fullmatch(prior_digest):
+        return f"league:pi-launch:{prior_digest[:16]}"
+    descriptor_source = descriptor.get("metadata_source")
+    if isinstance(descriptor_source, str) and METADATA_SOURCE.fullmatch(descriptor_source):
+        return descriptor_source
+    digest = descriptor.get("descriptor_digest")
+    if not isinstance(digest, str) or not SHA256.fullmatch(digest):
+        raise StorageRefusal(
+            "provider_launch_descriptor_invalid",
+            "Pi launch requires the durable descriptor digest",
+        )
+    return f"league:pi-launch:{digest[:16]}"
 
 
 def _session_arguments(descriptor: Mapping[str, Any], *, restart: bool) -> tuple[str, ...]:
@@ -83,6 +126,8 @@ def pi_start_arguments(
         "task-label": str(descriptor["task_label"]),
         "routing-alias": str(descriptor["routing_name"]),
         "descriptor-digest": digest,
+        "descriptor-id": str(descriptor["descriptor_id"]),
+        "metadata-source": pi_metadata_source(descriptor),
     }
     metadata_arguments = tuple(
         item
@@ -123,6 +168,10 @@ def pi_launch_environment(descriptor: Mapping[str, Any], digest: str) -> tuple[s
         "LEAGUE_TASK_LABEL": str(descriptor["task_label"]),
         "LEAGUE_ROUTING_ALIAS": str(descriptor["routing_name"]),
         "LEAGUE_LAUNCH_DESCRIPTOR_DIGEST": digest,
+        "LEAGUE_LAUNCH_DESCRIPTOR_ID": str(descriptor["descriptor_id"]),
+        "LEAGUE_LAUNCH_METADATA_SOURCE": pi_metadata_source(
+            {**dict(descriptor), "descriptor_digest": digest}
+        ),
     }
     return tuple(item for key, value in values.items() for item in ("--env", f"{key}={value}"))
 
@@ -199,7 +248,12 @@ class HerdrPiLaunchAdapter:
         session_id = str(self.descriptor["session_id"])
         session_path = str(self.descriptor["session_path"])
         digest = str(self.descriptor["descriptor_digest"])
-        source = "league:pi-launch:" + digest[:16]
+        pane = self._pane(endpoint["pane_id"])
+        tokens = pane.get("tokens")
+        source = pi_metadata_source(
+            self.descriptor, tokens if isinstance(tokens, Mapping) else None
+        )
+        self.descriptor["metadata_source"] = source
         sequence = str(time.time_ns() // 1000)
         values = {
             "launch_runtime_kind": "pi",
@@ -213,6 +267,9 @@ class HerdrPiLaunchAdapter:
             "launch_session_id": session_id,
             "launch_session_path_digest": hashlib.sha256(session_path.encode()).hexdigest(),
             "launch_descriptor_sha256": digest,
+            "launch_descriptor_id": str(self.descriptor["descriptor_id"]),
+            "launch_state_root": str(self.descriptor["state_root"]),
+            "launch_metadata_source": source,
             "launch_activation_phase": "session_started",
         }
         parent_path = self.descriptor.get("parent_session_path")
@@ -223,11 +280,21 @@ class HerdrPiLaunchAdapter:
             if self.descriptor["role"] == "shotcaller"
             else f"{self.descriptor['callsign']} · {self.descriptor['project_code']}|{self.descriptor['task_label']}"
         )
+        clear_arguments = [
+            "herdr", "pane", "report-metadata", endpoint["pane_id"],
+            "--source", source, "--applies-to-source", "herdr:pi",
+            "--seq", sequence,
+        ]
+        for key in REDUNDANT_LEGACY_TOKENS:
+            clear_arguments.extend(("--clear-token", key))
+        self._effect_command(
+            tuple(clear_arguments), "Herdr Pi redundant legacy metadata cleanup"
+        )
         metadata_arguments = [
             "herdr", "pane", "report-metadata", endpoint["pane_id"],
-            "--source", source,
+            "--source", source, "--applies-to-source", "herdr:pi",
             "--agent", "pi", "--display-agent", str(self.descriptor["provider_kind"]),
-            "--title", title, "--seq", sequence,
+            "--title", title, "--seq", str(int(sequence) + 1),
         ]
         for key, value in values.items():
             metadata_arguments.extend(("--token", f"{key}={value}"))
@@ -292,6 +359,11 @@ class HerdrPiLaunchAdapter:
                     and tokens.get("launch_task_label") == self.descriptor["task_label"]
                     and tokens.get("launch_routing_alias") == self.descriptor["routing_name"]
                     and tokens.get("launch_descriptor_sha256") == self.descriptor["descriptor_digest"]
+                    and tokens.get("launch_descriptor_id") == self.descriptor["descriptor_id"]
+                    and tokens.get("launch_state_root") == self.descriptor["state_root"]
+                    and tokens.get("launch_metadata_source") == pi_metadata_source(
+                        self.descriptor, tokens
+                    )
                     and tokens.get("launch_activation_phase") == "session_started"
                     and isinstance(session_id, str)
                     and isinstance(session_path, str)
@@ -385,7 +457,9 @@ class HerdrPiLaunchAdapter:
         worktree = Path(spec.worktree)
         if not worktree.is_absolute() or not worktree.is_dir() or worktree.is_symlink() or spec.callsign is None:
             raise LaunchAdapterError("invalid_launch_worktree")
-        binding = exact_worktree_binding(worktree.resolve())
+        binding = exact_launch_cwd_binding(
+            worktree.resolve(), str(self.descriptor["role"])
+        )
         stored_binding = self.descriptor.get("worktree_binding")
         if stored_binding is not None and stored_binding != binding:
             raise LaunchAdapterError("launch_scope_invalid")
@@ -563,7 +637,9 @@ def resume_pi_after_restart(
         }
     )
     worktree = Path(str(descriptor["cwd"]))
-    if exact_worktree_binding(worktree) != descriptor.get("worktree_binding"):
+    if exact_launch_cwd_binding(worktree, str(descriptor["role"])) != descriptor.get(
+        "worktree_binding"
+    ):
         raise StorageRefusal(
             "provider_restart_worktree_mismatch",
             "Pi restart cwd is not the exact owner-authorized worktree",
@@ -583,6 +659,12 @@ def resume_pi_after_restart(
         "pane_id": str(stored["pane_id"]),
         "terminal_id": str(stored["terminal_id"]),
     }
+    pane = adapter._pane(pane_id)
+    tokens = pane.get("tokens")
+    descriptor["metadata_source"] = pi_metadata_source(
+        descriptor, tokens if isinstance(tokens, Mapping) else None
+    )
+    adapter.descriptor["metadata_source"] = descriptor["metadata_source"]
     try:
         observation = adapter._observation(endpoint, restart=True)
     except StorageRefusal:

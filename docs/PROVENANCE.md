@@ -1062,3 +1062,14 @@ inventory scan returned on its first matching UUID and could miss a later
 duplicate; it now completes the bounded scan and refuses more than one match.
 Finally, terminal Cursor status `done` was treated as idle; steering now
 refuses it without an input effect. Focused regressions cover all five fixes.
+
+A final pre-landing pass found two Pi retry defects that the earlier fresh-
+launch acceptance did not exercise. An already-active launch could reuse the
+correct pane but context verification discarded its stored tab and terminal
+IDs, so the idempotent assignment retry failed after prompting. Context
+verification now reloads and fences the complete active endpoint before its
+readback. Pi launch selection also performed the Codex continuation lookup
+before choosing the runtime branch, even though Pi owns an explicit session
+descriptor. That lookup now exists only in the Codex branch. The focused Pi
+provider and visible-launch suites cover the replacement behavior, and the
+full repository gate passes without touching a live Pi process.

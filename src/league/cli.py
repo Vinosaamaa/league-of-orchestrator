@@ -2928,17 +2928,6 @@ def _assign_launch(store: Storage, args: argparse.Namespace) -> CommandResult:
     champion_agent_id = args.champion_agent_id or derived_champion_agent_id(
         assignment_id
     )
-    resume_thread_id = continuation_resume_thread(
-        store,
-        assignment_id=assignment_id,
-        task_id=args.task_id,
-        champion_agent_id=champion_agent_id,
-        repository=args.repository,
-        issue=args.issue,
-        branch=args.branch,
-        worktree=args.worktree,
-        at=_turn_time(),
-    )
     workspace_id = args.workspace_id or os.environ.get("HERDR_WORKSPACE_ID", "")
     league_command = str(
         Path(args.league_command).resolve()
@@ -2971,6 +2960,17 @@ def _assign_launch(store: Storage, args: argparse.Namespace) -> CommandResult:
     )
     runner = SubprocessRunner()
     if args.runtime_kind == "codex":
+        resume_thread_id = continuation_resume_thread(
+            store,
+            assignment_id=assignment_id,
+            task_id=args.task_id,
+            champion_agent_id=champion_agent_id,
+            repository=args.repository,
+            issue=args.issue,
+            branch=args.branch,
+            worktree=args.worktree,
+            at=_turn_time(),
+        )
         if args.provider_kind != "codex" or any(
             value is not None
             for value in (
@@ -2990,11 +2990,6 @@ def _assign_launch(store: Storage, args: argparse.Namespace) -> CommandResult:
             options, runner, resume_thread_id=resume_thread_id
         )
     else:
-        if resume_thread_id is not None:
-            raise StorageRefusal(
-                "launch_resume_unsupported",
-                "Pi launch uses its explicit provider session descriptor, not a Codex archive",
-            )
         if not args.project_code:
             raise StorageRefusal(
                 "launch_scope_invalid",

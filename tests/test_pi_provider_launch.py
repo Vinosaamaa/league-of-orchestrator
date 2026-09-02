@@ -387,6 +387,11 @@ def test_fork_metadata_restart_and_duplicate_suppression(root: Path) -> None:
     )
     retried = retried_adapter.launch(_spec(worktree))
     assert retried["thread_id"] == fake.session_path and fake.start_count == 1
+    delivered = retried_adapter.deliver_context(
+        retried, "Retry the exact bounded Pi assignment context."
+    )
+    assert delivered["display_receipt"]["tab_id"] == fake.endpoint["tab_id"]
+    assert delivered["display_receipt"]["terminal_id"] == fake.endpoint["terminal_id"]
 
     fake.stop_for_restart()
     resumed = resume_pi_after_restart(

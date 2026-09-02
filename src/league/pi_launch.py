@@ -474,11 +474,26 @@ class HerdrPiLaunchAdapter:
             ("herdr", "agent", "prompt", str(receipt["routing_name"]), context),
             "Herdr Pi context delivery",
         )
-        endpoint = self._created or {
-            "tab_id": "",
-            "pane_id": str(receipt["endpoint"]),
-            "terminal_id": "",
-        }
+        endpoint = self._created
+        if endpoint is None:
+            stored = self.store.provider_launch_descriptor(
+                str(self.descriptor["descriptor_id"])
+            )
+            if stored is None or stored["state"] != "active":
+                raise LaunchAdapterError(
+                    "provider_launch_unknown", cleanup_required=False
+                )
+            endpoint = {
+                "tab_id": str(stored["tab_id"]),
+                "pane_id": str(stored["pane_id"]),
+                "terminal_id": str(stored["terminal_id"]),
+            }
+            if endpoint["pane_id"] != str(receipt["endpoint"]) or not all(
+                endpoint.values()
+            ):
+                raise LaunchAdapterError(
+                    "launch_identity_unverified", cleanup_required=False
+                )
         observation = self._observation(endpoint, restart=False)
         return {
             "context_sha256": hashlib.sha256(body).hexdigest(),

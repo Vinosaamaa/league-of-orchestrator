@@ -35,6 +35,7 @@ from league.acceptance import (  # noqa: E402
     validate_hook_fixture,
 )
 from league.sqlite_store import CURRENT_SCHEMA_VERSION  # noqa: E402
+from league.routing import load_routing_config  # noqa: E402
 from league.storage import StorageRefusal  # noqa: E402
 
 
@@ -601,11 +602,21 @@ def test_version_staging_is_regular_and_exact(root: Path) -> None:
     for relative in (
         Path("integrations/pi/league-runtime.ts"),
         Path("integrations/pi/league-bash.sb"),
+        Path("config/league-model-routing.example.json"),
     ):
         source = ROOT / relative
         bundled = normal / "release-bundle/0.2.43" / relative
         staged = normal / "stage-prefix/releases/0.2.43" / relative
         assert bundled.read_bytes() == staged.read_bytes() == source.read_bytes()
+    installed_routing = load_routing_config(
+        normal
+        / "stage-prefix/releases/0.2.43/config/league-model-routing.example.json"
+    )
+    assert installed_routing["schema"] == 3
+    assert installed_routing["policy"]["quality_baseline"] == "WORKER_STRONG"
+    assert installed_routing["evaluations"]["openai/WORKER_FAST"][
+        "representative_tasks"
+    ] == 0
     assert receipt["source_release_staged_parity"] is True
     assert receipt["guidance"]["universal_unchanged"] is True
     assert receipt["guidance"]["rollback_completed"] is True

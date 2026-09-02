@@ -1,4 +1,4 @@
-"""In-place creation of one canonical Shotcaller from the calling Codex runtime."""
+"""In-place creation of one canonical Shotcaller from the calling runtime."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
+from .agent_adapters import builtin_agent_adapter_registry
 from .sqlite_callsign_ops import digest
 from .storage import Storage, StorageRefusal
 from .visible_launch import CommandRunner, SubprocessRunner
@@ -48,6 +49,8 @@ class ShotcallerBootstrapOptions:
     tab_id: str
     pane_id: str
     worktree: str
+    runtime_kind: str = "codex"
+    provider_kind: str = "codex"
 
 
 def _result(completed: subprocess.CompletedProcess[str], label: str) -> dict[str, Any]:
@@ -88,6 +91,21 @@ class HerdrShotcallerBootstrapAdapter:
         self.options = options
         self.runner = runner or SubprocessRunner()
         self.environment = dict(environment or os.environ)
+        self.agent_adapter = builtin_agent_adapter_registry().adapter(
+            options.runtime_kind
+        )
+        self.launch_profile = self.agent_adapter.launch_profile
+        if (
+            options.runtime_kind == "pi"
+            and options.provider_kind not in {"codex", "cursor"}
+        ) or (
+            options.runtime_kind != "pi"
+            and options.provider_kind != options.runtime_kind
+        ):
+            raise StorageRefusal(
+                "shotcaller_identity_unverified",
+                "Shotcaller runtime and provider kinds do not form a supported binding",
+            )
         self._observed: dict[str, Any] | None = None
         self._restore_baseline: dict[str, Any] | None = None
         self._published_source: str | None = None
@@ -149,7 +167,7 @@ class HerdrShotcallerBootstrapAdapter:
         if len(matches) != 1:
             raise StorageRefusal(
                 "shotcaller_identity_unverified",
-                "current pane does not contain exactly one visible Codex runtime",
+                "current pane does not contain exactly one visible runtime",
             )
         return dict(pane), matches[0]
 
@@ -164,13 +182,13 @@ class HerdrShotcallerBootstrapAdapter:
             if not isinstance(value, str) or not ROUTING_ALIAS.fullmatch(value):
                 raise StorageRefusal(
                     "shotcaller_identity_unverified",
-                    "calling Codex routing observation is ambiguous",
+                    "calling runtime routing observation is ambiguous",
                 )
             bindings.add(value)
         if len(bindings) > 1:
             raise StorageRefusal(
                 "shotcaller_identity_unverified",
-                "calling Codex routing observation is ambiguous",
+                "calling runtime routing observation is ambiguous",
             )
         return next(iter(bindings), None)
 
@@ -214,9 +232,10 @@ class HerdrShotcallerBootstrapAdapter:
         if (
             not all(isinstance(value, str) and value for value in labels)
             or len(set(labels)) != 1
-            or tokens.get("harness") != "codex"
+            or tokens.get("harness") != self.options.runtime_kind
             or tokens.get("identity_thread_id") != thread_id
-            or tokens.get("identity_title") != f"Codex | {labels[0]}"
+            or tokens.get("identity_title")
+            != f"{self.options.runtime_kind.title()} | {labels[0]}"
             or title != labels[0]
         ):
             return None
@@ -236,7 +255,7 @@ class HerdrShotcallerBootstrapAdapter:
             pass
         elif (
             token_route != route
-            or orchestrator_identity != f"codex · {route}"
+            or orchestrator_identity != f"{self.options.runtime_kind} · {route}"
             or (
                 str(labels[0]).casefold() != route.casefold()
                 and provider_route_only_alias != route
@@ -325,9 +344,10 @@ class HerdrShotcallerBootstrapAdapter:
                 source_less_provider
                 and (
                     tokens.get("callsign") != title
-                    or tokens.get("harness") != "codex"
+                    or tokens.get("harness") != self.options.runtime_kind
                     or tokens.get("identity_thread_id") != spec.thread_id
-                    or tokens.get("identity_title") != f"Codex | {title}"
+                    or tokens.get("identity_title")
+                    != f"{self.options.runtime_kind.title()} | {title}"
                     or not (
                         (
                             tokens.get("routing_alias") in {None, ""}
@@ -336,7 +356,7 @@ class HerdrShotcallerBootstrapAdapter:
                         or (
                             tokens.get("routing_alias") == expected_alias
                             and tokens.get("orchestrator_identity")
-                            == f"codex · {expected_alias}"
+                            == f"{self.options.runtime_kind} · {expected_alias}"
                         )
                     )
                 )
@@ -381,7 +401,7 @@ class HerdrShotcallerBootstrapAdapter:
         sequence = agent.get("state_change_seq")
         worktree = str(Path(self.options.worktree).resolve())
         return bool(
-            agent.get("agent") == "codex"
+            agent.get("agent") == self.options.runtime_kind
             and agent.get("workspace_id") == self.options.workspace_id
             and agent.get("tab_id") == self.options.tab_id
             and agent.get("pane_id") == self.options.pane_id
@@ -411,9 +431,10 @@ class HerdrShotcallerBootstrapAdapter:
         allow_unpublished: bool = False,
         route_only_recovery: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
-        if not THREAD_UUID.fullmatch(spec.thread_id):
+        if not self._valid_session_identity(spec.thread_id):
             raise StorageRefusal(
-                "shotcaller_identity_unverified", "calling Codex thread identity is invalid"
+                "shotcaller_identity_unverified",
+                "calling runtime session identity is invalid",
             )
         pane, agent = self._current()
         tokens = agent.get("tokens")
@@ -449,7 +470,7 @@ class HerdrShotcallerBootstrapAdapter:
         ):
             raise StorageRefusal(
                 "shotcaller_identity_unverified",
-                "calling Codex must be exact, current, and not already routing-bound",
+                "calling runtime must be exact, current, and not already routing-bound",
             )
         self._observed = {
             "terminal_id": str(agent["terminal_id"]),
@@ -466,6 +487,11 @@ class HerdrShotcallerBootstrapAdapter:
         if self._observed["routing_name"] is None:
             self._restore_baseline = self.restoration_baseline()
         return dict(self._observed)
+
+    def _valid_session_identity(self, value: str) -> bool:
+        if self.options.runtime_kind in {"codex", "cursor"}:
+            return bool(THREAD_UUID.fullmatch(value))
+        return bool(value and value.strip() == value and "\x00" not in value)
 
     def recovery_baseline(self) -> dict[str, Any]:
         baseline = self.restoration_baseline()
@@ -726,9 +752,9 @@ class HerdrShotcallerBootstrapAdapter:
                 "--applies-to-source",
                 authority_source,
                 "--agent",
-                "codex",
+                self.options.runtime_kind,
                 "--display-agent",
-                "codex",
+                self.options.provider_kind,
                 "--title",
                 callsign,
                 "--token",
@@ -843,13 +869,13 @@ class HerdrShotcallerBootstrapAdapter:
             "agent_id": spec.agent_id,
             "callsign": callsign,
             "runtime_instance_id": spec.runtime_instance_id,
-            "harness_kind": "codex-thread",
+            "harness_kind": self.launch_profile.runtime_kind,
             "backend_kind": "herdr",
             "session_identity": spec.thread_id,
             "endpoint_identity": self.options.pane_id,
             "endpoint_generation": self._observed["endpoint_generation"],
             "routing_name": callsign.lower(),
-            "display_agent": "codex",
+            "display_agent": self.options.provider_kind,
             "capabilities": list(spec.capabilities),
         }
 
@@ -911,7 +937,7 @@ class HerdrShotcallerBootstrapAdapter:
                 if expected_tokens.get("routing_alias") == routing_name:
                     expected_tokens.pop("routing_alias", None)
                 if expected_tokens.get("orchestrator_identity") == (
-                    f"codex · {routing_name}"
+                    f"{self.options.runtime_kind} · {routing_name}"
                 ):
                     expected_tokens.pop("orchestrator_identity", None)
                 if (
@@ -969,9 +995,9 @@ class HerdrShotcallerBootstrapAdapter:
                     "--applies-to-source",
                     authority_source,
                     "--agent",
-                    "codex",
+                    self.options.runtime_kind,
                     "--display-agent",
-                    "codex",
+                    self.options.provider_kind,
                 ]
                 for key, value in restore_tokens:
                     arguments.extend(("--token", f"{key}={value}"))
@@ -1020,9 +1046,9 @@ class HerdrShotcallerBootstrapAdapter:
                     "--applies-to-source",
                     authority_source,
                     "--agent",
-                    "codex",
+                    self.options.runtime_kind,
                     "--display-agent",
-                    "codex",
+                    self.options.provider_kind,
                     "--title",
                     str(previous_title),
                     "--token",
@@ -1068,7 +1094,7 @@ class HerdrShotcallerBootstrapAdapter:
             return False
         worktree = str(Path(self.options.worktree).resolve())
         return bool(
-            agent.get("agent") == "codex"
+            agent.get("agent") == self.options.runtime_kind
             and agent.get("agent_status") in LIVE_STATUSES
             and agent.get("workspace_id") == self.options.workspace_id
             and agent.get("tab_id") == self.options.tab_id
@@ -1090,7 +1116,7 @@ class HerdrShotcallerBootstrapAdapter:
 
 
 class ShotcallerBootstrapService:
-    """Reserve, annotate, activate, and receipt one existing Codex endpoint."""
+    """Reserve, annotate, activate, and receipt one existing agent endpoint."""
 
     def __init__(self, store: Storage, adapter: HerdrShotcallerBootstrapAdapter, clock: Any) -> None:
         self.store = store

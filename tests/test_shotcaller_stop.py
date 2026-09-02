@@ -69,7 +69,11 @@ def add_combined_obligations(store, clock) -> None:
     )
     store.prepare_assignment(
         PrepareAssignmentCommand(
-            **{key: value for key, value in vars(bound).items() if key != "callsign"},
+            **{
+                key: value
+                for key, value in vars(bound).items()
+                if key not in {"callsign", "routing_name", "launch_operation_id"}
+            },
             at=clock.now(),
         )
     )
@@ -102,7 +106,7 @@ def add_combined_obligations(store, clock) -> None:
         )
 
 
-def test_combined_obligations_one_block_per_generation(root: Path) -> None:
+def test_attached_shotcaller_blocks_every_stop_with_obligations(root: Path) -> None:
     _, store, clock = create_context(root, "combined-stop")
     capture_p100(store, clock)
     add_combined_obligations(store, clock)
@@ -110,7 +114,7 @@ def test_combined_obligations_one_block_per_generation(root: Path) -> None:
     first = store.stop_decision(
         "Garen-lifecycle", SHOTCALLER_ID, "terminal-generation-1", clock.now()
     )
-    assert first["decision"] == "block" and first["status"] == "blocked_once"
+    assert first["decision"] == "block" and first["status"] == "blocked_attached"
     assert all(first["obligations"][name] > 0 for name in (
         "active_champions",
         "pending_assignments",
@@ -121,11 +125,11 @@ def test_combined_obligations_one_block_per_generation(root: Path) -> None:
     repeated = store.stop_decision(
         "Garen-lifecycle", SHOTCALLER_ID, "terminal-generation-1", clock.now()
     )
-    assert repeated["decision"] == "allow" and repeated["terminal_fresh"] is False
+    assert repeated["decision"] == "block" and repeated["terminal_fresh"] is False
     third = store.stop_decision(
         "Garen-lifecycle", SHOTCALLER_ID, "terminal-generation-2", clock.now()
     )
-    assert third["decision"] == "allow" and third["terminal_fresh"] is True
+    assert third["decision"] == "block" and third["terminal_fresh"] is True
     rearmed = store.rearm_wait(
         "Garen-lifecycle", SHOTCALLER_ID, "event:fresh-wait", clock.now()
     )
@@ -137,7 +141,7 @@ def test_combined_obligations_one_block_per_generation(root: Path) -> None:
     store.close()
 
 
-def test_user_priority_explicit_allow_and_configuration(root: Path) -> None:
+def test_detachment_requires_verified_live_watcher_handoff(root: Path) -> None:
     _, store, clock = create_context(root, "priority-stop")
     capture_p100(store, clock)
     register_watcher(store, clock)
@@ -147,22 +151,34 @@ def test_user_priority_explicit_allow_and_configuration(root: Path) -> None:
     priority = store.stop_decision(
         "Garen-lifecycle", SHOTCALLER_ID, "terminal:user", clock.now()
     )
-    assert priority["decision"] == "block" and priority["status"] == "blocked_once"
+    assert priority["decision"] == "block" and priority["status"] == "blocked_attached"
     next_stop = store.stop_decision(
         "Garen-lifecycle", SHOTCALLER_ID, "terminal:user", clock.now()
     )
-    assert next_stop["decision"] == "allow"
+    assert next_stop["decision"] == "block"
     store.rearm_wait("Garen-lifecycle", SHOTCALLER_ID, "event:explicit", clock.now())
     store.set_allow_stop_once("Garen-lifecycle", SHOTCALLER_ID)
     allowed = store.stop_decision(
         "Garen-lifecycle", SHOTCALLER_ID, "terminal:explicit", clock.now()
     )
-    assert allowed["decision"] == "allow" and allowed["priority"] == "explicit_allow_stop_once"
-    register_watcher(store, clock, "Garen-no-block", block=False, fence=2)
-    unconfigured = store.stop_decision(
-        "Garen-no-block", SHOTCALLER_ID, "terminal:no-block", clock.now()
+    assert allowed["decision"] == "block" and allowed["status"] == "blocked_attached"
+    detached = store.set_supervision_attachment(
+        "Garen-lifecycle", SHOTCALLER_ID, "detached", clock.now()
     )
-    assert unconfigured["decision"] == "allow" and unconfigured["status"] == "unavailable"
+    assert detached["detachment_receipt"]["wake_locator"] == "wake:Garen-lifecycle"
+    handed_off = store.stop_decision(
+        "Garen-lifecycle", SHOTCALLER_ID, "terminal:detached", clock.now()
+    )
+    assert handed_off["decision"] == "allow"
+    assert handed_off["status"] == "detached_handoff_verified"
+    store.release_watcher(
+        "watcher:Garen-lifecycle", SHOTCALLER_ID, 1, clock.now()
+    )
+    unavailable = store.stop_decision(
+        "Garen-lifecycle", SHOTCALLER_ID, "terminal:no-watcher", clock.now()
+    )
+    assert unavailable["decision"] == "block"
+    assert unavailable["status"] == "supervisor_unavailable", unavailable
     assert user["user_message_generation"] == 1
     store.close()
 
@@ -230,10 +246,10 @@ def test_role_awareness_reconciliation_and_distinct_leases(root: Path) -> None:
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="league-shotcaller-stop-") as temporary:
         root = Path(temporary)
-        test_combined_obligations_one_block_per_generation(root)
-        test_user_priority_explicit_allow_and_configuration(root)
+        test_attached_shotcaller_blocks_every_stop_with_obligations(root)
+        test_detachment_requires_verified_live_watcher_handoff(root)
         test_role_awareness_reconciliation_and_distinct_leases(root)
-    print("PASS: role-aware Stop obligations, one block per fresh generation, stale-output refusal, user priority, and final allow")
+    print("PASS: attached obligations block every Stop, detached handoff is verified, stale output refuses, and user priority is preserved")
 
 
 if __name__ == "__main__":

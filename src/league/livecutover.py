@@ -19,6 +19,7 @@ from .acceptance import (
     _stage_release_bytes,
     _switch_symlink,
 )
+from .agent_adapters import builtin_agent_adapter_registry
 from .precutover import _integrated_lifecycle, _read_only_shadow, _snapshot, _validate_plan
 from .sqlite_store import SQLiteStorage
 from .storage import StorageRefusal
@@ -168,6 +169,7 @@ def _reserve_release_identity(release: Path, release_bundle: Path) -> None:
 def _install_hook_routes(plan: dict[str, Any]) -> list[dict[str, Any]]:
     stable_watcher = str(plan["proposed"]["watcher_launcher"])
     receipts: list[dict[str, Any]] = []
+    adapters = builtin_agent_adapter_registry()
     for hook in sorted(plan["proposed"]["hooks"], key=lambda item: item["harness"]):
         path = Path(hook["target"])
         before = _snapshot(path)
@@ -177,11 +179,17 @@ def _install_hook_routes(plan: dict[str, Any]) -> list[dict[str, Any]]:
         if not isinstance(hooks, dict):
             raise StorageRefusal("cutover_hook_invalid", "hook configuration is malformed")
         added: list[str] = []
+        try:
+            adapter = adapters.adapter(str(harness))
+        except StorageRefusal as exc:
+            raise StorageRefusal(
+                "cutover_hook_invalid", "unsupported cutover hook harness"
+            ) from exc
+        wanted = {
+            str(profile["native_event"]): f"{stable_watcher} {profile['command']}"
+            for profile in adapter.hook_profile.values()
+        }
         if harness == "codex":
-            wanted = {
-                "UserPromptSubmit": f"{stable_watcher} codex-user-prompt-hook",
-                "Stop": f"{stable_watcher} codex-stop-hook",
-            }
             for event, command in wanted.items():
                 groups = hooks.setdefault(event, [])
                 if not isinstance(groups, list):
@@ -203,10 +211,6 @@ def _install_hook_routes(plan: dict[str, Any]) -> list[dict[str, Any]]:
         elif harness == "cursor":
             if document.get("version") != 1:
                 raise StorageRefusal("cutover_hook_invalid", "Cursor hook version is unsupported")
-            wanted = {
-                "beforeSubmitPrompt": f"{stable_watcher} cursor-before-submit-hook",
-                "stop": f"{stable_watcher} cursor-stop-hook",
-            }
             for event, command in wanted.items():
                 handlers = hooks.setdefault(event, [])
                 if not isinstance(handlers, list):

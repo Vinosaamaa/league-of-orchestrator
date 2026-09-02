@@ -70,6 +70,14 @@ class WatcherStorage(Protocol):
         at: str,
     ) -> dict[str, Any]: ...
 
+    def set_supervision_attachment(
+        self,
+        scope_id: str,
+        actor_agent_id: str,
+        mode: str,
+        at: str,
+    ) -> dict[str, Any]: ...
+
     def apply_supervision_delivery_policy(
         self,
         outbox_id: str,

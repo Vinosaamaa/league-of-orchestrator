@@ -416,6 +416,7 @@ def test_fork_metadata_restart_and_duplicate_suppression(root: Path) -> None:
     assert "--fork" not in restart_start
     assert "--league-metadata-source" in restart_start
     reports = [call for call in fake.calls if call[1:3] == ("pane", "report-metadata")]
+    assert all(call.count("--token") <= 16 for call in reports)
     assert any("--clear-token" in call and "launch_descriptor_digest" in call for call in reports)
     assert any("--applies-to-source" in call and "launch_metadata_source=" in " ".join(call) for call in reports)
     duplicate = resume_pi_after_restart(
@@ -817,6 +818,21 @@ def test_cli_exposes_explicit_pi_inputs() -> None:
     assert restart.returncode == 0 and "--restart-id" in restart.stdout
 
 
+def test_pi_extension_enforces_herdr_token_limit() -> None:
+    source = (ROOT / "integrations/pi/league-runtime.ts").read_text(encoding="utf-8")
+    assert "const MAX_TOKENS_PER_REPORT = 16;" in source
+    assert "tokens.length > MAX_TOKENS_PER_REPORT" in source
+    for redundant in (
+        "`sidebar_name=${callsign}`",
+        "`project_code=${projectCode}`",
+        "`task_label=${taskLabel}`",
+        "`routing_alias=${routingAlias}`",
+        "`thread_title=${threadTitle}`",
+        "`parent_session_path=${session.parentFile}`",
+    ):
+        assert redundant not in source
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="league-pi-provider-") as directory:
         root = Path(directory)
@@ -828,6 +844,7 @@ def main() -> None:
         test_already_unified_child_uses_bound_parent_evidence_without_legacy_profile(root)
         test_unified_inventory_duplicate_scan_refuses(root)
     test_cli_exposes_explicit_pi_inputs()
+    test_pi_extension_enforces_herdr_token_limit()
     print("PASS: Pi provider launch, unified adoption, metadata, placement, and exact restart resume")
 
 

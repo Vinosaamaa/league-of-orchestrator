@@ -47,6 +47,24 @@ Nothing here installs files, changes hooks, or connects to live Roster state.
   session pool. Existing isolated Cursor-backed JSONL sessions can be copied
   byte-for-byte at a verified shell-only restart boundary, with duplicate-ID
   refusal and durable schema-22 migration/bind receipts.
+- Ordinary `league assign run` selects Pi as the runtime and Codex as the
+  provider, then consumes model and effort from one exact persisted
+  `ModelRouter` decision. A missing, malformed, mismatched, or capability-
+  incompatible decision refuses before launch. Explicit runtime/provider/model/
+  effort overrides remain exact, including Pi with Cursor; no path silently
+  selects the fast Luna tier. The release carries a validated schema-3 policy
+  plus an idempotent schema-1/2 migration, backup, and rollback command.
+- Separate agent and multiplexer adapter registries. Dedicated Codex, Pi, and
+  Cursor CLI adapters translate their truthfully supported prompt,
+  authorization, Stop/settled, launch/resume, steering, presentation, delivery,
+  retirement, and cleanup operations through one shared policy seam. Dedicated
+  Herdr and tmux adapters keep native transport out of that core; an adapter
+  advertises only callable operations and unsupported tmux replay refuses.
+- Provider-neutral restored-display reconciliation composes those two
+  registries with the existing schema-22 runtime, assignment, Shotcaller
+  publication, context-delivery, and Pi launch records. It updates at most 16
+  tokens per Herdr report, performs two stable readbacks, never starts or resumes
+  an agent, and fails closed on a missing, replaced, or ambiguous session.
 - Recoverable visible-Champion assignment with exact acceptance receipts,
   settled post-context callsign/task title restoration bound to the exact
   metadata source and sequence, deterministic two-word display-task defaults,
@@ -278,6 +296,15 @@ placement, metadata, and once-only restart contract are documented in
 passes `--approve` only after the assigned worktree has been verified as the
 exact repository root, then waits for native `session_start`, exact session
 ID/path, canonical metadata, and two stable readbacks before activation.
+The provider-neutral restart callback is `league runtime
+reconcile-restored-agent --multiplexer-kind herdr`. The bundled asynchronous
+[Herdr integration](integrations/herdr/league-restore/README.md) invokes it once
+after Herdr restores panes and exposes its API. A brief native fallback title is
+allowed while exact sessions become discoverable. Reconciliation then converges
+idempotently or fails closed without process creation. No blocking startup
+barrier, duplicate presentation store, launchd dependency, or extra coordinator
+is part of this path. The plugin has not been installed or exercised against
+live League state.
 Issue #66's inline-triage, candidate-inventory, persistent-supervision, and
 measured source-only boundaries are in the
 [issue #66 benchmark report](docs/research/issue-66-inline-triage-supervision-benchmark.md).

@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import os
+import secrets
+import stat
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -240,6 +244,309 @@ def load_routing_config(path: Path) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise StorageRefusal("routing_config_invalid", "routing configuration must be an object")
     return validate_routing_config(value)
+
+
+def migrate_routing_config(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Convert the retained schema-1/2 tier file into a safe schema-3 policy."""
+
+    if not isinstance(value, Mapping):
+        raise StorageRefusal(
+            "routing_config_invalid", "legacy routing configuration must be an object"
+        )
+    if value.get("schema") == 3:
+        return validate_routing_config(dict(value))
+    if value.get("schema") not in {1, 2} or set(value) != {
+        "schema",
+        "tiers",
+        "evaluations",
+        "policy",
+    }:
+        raise StorageRefusal(
+            "routing_migration_unsupported",
+            "only the retained schema-1/2 routing policy can be migrated",
+        )
+    tiers = value.get("tiers")
+    policy = value.get("policy")
+    if (
+        not isinstance(tiers, Mapping)
+        or set(tiers) != TIERS
+        or not isinstance(policy, Mapping)
+        or policy.get("quality_baseline") != WORKER_STRONG
+        or policy.get("safe_boundary_escalations") != 1
+    ):
+        raise StorageRefusal(
+            "routing_migration_unsafe",
+            "legacy routing policy does not preserve the strongest baseline",
+        )
+    normalized_tiers: dict[str, dict[str, str]] = {}
+    for tier in sorted(TIERS):
+        entry = tiers.get(tier)
+        if (
+            not isinstance(entry, Mapping)
+            or not isinstance(entry.get("model"), str)
+            or not entry["model"]
+            or not isinstance(entry.get("effort"), str)
+            or not entry["effort"]
+        ):
+            raise StorageRefusal(
+                "routing_migration_unsafe", "legacy routing tier is incomplete"
+            )
+        normalized_tiers[tier] = {
+            "model": str(entry["model"]),
+            "effort": str(entry["effort"]),
+        }
+    if "luna" in normalized_tiers[WORKER_STRONG]["model"].casefold():
+        raise StorageRefusal(
+            "routing_migration_unsafe",
+            "legacy strongest routing baseline cannot silently select Luna",
+        )
+    migrated = {
+        "schema": 3,
+        "policy_version": "league.model-routing.migrated-v3.1",
+        "default_provider": "openai",
+        "provider_order": ["openai"],
+        "providers": {
+            "openai": {
+                "config_version": "openai.legacy-migration-v3.1",
+                "capabilities": ["reasoning", "tools"],
+                "tiers": normalized_tiers,
+            }
+        },
+        # Legacy approval did not carry the rate/correction evidence required by
+        # schema 3.  Preserve it only as a fail-closed, not-approved baseline.
+        "evaluations": {
+            "openai/WORKER_FAST": {
+                "representative_tasks": 0,
+                "task_success_rate": 0.0,
+                "correction_rate": 1.0,
+                "minimum_representative_tasks": 20,
+                "minimum_task_success_rate": 0.95,
+                "maximum_correction_rate": 0.05,
+            }
+        },
+        "policy": {
+            "quality_baseline": WORKER_STRONG,
+            "safe_boundary_escalations": 1,
+        },
+        "operator_overrides": [],
+    }
+    return validate_routing_config(migrated)
+
+
+def _routing_bytes(value: Mapping[str, Any]) -> bytes:
+    return (
+        json.dumps(dict(value), sort_keys=True, separators=(",", ":")) + "\n"
+    ).encode("utf-8")
+
+
+def _read_regular(path: Path, *, required: bool = True) -> bytes | None:
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        if required:
+            raise StorageRefusal(
+                "routing_install_invalid", "routing policy file does not exist"
+            )
+        return None
+    except OSError as exc:
+        raise StorageRefusal(
+            "routing_install_invalid", "routing policy file cannot be inspected"
+        ) from exc
+    if not stat.S_ISREG(metadata.st_mode) or path.is_symlink():
+        raise StorageRefusal(
+            "routing_install_invalid", "routing policy must be a regular file"
+        )
+    try:
+        payload = path.read_bytes()
+    except OSError as exc:
+        raise StorageRefusal(
+            "routing_install_invalid", "routing policy file cannot be read"
+        ) from exc
+    if len(payload) > 1_048_576:
+        raise StorageRefusal(
+            "routing_install_invalid", "routing policy exceeds the bounded input size"
+        )
+    return payload
+
+
+def _absolute_install_path(path: Path, label: str) -> Path:
+    if not path.is_absolute() or path == Path("/"):
+        raise StorageRefusal(
+            "routing_install_invalid", f"{label} must be an exact absolute file path"
+        )
+    parent = path.parent
+    if not parent.is_dir() or parent.is_symlink():
+        raise StorageRefusal(
+            "routing_install_invalid", f"{label} parent must be an existing directory"
+        )
+    return path
+
+
+def _atomic_replace(path: Path, payload: bytes, mode: int) -> None:
+    temporary = path.with_name(f".{path.name}.league-{secrets.token_hex(8)}")
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            mode,
+        )
+        with os.fdopen(descriptor, "wb", closefd=True) as stream:
+            descriptor = None
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        directory = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    except OSError as exc:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise StorageRefusal(
+            "routing_install_failed", "routing policy atomic write failed"
+        ) from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def install_migrated_routing_config(
+    source: Path, destination: Path, backup: Path
+) -> dict[str, Any]:
+    """Back up and atomically replace one exact installed legacy policy."""
+
+    destination = _absolute_install_path(destination, "routing destination")
+    backup = _absolute_install_path(backup, "routing backup")
+    if destination == backup:
+        raise StorageRefusal(
+            "routing_install_invalid", "routing destination and backup must differ"
+        )
+    source_payload = _read_regular(source)
+    destination_payload = _read_regular(destination)
+    assert source_payload is not None and destination_payload is not None
+    if source.resolve() != destination.resolve() and source_payload != destination_payload:
+        raise StorageRefusal(
+            "routing_install_conflict", "routing source does not match the installed policy"
+        )
+    try:
+        source_value = json.loads(source_payload.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise StorageRefusal(
+            "routing_config_invalid", "routing configuration could not be read"
+        ) from exc
+    if not isinstance(source_value, dict):
+        raise StorageRefusal(
+            "routing_config_invalid", "routing configuration must be an object"
+        )
+    migrated = migrate_routing_config(source_value)
+    installed_payload = _routing_bytes(migrated)
+    prior_backup = _read_regular(backup, required=False)
+    source_schema = source_value.get("schema")
+    if destination_payload == installed_payload:
+        if prior_backup is not None and source_schema == 3:
+            try:
+                prior_value = json.loads(prior_backup.decode("utf-8"))
+            except (UnicodeError, json.JSONDecodeError) as exc:
+                raise StorageRefusal(
+                    "routing_install_conflict", "routing backup is malformed"
+                ) from exc
+            if not isinstance(prior_value, dict) or prior_value.get("schema") not in {1, 2}:
+                raise StorageRefusal(
+                    "routing_install_conflict", "routing backup is not the retained legacy policy"
+                )
+        return {
+            "schema": "league.routing-config-install.v1",
+            "state": "installed" if prior_backup is not None else "already_valid",
+            "from_schema": (
+                int(json.loads(prior_backup.decode("utf-8"))["schema"])
+                if prior_backup is not None
+                else 3
+            ),
+            "to_schema": 3,
+            "installed_sha256": hashlib.sha256(installed_payload).hexdigest(),
+            "backup_sha256": (
+                hashlib.sha256(prior_backup).hexdigest()
+                if prior_backup is not None
+                else None
+            ),
+            "rollback_ready": prior_backup is not None,
+            "idempotent": True,
+        }
+    if source_schema not in {1, 2}:
+        raise StorageRefusal(
+            "routing_install_conflict", "installed schema-3 routing policy differs"
+        )
+    if prior_backup is None:
+        _atomic_replace(backup, destination_payload, stat.S_IMODE(destination.lstat().st_mode))
+        prior_backup = destination_payload
+    elif prior_backup != destination_payload:
+        raise StorageRefusal(
+            "routing_install_conflict", "routing backup does not match the installed legacy policy"
+        )
+    mode = stat.S_IMODE(destination.lstat().st_mode)
+    _atomic_replace(destination, installed_payload, mode)
+    if _read_regular(destination) != installed_payload or _read_regular(backup) != prior_backup:
+        raise StorageRefusal(
+            "routing_install_unverified", "routing policy or backup did not verify"
+        )
+    return {
+        "schema": "league.routing-config-install.v1",
+        "state": "installed",
+        "from_schema": int(source_schema),
+        "to_schema": 3,
+        "installed_sha256": hashlib.sha256(installed_payload).hexdigest(),
+        "backup_sha256": hashlib.sha256(prior_backup).hexdigest(),
+        "rollback_ready": True,
+        "idempotent": False,
+    }
+
+
+def rollback_routing_config(
+    destination: Path,
+    backup: Path,
+    *,
+    expected_installed_sha256: str,
+    expected_backup_sha256: str,
+) -> dict[str, Any]:
+    destination = _absolute_install_path(destination, "routing destination")
+    backup = _absolute_install_path(backup, "routing backup")
+    destination_payload = _read_regular(destination)
+    backup_payload = _read_regular(backup)
+    assert destination_payload is not None and backup_payload is not None
+    installed_digest = hashlib.sha256(destination_payload).hexdigest()
+    backup_digest = hashlib.sha256(backup_payload).hexdigest()
+    if backup_digest != expected_backup_sha256:
+        raise StorageRefusal(
+            "routing_rollback_conflict", "routing backup does not match its exact receipt"
+        )
+    if installed_digest == backup_digest:
+        return {
+            "schema": "league.routing-config-rollback.v1",
+            "state": "rolled_back",
+            "restored_sha256": backup_digest,
+            "idempotent": True,
+        }
+    if installed_digest != expected_installed_sha256:
+        raise StorageRefusal(
+            "routing_rollback_conflict", "installed routing policy changed after migration"
+        )
+    mode = stat.S_IMODE(destination.lstat().st_mode)
+    _atomic_replace(destination, backup_payload, mode)
+    if _read_regular(destination) != backup_payload:
+        raise StorageRefusal(
+            "routing_rollback_unverified", "routing policy rollback did not verify"
+        )
+    return {
+        "schema": "league.routing-config-rollback.v1",
+        "state": "rolled_back",
+        "restored_sha256": backup_digest,
+        "idempotent": False,
+    }
 
 
 class ModelRouter:

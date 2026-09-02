@@ -72,6 +72,30 @@ The repository keeps the proven runtime and new storage boundary separate:
   adapters. `cleanup.py` and `routing.py` own proof-first teardown policy and
   assignment-neutral model/effort selection; `sqlite_runtime_ops.py` persists
   their bindings, decisions, resources, operations, and receipts.
+- `src/league/agent_adapters/` is the explicit Codex, Pi, and Cursor CLI
+  translation registry. Every adapter uses the same lifecycle vocabulary and
+  advertises only the operations its native contract supports;
+  `SharedLifecyclePolicy` owns the common accept/refuse seam consumed by prompt
+  capture and exposed for issue #81 enforcement. Each adapter also owns its
+  provider-specific visible-launch factory, so the CLI selects an adapter and
+  does not contain a Codex/Pi/Cursor launch switch. Cursor configured inside Pi
+  remains only a provider field, not a Cursor CLI runtime identity or session
+  pool.
+- `src/league/multiplexer_adapters/` independently registers Herdr and tmux.
+  Multiplexer adapters advertise only callable native operations. The current
+  Herdr adapter owns restored-agent discovery, exact endpoint/process
+  observation, routing, Champion-tab/Shotcaller-pane placement, display
+  metadata, delivery, and close transport; the tmux adapter advertises no
+  unimplemented capability. `display_replay.py` composes the selected
+  multiplexer adapter with the canonical runtime's agent adapter and contains no
+  Herdr command strings. It reconstructs presentation from existing schema-22
+  state rather than creating a second durable presentation store.
+- `routing.py` is the single model/effort policy implementation. Ordinary
+  visible launch defaults to Pi+Codex but requires the exact persisted routing
+  decision for its request/task/assignment, role, provider, and capabilities.
+  Explicit overrides are accepted only as an exact model+effort pair. The
+  packaged schema-3 policy and schema-1/2 migration/rollback path preserve the
+  strong-worker baseline and cannot silently fall back to Luna.
 - `src/league/skill_contracts.py` owns strict custom-skill provenance,
   capability-profile resolution, bounded content hashing, and sanitized
   duplicate/install parity. It consumes the existing adapter matrix but does

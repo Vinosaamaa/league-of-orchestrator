@@ -40,6 +40,8 @@ class AssignmentSpec:
     issue_receipt: Optional[dict[str, Any]]
     required_capabilities: tuple[str, ...] = ()
     callsign: Optional[str] = None
+    routing_name: Optional[str] = None
+    launch_operation_id: Optional[str] = None
 
 
 class LaunchAdapterError(RuntimeError):
@@ -81,6 +83,12 @@ class AssignmentService:
                 "issue_verification_required",
                 "visible Champion assignment requires exact owner-API issue evidence",
             )
+        occupied_names = getattr(self.adapter, "occupied_routing_names", None)
+        excluded_callsigns = (
+            tuple(sorted(set(occupied_names()), key=str.casefold))
+            if callable(occupied_names)
+            else ()
+        )
         prepared = self.store.prepare_assignment(
             PrepareAssignmentCommand(
                 assignment_id=spec.assignment_id,
@@ -97,6 +105,7 @@ class AssignmentService:
                 at=self.clock.now(),
                 required_capabilities=spec.required_capabilities,
                 issue_receipt=spec.issue_receipt,
+                excluded_callsigns=excluded_callsigns,
             )
         )
         if prepared["state"] == "active":

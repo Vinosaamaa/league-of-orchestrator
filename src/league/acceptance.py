@@ -433,8 +433,22 @@ def _release_files(source_root: Path) -> list[Path]:
         source_root / "global-agent-instructions/league/AGENTS.md",
         source_root / "integrations/pi/league-runtime.ts",
         source_root / "integrations/pi/league-bash.sb",
+        source_root / "integrations/herdr/league-restore/herdr-plugin.toml",
+        source_root / "integrations/herdr/league-restore/restore.sh",
+        source_root / "integrations/herdr/league-restore/README.md",
+        source_root / "config/league-model-routing.example.json",
     ]
     files.extend(_release_directory_files(source_root, Path("src/league"), ".py"))
+    for package in (
+        Path("src/league/agent_adapters"),
+        Path("src/league/agent_adapters/codex"),
+        Path("src/league/agent_adapters/pi"),
+        Path("src/league/agent_adapters/cursor_cli"),
+        Path("src/league/multiplexer_adapters"),
+        Path("src/league/multiplexer_adapters/herdr"),
+        Path("src/league/multiplexer_adapters/tmux"),
+    ):
+        files.extend(_release_directory_files(source_root, package, ".py"))
     files.extend(_release_directory_files(source_root, Path("schema"), ".json"))
     for path in files:
         _validate_regular_file(
@@ -1026,6 +1040,30 @@ def _check_staged_schemas_and_hooks(
         value = json.loads(schema_file.read_text(encoding="utf-8"))
         if value.get("$schema") != "https://json-schema.org/draft/2020-12/schema":
             raise StorageRefusal("staged_schema_failed", "staged schema is malformed")
+    routing_script = (
+        "import json,sys;"
+        "sys.path.insert(0,sys.argv[1]);"
+        "from league.routing import load_routing_config;"
+        "print(json.dumps(load_routing_config(__import__('pathlib').Path(sys.argv[2])),"
+        "sort_keys=True,separators=(',',':')))"
+    )
+    routing = json.loads(
+        _run_checked(
+            [
+                sys.executable,
+                "-c",
+                routing_script,
+                str(release / "src"),
+                str(release / "config/league-model-routing.example.json"),
+            ],
+            cwd=home,
+            env={**environment, "PYTHONDONTWRITEBYTECODE": "1"},
+        )
+    )
+    if routing.get("schema") != 3:
+        raise StorageRefusal(
+            "staged_schema_failed", "installed model routing policy is not schema 3"
+        )
     hook_script = (
         "import json,sys;"
         "sys.path.insert(0,sys.argv[1]);"

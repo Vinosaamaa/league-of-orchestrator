@@ -159,7 +159,11 @@ def _wait_for_watcher_registration(
 
 
 def _register_garen_runtime(
-    state: Path, suffix: str, *, session_ref: str | None = None
+    state: Path,
+    suffix: str,
+    *,
+    session_ref: str | None = None,
+    harness_kind: str = "codex-thread",
 ) -> str:
     runtime_id = f"runtime:installed:{suffix}"
     _league(
@@ -171,7 +175,7 @@ def _register_garen_runtime(
         "--actor-agent-id",
         SHOTCALLER_ID,
         "--harness-kind",
-        "codex-thread",
+        harness_kind,
         "--backend-kind",
         "herdr",
         "--session-ref",
@@ -295,8 +299,7 @@ def test_supervise_wakes_and_stop_allows_after_settlement(root: Path) -> None:
         stderr=subprocess.PIPE,
         env=env,
     )
-    time.sleep(0.15)
-    assert waiter.poll() is None, waiter.stderr.read()
+    _wait_for_watcher_registration(state, waiter)
     current = _league(state, "agent", "status", "--agent-id", CHAMPION_ID)
     version = current["result"]["agent"]["version"]
     settled = _league_env(
@@ -509,10 +512,28 @@ def test_provider_prompt_capture_identity_contracts(root: Path) -> None:
                 "prompt": "Complete local Cursor prompt.\nSecond line.",
             },
         ),
+        (
+            "pi-capture",
+            "pi-input-hook",
+            "input_id",
+            {
+                "session_id": "33333333-3333-4333-8333-333333333333",
+                "session_path": SHOTCALLER_ID,
+                "input_id": "input:pi-capture",
+                "hook_event_name": "PiInput",
+                "prompt": "Complete local Pi prompt.\nSecond line.",
+            },
+        ),
     ):
         _, state, _ = seeded_state(root, name)
         env = _environment(root / name, state)
-        _register_garen_runtime(state, name, session_ref=SHOTCALLER_ID)
+        adapter_kind = command.split("-", 1)[0]
+        _register_garen_runtime(
+            state,
+            name,
+            session_ref=SHOTCALLER_ID,
+            harness_kind=f"{adapter_kind}-thread",
+        )
         assert _watcher(env, command, payload=payload) == {}
         assert _watcher(env, command, payload=payload) == {}
         _league(
@@ -525,7 +546,6 @@ def test_provider_prompt_capture_identity_contracts(root: Path) -> None:
             f"{name}.json",
         )
         exported = json.loads((state / f"{name}.json").read_text(encoding="utf-8"))
-        adapter_kind = "codex" if command.startswith("codex-") else "cursor"
         payload_rows = {
             row["prompt_id"]: row
             for row in exported["tables"]["prompt_payloads"]
@@ -548,6 +568,8 @@ def test_provider_prompt_capture_identity_contracts(root: Path) -> None:
             row["body_hash"] == hashlib.sha256(encoded).hexdigest() for row in rows
         )
         assert all(row["byte_count"] == len(encoded) for row in rows)
+
+
         if adapter_kind == "codex":
             assert len({row["source_event_key"] for row in prompts}) == 2
         unresolved = _league(
@@ -614,6 +636,71 @@ def test_provider_prompt_capture_identity_contracts(root: Path) -> None:
             },
         )
         assert stop["decision"] == "block"
+
+
+def test_provider_pre_tool_policy_and_pi_stop_are_shared_and_fail_closed(
+    root: Path,
+) -> None:
+    cases = (
+        (
+            "codex", "codex-pre-tool-hook", "codex-stop-hook",
+            "33333333-3333-4333-8333-333333333333",
+            {
+                "session_id": "33333333-3333-4333-8333-333333333333",
+                "turn_id": "turn:provider-hooks", "hook_event_name": "PreToolUse",
+            },
+            {
+                "session_id": "33333333-3333-4333-8333-333333333333",
+                "turn_id": "turn:provider-hooks", "hook_event_name": "Stop",
+                "stop_hook_active": True,
+            },
+        ),
+        (
+            "cursor", "cursor-pre-tool-hook", "cursor-stop-hook",
+            "44444444-4444-4444-8444-444444444444",
+            {
+                "conversation_id": "44444444-4444-4444-8444-444444444444",
+                "generation_id": "generation:provider-hooks",
+                "hook_event_name": "beforeShellExecution",
+            },
+            {
+                "conversation_id": "44444444-4444-4444-8444-444444444444",
+                "generation_id": "generation:provider-hooks", "hook_event_name": "stop",
+            },
+        ),
+        (
+            "pi", "pi-pre-tool-hook", "pi-stop-hook",
+            str(root / "provider-hooks-pi" / "session.jsonl"),
+            {
+                "session_path": str(root / "provider-hooks-pi" / "session.jsonl"),
+                "input_id": "input:provider-hooks", "hook_event_name": "PiToolCall",
+            },
+            {
+                "session_path": str(root / "provider-hooks-pi" / "session.jsonl"),
+                "input_id": "input:provider-hooks", "hook_event_name": "PiStop",
+            },
+        ),
+    )
+    for kind, pretool_command, stop_command, session_ref, pretool, stop in cases:
+        label = f"provider-hooks-{kind}"
+        _, state, _ = seeded_state(root, label)
+        env = _environment(root / label, state)
+        _register_garen_runtime(
+            state, label, session_ref=session_ref, harness_kind=f"{kind}-thread"
+        )
+        accepted = _watcher(
+            env, pretool_command, payload={**pretool, "authorized": True}
+        )
+        refused = _watcher(
+            env, pretool_command, payload={**pretool, "authorized": False}
+        )
+        assert accepted == {"decision": "accept", "reason_code": "policy_accepted"}
+        assert refused == {"decision": "refuse", "reason_code": "tool_not_authorized"}
+        stopped = _watcher(env, stop_command, payload=stop)
+        if kind == "codex":
+            assert stopped["decision"] == "block"
+        else:
+            assert "unresolved obligations" in str(stopped["followup_message"])
 
 
 def test_queued_prompts_reusing_turn_id_are_unique_and_conflicts_quarantine(
@@ -1066,7 +1153,7 @@ def test_verified_runtime_session_routes_stop_and_pointer_state(root: Path) -> N
         "stop_hook_active": False,
     }
     assert _watcher(env, "codex-stop-hook", payload=payload)["decision"] == "block"
-    assert _watcher(env, "codex-stop-hook", payload=payload) == {}
+    assert _watcher(env, "codex-stop-hook", payload=payload)["decision"] == "block"
 
 
 def test_quarantined_prompt_rearms_one_shot_stop(root: Path) -> None:
@@ -1090,7 +1177,7 @@ def test_quarantined_prompt_rearms_one_shot_stop(root: Path) -> None:
     assert first["decision"] == "block"
     assert _watcher(
         env, "--shotcaller", "Garen", "codex-stop-hook", payload=first_generation
-    ) == {}
+    )["decision"] == "block"
     with SQLiteStorage(state, request_wal=False) as store:
         before = store.connection.execute(
             "SELECT user_message_generation,wait_generation FROM watcher_scopes WHERE actor_agent_id=?",
@@ -1198,8 +1285,8 @@ def test_real_codex_stop_payload_rearms_per_prompt_event(root: Path) -> None:
         "stop_hook_active": True,
         "last_assistant_message": "Continuation end attempt.",
     }
-    assert _watcher(env, "codex-stop-hook", payload=retry) == {}
-    assert _watcher(env, "codex-stop-hook", payload=retry) == {}
+    assert _watcher(env, "codex-stop-hook", payload=retry)["decision"] == "block"
+    assert _watcher(env, "codex-stop-hook", payload=retry)["decision"] == "block"
 
     # Codex reuses turn_id for queued steers. A genuine second invocation is a
     # new durable event even when its prompt bytes deliberately repeat A.
@@ -1212,7 +1299,7 @@ def test_real_codex_stop_payload_rearms_per_prompt_event(root: Path) -> None:
     assert next_block["decision"] == "block"
     assert "Garen" in str(next_block["reason"])
     assert "turn:owner-visible-one" not in str(next_block["reason"])
-    assert _watcher(env, "codex-stop-hook", payload=retry) == {}
+    assert _watcher(env, "codex-stop-hook", payload=retry)["decision"] == "block"
 
     with SQLiteStorage(state, request_wal=False) as store:
         captured = store.connection.execute(
@@ -1433,7 +1520,18 @@ def test_material_delivery_watcher_direct_dedup_and_unavailable(root: Path) -> N
         "2026-01-01T00:02:00Z",
     )
     event_id = direct["result"]["event_id"]
-    assert direct["result"]["delivery"]["state"] == "delivered"
+    assert direct["result"]["delivery"]["state"] == "pending"
+    assert direct["result"]["delivery"]["reason"] == "supervisor_unavailable"
+    assert not prompt_log.exists()
+    delivered = _watcher(
+        direct_env,
+        "--shotcaller",
+        "Garen",
+        "deliver",
+        "--event-id",
+        event_id,
+    )
+    assert delivered["state"] == "delivered" and delivered["idempotent"] is False
     assert len(prompt_log.read_text(encoding="utf-8").splitlines()) == 1
     retry = _watcher(
         direct_env,
@@ -1609,6 +1707,7 @@ def main() -> None:
         test_supervise_user_priority(root)
         test_long_lived_supervisor_allows_concurrent_prompt_and_stop(root)
         test_provider_prompt_capture_identity_contracts(root)
+        test_provider_pre_tool_policy_and_pi_stop_are_shared_and_fail_closed(root)
         test_queued_prompts_reusing_turn_id_are_unique_and_conflicts_quarantine(root)
         test_missing_identity_quarantines_then_binds_and_triages(root)
         test_unverified_champion_prompt_quarantines_without_shotcaller_wake(root)

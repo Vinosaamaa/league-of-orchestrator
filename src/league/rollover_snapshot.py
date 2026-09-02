@@ -2,20 +2,21 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any, Mapping, Protocol
 
 from .rollover_descendant import (
     CLOSED_STATUSES,
     LIVE_STATUSES,
-    THREAD_UUID,
     _herdr_runtime_generation,
     _herdr_interactive_ready,
     _public_descendant_locator,
     _session,
 )
 from .storage import Storage, StorageRefusal
+from .adapter_types import OpaqueIdentity
+from .agent_adapters import adapter_kind_from_runtime, builtin_agent_adapter_registry
+from .multiplexer_adapters import builtin_multiplexer_adapter_registry
 from .visible_launch import CommandRunner, SubprocessRunner
 
 
@@ -48,23 +49,17 @@ class HerdrRolloverSnapshotAdapter:
 
     def __init__(self, runner: CommandRunner | None = None) -> None:
         self.runner = runner or SubprocessRunner()
+        self.multiplexer = builtin_multiplexer_adapter_registry(
+            herdr_runner=self.runner, herdr_binary="herdr"
+        ).adapter("herdr")
 
     def observe(self, descendants: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        completed = self.runner.run(("herdr", "agent", "list"), timeout_seconds=30)
         try:
-            envelope = json.loads(completed.stdout)
-            agents = envelope["result"]["agents"]
-        except (KeyError, TypeError, json.JSONDecodeError) as exc:
+            agents = self.multiplexer.discover()
+        except StorageRefusal as exc:
             raise StorageRefusal(
                 "snapshot_refresh_live_unverified", "Herdr agent inventory is malformed"
             ) from exc
-        if completed.returncode != 0 or not isinstance(agents, list) or any(
-            not isinstance(item, Mapping) for item in agents
-        ):
-            raise StorageRefusal(
-                "snapshot_refresh_live_unverified",
-                "Herdr agent inventory refused snapshot refresh verification",
-            )
         inventory = [dict(agent) for agent in agents]
         by_pane: dict[str, set[int]] = {}
         by_route: dict[str, set[int]] = {}
@@ -101,7 +96,7 @@ class HerdrRolloverSnapshotAdapter:
                 or not isinstance(route, str)
                 or not route
                 or not isinstance(thread, str)
-                or THREAD_UUID.fullmatch(thread) is None
+                or not thread
             ):
                 raise StorageRefusal(
                     "snapshot_refresh_live_mismatch",
@@ -135,10 +130,20 @@ class HerdrRolloverSnapshotAdapter:
             terminal_id = agent.get("terminal_id")
             state_change_seq = agent.get("state_change_seq")
             explicit_routes = _explicit_routes(agent, locator)
+            try:
+                adapter_kind = adapter_kind_from_runtime(str(target.get("kind", "")))
+                agent_adapter = builtin_agent_adapter_registry().adapter(adapter_kind)
+                agent_adapter.contract.require("identify")
+                OpaqueIdentity(adapter_kind, thread)
+            except StorageRefusal as exc:
+                raise StorageRefusal(
+                    "snapshot_refresh_live_mismatch",
+                    f"{locator}: canonical agent adapter identity is unsupported",
+                ) from exc
             exact = (
-                target.get("kind") == "codex-thread"
+                target.get("kind") == agent_adapter.launch_profile.runtime_kind
                 and target.get("backend") == "herdr"
-                and agent.get("agent") == "codex"
+                and agent.get("agent") == adapter_kind
                 and _herdr_interactive_ready(agent)
                 and agent.get("pane_id") == pane
                 and agent.get("name") == route

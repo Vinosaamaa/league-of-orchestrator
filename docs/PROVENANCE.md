@@ -803,6 +803,10 @@ not rewrite delivery history or treat a terminal command's exit status as
 proof that Cursor accepted the steer.
 The same issue appends Pi provider launch, unified-session migration, and
 restart-effect receipts as schema 22. It does not alter any earlier migration.
+Restart display reconciliation adds no migration. It reconstructs independent
+agent and multiplexer adapter selections from the existing schema-22 runtime,
+assignment, Shotcaller publication, context-delivery, and Pi launch records.
+Schemas 1 through 22 remain unchanged.
 The deterministic acceptance dry-run report follows the current schema target. Its
 legacy-source digest and exact
 post-import parity digest remain unchanged; only the truthful target-version
@@ -1130,3 +1134,80 @@ legacy runtime/session tokens. The permanent launcher now derives that source
 only from matching Pi routing metadata, passes it explicitly to the Pi extension,
 and publishes a reduced non-duplicative token set. Native Pi session identity,
 toolkit presentation tokens, JSONL bytes, and Job Journey state remain unchanged.
+
+## Provider-neutral restart display provenance
+
+A real named Herdr restart restored the same Codex/Pi sessions, panes, working
+directories, and process identities without duplicates, but discarded every
+League display token. The sidebar's role/provider/title fallback matched its
+missing inputs. A display-only replay restored all four named presentations,
+which isolated ownership to League restart replay rather than the renderer.
+
+The first source candidate incorrectly introduced a schema-23 duplicate
+presentation store and a nonexistent blocking startup-barrier dependency.
+Owner correction removed both before publication. The final core reconciler
+selects both registries without provider or Herdr command strings, reconstructs
+presentation from existing canonical records, binds a newly restored terminal
+to the exact native session/cwd/routing name and one foreground process, and
+advances the stable League metadata source from the observed native sequence.
+The Herdr adapter reports at most 16 tokens per call and requires two stable
+readbacks. An exact retry observes convergence and performs no report; a missing,
+replaced, duplicated, or mismatched session refuses without launching a process.
+
+Herdr's supported `[[startup]]` hook runs asynchronously after session restore
+and API readiness. The bundled plugin uses that one-shot hook directly. A brief
+fallback display is therefore expected and accepted; eventual exact convergence
+is the contract. Hook failure remains visible in Herdr's plugin command log but
+does not cause League to target a best guess. Disabling the plugin retains
+ordinary Herdr startup. This repository does not install, patch, restart, or
+steer the live Herdr server, and the focused restart regression uses only
+synthetic canonical state and a fake Herdr adapter.
+The full repository gate also exposed an older help assertion that omitted the
+already-merged `continuation` command while the parser correctly advertised it.
+Only that expected command inventory was updated; CLI behavior is unchanged.
+
+## Issue-#84 adapter and routing completion
+
+The final #84 repository candidate keeps provider selection out of the command
+facade. `assign run` asks the registered Codex, Pi, or Cursor-CLI adapter for
+its visible-launch driver; the dedicated adapter folder validates native
+create/resume/provider inputs. Multiplexer placement, discovery, routing,
+metadata, delivery, and close effects likewise flow through the multiplexer
+registry. Herdr advertises those concrete operations; tmux advertises none
+until a callable native implementation lands. Shared contract tests require a
+callable method for every advertised capability.
+
+Ordinary Champion launch now defaults to Pi+Codex. It consumes exactly one
+persisted `ModelRouter` decision and verifies the bound request/task/assignment,
+Champion role, selected provider, required capabilities, and selected state.
+Model and effort are optional CLI inputs only as an exact paired override.
+Explicit runtime/provider overrides remain exact, including Pi+Cursor. The
+schema-3 release policy retains Sol/xhigh as the unevaluated strong-worker
+baseline. A bounded, idempotent migration installs retained schema-1/2 policy
+only with an explicit destination and backup; rollback is digest-fenced. No
+install or migration was applied to user state in this lane.
+
+The shared pre-tool decision seam is implemented here for all three agent
+adapters. Issue #81 remains the owner of autonomous authorization evidence and
+its installed hook policy; #84 neither fabricates authorization nor duplicates
+that producer. The public restart entrypoint is `runtime
+reconcile-restored-agent`; `replay-restored-display` remains a compatibility
+step inside that operation.
+
+Focused verification exposed and resolved only repository-local or synthetic
+failures:
+
+| Failure | Resolution |
+| --- | --- |
+| The script-style tests were first invoked through unittest discovery and reported zero tests. | Re-ran each file through its supported direct Python entrypoint. |
+| The Shotcaller adapter refactor initially referenced the former harness option name. | Bound identity and presentation to `runtime_kind` and added Codex, Cursor, Pi+Codex, and Pi+Cursor cases. |
+| Multiplexer test doubles did not accept the production runner timeout keyword. | Kept the production runner contract explicit and updated the synthetic doubles. |
+| A routing-aware Roster fixture omitted its required assignment role. | Added the exact synthetic Champion role before asserting the persisted decision. |
+| A restored Cursor fixture inserted its runtime before the canonical agent row. | Corrected fixture order; production foreign-key behavior was unchanged. |
+| A synthetic metadata-effect error exceeded the bounded report chunk. | Reduced only the fake error text and retained the production limit. |
+| The new adapter-factory fixture used a hyphenated fake Herdr workspace ID rejected by the production identity grammar. | Replaced it with a valid synthetic `w...` identity; production validation was unchanged. |
+| The restricted test sandbox denied creation of the supervisor Unix socket. | The same focused suite is rerun with only temporary-directory socket permission; no live service or endpoint is used. |
+| The missing-supervisor fixture retained two verified Shotcaller runtimes, so the exact-binding guard refused before the intended Stop assertion. | Closed only the fixture's obsolete second runtime, matching the already-established delivery fixture setup. |
+
+No installation, live Herdr restart, live agent discovery, prompt, steering,
+cleanup, migration, or cutover is claimed by these source and synthetic tests.

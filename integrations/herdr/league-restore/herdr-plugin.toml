@@ -1,0 +1,10 @@
+id = "league.restore"
+name = "League restored agent reconciliation"
+version = "0.2.0"
+min_herdr_version = "0.7.5"
+description = "Asynchronously reconciles exact restored League agent routing, generation, watcher, and presentation state."
+platforms = ["macos", "linux"]
+
+[[startup]]
+id = "replay"
+command = ["sh", "restore.sh"]

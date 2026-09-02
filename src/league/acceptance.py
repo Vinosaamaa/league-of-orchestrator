@@ -431,6 +431,8 @@ def _release_files(source_root: Path) -> list[Path]:
         source_root / "src/league/report_template.html",
         source_root / "skills/league-report/SKILL.md",
         source_root / "global-agent-instructions/league/AGENTS.md",
+        source_root / "integrations/pi/league-runtime.ts",
+        source_root / "integrations/pi/league-bash.sb",
     ]
     files.extend(_release_directory_files(source_root, Path("src/league"), ".py"))
     files.extend(_release_directory_files(source_root, Path("schema"), ".json"))

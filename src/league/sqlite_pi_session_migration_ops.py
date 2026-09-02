@@ -72,8 +72,6 @@ def _validate_intent(value: Mapping[str, Any]) -> dict[str, Any]:
         )
     ):
         raise StorageRefusal("pi_session_migration_invalid", "Pi parent lineage is incomplete")
-    if exact["source_session_path"] == exact["destination_session_path"]:
-        raise StorageRefusal("pi_session_migration_invalid", "source and unified Pi paths must differ")
     return exact
 
 

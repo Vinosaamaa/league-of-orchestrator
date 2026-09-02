@@ -20,6 +20,7 @@ let projectCode = process.env.LEAGUE_PROJECT_CODE;
 let taskLabel = process.env.LEAGUE_TASK_LABEL;
 let routingAlias = process.env.LEAGUE_ROUTING_ALIAS;
 let descriptorDigest = process.env.LEAGUE_LAUNCH_DESCRIPTOR_DIGEST;
+let descriptorId = process.env.LEAGUE_LAUNCH_DESCRIPTOR_ID;
 
 function exactRoot(value: string | undefined): string | undefined {
   if (!value || !path.isAbsolute(value) || value === "/") return undefined;
@@ -83,6 +84,7 @@ type SessionIdentity = {
 function exactMetadataInputs(): boolean {
   return Boolean(
     paneId &&
+      exactStateRoot &&
       runtimeKind === "pi" &&
       (providerKind === "cursor" || providerKind === "codex") &&
       (launchRole === "shotcaller" || launchRole === "champion") &&
@@ -91,7 +93,8 @@ function exactMetadataInputs(): boolean {
       projectCode &&
       taskLabel &&
       routingAlias &&
-      descriptorDigest,
+      descriptorDigest &&
+      descriptorId,
   );
 }
 
@@ -128,6 +131,8 @@ function reportLeagueMetadata(session: SessionIdentity): void {
     `launch_session_id=${session.id}`,
     `launch_session_path_digest=${crypto.createHash("sha256").update(session.file).digest("hex")}`,
     `launch_descriptor_sha256=${descriptorDigest}`,
+    `launch_descriptor_id=${descriptorId}`,
+    `launch_state_root=${exactStateRoot}`,
     "launch_activation_phase=session_started",
   ];
   if (session.parentFile) {
@@ -166,6 +171,7 @@ export default function (pi) {
     "pane-id", "state-root", "watcher-command", "worktree", "sandbox-profile",
     "runtime-kind", "provider-kind", "role", "placement", "callsign",
     "project-code", "task-label", "routing-alias", "descriptor-digest",
+    "descriptor-id",
   ];
   for (const name of flags) {
     pi.registerFlag(`league-${name}`, {
@@ -191,6 +197,7 @@ export default function (pi) {
   taskLabel = supplied("task-label", taskLabel);
   routingAlias = supplied("routing-alias", routingAlias);
   descriptorDigest = supplied("descriptor-digest", descriptorDigest);
+  descriptorId = supplied("descriptor-id", descriptorId);
   exactStateRoot = exactRoot(stateRoot);
   exactWorktree = exactRoot(worktree);
   let sessionIdentity: SessionIdentity | undefined;

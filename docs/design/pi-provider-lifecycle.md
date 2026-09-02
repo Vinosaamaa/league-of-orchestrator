@@ -42,10 +42,12 @@ the canonical pane label.
 
 ## Unified-inventory migration
 
-Migration of an existing isolated session occurs only at a controlled restart
-boundary where Herdr proves the exact pane has returned to its shell and has no
-foreground process. A strict manifest binds the legacy inventory root, unified
-inventory root, relative JSONL path, source digest, descriptor, and endpoint.
+Migration or adoption of an existing session occurs only at a controlled
+restart boundary where Herdr proves the exact pane has returned to its shell
+and has no foreground process. A strict manifest binds the source inventory
+root, unified inventory root, relative JSONL path, source digest, descriptor,
+and endpoint. An already-unified session may use the same exact source and
+destination path; it is verified and bound without copying bytes.
 
 League reads only the first JSONL record for identity/cwd/parent validation,
 and the first parent record when lineage exists. It hashes the complete source,
@@ -54,7 +56,7 @@ exclusive mode-0600 creation, fsyncs, and verifies the same digest. Source
 bytes and the embedded parent path are unchanged. Durable intent, copy, bind,
 and restart receipts make interruption and retry effect-safe.
 
-After migration, plain `pi --resume` with the All tab is the inventory
+After migration or adoption, plain `pi --resume` with the All tab is the inventory
 acceptance boundary. Herdr then starts `pi --session <exact-child-path>` in the
 stored cwd. All launch metadata, including pane identity, is passed as explicit
 Pi arguments rather than inherited environment. A restart ID can apply that

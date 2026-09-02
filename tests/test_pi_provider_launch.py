@@ -108,6 +108,8 @@ class FakePiHerdr:
                 "launch_session_id": self.session_id,
                 "launch_session_path_digest": __import__("hashlib").sha256(self.session_path.encode()).hexdigest(),
                 "launch_descriptor_sha256": self.env["LEAGUE_LAUNCH_DESCRIPTOR_DIGEST"],
+                "launch_descriptor_id": self.env["LEAGUE_LAUNCH_DESCRIPTOR_ID"],
+                "launch_state_root": self.env["LEAGUE_STATE_ROOT"],
                 "launch_activation_phase": "session_started",
             })
         if self.parent_path:
@@ -187,6 +189,7 @@ class FakePiHerdr:
                 "league-task-label": "LEAGUE_TASK_LABEL",
                 "league-routing-alias": "LEAGUE_ROUTING_ALIAS",
                 "league-descriptor-digest": "LEAGUE_LAUNCH_DESCRIPTOR_DIGEST",
+                "league-descriptor-id": "LEAGUE_LAUNCH_DESCRIPTOR_ID",
             }
             for flag, key in explicit.items():
                 option = f"--{flag}"
@@ -549,6 +552,73 @@ def test_unified_inventory_duplicate_scan_refuses(root: Path) -> None:
         raise AssertionError("bounded inventory scan stopped before finding a duplicate")
 
 
+def test_already_unified_shotcaller_session_is_adopted_without_copy(root: Path) -> None:
+    _state, store, _clock = create_context(root, "pi-adopt")
+    base = root / "pi-adopt"
+    project_folder = base / "project-folder"
+    project_folder.mkdir(parents=True)
+    unified = base / "unified-sessions"
+    relative = Path("--synthetic-project--") / "2026-01-01_shotcaller.jsonl"
+    session = unified / relative
+    session.parent.mkdir(parents=True)
+    payload = (
+        json.dumps(
+            {
+                "type": "session",
+                "version": 3,
+                "id": CHILD_ID,
+                "cwd": str(project_folder.resolve()),
+            },
+            separators=(",", ":"),
+        )
+        + "\n"
+    ).encode()
+    session.write_bytes(payload)
+    descriptor = _descriptor(base, project_folder, "cursor", "resume")
+    descriptor.update(
+        {
+            "descriptor_id": "pi-launch:adopted:shotcaller",
+            "assignment_id": "shotcaller:job-journey",
+            "role": "shotcaller",
+            "placement": "sibling_pane",
+            "creator_pane_id": "w1:p1",
+            "requested_session_id": CHILD_ID,
+            "requested_session_path": str(session.resolve()),
+            "parent_session_id": None,
+            "parent_session_path": None,
+            "callsign": "Ambessa",
+            "project_code": "JJ",
+            "task_label": "Squad Control",
+            "routing_name": "ambessa",
+        }
+    )
+    fake = FakePiHerdr(base)
+    fake.env["LEAGUE_WORKTREE"] = str(project_folder.resolve())
+    manifest = {
+        "schema": "league.pi-session-migration.v1",
+        "migration_id": "pi-adoption:shotcaller",
+        "source_inventory_root": str(unified.resolve()),
+        "unified_inventory_root": str(unified.resolve()),
+        "relative_session_path": str(relative),
+        "expected_sha256": __import__("hashlib").sha256(payload).hexdigest(),
+        "descriptor": descriptor,
+        "endpoint": fake.endpoint,
+    }
+    adopted = migrate_pi_session(
+        store, manifest, at="2026-01-01T00:04:00Z", runner=fake
+    )
+    assert adopted["state"] == "bound"
+    assert session.read_bytes() == payload
+    stored = store.provider_launch_descriptor(descriptor["descriptor_id"])
+    assert stored["session_path"] == str(session.resolve())
+    assert stored["role"] == "shotcaller"
+    assert migrate_pi_session(
+        store, manifest, at="2026-01-01T00:04:01Z", runner=fake
+    )["idempotent"] is True
+    assert len(list(unified.rglob("*.jsonl"))) == 1
+    store.close()
+
+
 def test_provider_mapping_and_role_placement(root: Path) -> None:
     _state, store, _clock = create_context(root, "pi-placement")
     worktree = root / "pi-placement" / "worktree"
@@ -561,7 +631,9 @@ def test_provider_mapping_and_role_placement(root: Path) -> None:
         arguments = pi_start_arguments(descriptor)
         assert arguments[arguments.index("--provider") + 1] == cli_provider
 
-    descriptor = _descriptor(root / "pi-placement", worktree, "codex", "create")
+    project_folder = root / "pi-placement" / "project-folder"
+    project_folder.mkdir()
+    descriptor = _descriptor(root / "pi-placement", project_folder, "codex", "create")
     descriptor.update(
         {
             "descriptor_id": "pi-launch:shotcaller:placement",
@@ -581,7 +653,7 @@ def test_provider_mapping_and_role_placement(root: Path) -> None:
         runner=fake,
         environment={"HERDR_ENV": "1"},
     )
-    receipt = adapter.launch(_spec(worktree))
+    receipt = adapter.launch(_spec(project_folder))
     assert receipt["display_agent"] == "codex"
     assert any(call[1:3] == ("pane", "split") for call in fake.calls)
     assert not any(call[1:3] == ("tab", "create") for call in fake.calls)
@@ -626,9 +698,10 @@ def main() -> None:
         test_fork_metadata_restart_and_duplicate_suppression(root)
         test_provider_mapping_and_role_placement(root)
         test_unified_inventory_migration_preserves_bytes_and_lineage(root)
+        test_already_unified_shotcaller_session_is_adopted_without_copy(root)
         test_unified_inventory_duplicate_scan_refuses(root)
     test_cli_exposes_explicit_pi_inputs()
-    print("PASS: Pi provider launch, one-time fork lineage, metadata, placement, and exact restart resume")
+    print("PASS: Pi provider launch, unified adoption, metadata, placement, and exact restart resume")
 
 
 if __name__ == "__main__":

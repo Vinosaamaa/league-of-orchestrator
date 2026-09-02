@@ -296,9 +296,14 @@ def test_install_restart_and_exact_rollback(root: Path) -> None:
         raise AssertionError("attachment changed without the OS-managed service")
 
 
-def test_start_refuses_source_check_use_races(root: Path) -> None:
-    for name in ("agent-watcher", "template"):
-        case = root / name
+def test_service_operations_refuse_source_check_use_races(root: Path) -> None:
+    for operation, name in (
+        ("start", "agent-watcher"),
+        ("start", "template"),
+        ("idempotent-install", "agent-watcher"),
+        ("idempotent-install", "template"),
+    ):
+        case = root / operation / name
         state, store = _multisquad_state(case, "state")
         store.close()
         source = case / "source"
@@ -338,10 +343,18 @@ def test_start_refuses_source_check_use_races(root: Path) -> None:
             if name == "agent-watcher"
             else original + b"\n"
         )
+        if operation == "idempotent-install":
+            launchd.bootout(SERVICE_LABEL)
         launchd.before_start = lambda: target.write_bytes(drift)
         refused = False
         try:
-            installer.start()
+            if operation == "start":
+                installer.start()
+            else:
+                installer.install(
+                    expected_agent_watcher_sha256=sha256(agent_watcher),
+                    expected_template_sha256=sha256(template),
+                )
         except StorageRefusal as exc:
             assert exc.code == "supervisor_service_source_mismatch"
             refused = True
@@ -352,7 +365,7 @@ def test_start_refuses_source_check_use_races(root: Path) -> None:
                     "installed_plist_sha256"
                 ]
             )
-        assert refused, f"service start accepted {name} check/use drift"
+        assert refused, f"service {operation} accepted {name} check/use drift"
         assert not launchd.loaded and launchd.starts == 2
 
 
@@ -497,7 +510,7 @@ def main() -> None:
         root = Path(temporary)
         test_launchd_environment_starts_the_canonical_watcher(root / "environment")
         test_install_restart_and_exact_rollback(root / "lifecycle")
-        test_start_refuses_source_check_use_races(root / "source-race")
+        test_service_operations_refuse_source_check_use_races(root / "source-race")
         test_install_refuses_unmanaged_live_process(root / "unmanaged")
         test_failed_install_retries_only_after_exact_rollback(root / "retry")
         test_install_refuses_unapproved_source_without_side_effects(root / "refusal")

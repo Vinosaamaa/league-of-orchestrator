@@ -441,6 +441,20 @@ class SupervisorServiceInstaller:
                 "service source bytes no longer match the authorized manifest",
             )
 
+    def _assert_live_source_manifest(self, manifest: Mapping[str, Any]) -> None:
+        try:
+            self._assert_source_manifest(manifest)
+        except StorageRefusal:
+            try:
+                if self.service_manager.is_loaded(SERVICE_LABEL):
+                    self.service_manager.bootout(SERVICE_LABEL)
+            except (OSError, StorageRefusal) as rollback_exc:
+                raise StorageRefusal(
+                    "supervisor_service_rollback_failed",
+                    "source drift after service start could not be stopped safely",
+                ) from rollback_exc
+            raise
+
     def _assert_exact_rolled_back_state(self, manifest: Mapping[str, Any]) -> None:
         if self.service_manager.is_loaded(SERVICE_LABEL):
             raise StorageRefusal(
@@ -511,6 +525,7 @@ class SupervisorServiceInstaller:
                     self._assert_no_unmanaged_process()
                     self.service_manager.bootstrap(SERVICE_LABEL, self.plist_path)
                 status = self._wait_live()
+                self._assert_live_source_manifest(existing_manifest)
                 return {
                     "schema": MANIFEST_SCHEMA,
                     "installed": True,
@@ -631,18 +646,7 @@ class SupervisorServiceInstaller:
             self._assert_no_unmanaged_process()
             self.service_manager.bootstrap(SERVICE_LABEL, self.plist_path)
         status = self._wait_live(previous_fences=previous_fences)
-        try:
-            self._assert_source_manifest(manifest)
-        except StorageRefusal:
-            try:
-                if self.service_manager.is_loaded(SERVICE_LABEL):
-                    self.service_manager.bootout(SERVICE_LABEL)
-            except (OSError, StorageRefusal) as rollback_exc:
-                raise StorageRefusal(
-                    "supervisor_service_rollback_failed",
-                    "source drift after service start could not be stopped safely",
-                ) from rollback_exc
-            raise
+        self._assert_live_source_manifest(manifest)
         return {
             "schema": MANIFEST_SCHEMA,
             "started": True,

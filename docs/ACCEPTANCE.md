@@ -468,11 +468,15 @@ continuation, and immutable switched-rollover snapshot-revision contracts. The
 acceptance operation and source-sentinel contract remain unchanged.
 
 Migration 24 records an immutable stopped-agent retirement request, exact
-provider/multiplexer absence proof, and completion receipt. The focused
-acceptance intentionally interrupts the atomic settlement after runtime close
+provider/multiplexer pane-and-process absence proof, and completion receipt. The
+bounded `BEGIN IMMEDIATE` acceptance holds proof open while a second supported
+runtime writer receives a retryable refusal. It also intentionally interrupts
+the atomic settlement after runtime close
 and after callsign release, proves full rollback, reopens SQLite, retries once,
 and verifies the original receipt, closed runtime, retired Roster identity,
-released callsign, and untouched retained repository bytes.
+released callsign, and untouched retained repository bytes. Separate cases prove
+orphan-process refusal, provider-alias normalization, bounded proof/input bytes,
+and indexed active-ownership lookups.
 
 The skill-contract suite uses only synthetic temporary custom roots and fake
 capability profiles. The current machine inventory was audited separately in a

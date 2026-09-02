@@ -9,6 +9,7 @@ import sys
 import subprocess
 import json
 import os
+import threading
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -25,6 +26,7 @@ from league.sqlite_handoff_schema import (
 from league.sqlite_store import SQLiteStorage
 from league.stopped_retirement import RetirementSpec, StoppedAgentRetirement
 from league.storage import StorageRefusal
+from league.storage import RuntimeRegistrationCommand
 from storage_test_support import migrated_state
 
 
@@ -42,6 +44,8 @@ class StoppedMultiplexer:
         self.adapter_providers: list[tuple[str, str]] = []
 
     def verify_stopped_agent(self, **inputs):
+        assert isinstance(inputs.get("process_names"), frozenset)
+        assert inputs["process_names"]
         target = dict(inputs["target"])
         self.targets.append(target)
         self.adapter_providers.append(
@@ -59,6 +63,37 @@ class StoppedMultiplexer:
             "runtime_generation": target["runtime_generation"],
             "endpoint_absent": True,
         }
+
+
+class TransactionCheckingMultiplexer(StoppedMultiplexer):
+    def __init__(self, store: SQLiteStorage) -> None:
+        super().__init__()
+        self.store = store
+        self.observed_transaction = False
+
+    def verify_stopped_agent(self, **inputs):
+        self.observed_transaction = self.store.connection.in_transaction
+        assert self.observed_transaction
+        return super().verify_stopped_agent(**inputs)
+
+
+class OversizedProofMultiplexer(StoppedMultiplexer):
+    def verify_stopped_agent(self, **inputs):
+        proof = dict(super().verify_stopped_agent(**inputs))
+        proof["detail"] = "x" * 20_000
+        return proof
+
+
+class BlockingMultiplexer(StoppedMultiplexer):
+    def __init__(self) -> None:
+        super().__init__()
+        self.proof_started = threading.Event()
+        self.release_proof = threading.Event()
+
+    def verify_stopped_agent(self, **inputs):
+        self.proof_started.set()
+        assert self.release_proof.wait(timeout=5)
+        return super().verify_stopped_agent(**inputs)
 
 
 def _active_cursor(
@@ -264,6 +299,25 @@ def test_stopped_endpoint_retirement_is_atomic_and_preserves_repository_state(
     with SQLiteStorage(state) as store:
         assignment = _active_cursor(store, retained)
         _attach_squad_membership(store)
+        callsign_plan = store.connection.execute(
+            "EXPLAIN QUERY PLAN SELECT callsign_assignment_id FROM callsign_assignments "
+            "WHERE agent_id=? AND state='active' ORDER BY callsign_assignment_id LIMIT 2",
+            ("agent:stopped",),
+        ).fetchall()
+        assert any(
+            "ix_callsign_assignments_agent_state" in str(row["detail"])
+            for row in callsign_plan
+        )
+        task_plan = store.connection.execute(
+            "EXPLAIN QUERY PLAN SELECT task_assignment_id FROM task_assignments "
+            "WHERE champion_agent_id=? AND state IN "
+            "('pending','launching','active','cleanup_pending') LIMIT 1",
+            ("agent:stopped",),
+        ).fetchall()
+        assert any(
+            "ix_task_assignments_champion_state" in str(row["detail"])
+            for row in task_plan
+        )
         try:
             store.release_callsign(
                 str(assignment["assignment_id"]),
@@ -369,6 +423,86 @@ def test_exact_retry_after_storage_restart_is_idempotent(root: Path) -> None:
     assert retry_adapter.targets == []
 
 
+def test_absence_proof_is_linearized_inside_canonical_transaction(root: Path) -> None:
+    root.mkdir(parents=True)
+    retained = root / "retained-worktree"
+    retained.mkdir()
+    state, _ = migrated_state(root, "state")
+    with SQLiteStorage(state) as store:
+        assignment = _active_cursor(store, retained)
+        multiplexer = TransactionCheckingMultiplexer(store)
+        result = StoppedAgentRetirement(
+            store, multiplexer_registry=_registry(multiplexer)
+        ).retire(
+            _spec(
+                str(assignment["assignment_id"]),
+                operation_id="retirement:linearized-proof",
+            )
+        )
+        assert result["state"] == "completed"
+        assert multiplexer.observed_transaction
+
+
+def test_supported_runtime_resume_cannot_interleave_with_bounded_proof(
+    root: Path,
+) -> None:
+    root.mkdir(parents=True)
+    retained = root / "retained-worktree"
+    retained.mkdir()
+    state, _ = migrated_state(root, "state")
+    with SQLiteStorage(state) as setup:
+        assignment = _active_cursor(setup, retained)
+    multiplexer = BlockingMultiplexer()
+    results: list[dict[str, object]] = []
+    errors: list[BaseException] = []
+
+    def retire() -> None:
+        try:
+            with SQLiteStorage(state) as owner:
+                results.append(
+                    StoppedAgentRetirement(
+                        owner, multiplexer_registry=_registry(multiplexer)
+                    ).retire(
+                        _spec(
+                            str(assignment["assignment_id"]),
+                            operation_id="retirement:concurrency",
+                        )
+                    )
+                )
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            errors.append(exc)
+
+    thread = threading.Thread(target=retire, name="synthetic-retirement-owner")
+    thread.start()
+    assert multiplexer.proof_started.wait(timeout=5)
+    try:
+        with SQLiteStorage(state, busy_timeout_ms=50) as competing:
+            competing.register_runtime(
+                RuntimeRegistrationCommand(
+                    runtime_instance_id="runtime:stopped",
+                    actor_agent_id="agent:stopped",
+                    harness_kind="cursor-thread",
+                    backend_kind="herdr",
+                    session_ref="cursor-session-exact",
+                    endpoint="workspace:pane-stopped",
+                    runtime_generation="generation-exact",
+                    status="active",
+                    verified=True,
+                    at="2026-09-02T16:01:30Z",
+                )
+            )
+    except StorageRefusal as exc:
+        assert exc.code == "busy" and exc.retryable
+    else:
+        raise AssertionError("supported runtime resume interleaved with retirement proof")
+    finally:
+        multiplexer.release_proof.set()
+        thread.join(timeout=5)
+    assert not thread.is_alive()
+    assert errors == []
+    assert len(results) == 1 and results[0]["state"] == "completed"
+
+
 def test_failure_rolls_back_every_canonical_retirement_change(root: Path) -> None:
     root.mkdir(parents=True)
     for interrupted_phase in ("after_runtime_closed", "after_callsign_released"):
@@ -406,9 +540,9 @@ def test_failure_rolls_back_every_canonical_retirement_change(root: Path) -> Non
                 str(assignment["assignment_id"])
             )["state"] == "active"
             assert store.stopped_agent_retirement(spec.operation_id) is None
-
+        with SQLiteStorage(state) as restarted:
             completed = StoppedAgentRetirement(
-                store, multiplexer_registry=_registry(adapter)
+                restarted, multiplexer_registry=_registry(adapter)
             ).retire(spec)
             assert completed["state"] == "completed"
 
@@ -422,13 +556,33 @@ class LiveMultiplexer(StoppedMultiplexer):
 
 
 class HerdrInventoryRunner:
-    def __init__(self, agents: list[dict[str, object]]) -> None:
+    def __init__(
+        self,
+        agents: list[dict[str, object]],
+        *,
+        process_info: dict[str, object] | None = None,
+    ) -> None:
         self.agents = agents
+        self.process_info = process_info
         self.calls: list[tuple[str, ...]] = []
 
     def run(self, arguments, timeout_seconds: int = 30):
         del timeout_seconds
         self.calls.append(tuple(arguments))
+        if tuple(arguments[1:3]) == ("pane", "process-info"):
+            if self.process_info is None:
+                return subprocess.CompletedProcess(
+                    arguments,
+                    1,
+                    json.dumps({"error": {"code": "not_found"}}),
+                    "",
+                )
+            return subprocess.CompletedProcess(
+                arguments,
+                0,
+                json.dumps({"result": {"process_info": self.process_info}}),
+                "",
+            )
         return subprocess.CompletedProcess(
             arguments,
             0,
@@ -453,7 +607,34 @@ def test_herdr_proves_absence_and_refuses_live_or_ambiguous_identity() -> None:
         multiplexer=HerdrMultiplexerAdapter(absent_runner, binary="test-herdr"),
     )
     assert proof["verified"] is True and proof["endpoint_absent"] is True
-    assert absent_runner.calls == [("test-herdr", "agent", "list")]
+    assert absent_runner.calls == [
+        ("test-herdr", "pane", "process-info", "--pane", "workspace:pane-stopped"),
+        ("test-herdr", "agent", "list"),
+    ]
+
+    orphan_runner = HerdrInventoryRunner(
+        [],
+        process_info={
+            "foreground_processes": [
+                {
+                    "pid": 123,
+                    "argv0": "cursor-agent",
+                    "cwd": "/synthetic/retained",
+                    "process_start": "synthetic-start",
+                }
+            ]
+        },
+    )
+    try:
+        cursor.verify_stopped_retirement(
+            target=target,
+            provider_kind="cursor",
+            multiplexer=HerdrMultiplexerAdapter(orphan_runner, binary="test-herdr"),
+        )
+    except StorageRefusal as exc:
+        assert exc.code == "stopped_retirement_endpoint_live"
+    else:
+        raise AssertionError("orphan provider process was treated as absent")
 
     live = {
         "name": "lux",
@@ -474,7 +655,20 @@ def test_herdr_proves_absence_and_refuses_live_or_ambiguous_identity() -> None:
                 target=target,
                 provider_kind="cursor",
                 multiplexer=HerdrMultiplexerAdapter(
-                    HerdrInventoryRunner(agents), binary="test-herdr"
+                    HerdrInventoryRunner(
+                        agents,
+                        process_info={
+                            "foreground_processes": [
+                                {
+                                    "pid": 123,
+                                    "argv0": "cursor-agent",
+                                    "cwd": "/synthetic/retained",
+                                    "process_start": "synthetic-start",
+                                }
+                            ]
+                        },
+                    ),
+                    binary="test-herdr",
                 ),
             )
         except StorageRefusal as exc:
@@ -637,6 +831,78 @@ def test_invalid_timestamp_refuses_before_adapter_inspection(root: Path) -> None
         assert multiplexer.targets == []
 
 
+def test_provider_alias_is_normalized_and_exact_retries_share_one_receipt(
+    root: Path,
+) -> None:
+    root.mkdir(parents=True)
+    retained = root / "retained-worktree"
+    retained.mkdir()
+    state, _ = migrated_state(root, "state")
+    multiplexer = StoppedMultiplexer()
+    with SQLiteStorage(state) as store:
+        assignment = _active_cursor(
+            store,
+            retained,
+            harness_kind="pi-thread",
+            provider_kind="codex",
+        )
+        alias = _spec(
+            str(assignment["assignment_id"]),
+            operation_id="retirement:provider-alias",
+            provider_kind="openai-codex",
+        )
+        first = StoppedAgentRetirement(
+            store, multiplexer_registry=_registry(multiplexer)
+        ).retire(alias)
+        assert first["provider_kind"] == "codex"
+        canonical = RetirementSpec(**{**alias.__dict__, "provider_kind": "codex"})
+        second = StoppedAgentRetirement(
+            store, multiplexer_registry=_registry(StoppedMultiplexer())
+        ).retire(canonical)
+        assert second["idempotent"] is True
+        assert second["provider_kind"] == "codex"
+
+
+def test_oversized_input_and_proof_refuse_before_canonical_mutation(root: Path) -> None:
+    root.mkdir(parents=True)
+    for case_name in ("input", "proof"):
+        case = root / case_name
+        case.mkdir()
+        retained = case / "retained-worktree"
+        retained.mkdir()
+        state, _ = migrated_state(case, "state")
+        multiplexer = (
+            StoppedMultiplexer()
+            if case_name == "input"
+            else OversizedProofMultiplexer()
+        )
+        with SQLiteStorage(state) as store:
+            assignment = _active_cursor(store, retained)
+            spec = _spec(
+                str(assignment["assignment_id"]),
+                operation_id=f"retirement:oversized-{case_name}",
+            )
+            if case_name == "input":
+                spec = RetirementSpec(**{**spec.__dict__, "session_ref": "x" * 2049})
+            try:
+                StoppedAgentRetirement(
+                    store, multiplexer_registry=_registry(multiplexer)
+                ).retire(spec)
+            except StorageRefusal as exc:
+                expected = (
+                    "stopped_retirement_invalid"
+                    if case_name == "input"
+                    else "stopped_retirement_proof_invalid"
+                )
+                assert exc.code == expected, (case_name, exc.code, expected)
+            else:
+                raise AssertionError(f"oversized {case_name} was persisted")
+            runtime = store.connection.execute(
+                "SELECT status,verified FROM runtime_instances WHERE runtime_instance_id='runtime:stopped'"
+            ).fetchone()
+            assert tuple(runtime) == ("active", 1)
+
+
 def test_stable_cli_exposes_exact_retirement_identity() -> None:
     completed = subprocess.run(
         [
@@ -688,7 +954,12 @@ def test_stable_cli_retires_imported_hook_runtime_end_to_end(root: Path) -> None
         )
     fake_herdr = root / "fake-herdr"
     fake_herdr.write_text(
-        "#!/bin/sh\nprintf '%s\\n' '{\"result\":{\"agents\":[]}}'\n",
+        "#!/bin/sh\n"
+        "if [ \"$1 $2\" = \"pane process-info\" ]; then\n"
+        "  printf '%s\\n' '{\"error\":{\"code\":\"not_found\"}}'\n"
+        "  exit 1\n"
+        "fi\n"
+        "printf '%s\\n' '{\"result\":{\"agents\":[]}}'\n",
         encoding="utf-8",
     )
     fake_herdr.chmod(0o700)
@@ -754,6 +1025,12 @@ def main() -> None:
         test_exact_retry_after_storage_restart_is_idempotent(
             Path(temporary) / "restart"
         )
+        test_absence_proof_is_linearized_inside_canonical_transaction(
+            Path(temporary) / "linearized"
+        )
+        test_supported_runtime_resume_cannot_interleave_with_bounded_proof(
+            Path(temporary) / "concurrency"
+        )
         test_failure_rolls_back_every_canonical_retirement_change(
             Path(temporary) / "rollback"
         )
@@ -771,6 +1048,12 @@ def main() -> None:
         )
         test_invalid_timestamp_refuses_before_adapter_inspection(
             Path(temporary) / "invalid-time"
+        )
+        test_provider_alias_is_normalized_and_exact_retries_share_one_receipt(
+            Path(temporary) / "provider-alias"
+        )
+        test_oversized_input_and_proof_refuse_before_canonical_mutation(
+            Path(temporary) / "bounded"
         )
         test_stable_cli_retires_imported_hook_runtime_end_to_end(
             Path(temporary) / "cli-e2e"

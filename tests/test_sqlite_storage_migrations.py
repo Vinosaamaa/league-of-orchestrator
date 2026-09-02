@@ -125,6 +125,8 @@ def test_transactional_upgrade_backup_and_rollback(root: Path) -> None:
             "ux_runtime_replacement_successor_agent",
             "ux_runtime_replacement_successor_runtime",
             "ix_stopped_agent_retirements_completed",
+            "ix_callsign_assignments_agent_state",
+            "ix_task_assignments_champion_state",
         } <= indexes
         assert [migration.version for migration in MIGRATIONS] == list(
             range(1, CURRENT_SCHEMA_VERSION + 1)
@@ -149,7 +151,7 @@ def test_transactional_upgrade_backup_and_rollback(root: Path) -> None:
             (21, "cursor-steering-intent-receipt", "7f6029e3d16a361afda80eab6d04624f99a50a4d37a0a2a4bd0fca3fc471bd66"),
             (22, "pi-provider-launch-descriptor", "00db025c97fd622984900c4db9712a2e3f3ea34125bed2af770c1e04d8aed83f"),
             (23, "adapter-neutral-champion-runtime-replacement", "b7c70f0db8bd4ccc8135f7d3d8b7471a470220cad6b86e86614f67415df75251"),
-            (24, "stopped-agent-total-retirement", "d870bffa84298f2e2148bb7ea7259bef23b746f52bd69f03383bf08b8a16c131"),
+            (24, "stopped-agent-total-retirement", "2f99523b608e0023aa958ba865946c276f2eb5b7cca4051e135c593af389f635"),
         ]
         assert store.connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
 

@@ -26,4 +26,6 @@ STATEMENTS = (
     )
     """,
     "CREATE INDEX ix_stopped_agent_retirements_completed ON stopped_agent_retirements(completed_at,operation_id)",
+    "CREATE INDEX ix_callsign_assignments_agent_state ON callsign_assignments(agent_id,state,callsign_assignment_id)",
+    "CREATE INDEX ix_task_assignments_champion_state ON task_assignments(champion_agent_id,state,task_assignment_id)",
 )

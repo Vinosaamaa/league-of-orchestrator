@@ -6,14 +6,22 @@ import hashlib
 import json
 from dataclasses import asdict, dataclass
 from datetime import datetime
-from typing import Any, Callable, Mapping, Optional
+from typing import Any, Mapping, Optional
 
 from .agent_adapters import AgentAdapterRegistry, builtin_agent_adapter_registry
 from .multiplexer_adapters import (
     MultiplexerAdapterRegistry,
     builtin_multiplexer_adapter_registry,
 )
-from .storage import Storage, StorageRefusal
+from .storage import FaultInjector, Storage, StorageRefusal
+
+
+MAX_ID_LENGTH = 256
+MAX_KIND_LENGTH = 64
+MAX_SESSION_LENGTH = 2048
+MAX_GENERATION_LENGTH = 512
+MAX_TIME_LENGTH = 64
+MAX_PROOF_BYTES = 16_384
 
 
 @dataclass(frozen=True)
@@ -39,19 +47,25 @@ class RetirementSpec:
 
     def validate(self) -> None:
         strings = self.identity()
-        for key in (
-            "operation_id",
-            "agent_id",
-            "runtime_instance_id",
-            "session_ref",
-            "endpoint",
-            "runtime_generation",
-            "provider_kind",
-            "multiplexer_kind",
-            "callsign_assignment_id",
-        ):
+        bounds = {
+            "operation_id": MAX_ID_LENGTH,
+            "agent_id": MAX_ID_LENGTH,
+            "runtime_instance_id": MAX_ID_LENGTH,
+            "session_ref": MAX_SESSION_LENGTH,
+            "endpoint": MAX_SESSION_LENGTH,
+            "runtime_generation": MAX_GENERATION_LENGTH,
+            "provider_kind": MAX_KIND_LENGTH,
+            "multiplexer_kind": MAX_KIND_LENGTH,
+            "callsign_assignment_id": MAX_ID_LENGTH,
+        }
+        for key, maximum in bounds.items():
             value = strings[key]
-            if not isinstance(value, str) or not value or value.strip() != value:
+            if (
+                not isinstance(value, str)
+                or not value
+                or value.strip() != value
+                or len(value) > maximum
+            ):
                 raise StorageRefusal(
                     "stopped_retirement_invalid", "retirement identity is incomplete"
                 )
@@ -66,6 +80,11 @@ class RetirementSpec:
         ):
             raise StorageRefusal(
                 "stopped_retirement_invalid", "retirement versions or terminal status are invalid"
+            )
+        if not isinstance(self.at, str) or len(self.at) > MAX_TIME_LENGTH:
+            raise StorageRefusal(
+                "stopped_retirement_invalid",
+                "retirement time must be RFC3339",
             )
         try:
             parsed_at = datetime.fromisoformat(self.at.replace("Z", "+00:00"))
@@ -87,6 +106,18 @@ def _digest(value: Mapping[str, Any]) -> str:
     ).hexdigest()
 
 
+def _proof_size(value: Mapping[str, Any]) -> int:
+    try:
+        return len(
+            json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        )
+    except (TypeError, ValueError) as exc:
+        raise StorageRefusal(
+            "stopped_retirement_proof_invalid",
+            "adapter proof is not bounded canonical JSON",
+        ) from exc
+
+
 class StoppedAgentRetirement:
     def __init__(
         self,
@@ -105,55 +136,72 @@ class StoppedAgentRetirement:
         self,
         spec: RetirementSpec,
         *,
-        fault: Optional[Callable[[str], None]] = None,
+        fault: Optional[FaultInjector] = None,
     ) -> dict[str, Any]:
         spec.validate()
-        request = spec.identity()
-        request_digest = _digest(request)
+        requested = spec.identity()
         existing = self.store.stopped_agent_retirement(spec.operation_id)
         if existing is not None:
+            existing_adapter = self.agents.adapter(str(existing["adapter_kind"]))
+            request = {
+                **requested,
+                "provider_kind": existing_adapter.normalize_provider(
+                    spec.provider_kind
+                ),
+            }
+            request_digest = _digest(request)
             if existing["request_digest"] != request_digest:
                 raise StorageRefusal(
                     "stopped_retirement_operation_conflict",
                     "retirement operation identity changed",
                 )
             return {**dict(existing["receipt"]), "state": "completed", "idempotent": True}
-        target = self.store.stopped_agent_retirement_target(request)
+        target = self.store.stopped_agent_retirement_adapter_identity(requested)
         adapter_kind = str(target["harness_kind"]).removesuffix("-thread")
         adapter = self.agents.adapter(adapter_kind)
         normalized_provider = adapter.normalize_provider(spec.provider_kind)
         observed_provider = adapter.normalize_provider(str(target["display_agent"]))
         if (
-            spec.provider_kind != normalized_provider
-            or normalized_provider != observed_provider
+            normalized_provider != observed_provider
             or not adapter.accepts_provider(normalized_provider)
         ):
             raise StorageRefusal(
                 "stopped_retirement_provider_mismatch",
                 "canonical provider does not belong to the selected agent adapter",
             )
+        request = {**requested, "provider_kind": normalized_provider}
+        request_digest = _digest(request)
         multiplexer = self.multiplexers.adapter(spec.multiplexer_kind)
-        proof = adapter.verify_stopped_retirement(
-            target={**target, **request},
-            provider_kind=normalized_provider,
-            multiplexer=multiplexer,
-        )
-        if (
-            not isinstance(proof, Mapping)
-            or proof.get("verified") is not True
-            or proof.get("runtime_instance_id") != spec.runtime_instance_id
-            or proof.get("session_ref") != spec.session_ref
-            or proof.get("endpoint") != spec.endpoint
-            or proof.get("runtime_generation") != spec.runtime_generation
-        ):
-            raise StorageRefusal(
-                "stopped_retirement_proof_invalid",
-                "adapter did not prove the exact stopped runtime",
+
+        def verify(canonical: Mapping[str, Any]) -> Mapping[str, Any]:
+            proof = adapter.verify_stopped_retirement(
+                target={**canonical, **request},
+                provider_kind=normalized_provider,
+                multiplexer=multiplexer,
             )
+            if (
+                not isinstance(proof, Mapping)
+                or _proof_size(proof) > MAX_PROOF_BYTES
+                or proof.get("verified") is not True
+                or proof.get("endpoint_absent") is not True
+                or proof.get("adapter_kind") != adapter.contract.kind
+                or proof.get("provider_kind") != normalized_provider
+                or proof.get("multiplexer_kind") != spec.multiplexer_kind
+                or proof.get("runtime_instance_id") != spec.runtime_instance_id
+                or proof.get("session_ref") != spec.session_ref
+                or proof.get("endpoint") != spec.endpoint
+                or proof.get("runtime_generation") != spec.runtime_generation
+            ):
+                raise StorageRefusal(
+                    "stopped_retirement_proof_invalid",
+                    "adapter did not prove the exact stopped runtime",
+                )
+            return proof
+
         return self.store.complete_stopped_agent_retirement(
             request,
             adapter_kind=adapter.contract.kind,
-            proof=proof,
+            verifier=verify,
             request_digest=request_digest,
             at=spec.at,
             fault=fault,

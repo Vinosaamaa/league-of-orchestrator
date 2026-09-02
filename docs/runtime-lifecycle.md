@@ -120,27 +120,41 @@ closes, resumes, launches, prompts, steers, deletes, or rewrites external state.
 
 Core resolves the runtime kind and multiplexer kind only through their adapter
 registries. The agent adapter validates its provider and process vocabulary;
-the multiplexer adapter proves that the exact endpoint, route, and native
-session have no live or ambiguous inventory match. An unsupported pair refuses
-without a fallback. Herdr implements the proof; tmux remains explicitly
-unsupported until its adapter can provide equivalent owner-source evidence.
+the multiplexer adapter proves that the exact endpoint, route, native session,
+pane, and registered provider process names have no live or ambiguous inventory
+match. An unsupported pair refuses without a fallback. Herdr uses structured
+`agent list` and exact-pane `process-info`; only an explicit structured
+`not_found` establishes pane absence. tmux remains explicitly unsupported until
+its adapter can provide equivalent owner-source evidence.
 
-After proof, one SQLite transaction rechecks the immutable runtime/session/
+One bounded `BEGIN IMMEDIATE` transaction rechecks the immutable runtime/session/
 endpoint/generation, expected agent and callsign versions, unique active runtime
-and callsign ownership, and transferred-task boundary. It then marks the runtime
+and callsign ownership, and transferred-task boundary before performing that
+external read-only proof. It then marks the runtime
 closed and unverified, releases the exact callsign at the queue tail,
 terminalizes and retires the Champion, removes only that Champion's Squad
 membership, records immutable proof and receipt digests, and emits a retirement
 event. A fault at either internal boundary rolls everything back. Reopening the
 store and retrying the same operation returns the stored receipt without
-consulting or changing the multiplexer again. Repository coordinates are
+consulting or changing the multiplexer again. Supported League launch and resume
+paths also require canonical write ownership, so they cannot interleave between
+proof and settlement; the concurrency acceptance holds the proof open and
+observes an exact retryable writer refusal. Same-user raw process injection is
+outside League's process-security boundary, while any pane or registered
+provider process present when proof runs is still refused. Repository coordinates are
 retained only as immutable agent history; no filesystem adapter participates.
+
+Retirement identity fields and serialized proof bytes are bounded before
+persistence. Supported provider aliases normalize to the adapter's canonical
+provider before comparison, digesting, and receipt storage. Composite indexes
+bound the unique active-callsign and active-assignment checks.
 
 Focused acceptance uses synthetic SQLite state, temporary retained bytes, and
 fake adapter inventories. It covers direct Codex, direct Cursor CLI, Pi with
 Cursor, Pi with Codex, an injected non-Herdr multiplexer, imported callsign/runtime
-binding, live/ambiguous/mismatched refusal, unsupported pairs, transaction
-rollback, and exact retry after storage restart.
+binding, live/ambiguous/mismatched/orphan-process refusal, unsupported pairs,
+proof-versus-resume concurrency, transaction rollback, and exact retry after
+storage restart.
 
 ## Issue-coupled cleanup and exact-thread continuation
 

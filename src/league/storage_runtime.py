@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any, Callable, Mapping, Optional, Protocol
 
+from .storage_types import FaultInjector
+
 
 class RuntimeBindingStorage(Protocol):
     """Canonical binding contract consumed by runtime orchestration."""
@@ -21,7 +23,7 @@ class RuntimeBindingStorage(Protocol):
         at: str,
     ) -> dict[str, Any]: ...
 
-    def stopped_agent_retirement_target(
+    def stopped_agent_retirement_adapter_identity(
         self, request: Mapping[str, Any]
     ) -> dict[str, Any]: ...
 
@@ -34,10 +36,10 @@ class RuntimeBindingStorage(Protocol):
         request: Mapping[str, Any],
         *,
         adapter_kind: str,
-        proof: Mapping[str, Any],
+        verifier: Callable[[Mapping[str, Any]], Mapping[str, Any]],
         request_digest: str,
         at: str,
-        fault: Optional[Callable[[str], None]] = None,
+        fault: Optional[FaultInjector] = None,
     ) -> dict[str, Any]: ...
 
     def prepare_provider_launch(

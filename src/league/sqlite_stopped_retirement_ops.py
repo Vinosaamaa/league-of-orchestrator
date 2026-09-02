@@ -8,7 +8,7 @@ import sqlite3
 from typing import Any, Callable, Mapping, Optional
 
 from .sqlite_callsign_ops import _release_active_in_transaction
-from .storage_types import StorageRefusal
+from .storage_types import FaultInjector, StorageRefusal
 
 
 def _json(value: Any) -> str:
@@ -35,6 +35,39 @@ def status(store: Any, operation_id: str) -> Optional[dict[str, Any]]:
     row["proof"] = json.loads(row.pop("proof_json"))
     row["receipt"] = json.loads(row.pop("receipt_json"))
     return row
+
+
+def adapter_identity(store: Any, request: Mapping[str, Any]) -> dict[str, Any]:
+    """Resolve only the adapter/provider identity before write ownership."""
+
+    row = store.connection.execute(
+        """
+        SELECT r.harness_kind,a.display_agent
+          FROM runtime_instances r
+          JOIN agent_instances a ON a.agent_id=r.actor_agent_id
+         WHERE r.runtime_instance_id=? AND r.actor_agent_id=?
+           AND r.session_ref=? AND r.endpoint=? AND r.runtime_generation=?
+           AND r.backend_kind=? AND r.status IN ('active','idle') AND r.verified=1
+           AND a.version=? AND a.retired_at IS NULL AND a.role='champion'
+           AND a.address=r.endpoint AND a.thread_id=r.session_ref
+           AND a.backend=r.backend_kind
+        """,
+        (
+            request["runtime_instance_id"],
+            request["agent_id"],
+            request["session_ref"],
+            request["endpoint"],
+            request["runtime_generation"],
+            request["multiplexer_kind"],
+            request["expected_agent_version"],
+        ),
+    ).fetchone()
+    if row is None:
+        raise StorageRefusal(
+            "stopped_retirement_identity_mismatch",
+            "retirement does not match one active exact canonical runtime",
+        )
+    return dict(row)
 
 
 def target(store: Any, request: Mapping[str, Any]) -> dict[str, Any]:
@@ -96,6 +129,7 @@ def target(store: Any, request: Mapping[str, Any]) -> dict[str, Any]:
         """
         SELECT callsign_assignment_id FROM callsign_assignments
          WHERE agent_id=? AND state='active'
+         ORDER BY callsign_assignment_id LIMIT 2
         """,
         (request["agent_id"],),
     ).fetchall()
@@ -150,40 +184,14 @@ def complete(
     request: Mapping[str, Any],
     *,
     adapter_kind: str,
-    proof: Mapping[str, Any],
+    verifier: Callable[[Mapping[str, Any]], Mapping[str, Any]],
     request_digest: str,
     at: str,
-    fault: Optional[Callable[[str], None]] = None,
+    fault: Optional[FaultInjector] = None,
 ) -> dict[str, Any]:
     """Commit runtime, agent, membership, and callsign settlement together."""
 
-    proof_digest = _digest(proof)
-    receipt = {
-        "schema": "league.stopped-agent-retirement-receipt.v1",
-        "verified": True,
-        "operation_id": request["operation_id"],
-        "agent_id": request["agent_id"],
-        "runtime_instance_id": request["runtime_instance_id"],
-        "callsign_assignment_id": request["callsign_assignment_id"],
-        "adapter_kind": adapter_kind,
-        "provider_kind": request["provider_kind"],
-        "multiplexer_kind": request["multiplexer_kind"],
-        "session_ref": request["session_ref"],
-        "endpoint": request["endpoint"],
-        "runtime_generation": request["runtime_generation"],
-        "terminal_status": request["terminal_status"],
-        "repository_cleanup": False,
-        "proof_digest": proof_digest,
-        "completed_at": at,
-    }
-    release_digest = _digest(
-        {
-            "schema": "league.stopped-agent-release.v1",
-            "operation_id": request["operation_id"],
-            "request_digest": request_digest,
-            "proof_digest": proof_digest,
-        }
-    )
+    receipt: dict[str, Any]
     try:
         with store._transaction():
             existing = store.connection.execute(
@@ -200,12 +208,40 @@ def complete(
                 value.update({"state": "completed", "idempotent": True})
                 return value
             canonical = target(store, request)
-            receipt["callsign"] = canonical["callsign"]
             if canonical["agent_kind"].removesuffix("-thread") != adapter_kind:
                 raise StorageRefusal(
                     "stopped_retirement_identity_mismatch",
                     "canonical agent adapter changed before settlement",
                 )
+            proof = verifier(canonical)
+            proof_digest = _digest(proof)
+            receipt = {
+                "schema": "league.stopped-agent-retirement-receipt.v1",
+                "verified": True,
+                "operation_id": request["operation_id"],
+                "agent_id": request["agent_id"],
+                "runtime_instance_id": request["runtime_instance_id"],
+                "callsign_assignment_id": request["callsign_assignment_id"],
+                "callsign": canonical["callsign"],
+                "adapter_kind": adapter_kind,
+                "provider_kind": request["provider_kind"],
+                "multiplexer_kind": request["multiplexer_kind"],
+                "session_ref": request["session_ref"],
+                "endpoint": request["endpoint"],
+                "runtime_generation": request["runtime_generation"],
+                "terminal_status": request["terminal_status"],
+                "repository_cleanup": False,
+                "proof_digest": proof_digest,
+                "completed_at": at,
+            }
+            release_digest = _digest(
+                {
+                    "schema": "league.stopped-agent-release.v1",
+                    "operation_id": request["operation_id"],
+                    "request_digest": request_digest,
+                    "proof_digest": proof_digest,
+                }
+            )
             changed = store.connection.execute(
                 """
                 UPDATE runtime_instances

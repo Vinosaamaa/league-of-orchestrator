@@ -45,6 +45,21 @@ def _result(completed: subprocess.CompletedProcess[str], label: str) -> dict[str
     return result
 
 
+def _session_value(item: Mapping[str, Any]) -> Any:
+    session = item.get("agent_session")
+    return session.get("value") if isinstance(session, Mapping) else None
+
+
+def _overlaps_identity(
+    item: Mapping[str, Any], *, endpoint: str, routing_name: str, session_ref: str
+) -> bool:
+    return bool(
+        item.get("pane_id") == endpoint
+        or item.get("name") == routing_name
+        or _session_value(item) == session_ref
+    )
+
+
 class HerdrMultiplexerAdapter:
     kind = "herdr"
     capabilities = frozenset(
@@ -963,18 +978,16 @@ class HerdrMultiplexerAdapter:
             )
             self.close(endpoint, placement="tab")
         after = list(self.discover())
-        conflicts = []
-        for item in after:
-            session = item.get("agent_session")
-            observed_session = (
-                session.get("value") if isinstance(session, Mapping) else None
+        conflicts = [
+            item
+            for item in after
+            if _overlaps_identity(
+                item,
+                endpoint=endpoint_id,
+                routing_name=routing_name,
+                session_ref=session_ref,
             )
-            if (
-                item.get("pane_id") == endpoint_id
-                or item.get("name") == routing_name
-                or observed_session == session_ref
-            ):
-                conflicts.append(item)
+        ]
         if conflicts:
             raise StorageRefusal(
                 "runtime_replacement_retirement_unverified",
@@ -993,7 +1006,7 @@ class HerdrMultiplexerAdapter:
         }
 
     def verify_stopped_agent(self, **inputs: Any) -> Mapping[str, Any]:
-        """Prove an exact canonical identity is absent from Herdr inventory."""
+        """Prove the exact Herdr pane and provider process are both absent."""
 
         target = inputs.get("target")
         adapter_kind = inputs.get("adapter_kind")
@@ -1027,16 +1040,78 @@ class HerdrMultiplexerAdapter:
                 "stopped_retirement_identity_mismatch",
                 "stopped endpoint proof lacks immutable runtime identity",
             )
-        matches: list[Mapping[str, Any]] = []
-        for item in self.discover():
-            session = item.get("agent_session")
-            session_ref = session.get("value") if isinstance(session, Mapping) else None
-            if (
-                item.get("pane_id") == target["endpoint"]
-                or item.get("name") == target["routing_name"]
-                or session_ref == target["session_ref"]
+        completed = self.runner.run(
+            (
+                self.binary,
+                "pane",
+                "process-info",
+                "--pane",
+                str(target["endpoint"]),
+            ),
+            timeout_seconds=30,
+        )
+        try:
+            process_envelope = json.loads(completed.stdout)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise StorageRefusal(
+                "stopped_retirement_process_unavailable",
+                "Herdr process inspection returned malformed JSON",
+            ) from exc
+        process_result = (
+            process_envelope.get("result")
+            if isinstance(process_envelope, Mapping)
+            else None
+        )
+        process_error = (
+            process_envelope.get("error")
+            if isinstance(process_envelope, Mapping)
+            else None
+        )
+        pane_absent = bool(
+            completed.returncode != 0
+            and isinstance(process_error, Mapping)
+            and process_error.get("code") == "not_found"
+        )
+        if completed.returncode != 0 and not pane_absent:
+            raise StorageRefusal(
+                "stopped_retirement_process_unavailable",
+                "Herdr could not prove the exact pane process surface",
+            )
+        processes: list[Mapping[str, Any]] = []
+        if not pane_absent:
+            info = (
+                process_result.get("process_info")
+                if isinstance(process_result, Mapping)
+                else None
+            )
+            observed = (
+                info.get("foreground_processes")
+                if isinstance(info, Mapping)
+                else None
+            )
+            if not isinstance(observed, list) or any(
+                not isinstance(item, Mapping) for item in observed
             ):
-                matches.append(item)
+                raise StorageRefusal(
+                    "stopped_retirement_process_unavailable",
+                    "Herdr process inspection was incomplete",
+                )
+            processes = list(observed)
+        provider_process_present = any(
+            Path(str(item.get("argv0") or item.get("name") or "")).name
+            in process_names
+            for item in processes
+        )
+        matches = [
+            item
+            for item in self.discover()
+            if _overlaps_identity(
+                item,
+                endpoint=str(target["endpoint"]),
+                routing_name=str(target["routing_name"]),
+                session_ref=str(target["session_ref"]),
+            )
+        ]
         if len(matches) > 1:
             raise StorageRefusal(
                 "stopped_retirement_identity_ambiguous",
@@ -1044,18 +1119,14 @@ class HerdrMultiplexerAdapter:
             )
         if matches:
             item = matches[0]
-            session = item.get("agent_session")
-            observed_session = (
-                session.get("value") if isinstance(session, Mapping) else None
-            )
             exact = bool(
                 item.get("pane_id") == target["endpoint"]
                 and item.get("name") == target["routing_name"]
                 and item.get("agent") == adapter_kind
                 and item.get("display_agent") == provider_kind
-                and observed_session == target["session_ref"]
+                and _session_value(item) == target["session_ref"]
             )
-            if exact:
+            if exact and not pane_absent:
                 raise StorageRefusal(
                     "stopped_retirement_endpoint_live",
                     "exact retirement endpoint is still live",
@@ -1063,6 +1134,16 @@ class HerdrMultiplexerAdapter:
             raise StorageRefusal(
                 "stopped_retirement_identity_mismatch",
                 "a live endpoint overlaps but does not match the retirement identity",
+            )
+        if provider_process_present:
+            raise StorageRefusal(
+                "stopped_retirement_endpoint_live",
+                "expected provider process remains on the retirement pane",
+            )
+        if not pane_absent:
+            raise StorageRefusal(
+                "stopped_retirement_identity_mismatch",
+                "retirement pane remains present without the expected provider identity",
             )
         return {
             "schema": "league.stopped-agent-proof.v1",
@@ -1074,6 +1155,8 @@ class HerdrMultiplexerAdapter:
             "session_ref": target["session_ref"],
             "endpoint": target["endpoint"],
             "runtime_generation": target["runtime_generation"],
+            "pane_absent": True,
+            "provider_process_absent": True,
             "endpoint_absent": True,
         }
 

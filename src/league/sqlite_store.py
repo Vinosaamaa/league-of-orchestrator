@@ -3866,10 +3866,10 @@ class SQLiteStorage(SQLiteTransactionCore):
             at,
         )
 
-    def stopped_agent_retirement_target(
+    def stopped_agent_retirement_adapter_identity(
         self, request: Mapping[str, Any]
     ) -> dict[str, Any]:
-        return sqlite_stopped_retirement_ops.target(self, request)
+        return sqlite_stopped_retirement_ops.adapter_identity(self, request)
 
     def stopped_agent_retirement(
         self, operation_id: str
@@ -3881,16 +3881,16 @@ class SQLiteStorage(SQLiteTransactionCore):
         request: Mapping[str, Any],
         *,
         adapter_kind: str,
-        proof: Mapping[str, Any],
+        verifier: Callable[[Mapping[str, Any]], Mapping[str, Any]],
         request_digest: str,
         at: str,
-        fault: Optional[Callable[[str], None]] = None,
+        fault: Optional[FaultInjector] = None,
     ) -> dict[str, Any]:
         return sqlite_stopped_retirement_ops.complete(
             self,
             request,
             adapter_kind=adapter_kind,
-            proof=proof,
+            verifier=verifier,
             request_digest=request_digest,
             at=at,
             fault=fault,

@@ -165,9 +165,44 @@ def exact_worktree_binding(worktree: Path) -> str:
     ).hexdigest()
 
 
+def exact_launch_cwd_binding(cwd: Path, role: str) -> str:
+    """Bind a Champion worktree or a Shotcaller's exact project folder."""
+
+    if role == "champion":
+        return exact_worktree_binding(cwd)
+    if role != "shotcaller":
+        raise StorageRefusal("launch_scope_invalid", "Pi launch role is invalid")
+    if (
+        not cwd.is_absolute()
+        or not cwd.is_dir()
+        or cwd.is_symlink()
+        or cwd.resolve() != cwd
+        or cwd == Path("/")
+    ):
+        raise StorageRefusal(
+            "launch_scope_invalid", "Shotcaller project folder path is not exact"
+        )
+    try:
+        details = cwd.lstat()
+    except OSError as exc:
+        raise StorageRefusal(
+            "launch_scope_invalid", "Shotcaller project folder identity is unavailable"
+        ) from exc
+    identity = {
+        "schema": "league.project-folder-binding.v1",
+        "cwd": str(cwd),
+        "device": details.st_dev,
+        "inode": details.st_ino,
+    }
+    return hashlib.sha256(
+        json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
 __all__ = [
     "GitCommandRunner",
     "SubprocessGitRunner",
+    "exact_launch_cwd_binding",
     "exact_worktree_binding",
     "normalized_github_repository",
     "verified_worktree_repository_root",

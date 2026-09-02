@@ -1073,3 +1073,26 @@ before choosing the runtime branch, even though Pi owns an explicit session
 descriptor. That lookup now exists only in the Codex branch. The focused Pi
 provider and visible-launch suites cover the replacement behavior, and the
 full repository gate passes without touching a live Pi process.
+
+Installed 0.2.39 acceptance then exposed four source-only blind spots. The
+release manifest did not include the Pi extension or sandbox profile, the
+exact resume command had no Herdr-startup caller, migration rejected sessions
+already stored in the unified inventory, and restart applied Champion Git
+worktree proof to Shotcallers intentionally rooted at a non-Git project
+folder. The corrective release stages both integration files explicitly,
+allows byte-identical in-place adoption only at the same shell-only boundary,
+keeps exact Git identity mandatory for Champions, and binds a Shotcaller to
+the exact project-directory device and inode. Launch metadata now carries the
+durable descriptor ID and state root required by the Herdr startup plugin;
+the plugin derives one generation from the live socket identity and invokes
+the existing effect-fenced resume command. Focused acceptance covers the
+installed file manifest, already-unified adoption, role-aware cwd binding,
+and repeated same-generation recovery. A live three-agent restart remains the
+final installed gate.
+
+The same install found a macOS pointer-update hazard: moving a temporary
+symlink onto a stable symlink whose target is a directory followed the target
+instead of replacing the stable link. The install removed only that temporary
+artifact and used an atomic path replacement. Future installers must verify
+the stable link target after every switch and must not use directory-following
+`mv` semantics for release activation.

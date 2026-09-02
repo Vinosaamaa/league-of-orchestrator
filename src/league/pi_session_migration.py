@@ -11,7 +11,7 @@ from typing import Any, Mapping
 
 from .storage_types import StorageRefusal
 from .visible_launch import CommandRunner, SubprocessRunner
-from .worktree import exact_worktree_binding
+from .worktree import exact_launch_cwd_binding
 
 
 MAX_HEADER_BYTES = 1_048_576
@@ -240,7 +240,9 @@ def migrate_pi_session(
         or descriptor.get("workspace_id") != endpoint.get("workspace_id")
     ):
         raise StorageRefusal("pi_session_migration_descriptor_mismatch", "Pi resume descriptor differs from the exact JSONL lineage")
-    binding = exact_worktree_binding(Path(str(descriptor["cwd"])))
+    binding = exact_launch_cwd_binding(
+        Path(str(descriptor["cwd"])), str(descriptor.get("role", ""))
+    )
     stored_binding = descriptor.get("worktree_binding")
     if stored_binding is not None and stored_binding != binding:
         raise StorageRefusal(

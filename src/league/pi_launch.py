@@ -14,7 +14,7 @@ from typing import Any, Mapping, Sequence
 from .request_services import AssignmentSpec, LaunchAdapterError
 from .storage_types import StorageRefusal
 from .visible_launch import MAX_CONTEXT_BYTES, CommandRunner, SubprocessRunner
-from .worktree import exact_worktree_binding
+from .worktree import exact_launch_cwd_binding
 
 
 def _digest(value: Mapping[str, Any]) -> str:
@@ -83,6 +83,7 @@ def pi_start_arguments(
         "task-label": str(descriptor["task_label"]),
         "routing-alias": str(descriptor["routing_name"]),
         "descriptor-digest": digest,
+        "descriptor-id": str(descriptor["descriptor_id"]),
     }
     metadata_arguments = tuple(
         item
@@ -123,6 +124,7 @@ def pi_launch_environment(descriptor: Mapping[str, Any], digest: str) -> tuple[s
         "LEAGUE_TASK_LABEL": str(descriptor["task_label"]),
         "LEAGUE_ROUTING_ALIAS": str(descriptor["routing_name"]),
         "LEAGUE_LAUNCH_DESCRIPTOR_DIGEST": digest,
+        "LEAGUE_LAUNCH_DESCRIPTOR_ID": str(descriptor["descriptor_id"]),
     }
     return tuple(item for key, value in values.items() for item in ("--env", f"{key}={value}"))
 
@@ -213,6 +215,8 @@ class HerdrPiLaunchAdapter:
             "launch_session_id": session_id,
             "launch_session_path_digest": hashlib.sha256(session_path.encode()).hexdigest(),
             "launch_descriptor_sha256": digest,
+            "launch_descriptor_id": str(self.descriptor["descriptor_id"]),
+            "launch_state_root": str(self.descriptor["state_root"]),
             "launch_activation_phase": "session_started",
         }
         parent_path = self.descriptor.get("parent_session_path")
@@ -292,6 +296,8 @@ class HerdrPiLaunchAdapter:
                     and tokens.get("launch_task_label") == self.descriptor["task_label"]
                     and tokens.get("launch_routing_alias") == self.descriptor["routing_name"]
                     and tokens.get("launch_descriptor_sha256") == self.descriptor["descriptor_digest"]
+                    and tokens.get("launch_descriptor_id") == self.descriptor["descriptor_id"]
+                    and tokens.get("launch_state_root") == self.descriptor["state_root"]
                     and tokens.get("launch_activation_phase") == "session_started"
                     and isinstance(session_id, str)
                     and isinstance(session_path, str)
@@ -385,7 +391,9 @@ class HerdrPiLaunchAdapter:
         worktree = Path(spec.worktree)
         if not worktree.is_absolute() or not worktree.is_dir() or worktree.is_symlink() or spec.callsign is None:
             raise LaunchAdapterError("invalid_launch_worktree")
-        binding = exact_worktree_binding(worktree.resolve())
+        binding = exact_launch_cwd_binding(
+            worktree.resolve(), str(self.descriptor["role"])
+        )
         stored_binding = self.descriptor.get("worktree_binding")
         if stored_binding is not None and stored_binding != binding:
             raise LaunchAdapterError("launch_scope_invalid")
@@ -563,7 +571,9 @@ def resume_pi_after_restart(
         }
     )
     worktree = Path(str(descriptor["cwd"]))
-    if exact_worktree_binding(worktree) != descriptor.get("worktree_binding"):
+    if exact_launch_cwd_binding(worktree, str(descriptor["role"])) != descriptor.get(
+        "worktree_binding"
+    ):
         raise StorageRefusal(
             "provider_restart_worktree_mismatch",
             "Pi restart cwd is not the exact owner-authorized worktree",

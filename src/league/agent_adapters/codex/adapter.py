@@ -112,7 +112,7 @@ def adapter() -> DeclaredAgentAdapter:
             "steer": frozenset({"delivery"}),
             "title": frozenset({"title"}),
             "delivery": frozenset({"delivery"}),
-            "retirement": frozenset({"production_cleanup"}),
+            "retirement": frozenset({"stopped_retirement"}),
             "cleanup": frozenset({"production_cleanup"}),
             "replacement": frozenset({"runtime_replacement"}),
         },

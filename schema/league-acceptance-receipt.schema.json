@@ -281,7 +281,7 @@
       "properties": {
         "schema": {"const": "league.migration.v1"},
         "from_version": {"const": 0},
-        "to_version": {"const": 23},
+        "to_version": {"const": 24},
         "applied": {
           "type": "array",
           "prefixItems": [
@@ -290,10 +290,10 @@
             {"const": 9}, {"const": 10}, {"const": 11}, {"const": 12},
             {"const": 13}, {"const": 14}, {"const": 15}, {"const": 16},
             {"const": 17}, {"const": 18}, {"const": 19}, {"const": 20},
-            {"const": 21}, {"const": 22}, {"const": 23}
+            {"const": 21}, {"const": 22}, {"const": 23}, {"const": 24}
           ],
-          "minItems": 23,
-          "maxItems": 23
+          "minItems": 24,
+          "maxItems": 24
         },
         "backup": {"type": "null"},
         "policy": {"$ref": "#/$defs/connectionPolicy"}

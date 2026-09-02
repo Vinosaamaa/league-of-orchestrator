@@ -45,6 +45,7 @@ RUNTIME_LIFECYCLE_TESTS := \
 	tests/test_runtime_adapters.py \
 	tests/test_multiplexer_metadata.py \
 	tests/test_runtime_replacement.py \
+	tests/test_stopped_agent_retirement.py \
 	tests/test_cleanup_lifecycle.py \
 	tests/test_production_cleanup.py \
 	tests/test_repository_artifacts.py \

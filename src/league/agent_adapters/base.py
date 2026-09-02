@@ -229,22 +229,17 @@ class DeclaredAgentAdapter:
         target: Mapping[str, Any],
         multiplexer: Any,
     ) -> Mapping[str, Any]:
-        if "replacement" not in self.lifecycle_operations:
-            raise StorageRefusal(
-                "runtime_replacement_adapter_unsupported",
-                "agent adapter does not support runtime replacement",
-            )
-        provider_kind = target.get("provider_kind")
-        if not isinstance(provider_kind, str) or not self.accepts_provider(provider_kind):
-            raise StorageRefusal(
-                "runtime_replacement_provider_mismatch",
-                "provider does not belong to the selected agent adapter",
-            )
-        if "runtime_replacement" not in multiplexer.capabilities:
-            raise StorageRefusal(
-                "runtime_replacement_multiplexer_unsupported",
-                "multiplexer does not support exact runtime replacement",
-            )
+        provider_kind = self._validated_lifecycle_pair(
+            operation="replacement",
+            provider_kind=target.get("provider_kind"),
+            multiplexer=multiplexer,
+            multiplexer_capability="runtime_replacement",
+            adapter_code="runtime_replacement_adapter_unsupported",
+            adapter_message="agent adapter does not support runtime replacement",
+            provider_code="runtime_replacement_provider_mismatch",
+            multiplexer_code="runtime_replacement_multiplexer_unsupported",
+            multiplexer_message="multiplexer does not support exact runtime replacement",
+        )
         return multiplexer.replacement_verify(
             adapter_kind=self.contract.kind,
             provider_kind=provider_kind,
@@ -252,28 +247,59 @@ class DeclaredAgentAdapter:
             target=target,
         )
 
+    def _validated_lifecycle_pair(
+        self,
+        *,
+        operation: str,
+        provider_kind: Any,
+        multiplexer: Any,
+        multiplexer_capability: str,
+        adapter_code: str,
+        adapter_message: str,
+        provider_code: str,
+        multiplexer_code: str,
+        multiplexer_message: str,
+    ) -> str:
+        if operation not in self.lifecycle_operations:
+            raise StorageRefusal(
+                adapter_code,
+                adapter_message,
+            )
+        if not isinstance(provider_kind, str):
+            raise StorageRefusal(
+                provider_code,
+                "provider does not belong to the selected agent adapter",
+            )
+        normalized = self.normalize_provider(provider_kind)
+        if not self.accepts_provider(normalized):
+            raise StorageRefusal(
+                provider_code,
+                "provider does not belong to the selected agent adapter",
+            )
+        if multiplexer_capability not in multiplexer.capabilities:
+            raise StorageRefusal(
+                multiplexer_code,
+                multiplexer_message,
+            )
+        return normalized
+
     def recover_replacement(
         self,
         *,
         target: Mapping[str, Any],
         multiplexer: Any,
     ) -> Mapping[str, Any] | None:
-        if "replacement" not in self.lifecycle_operations:
-            raise StorageRefusal(
-                "runtime_replacement_adapter_unsupported",
-                "agent adapter does not support runtime replacement",
-            )
-        provider_kind = target.get("provider_kind")
-        if not isinstance(provider_kind, str) or not self.accepts_provider(provider_kind):
-            raise StorageRefusal(
-                "runtime_replacement_provider_mismatch",
-                "provider does not belong to the selected agent adapter",
-            )
-        if "runtime_replacement" not in multiplexer.capabilities:
-            raise StorageRefusal(
-                "runtime_replacement_multiplexer_unsupported",
-                "multiplexer does not support exact runtime replacement",
-            )
+        provider_kind = self._validated_lifecycle_pair(
+            operation="replacement",
+            provider_kind=target.get("provider_kind"),
+            multiplexer=multiplexer,
+            multiplexer_capability="runtime_replacement",
+            adapter_code="runtime_replacement_adapter_unsupported",
+            adapter_message="agent adapter does not support runtime replacement",
+            provider_code="runtime_replacement_provider_mismatch",
+            multiplexer_code="runtime_replacement_multiplexer_unsupported",
+            multiplexer_message="multiplexer does not support exact runtime replacement",
+        )
         return multiplexer.replacement_recover(
             adapter_kind=self.contract.kind,
             provider_kind=provider_kind,
@@ -294,6 +320,31 @@ class DeclaredAgentAdapter:
             provider_kind=str(target["provider_kind"]),
             process_names=self.process_names,
             exit_prompt=str(self.launch_profile.exit_prompt),
+            target=target,
+        )
+
+    def verify_stopped_retirement(
+        self,
+        *,
+        target: Mapping[str, Any],
+        provider_kind: str,
+        multiplexer: Any,
+    ) -> Mapping[str, Any]:
+        normalized = self._validated_lifecycle_pair(
+            operation="retirement",
+            provider_kind=provider_kind,
+            multiplexer=multiplexer,
+            multiplexer_capability="stopped_retirement",
+            adapter_code="stopped_retirement_adapter_unsupported",
+            adapter_message="agent adapter does not support retirement",
+            provider_code="stopped_retirement_provider_mismatch",
+            multiplexer_code="stopped_retirement_multiplexer_unsupported",
+            multiplexer_message="multiplexer cannot prove an already-stopped endpoint",
+        )
+        return multiplexer.verify_stopped_agent(
+            adapter_kind=self.contract.kind,
+            provider_kind=normalized,
+            process_names=self.process_names,
             target=target,
         )
 

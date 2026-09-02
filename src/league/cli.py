@@ -768,6 +768,33 @@ def _add_runtime_commands(groups: argparse._SubParsersAction) -> None:
     reconcile_restored.add_argument("--multiplexer-kind", required=True)
     reconcile_restored.add_argument("--timeout-ms", type=int, default=30_000)
     reconcile_restored.add_argument("--poll-ms", type=int, default=100)
+    retire_stopped = commands.add_parser(
+        "retire-stopped-agent",
+        help=(
+            "Prove one exact Champion endpoint is already absent, then atomically "
+            "close its stale runtime, terminalize it, and release its callsign."
+        ),
+    )
+    for name in (
+        "operation-id",
+        "agent-id",
+        "runtime-instance-id",
+        "session-ref",
+        "endpoint",
+        "runtime-generation",
+        "provider-kind",
+        "multiplexer-kind",
+        "callsign-assignment-id",
+        "at",
+    ):
+        retire_stopped.add_argument(f"--{name}", required=True)
+    retire_stopped.add_argument("--expected-agent-version", type=int, required=True)
+    retire_stopped.add_argument("--expected-callsign-version", type=int, required=True)
+    retire_stopped.add_argument(
+        "--terminal-status",
+        choices=("completed", "cancelled", "failed"),
+        required=True,
+    )
 
 
 def _add_skill_commands(groups: argparse._SubParsersAction) -> None:
@@ -2227,6 +2254,30 @@ def _runtime_reconcile_restored_agent(
         timeout_ms=args.timeout_ms,
         poll_ms=args.poll_ms,
         at=utc_now(),
+    ), None
+
+
+def _runtime_retire_stopped_agent(
+    store: Storage, args: argparse.Namespace
+) -> CommandResult:
+    from .stopped_retirement import RetirementSpec, StoppedAgentRetirement
+
+    return StoppedAgentRetirement(store).retire(
+        RetirementSpec(
+            operation_id=args.operation_id,
+            agent_id=args.agent_id,
+            runtime_instance_id=args.runtime_instance_id,
+            session_ref=args.session_ref,
+            endpoint=args.endpoint,
+            runtime_generation=args.runtime_generation,
+            provider_kind=args.provider_kind,
+            multiplexer_kind=args.multiplexer_kind,
+            expected_agent_version=args.expected_agent_version,
+            callsign_assignment_id=args.callsign_assignment_id,
+            expected_callsign_version=args.expected_callsign_version,
+            terminal_status=args.terminal_status,
+            at=args.at,
+        )
     ), None
 
 
@@ -3818,6 +3869,7 @@ HANDLERS: dict[str, CommandHandler] = {
     "runtime.migrate-pi-session": _runtime_migrate_pi_session,
     "runtime.replay-restored-display": _runtime_replay_restored_display,
     "runtime.reconcile-restored-agent": _runtime_reconcile_restored_agent,
+    "runtime.retire-stopped-agent": _runtime_retire_stopped_agent,
     "routing.choose": _routing_choose,
     "routing.escalate": _routing_escalate,
     "routing.outcome": _routing_outcome,
@@ -3905,6 +3957,7 @@ SCHEMA_INVENTORY = (
     "league-roster-snapshot.schema.json",
     "league-callsign-catalog.schema.json",
     "league-runtime-acceptance.schema.json",
+    "league-stopped-agent-retirement-receipt.schema.json",
     "league-shotcaller-handoff-plan.schema.json",
     "league-rollover-pages.schema.json",
     "league-rollover-abort-receipt.schema.json",

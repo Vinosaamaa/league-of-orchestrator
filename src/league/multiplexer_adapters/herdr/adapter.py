@@ -14,6 +14,7 @@ from ..contract import CommandRunner, RestoredEndpoint
 
 
 MAX_TOKENS_PER_REPORT = 16
+MAX_STOPPED_RETIREMENT_PROCESS_OUTPUT_BYTES = 65_536
 
 
 class SubprocessRunner:
@@ -45,6 +46,77 @@ def _result(completed: subprocess.CompletedProcess[str], label: str) -> dict[str
     return result
 
 
+def _session_value(item: Mapping[str, Any]) -> Any:
+    session = item.get("agent_session")
+    return session.get("value") if isinstance(session, Mapping) else None
+
+
+def _reject_nonfinite_json_constant(_constant: str) -> Any:
+    raise ValueError("non-finite JSON constants are not accepted")
+
+
+def _strict_json_object(pairs: Sequence[tuple[str, Any]]) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("duplicate JSON members are not accepted")
+        value[key] = item
+    return value
+
+
+def _stopped_retirement_process_envelope(
+    payload: Any,
+) -> Mapping[str, Any]:
+    if not isinstance(payload, str):
+        raise StorageRefusal(
+            "stopped_retirement_process_unavailable",
+            "Herdr process inspection returned non-text output",
+        )
+    try:
+        encoded = payload.encode("utf-8")
+    except UnicodeError as exc:
+        raise StorageRefusal(
+            "stopped_retirement_process_unavailable",
+            "Herdr process inspection returned invalid text",
+        ) from exc
+    if (
+        not encoded
+        or len(encoded) > MAX_STOPPED_RETIREMENT_PROCESS_OUTPUT_BYTES
+        or b"\x00" in encoded
+    ):
+        raise StorageRefusal(
+            "stopped_retirement_process_unavailable",
+            "Herdr process inspection output was empty or outside its byte bound",
+        )
+    try:
+        envelope = json.loads(
+            payload,
+            object_pairs_hook=_strict_json_object,
+            parse_constant=_reject_nonfinite_json_constant,
+        )
+    except (TypeError, ValueError) as exc:
+        raise StorageRefusal(
+            "stopped_retirement_process_unavailable",
+            "Herdr process inspection returned malformed JSON",
+        ) from exc
+    if not isinstance(envelope, Mapping):
+        raise StorageRefusal(
+            "stopped_retirement_process_unavailable",
+            "Herdr process inspection returned a non-object envelope",
+        )
+    return envelope
+
+
+def _overlaps_identity(
+    item: Mapping[str, Any], *, endpoint: str, routing_name: str, session_ref: str
+) -> bool:
+    return bool(
+        item.get("pane_id") == endpoint
+        or item.get("name") == routing_name
+        or _session_value(item) == session_ref
+    )
+
+
 class HerdrMultiplexerAdapter:
     kind = "herdr"
     capabilities = frozenset(
@@ -54,6 +126,7 @@ class HerdrMultiplexerAdapter:
             "rollover_reconciliation", "production_cleanup",
             "provider_session_lifecycle",
             "runtime_replacement",
+            "stopped_retirement",
         }
     )
 
@@ -962,18 +1035,16 @@ class HerdrMultiplexerAdapter:
             )
             self.close(endpoint, placement="tab")
         after = list(self.discover())
-        conflicts = []
-        for item in after:
-            session = item.get("agent_session")
-            observed_session = (
-                session.get("value") if isinstance(session, Mapping) else None
+        conflicts = [
+            item
+            for item in after
+            if _overlaps_identity(
+                item,
+                endpoint=endpoint_id,
+                routing_name=routing_name,
+                session_ref=session_ref,
             )
-            if (
-                item.get("pane_id") == endpoint_id
-                or item.get("name") == routing_name
-                or observed_session == session_ref
-            ):
-                conflicts.append(item)
+        ]
         if conflicts:
             raise StorageRefusal(
                 "runtime_replacement_retirement_unverified",
@@ -989,6 +1060,175 @@ class HerdrMultiplexerAdapter:
             "endpoint": target.get("endpoint"),
             "runtime_generation": target.get("runtime_generation"),
             "state": "retired",
+        }
+
+    def verify_stopped_agent(self, **inputs: Any) -> Mapping[str, Any]:
+        """Prove the exact Herdr pane and provider process are both absent."""
+
+        target = inputs.get("target")
+        adapter_kind = inputs.get("adapter_kind")
+        provider_kind = inputs.get("provider_kind")
+        process_names = inputs.get("process_names")
+        if (
+            not isinstance(target, Mapping)
+            or not isinstance(adapter_kind, str)
+            or not adapter_kind
+            or not isinstance(provider_kind, str)
+            or not provider_kind
+            or not isinstance(process_names, frozenset)
+            or not process_names
+        ):
+            raise StorageRefusal(
+                "stopped_retirement_identity_mismatch",
+                "stopped endpoint proof identity is incomplete",
+            )
+        required = (
+            "runtime_instance_id",
+            "session_ref",
+            "endpoint",
+            "runtime_generation",
+            "routing_name",
+        )
+        if any(
+            not isinstance(target.get(key), str) or not target[key]
+            for key in required
+        ):
+            raise StorageRefusal(
+                "stopped_retirement_identity_mismatch",
+                "stopped endpoint proof lacks immutable runtime identity",
+            )
+        completed = self.runner.run(
+            (
+                self.binary,
+                "pane",
+                "process-info",
+                "--pane",
+                str(target["endpoint"]),
+            ),
+            timeout_seconds=30,
+        )
+        if completed.returncode == 0:
+            if completed.stderr != "":
+                raise StorageRefusal(
+                    "stopped_retirement_process_unavailable",
+                    "Herdr process inspection mixed success and failure streams",
+                )
+            process_envelope = _stopped_retirement_process_envelope(completed.stdout)
+            process_result = process_envelope.get("result")
+            if (
+                set(process_envelope) != {"result"}
+                or not isinstance(process_result, Mapping)
+            ):
+                raise StorageRefusal(
+                    "stopped_retirement_process_unavailable",
+                    "Herdr process inspection returned no success result",
+                )
+            pane_absent = False
+        elif completed.returncode == 1:
+            if completed.stdout != "":
+                raise StorageRefusal(
+                    "stopped_retirement_process_unavailable",
+                    "Herdr process inspection mixed success and failure streams",
+                )
+            process_envelope = _stopped_retirement_process_envelope(completed.stderr)
+            process_error = process_envelope.get("error")
+            if (
+                set(process_envelope) != {"error"}
+                or not isinstance(process_error, Mapping)
+                or process_error.get("code") != "pane_not_found"
+            ):
+                raise StorageRefusal(
+                    "stopped_retirement_process_unavailable",
+                    "Herdr could not prove the exact pane process surface",
+                )
+            process_result = None
+            pane_absent = True
+        else:
+            raise StorageRefusal(
+                "stopped_retirement_process_unavailable",
+                "Herdr could not prove the exact pane process surface",
+            )
+        processes: list[Mapping[str, Any]] = []
+        if not pane_absent:
+            info = (
+                process_result.get("process_info")
+                if isinstance(process_result, Mapping)
+                else None
+            )
+            observed = (
+                info.get("foreground_processes")
+                if isinstance(info, Mapping)
+                else None
+            )
+            if not isinstance(observed, list) or any(
+                not isinstance(item, Mapping) for item in observed
+            ):
+                raise StorageRefusal(
+                    "stopped_retirement_process_unavailable",
+                    "Herdr process inspection was incomplete",
+                )
+            processes = list(observed)
+        provider_process_present = any(
+            Path(str(item.get("argv0") or item.get("name") or "")).name
+            in process_names
+            for item in processes
+        )
+        matches = [
+            item
+            for item in self.discover()
+            if _overlaps_identity(
+                item,
+                endpoint=str(target["endpoint"]),
+                routing_name=str(target["routing_name"]),
+                session_ref=str(target["session_ref"]),
+            )
+        ]
+        if len(matches) > 1:
+            raise StorageRefusal(
+                "stopped_retirement_identity_ambiguous",
+                "more than one live endpoint overlaps the retirement identity",
+            )
+        if matches:
+            item = matches[0]
+            exact = bool(
+                item.get("pane_id") == target["endpoint"]
+                and item.get("name") == target["routing_name"]
+                and item.get("agent") == adapter_kind
+                and item.get("display_agent") == provider_kind
+                and _session_value(item) == target["session_ref"]
+            )
+            if exact and not pane_absent:
+                raise StorageRefusal(
+                    "stopped_retirement_endpoint_live",
+                    "exact retirement endpoint is still live",
+                )
+            raise StorageRefusal(
+                "stopped_retirement_identity_mismatch",
+                "a live endpoint overlaps but does not match the retirement identity",
+            )
+        if provider_process_present:
+            raise StorageRefusal(
+                "stopped_retirement_endpoint_live",
+                "expected provider process remains on the retirement pane",
+            )
+        if not pane_absent:
+            raise StorageRefusal(
+                "stopped_retirement_identity_mismatch",
+                "retirement pane remains present without the expected provider identity",
+            )
+        return {
+            "schema": "league.stopped-agent-proof.v1",
+            "verified": True,
+            "adapter_kind": adapter_kind,
+            "provider_kind": provider_kind,
+            "multiplexer_kind": self.kind,
+            "runtime_instance_id": target["runtime_instance_id"],
+            "session_ref": target["session_ref"],
+            "endpoint": target["endpoint"],
+            "runtime_generation": target["runtime_generation"],
+            "pane_absent": True,
+            "provider_process_absent": True,
+            "endpoint_absent": True,
         }
 
     def close(

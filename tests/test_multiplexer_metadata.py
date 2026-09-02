@@ -862,6 +862,7 @@ def test_adapter_capabilities_are_truthful() -> None:
     assert "server_generation" in MultiplexerAdapter.__dict__
     assert "calling_context" in MultiplexerAdapter.__dict__
     assert "focus" in MultiplexerAdapter.__dict__
+    assert "verify_stopped_agent" in MultiplexerAdapter.__dict__
     assert "replay_presentation" not in CommandRunner.__dict__
     assert "run" in CommandRunner.__dict__
     registry = builtin_multiplexer_adapter_registry()
@@ -871,7 +872,7 @@ def test_adapter_capabilities_are_truthful() -> None:
             "title", "delivery", "steering_delivery", "close",
             "visible_launch", "shotcaller_bootstrap", "rollover_reconciliation",
             "production_cleanup", "provider_session_lifecycle",
-            "runtime_replacement",
+            "runtime_replacement", "stopped_retirement",
         }
     )
     assert registry.adapter("tmux").capabilities == frozenset()

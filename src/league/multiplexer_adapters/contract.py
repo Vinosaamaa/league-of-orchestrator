@@ -26,6 +26,7 @@ MULTIPLEXER_OPERATIONS = frozenset(
         "production_cleanup",
         "provider_session_lifecycle",
         "runtime_replacement",
+        "stopped_retirement",
     }
 )
 MULTIPLEXER_OPERATION_METHODS = {
@@ -58,6 +59,7 @@ MULTIPLEXER_OPERATION_METHODS = {
         "replacement_route_rollback",
         "replacement_retire",
     ),
+    "stopped_retirement": ("verify_stopped_agent",),
 }
 
 
@@ -146,6 +148,8 @@ class MultiplexerAdapter(Protocol):
     def replacement_route_rollback(self, **inputs: Any) -> Mapping[str, Any]: ...
 
     def replacement_retire(self, **inputs: Any) -> Mapping[str, Any]: ...
+
+    def verify_stopped_agent(self, **inputs: Any) -> Mapping[str, Any]: ...
 
 
 class CommandRunner(Protocol):

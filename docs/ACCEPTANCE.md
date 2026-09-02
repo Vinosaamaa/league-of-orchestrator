@@ -460,12 +460,23 @@ make test-reporting-privacy
 ```
 
 The staged migration assertion and strict receipt schema follow
-`CURRENT_SCHEMA_VERSION`; the current contiguous sequence is
-`[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17]`. Versions 12 through 17 add the
+`CURRENT_SCHEMA_VERSION`; the current contiguous sequence is versions 1 through
+24. Versions 12 through 17 add the
 bounded rollover-reconciliation, in-place Shotcaller-bootstrap, immutable prompt
 provenance/current-owner, exact Stop-feedback suppression, issue-coupled
 continuation, and immutable switched-rollover snapshot-revision contracts. The
 acceptance operation and source-sentinel contract remain unchanged.
+
+Migration 24 records an immutable stopped-agent retirement request, exact
+provider/multiplexer pane-and-process absence proof, and completion receipt. The
+bounded `BEGIN IMMEDIATE` acceptance holds proof open while a second supported
+runtime writer receives a retryable refusal. It also intentionally interrupts
+the atomic settlement after runtime close
+and after callsign release, proves full rollback, reopens SQLite, retries once,
+and verifies the original receipt, closed runtime, retired Roster identity,
+released callsign, and untouched retained repository bytes. Separate cases prove
+orphan-process refusal, provider-alias normalization, bounded proof/input bytes,
+and indexed active-ownership lookups.
 
 The skill-contract suite uses only synthetic temporary custom roots and fake
 capability profiles. The current machine inventory was audited separately in a

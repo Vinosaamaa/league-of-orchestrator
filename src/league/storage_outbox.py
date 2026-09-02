@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Optional, Protocol
+from typing import Any, Mapping, Optional, Protocol
 
 
 @dataclass(frozen=True)
@@ -53,3 +53,18 @@ class OutboxStorage(Protocol):
     def outbox_envelope(
         self, outbox_id: str, event_id: str, recipient_agent_id: str
     ) -> dict[str, Any]: ...
+
+    def begin_cursor_steering(
+        self, intent: Mapping[str, Any], at: str
+    ) -> dict[str, Any]: ...
+
+    def record_cursor_steering_phase(
+        self,
+        outbox_id: str,
+        intent_digest: str,
+        state: str,
+        receipt: Mapping[str, Any],
+        at: str,
+    ) -> dict[str, Any]: ...
+
+    def cursor_steering_effect(self, outbox_id: str) -> Optional[dict[str, Any]]: ...

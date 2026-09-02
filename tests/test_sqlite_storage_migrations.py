@@ -117,6 +117,10 @@ def test_transactional_upgrade_backup_and_rollback(root: Path) -> None:
             "ix_tasks_request_routing",
             "ix_prompts_recovery",
             "ix_runtime_owner_health",
+            "ix_cursor_steering_state",
+            "ux_provider_launch_one_project_fork",
+            "ix_provider_restart_state",
+            "ix_pi_session_migration_state",
         } <= indexes
         assert [migration.version for migration in MIGRATIONS] == list(
             range(1, CURRENT_SCHEMA_VERSION + 1)
@@ -138,6 +142,8 @@ def test_transactional_upgrade_backup_and_rollback(root: Path) -> None:
             (18, "scoped-autonomous-delivery-and-issue-first-assignment", "b517b9103fedcc0db8a1f0dd7d06d475f309f3a135d87356209ab34dbd957631"),
             (19, "agent-authored-request-reconciliation", "038abf84401775c692954c5eea8f12e2f19a23d6b67ab727245f651751f438c0"),
             (20, "autonomous-protected-gate-authority-propagation", "b36865213f931b6522f2f8c807dcea60c3949a08eab05772c6ad8567fbdcf71a"),
+            (21, "cursor-steering-intent-receipt", "7f6029e3d16a361afda80eab6d04624f99a50a4d37a0a2a4bd0fca3fc471bd66"),
+            (22, "pi-provider-launch-descriptor", "00db025c97fd622984900c4db9712a2e3f3ea34125bed2af770c1e04d8aed83f"),
         ]
         assert store.connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
 
@@ -254,6 +260,31 @@ def test_v15_to_v16_rolls_back_before_thread_lineage_cutover(root: Path) -> None
         ).fetchone() is not None
         assert store.connection.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='thread_lineages'"
+        ).fetchone() is not None
+        assert store.integrity()["ok"]
+
+
+def test_v21_to_v22_rolls_back_unified_pi_migration_tables(root: Path) -> None:
+    state, _ = migrated_state(root, "v21-to-v22", target_version=21)
+    with SQLiteStorage.for_migration(state) as store:
+        def crash(point: str) -> None:
+            if point == "after_migration_22":
+                raise InjectedCrash(point)
+
+        try:
+            store.migrate(backup_name="backups/pre-v22.sqlite3", fault=crash)
+        except InjectedCrash:
+            pass
+        else:
+            raise AssertionError("v22 migration crash was not injected")
+        assert store.connection.execute("PRAGMA user_version").fetchone()[0] == 21
+        assert store.connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='pi_session_migrations'"
+        ).fetchone() is None
+        receipt = store.migrate(backup_name="backups/pre-v22-retry.sqlite3")
+        assert receipt["from_version"] == 21 and receipt["applied"] == [22]
+        assert store.connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='pi_session_migrations'"
         ).fetchone() is not None
         assert store.integrity()["ok"]
 
@@ -510,7 +541,9 @@ def test_v19_to_v20_rolls_back_protected_gate_receipts(root: Path) -> None:
             "WHERE type='table' AND name='protected_gate_uses'"
         ).fetchone()[0] == 0
 
-        receipt = store.migrate(backup_name="backups/pre-v20-retry.sqlite3")
+        receipt = store.migrate(
+            target_version=20, backup_name="backups/pre-v20-retry.sqlite3"
+        )
         assert receipt["from_version"] == 19
         assert receipt["to_version"] == 20
         assert receipt["applied"] == [20]
@@ -544,6 +577,43 @@ def test_v19_to_v20_rolls_back_protected_gate_receipts(root: Path) -> None:
             "protected_gate_settlements_immutable_update",
             "protected_gate_settlements_immutable_delete",
         } <= triggers
+        assert store.integrity()["ok"]
+
+
+def test_v20_to_v21_cursor_steering_rolls_back_and_retries(root: Path) -> None:
+    state, _ = migrated_state(root, "v20-to-v21", target_version=20)
+    with SQLiteStorage.for_migration(state) as store:
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM sqlite_master "
+            "WHERE type='table' AND name='cursor_steering_effects'"
+        ).fetchone()[0] == 0
+
+        def crash(point: str) -> None:
+            if point == "after_migration_21":
+                raise InjectedCrash(point)
+
+        try:
+            store.migrate(backup_name="backups/pre-v21.sqlite3", fault=crash)
+        except InjectedCrash:
+            pass
+        else:
+            raise AssertionError("v21 migration crash was not injected")
+        assert store.connection.execute("PRAGMA user_version").fetchone()[0] == 20
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM sqlite_master "
+            "WHERE type='table' AND name='cursor_steering_effects'"
+        ).fetchone()[0] == 0
+
+        receipt = store.migrate(
+            backup_name="backups/pre-v21-retry.sqlite3", target_version=21
+        )
+        assert receipt["from_version"] == 20
+        assert receipt["to_version"] == 21
+        assert receipt["applied"] == [21]
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM sqlite_master "
+            "WHERE type='table' AND name='cursor_steering_effects'"
+        ).fetchone()[0] == 1
         assert store.integrity()["ok"]
 
 
@@ -630,6 +700,8 @@ def main() -> None:
         test_v17_active_assignment_requires_migration18_issue_reconciliation(root)
         test_v18_to_v19_rolls_back_request_reconciliation(root)
         test_v19_to_v20_rolls_back_protected_gate_receipts(root)
+        test_v20_to_v21_cursor_steering_rolls_back_and_retries(root)
+        test_v21_to_v22_rolls_back_unified_pi_migration_tables(root)
         test_v3_upgrade_preserves_cleanup_and_indexes_legacy_project(root)
         test_backup_collision_and_corruption(root)
     print("PASS: SQLite runtime gate, migrations, verified backup, rollback, drift, and corruption refusal")

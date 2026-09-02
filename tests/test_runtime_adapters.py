@@ -63,7 +63,8 @@ def test_named_compatibility_matrix_and_opaque_identity() -> None:
     assert pairs[("codex", "herdr")]["operations"]["create"] == "driver_unavailable"
     assert pairs[("codex", "herdr")]["operations"]["resume"] == "unsupported"
     assert pairs[("codex", "tmux")]["operations"]["backend.allocate"] == "unsupported"
-    assert pairs[("pi", "herdr")]["evidence"] == "unverified"
+    assert pairs[("cursor", "herdr")]["operations"]["resume"] == "driver_unavailable"
+    assert pairs[("pi", "herdr")]["evidence"] == "inherited-contract"
     assert pairs[("pi", "herdr")]["operations"]["resume"] == "driver_unavailable"
     assert OpaqueIdentity.decode("codex:not-a-uuid").value == "not-a-uuid"
     try:
@@ -78,6 +79,12 @@ def test_runtime_matrix_cli_and_unsupported_create(root: Path) -> None:
     _, state, _ = seeded_state(root, "matrix")
     matrix_command = invoke_cli(state, "runtime", "matrix")
     assert matrix_command["ok"] is True and matrix_command["result"]["pairs"]
+    production_pairs = {
+        (item["harness"], item["backend"]): item
+        for item in matrix_command["result"]["pairs"]
+    }
+    for provider in ("codex", "cursor", "pi"):
+        assert production_pairs[(provider, "herdr")]["availability"] == "operational"
     with SQLiteStorage(state) as store:
         unavailable = RuntimeLifecycle(store, builtin_contract_registry())
         try:
@@ -215,6 +222,37 @@ def test_non_codex_shared_lifecycle(root: Path) -> None:
         assert_runtime_export_redaction(store)
     operations = [operation for operation, _ in backend.operations]
     assert all(name in operations for name in ("allocate", "create", "title", "prompt", "hook", "interrupt", "resume", "exit", "close"))
+
+
+def test_cursor_shared_contract_supports_exact_resume(root: Path) -> None:
+    _, state, _ = seeded_state(root, "runtime-cursor")
+    backend = DeterministicBackend()
+    registry = AdapterRegistry()
+    cursor = next(
+        adapter
+        for adapter in builtin_harness_contracts()
+        if adapter.contract.kind == "cursor"
+    )
+    registry.register_harness(cursor)
+    registry.register_backend(backend)
+    with SQLiteStorage(state) as store:
+        lifecycle = RuntimeLifecycle(store, registry)
+        created = lifecycle.create(
+            RuntimeCreateSpec(
+                "binding:cursor-fixture",
+                TASK_ID,
+                "cursor",
+                "fixture",
+                "Cursor runtime test",
+                AT3,
+                {},
+                {},
+            )
+        )
+        lifecycle.prompt(created["binding_id"], "Synthetic Cursor prompt.")
+        lifecycle.interrupt(created["binding_id"])
+        lifecycle.resume(created["binding_id"])
+        assert lifecycle.status(created["binding_id"]) == "active"
 
 
 def test_create_rolls_back_allocated_endpoint_before_persistence(root: Path) -> None:
@@ -424,6 +462,7 @@ def main() -> None:
         root = Path(temporary)
         test_runtime_matrix_cli_and_unsupported_create(root / "matrix")
         test_non_codex_shared_lifecycle(root / "lifecycle")
+        test_cursor_shared_contract_supports_exact_resume(root / "cursor-lifecycle")
         test_create_rolls_back_allocated_endpoint_before_persistence(root / "rollback")
         test_unsupported_resume_fails_before_backend_input(root / "unsupported")
         test_named_codex_herdr_and_tmux_contract_behavior(root / "codex-contracts")

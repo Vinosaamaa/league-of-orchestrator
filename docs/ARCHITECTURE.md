@@ -50,6 +50,17 @@ The repository keeps the proven runtime and new storage boundary separate:
   produces an in-memory plan; it never opens a database or writes legacy files.
 - `src/league/request_services.py` owns injected visible-launch and delivery
   adapter boundaries; production adapter selection remains outside the store.
+- `src/league/cursor_steering.py` owns the Cursor/Herdr direct-delivery effect:
+  exact pane/session/status/process proof, idle submit versus working steer,
+  and durable retry fencing. `sqlite_cursor_steering_*` owns only its intent
+  and receipt state; it never reads terminal output or performs provider I/O.
+- `src/league/pi_launch.py` owns explicit Pi runtime launch and exact-session
+  restart through Herdr. Cursor/Codex selection is a descriptor field and Pi
+  CLI argument, never a session-home choice. `pi_session_migration.py` verifies
+  a shell-only restart boundary, first-record JSONL identity/lineage, bounded
+  unified-inventory uniqueness, and byte-exact copy. The schema-22 operation
+  modules persist launch, migration, and restart intent/receipts separately
+  from provider I/O.
 - `src/league/sqlite_continuation_ops.py` owns immutable provider-thread
   lineages, per-cleanup archives, exclusive continuation claims, issue-reopen
   fences, and runtime incarnations. `continuation.py` owns the bounded GitHub

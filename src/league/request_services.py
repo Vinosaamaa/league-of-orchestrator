@@ -226,12 +226,13 @@ class DeliveryService:
         envelope = self.store.outbox_envelope(outbox_id, event_id, recipient_agent_id)
         try:
             receipt = self.adapter.send(target["channel"], target, envelope)
-        except DeliveryUnavailable:
+        except DeliveryUnavailable as exc:
+            reason = str(exc) or "receiver_unavailable"
             self.store.fail_outbox(
                 identity,
                 claim["fence"],
                 target["channel"],
-                "receiver_unavailable",
+                reason,
                 self.clock.after(30),
                 self.clock.now(),
             )

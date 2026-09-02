@@ -39,8 +39,13 @@ class InstalledDeliveryAdapter:
     def __init__(
         self,
         runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+        *,
+        store: Any | None = None,
+        at: str | None = None,
     ) -> None:
         self.runner = runner
+        self.store = store
+        self.at = at
 
     def send(
         self, channel: str, target: dict[str, Any], envelope: dict[str, Any]
@@ -52,6 +57,14 @@ class InstalledDeliveryAdapter:
             ).encode()
         ).hexdigest()
         if channel == "direct":
+            if target.get("harness_kind") in {"cursor", "cursor-thread"}:
+                if self.store is None or self.at is None:
+                    raise DeliveryUnavailable("cursor_steering_unavailable")
+                from .cursor_steering import HerdrCursorSteeringAdapter
+
+                return HerdrCursorSteeringAdapter(
+                    self.store, at=self.at, runner=self.runner
+                ).send(target, envelope)
             routing_target = target.get("routing_name") or target.get("locator")
             if target.get("backend_kind") != "herdr" or not routing_target:
                 raise DeliveryUnavailable("receiver_unavailable")
@@ -142,18 +155,18 @@ def dispatch_event(
         }
     service = DeliveryService(
         store,
-        adapter or InstalledDeliveryAdapter(),
+        adapter or InstalledDeliveryAdapter(store=store, at=at),
         _Clock(at),
         _Ids(),
         dispatcher_id="dispatcher:installed-agent-transition",
     )
     try:
         return service.dispatch_source(outbox_id, event_id, recipient_agent_id)
-    except DeliveryUnavailable:
+    except DeliveryUnavailable as exc:
         return {
             "outbox_id": outbox_id,
             "event_id": event_id,
             "recipient_agent_id": recipient_agent_id,
             "state": "pending",
-            "reason": "receiver_unavailable",
+            "reason": str(exc) or "receiver_unavailable",
         }

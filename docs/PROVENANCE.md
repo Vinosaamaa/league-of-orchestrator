@@ -1323,3 +1323,12 @@ Release `0.2.47` corrects the self-contained release manifest exposed by the
 verified beside the watcher binary. The operator no longer needs an issue
 worktree or any source outside the immutable installed release to run
 `service-install`.
+
+Release `0.2.48` corrects the live launchd environment exposed by the first
+0.2.47 service-install attempt. The rendered LaunchAgent now binds the exact
+canonical writer pointer and puts the installer's validated Python interpreter
+directory first on its bounded `PATH`, preventing launchd from selecting the
+system Python with an SQLite runtime too old for the canonical WAL database.
+The ordinary launcher contract remains unchanged, and a clean-environment
+integration regression proves that the rendered service invokes the canonical
+multi-Squad watcher.

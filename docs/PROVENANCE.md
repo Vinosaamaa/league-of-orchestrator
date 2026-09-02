@@ -1346,3 +1346,11 @@ proving that launchd is unloaded, no unmanaged watcher is live, and the exact
 prior plist and rollback backup bytes are still restored. Both absent-prior and
 existing-prior cases prove failed-start rollback, retry, live startup, and a
 second exact rollback without manual file or database edits.
+
+Release `0.2.50` assigns the next immutable install identity to PR #144's
+reviewed source tree `0037b95d4c2a73a98c312f630d0172d41b4bb36d`. Aggregate
+service Stop validates the complete actor, watcher, fence, runtime, and runtime-
+generation set, while start/restart and idempotent install revalidate exact
+executable/template bytes after liveness and stop the service before refusing
+observable check/use drift. The release preserves 0.2.49 launchd runtime
+selection and exact rolled-back-install recovery.

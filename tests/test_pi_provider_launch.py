@@ -16,6 +16,7 @@ sys.path[:0] = [str(ROOT / "src"), str(ROOT / "tests")]
 from league.pi_launch import (  # noqa: E402
     HerdrPiLaunchAdapter,
     deterministic_pi_session_id,
+    pi_metadata_source,
     pi_start_arguments,
     resume_pi_after_restart,
 )
@@ -110,6 +111,7 @@ class FakePiHerdr:
                 "launch_descriptor_sha256": self.env["LEAGUE_LAUNCH_DESCRIPTOR_DIGEST"],
                 "launch_descriptor_id": self.env["LEAGUE_LAUNCH_DESCRIPTOR_ID"],
                 "launch_state_root": self.env["LEAGUE_STATE_ROOT"],
+                "launch_metadata_source": self.env["LEAGUE_LAUNCH_METADATA_SOURCE"],
                 "launch_activation_phase": "session_started",
             })
         if self.parent_path:
@@ -122,7 +124,7 @@ class FakePiHerdr:
             "interactive_ready": True,
             "name": self.env["LEAGUE_ROUTING_ALIAS"],
             "display_agent": provider,
-            "metadata_source": "league:pi-launch:" + self.env["LEAGUE_LAUNCH_DESCRIPTOR_DIGEST"][:16],
+            "metadata_source": self.env["LEAGUE_LAUNCH_METADATA_SOURCE"],
             "cwd": self.env["LEAGUE_WORKTREE"],
             "foreground_cwd": self.env["LEAGUE_WORKTREE"],
             "terminal_title": title,
@@ -190,6 +192,7 @@ class FakePiHerdr:
                 "league-routing-alias": "LEAGUE_ROUTING_ALIAS",
                 "league-descriptor-digest": "LEAGUE_LAUNCH_DESCRIPTOR_DIGEST",
                 "league-descriptor-id": "LEAGUE_LAUNCH_DESCRIPTOR_ID",
+                "league-metadata-source": "LEAGUE_LAUNCH_METADATA_SOURCE",
             }
             for flag, key in explicit.items():
                 option = f"--{flag}"
@@ -411,6 +414,10 @@ def test_fork_metadata_restart_and_duplicate_suppression(root: Path) -> None:
     restart_start = [call for call in fake.calls if call[1:3] == ("agent", "start")][-1]
     assert "--session" in restart_start and stored["session_path"] in restart_start
     assert "--fork" not in restart_start
+    assert "--league-metadata-source" in restart_start
+    reports = [call for call in fake.calls if call[1:3] == ("pane", "report-metadata")]
+    assert any("--clear-token" in call and "launch_descriptor_digest" in call for call in reports)
+    assert any("--applies-to-source" in call and "launch_metadata_source=" in " ".join(call) for call in reports)
     duplicate = resume_pi_after_restart(
         store,
         descriptor_id=descriptor["descriptor_id"],
@@ -757,6 +764,31 @@ def test_provider_mapping_and_role_placement(root: Path) -> None:
     store.close()
 
 
+def test_pi_metadata_source_reuses_owned_legacy_source(root: Path) -> None:
+    worktree = root / "pi-metadata-source" / "worktree"
+    worktree.mkdir(parents=True)
+    descriptor = _descriptor(root / "pi-metadata-source", worktree, "cursor", "resume")
+    descriptor.update(
+        {
+            "descriptor_digest": "b" * 64,
+            "routing_name": "lux",
+        }
+    )
+    legacy = {
+        "launch_runtime_kind": "pi",
+        "launch_routing_alias": "lux",
+        "launch_descriptor_sha256": "a" * 64,
+    }
+    assert pi_metadata_source(descriptor, legacy) == f"league:pi-launch:{'a' * 16}"
+    explicit = {**legacy, "launch_metadata_source": "league:pi-launch:stable"}
+    assert pi_metadata_source(descriptor, explicit) == "league:pi-launch:stable"
+    assert pi_metadata_source(
+        {**descriptor, "metadata_source": "league:pi-launch:carried"}
+    ) == "league:pi-launch:carried"
+    foreign = {**legacy, "launch_routing_alias": "other"}
+    assert pi_metadata_source(descriptor, foreign) == f"league:pi-launch:{'b' * 16}"
+
+
 def test_cli_exposes_explicit_pi_inputs() -> None:
     completed = subprocess.run(
         (str(ROOT / "bin" / "league"), "assign", "run", "--help"),
@@ -790,6 +822,7 @@ def main() -> None:
         root = Path(directory)
         test_fork_metadata_restart_and_duplicate_suppression(root)
         test_provider_mapping_and_role_placement(root)
+        test_pi_metadata_source_reuses_owned_legacy_source(root)
         test_unified_inventory_migration_preserves_bytes_and_lineage(root)
         test_already_unified_shotcaller_session_is_adopted_without_copy(root)
         test_already_unified_child_uses_bound_parent_evidence_without_legacy_profile(root)

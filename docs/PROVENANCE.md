@@ -1370,3 +1370,10 @@ Supported canonical launch/resume writers cannot interleave with the proof;
 orphan provider processes, unstructured absence, and oversized proof or identity
 values fail closed. Provider aliases are normalized to canonical adapter
 identity, and indexed lookups bound active callsign/assignment checks.
+
+Release `0.2.51` assigns the next immutable install identity to merged PR #146
+at main commit `8778dc2982903807151bc4b3f5b1f172afeb5836` and reviewed source
+tree `db5463ffe123a5644e51a1d6794eeda7c9644929`. The release preserves the
+schema-24 stopped-agent retirement behavior exactly; its delta changes only the
+version contract, deterministic release-staging expectations, and this
+provenance record.

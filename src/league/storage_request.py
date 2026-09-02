@@ -184,6 +184,15 @@ class RequestStorage(Protocol):
         at: str,
     ) -> dict[str, Any]: ...
 
+    def accept_routed_delivery(
+        self,
+        event_id: str,
+        recipient_agent_id: str,
+        runtime_instance_id: str,
+        leased_until: str,
+        at: str,
+    ) -> dict[str, Any]: ...
+
     def release_request_claim(
         self, request_id: str, runtime_instance_id: str, claim_token: str, at: str
     ) -> dict[str, Any]: ...

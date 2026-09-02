@@ -179,28 +179,11 @@ class AdapterRegistry:
 
 
 def builtin_harness_contracts() -> tuple[DeclaredHarnessAdapter, ...]:
-    return (
-        DeclaredHarnessAdapter(
-            AdapterContract(
-                "codex",
-                "harness",
-                frozenset(HARNESS_CAPABILITIES - {"resume"}),
-                "inherited-contract",
-                "available",
-                "Compatibility contract for the proven Codex watcher behavior; real cutover canary is issue #23.",
-            )
-        ),
-        DeclaredHarnessAdapter(
-            AdapterContract(
-                "pi",
-                "harness",
-                frozenset(HARNESS_CAPABILITIES),
-                "unverified",
-                "available",
-                "Non-Codex contract exercised only through deterministic isolated doubles until issue #23.",
-            )
-        ),
-    )
+    # Compatibility facade: established RuntimeLifecycle callers keep this
+    # import while contracts now come from the explicit provider registry.
+    from .agent_adapters import builtin_agent_adapter_registry
+
+    return tuple(builtin_agent_adapter_registry().adapters())
 
 
 @dataclass(frozen=True)
@@ -265,3 +248,47 @@ def builtin_registry(backends: tuple[BackendAdapter, ...]) -> AdapterRegistry:
 
 def builtin_contract_registry() -> AdapterRegistry:
     return builtin_registry(tuple(builtin_backend_contracts()))
+
+
+def production_capability_matrix() -> dict[str, Any]:
+    """Report low-level compatibility honestly and list semantic facades separately.
+
+    ``RuntimeLifecycle`` still consumes the original low-level harness/backend
+    contract, so its operations remain ``driver_unavailable`` for built-ins.
+    Repository lifecycle commands use the explicit semantic registries exposed
+    in ``lifecycle_operations``; the two surfaces must not be conflated.
+    """
+
+    from .agent_adapters import builtin_agent_adapter_registry
+    from .multiplexer_adapters import builtin_multiplexer_adapter_registry
+
+    pairs = builtin_contract_registry().capability_matrix()["pairs"]
+    agents = builtin_agent_adapter_registry()
+    multiplexers = builtin_multiplexer_adapter_registry()
+    for pair in pairs:
+        multiplexer = multiplexers.adapter(str(pair["backend"]))
+        agent = agents.adapter(str(pair["harness"]))
+        pair["lifecycle_operations"] = {}
+        for operation in sorted(agent.lifecycle_operations):
+            required = agent.multiplexer_requirements.get(
+                operation, frozenset()
+            )
+            pair["lifecycle_operations"][operation] = (
+                "supported"
+                if required <= multiplexer.capabilities
+                else "driver_unavailable"
+            )
+        pair["multiplexer_operations"] = {
+            operation: "supported"
+            for operation in sorted(multiplexer.capabilities)
+        }
+        pair["semantic_availability"] = (
+            "operational"
+            if "visible_launch" in multiplexer.capabilities
+            else "contract-only"
+        )
+    return {
+        "schema": "league.adapter-matrix.v1",
+        "driver": "low-level-contract+explicit-semantic-facades",
+        "pairs": pairs,
+    }

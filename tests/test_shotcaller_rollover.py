@@ -85,7 +85,7 @@ def descendant_runtime_receipt(
         "champion_agent_id": target["champion_agent_id"],
         "task_id": target["task_id"],
         "runtime_instance_id": runtime_instance_id,
-        "harness_kind": "codex-thread",
+        "harness_kind": target["kind"],
         "backend_kind": "herdr",
         "session_ref": target["thread_id"],
         "endpoint": target["address"],
@@ -1169,7 +1169,7 @@ def test_snapshot_refresh_cli_requires_the_exact_switched_identity() -> None:
         capture_output=True,
         check=False,
     )
-    assert completed.returncode == 0, completed.stderr
+    assert completed.returncode == 0, (completed.stdout, completed.stderr)
     for option in (
         "--operation-id",
         "--refresh-id",
@@ -1289,7 +1289,7 @@ def test_snapshot_refresh_cli_runs_two_stable_herdr_inventories(root: Path) -> N
         capture_output=True,
         check=False,
     )
-    assert completed.returncode == 0, completed.stderr
+    assert completed.returncode == 0, (completed.stdout, completed.stderr)
     payload = json.loads(completed.stdout)
     assert payload["command"] == "rollover.refresh-bindings"
     assert payload["result"]["snapshot"]["version"] == 2
@@ -1473,6 +1473,59 @@ def test_snapshot_refresh_settled_legacy_readiness_live_drift_rolls_back(
         assert store.connection.execute(
             "SELECT COUNT(*) FROM events"
         ).fetchone()[0] == before_events
+
+
+def test_rollover_runtime_adapters_preserve_all_registered_agent_kinds(
+    root: Path,
+) -> None:
+    worktree = (root / "provider-neutral-rollover-adapters").resolve()
+    worktree.mkdir()
+    cases = (
+        ("codex-thread", "codex", "codex", "11111111-1111-4111-8111-111111111111"),
+        ("cursor-thread", "cursor", "cursor", "22222222-2222-4222-8222-222222222222"),
+        ("pi-thread", "pi", "codex", "/synthetic/pi/sessions/codex.jsonl"),
+        ("pi-thread", "pi", "cursor", "/synthetic/pi/sessions/cursor.jsonl"),
+    )
+    for index, (harness_kind, agent_kind, provider_kind, session_ref) in enumerate(cases):
+        pane_id = f"pane:provider:{index}"
+        terminal_id = f"terminal:provider:{index}"
+        target = {
+            "champion_agent_id": f"agent:provider:{index}",
+            "task_id": f"task:provider:{index}",
+            "callsign": "Annie",
+            "kind": harness_kind,
+            "thread_id": session_ref,
+            "backend": "herdr",
+            "routing_name": "annie",
+            "display_agent": provider_kind,
+            "address": pane_id,
+            "worktree": str(worktree),
+            "canonical_row_digest": "a" * 64,
+            "snapshot_row_digest": "b" * 64,
+            "capabilities": ["task.execute"],
+        }
+        exact = {
+            "agent": agent_kind,
+            "agent_session": {"value": session_ref},
+            "agent_status": "done",
+            "interactive_ready": True,
+            "cwd": str(worktree),
+            "foreground_cwd": str(worktree),
+            "name": "annie",
+            "pane_id": pane_id,
+            "state_change_seq": 2,
+            "terminal_id": terminal_id,
+        }
+        snapshot = HerdrRolloverSnapshotAdapter(
+            FakeHerdrInventory([exact])
+        ).observe([target])[0]
+        assert snapshot["thread_id"] == session_ref
+        descendant = HerdrDescendantRuntimeAdapter(
+            FakeHerdrInventory([exact])
+        ).verify(target, f"runtime:provider:{index}")
+        assert descendant["harness_kind"] == harness_kind
+        assert descendant["session_ref"] == session_ref
+        assert descendant["display_agent"] == provider_kind
 
 
 def test_snapshot_refresh_refuses_a_mismatched_canonical_runtime(root: Path) -> None:
@@ -4892,6 +4945,7 @@ def main() -> None:
         test_snapshot_refresh_null_route_cas_and_fault_restore_exact_state(root)
         test_snapshot_refresh_adapter_requires_one_exact_live_identity(root)
         test_snapshot_refresh_settled_legacy_readiness_live_drift_rolls_back(root)
+        test_rollover_runtime_adapters_preserve_all_registered_agent_kinds(root)
         test_snapshot_refresh_refuses_a_mismatched_canonical_runtime(root)
         test_runtime_capability_superset_refreshes_and_reconciles_without_downgrade(root)
         test_runtime_capability_contract_refuses_missing_and_unverified(root)

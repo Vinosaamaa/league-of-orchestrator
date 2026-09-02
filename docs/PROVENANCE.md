@@ -31,7 +31,7 @@ used for that comparison.
 
 | Candidate path | Toolkit source path | Source SHA-256 | Adaptation |
 | --- | --- | --- | --- |
-| `src/agent_watcher.py` | `agent_watcher.py` | `ab77f3f0d97cb1b09e34c005c45e90b94a8c0e0612f115169bc62827e524e0d7` | None; byte-for-byte import. |
+| `src/agent_watcher.py` | `agent_watcher.py` | `ab77f3f0d97cb1b09e34c005c45e90b94a8c0e0612f115169bc62827e524e0d7` | Originally byte-for-byte; issue #66 deliberately removes the universal automatic second-Stop allowance while retaining the explicit operator one-shot override. |
 | `bin/agent-watcher` | `agent-watcher` | `3a049f5315e131bda3deed22cbd18f5b14f7d54b2821fcb8dddbda3d9fbba034` | Launch target changed to `src/agent_watcher.py`. |
 | `config/agent-routing.example.json` | `global-agent-instructions/agent-routing.example.json` | `2d475dd727526336b6635d4cf7b9af14c7e2497456ebdff3117ae4adcea3bbdb` | None. |
 | `tests/test_agent_watcher.py` | `shell-completions/test-agent-watcher.py` | `203540768c12be053871cf287f5c7a32cf28319eac9be0f2e0d38f634fabad70` | CLI path, description, synthetic identity, and test-only subprocess ceilings. |
@@ -290,10 +290,16 @@ opaque runtime bindings, typed resources, cleanup operations/actions/receipts,
 and durable routing evidence; it does not duplicate request claims,
 assignments, delivery outbox, watcher, or Stop state machines.
 
-Codex+Herdr and Codex+tmux are named adapter contracts. Pi and all destructive
-cleanup adapters in the suite are deterministic isolated doubles, not
-real-runtime evidence. Installed drivers, a genuine isolated canary, global
-installation, live migration, cutover, and rollback remain issue-#23 gates.
+Codex+Herdr and Codex+tmux were the original named adapter contracts. Issue #84
+deliberately adds Cursor+Herdr and Pi+Herdr to the production visible-assignment
+and cleanup driver while leaving the generic `RuntimeLifecycle` backend
+contract-only. Provider session values remain opaque to core storage; the
+provider boundary owns exact validation and resume arguments. Pi prompt/Stop
+capture and shell confinement are a release-local, per-process extension and
+sandbox profile, not a global Pi configuration rewrite. Focused fake-adapter
+tests cover Codex, Cursor, and Pi; they are not live-provider evidence. Merge,
+installation, live provider canaries, cutover, rollback, and teardown remain
+separate gates.
 
 ## Skill-contract implementation provenance
 
@@ -745,14 +751,13 @@ with renewable/fenced ownership. Stop remains an omission backstop and does not
 merge requests. A source launchd template declares the intended owner boundary
 but is neither rendered nor installed.
 
-The deliberate supervision follow-up adds Calm filtering plus durable
-supervising/paused policy state, one exact pause receipt, bounded resume
-reconciliation, one-shot Champion Stop protection, and fenced canonical
-runtime reconciliation. Calm with supervision on keeps an event-driven wait
-outside model inference and uses the registered Unix socket. Calm with
-supervision off ends the model turn while the non-model monitor and its lease
-remain live; routine transitions stay silent and attention uses the verified
-exact-once direct recipient path. Real owner prompts keep priority.
+The deliberate supervision follow-up keeps notification and model attachment as
+independent axes. `all_material`/`calm` controls only filtering; Calm persists
+routine transitions silently in every attachment state. `attached`/`detached`
+controls only model participation while the non-model monitor, lease, and socket
+stay live. Attached delivery uses the fenced watcher channel; detached delivery
+uses the exact-once direct recipient path; attach returns a bounded silent-event
+reconciliation. Real owner prompts keep priority.
 
 Normal transition delivery is immediate. A missing runtime gets one
 configurable 60-second grace before CAS-safe reconciliation. A 300-second
@@ -761,36 +766,72 @@ renews silently every 20 seconds, ownership expires after 60 seconds, and the
 launchd template throttles restart to five seconds. The retained one-second
 `supervise` loop is diagnostic compatibility, not the production runtime.
 
-Owner-source installed 0.2.28 truth remains distinct: its foreground legacy
-loop has a 30-second runtime snapshot, two matching observations (about 60
-seconds) before a stall fallback, and a 300-second liveness deadline that only
-resets silently. It has no separate OS timer or always-running liveness process,
-and both timers vanish when the foreground loop exits. Those legacy timers are
-not the source candidate behavior. The launchd/socket source in this change
-remains uninstalled.
+Installed 0.2.45 truth remains distinct. Read-only owner evidence showed the
+release healthy but `agent-watcher --shotcaller Ashe service-status` returned
+`live:false`, `monitor_live:false`, `reason:registration_missing`;
+`service-resume` refused `supervisor_not_live`, and no persistent service process
+existed. The source candidate therefore adds a hash-authorized launchd
+install/start/restart/rollback controller around the existing template. This
+change does not execute that controller, install the Herdr plugin, restart Herdr,
+or mutate live canonical state.
 
-The post-0.2.35 issue-#66 Stop correction treats Codex `turn_id` as a turn
-scope, not a per-prompt event key. Each real `UserPromptSubmit` invocation
-mints one opaque League capture identity, carries that same identity through a
-broker retry or direct fallback, and binds it to the immutable prompt/source
-provenance. Two genuine same-turn invocations therefore remain distinct even
-when their prompt bytes are identical. Stop rearms only from a committed
-durable wait event; a fresh-looking terminal identifier alone cannot add a
-second block. The exact pending League feedback remains one-time suppressed,
-and the matching Stop retry is allowed. This source-only correction adds no
-schema migration and performs no installation, hook mutation, live
-reconciliation, or runtime cutover.
+The post-0.2.35 issue-#66 capture correction still treats Codex `turn_id` as a
+turn scope, not a per-prompt event key. Each real `UserPromptSubmit` invocation
+mints one opaque League capture identity, carries it through broker retry or
+direct fallback, and binds it to immutable prompt/source provenance. Two genuine
+same-turn invocations remain distinct even when bytes match. This successor
+intentionally supersedes the old anti-loop behavior: an attached Shotcaller now
+blocks every unchanged Stop while any obligation remains. A detached Shotcaller
+blocks owner-actionable work and may allow delegated-only work only when the
+stored lease, runtime generation, Unix locator, watcher ID, and fence still match
+its detachment receipt. Exact League feedback suppression remains one-time, but
+it never grants Stop. The legacy focused regression is
+`tests/test_agent_watcher.py`; canonical repeated-Stop and detachment coverage is
+in `tests/test_shotcaller_stop.py`.
 
 The issue-#123 successor deliberately replaces the one-binding physical
 supervisor assumption with one root-scoped service that discovers active Squad
 Shotcallers and holds an independent durable fence for each. Root lock/socket
 ownership remains singular, but binding registration, cursor, generation,
-priority, Calm policy, recovery, and delivery identity never cross Squads.
-`request turn` now marks its exact active/committed boundary: attention persists
-without starting a concurrent model turn, and Stop hands pending delivery to a
-live fenced service only after the request commit and only when no immediate
-owner action remains. The launchd template provides RunAtLoad, failed-exit
-restart, and five-second throttling but remains inert and uninstalled.
+priority, notification policy, attachment, recovery, and delivery identity never
+cross Squads. The launchd controller accepts only exact source/template hashes,
+preserves one exact prior plist and manifest, uses RunAtLoad plus failed-exit
+restart, waits for aggregate live status, restarts through the OS manager, and
+rolls back only matching installed/backup bytes. `service-run` is never launched
+by a model turn.
+
+The installed Herdr asynchronous restore command remains provider- and
+multiplexer-neutral. It now requires the OS watcher to be live before restart,
+pings the exact Shotcaller actor, CAS-rebinds only that restored runtime and
+watcher fence, verifies it again, then replays metadata for restored Codex and Pi
+sessions (including Pi with Codex or Cursor provider). It never creates, resumes,
+prompts, or closes a process.
+
+### Current-main reconciliation and encountered failures
+
+This successor reconciles reviewed PR-#126 head
+`ac6ce35b3a46c78b62afdd6018bda8aacc325d19` with `origin/main`
+`02376107ebf2544191cea5de0571ecaf26bfea1c` (the League 0.2.45 / PR-#138
+line) without replacing its Codex, Pi, Cursor CLI, Herdr, or tmux adapter
+contracts. The reconciliation encountered and retained the following bounded
+failure evidence:
+
+| Failure | Resolution / remaining owner action |
+| --- | --- |
+| Installed 0.2.45 had no watcher registration/process; status reported `registration_missing` and attachment resume refused `supervisor_not_live`. | Added the source-only exact launchd install/start/restart/rollback path and actionable Stop/attachment refusal. Ashe still owns installation and live proof. |
+| Main integration conflicted in the roadmap, hook broker, and persistent runtime. | Kept #84 adapter-neutral broker/restore behavior and merged it with actor-targeted, per-Squad bindings; focused provider/multiplexer and multi-Squad tests cover the result. |
+| The first restored-agent focused run rebound Ashe successfully but status still read the empty active-Squad registration snapshot for the explicit compatibility binding. | Status now reads the resolved exact actor registration in the same canonical snapshot; restored Codex/Pi metadata and watcher delivery pass. |
+| Old Calm tests expected pause to mutate monitor state and old committed-turn tests expected attached Stop handoff. | Replaced them with the independent four-state notification/attachment matrix and repeated attached-Stop blocking. Deprecated names are aliases only. |
+| The first rollback assertion expected one top-level aggregate reason. | Aggregate status remains per-Squad and the test now verifies every binding's `registration_missing` reason. |
+| The first exact-once delivery assertion counted unrelated seeded startup backlog. | Exact-once acceptance now counts only the target event identity and separately proves one outbox attempt and one recipient receipt. |
+| Short test leases exposed a fence race: routine renewal rotated the fence, so a status/publish snapshot could become stale while the same process still owned the service; detachment receipts also expired semantically on renewal. | Routine renewal now extends the same exact live-owner fence; only process startup, stale-owner takeover, or restored-runtime rebind advances it. Five repeated delivery runs and restart fence assertions pass. |
+| The first affected request-turn run omitted `turn_commit_pending` from attached aggregate obligations after the detachment split. | The attached aggregate now retains the pending-turn guard; the grouped request lifecycle passes. |
+| Main's runtime-replacement pre-tool test expected the pre-#123 two-field broker result. | Its exact expectation now includes the resolved `actor_agent_id` required for per-Squad dispatch; the full provider-neutral runtime lifecycle passes. |
+| The first acceptance run used a legacy synthetic wake locator for direct detachment. | The fixture now declares the same persistent/Unix identity required by production while remaining temporary and effect-free. |
+| Main's in-place Shotcaller bootstrap has a valid pre-Squad request turn, but the first multi-Squad integration required an active Squad too early. | Turn ownership again accepts one exact active Shotcaller; only OS service discovery requires an active Squad. Bootstrap and multi-Squad gates both pass. |
+
+No row above involved a live install, Herdr restart, canonical-state mutation,
+real multiplexer effect, or provider call.
 
 The 3×3 prompt-size/intent-count matrix measures exact capture, JSON sideband,
 candidate linking, SQLite commit, and one-process completion on synthetic
@@ -803,6 +844,15 @@ Current main's issue-coupled continuation, rollover-snapshot, scoped
 autonomous-delivery, and request-reconciliation migrations remain canonical
 schemas 16 through 19. Issue #81 appends protected-gate authority propagation
 as schema 20; it does not renumber, replace, or mutate any earlier migration.
+Issue #84 appends Cursor steering intent/effect receipts as schema 21. It does
+not rewrite delivery history or treat a terminal command's exit status as
+proof that Cursor accepted the steer.
+The same issue appends Pi provider launch, unified-session migration, and
+restart-effect receipts as schema 22. It does not alter any earlier migration.
+Restart display reconciliation adds no migration. It reconstructs independent
+agent and multiplexer adapter selections from the existing schema-22 runtime,
+assignment, Shotcaller publication, context-delivery, and Pi launch records.
+Schemas 1 through 22 remain unchanged.
 The deterministic acceptance dry-run report follows the current schema target. Its
 legacy-source digest and exact
 post-import parity digest remain unchanged; only the truthful target-version
@@ -916,3 +966,341 @@ version. Route events,
 agent updates, snapshot rows, and the rollover pointer share one transaction;
 fault or CAS failure rolls all of them back. No schema, live rollover, hook,
 installation, layout, process, task owner, or successor row changes here.
+
+## Cursor CLI steering provenance
+
+Issue #84 preserves the existing canonical delivery/outbox boundary and adds
+one provider-specific effect adapter behind it. The defect was that generic
+direct delivery treated every interactive agent as an idle prompt target. That
+cannot safely steer a working Cursor CLI: one Enter submits an idle prompt,
+while Cursor's working-state interrupt contract is literal text followed by
+two Enter keys. An exit-zero input command alone also cannot prove that the
+same Cursor session observed the input.
+
+The adapter therefore binds the canonical runtime generation to exact live
+Herdr evidence: pane, Cursor session, routing name when present, interactive
+readiness, status, revision, state-change sequence, one foreground
+`cursor-agent` process, PID, and foreground process group. It uses only
+supported direct Herdr commands. It does not scrape a transcript or run a
+Python or heredoc command wrapper. Idle/done delivery uses `herdr agent prompt`
+for literal text plus one Enter. Working delivery records its intent, repeats
+the complete observation, sends literal text, records that phase, repeats the
+unchanged observation again, and only then sends exactly two Enter keys.
+
+Schema 21 records prompt length and digest rather than prompt bytes. A retry
+after a proved effect returns the same receipt without terminal input. A retry
+after a refusal returns the same refusal. A retry after an incomplete intent or
+text phase refuses as outcome-ambiguous, preventing duplicate text or a second
+interrupt. Wrong pane, replaced session, route/provider mismatch, unavailable
+input, missing or ambiguous process, state race, command ambiguity, and absent
+post-effect state advance all fail closed.
+
+Routed-request prompts carry a versioned structured envelope plus the complete
+`league request accept-routed` argument vector. That stable command derives its
+lease and deterministic claim token from current canonical state, so the
+Cursor Shotcaller does not reconstruct internal timestamps or claim details.
+`league delivery dispatch` exposes the state-aware provider selection through
+the stable CLI.
+
+Focused synthetic installed-adapter tests cover idle submit, working steer,
+the pre-interrupt state race, duplicate retry, wrong pane, replaced session,
+ambiguous/missing process, unavailable input, post-steer acknowledgement, and
+idempotent routed acceptance. The migration test proves schema-20-to-21 crash
+rollback and exact retry. This source candidate does not install League, steer
+a live Cursor process, replay an event, replace a Champion, clean up a runtime,
+or claim owner-visible acceptance.
+
+## Pi provider lifecycle and unified-inventory provenance
+
+The live integration failure that triggered the schema-22 slice had four
+separate causes. A restored Herdr layout did not restart Pi. The runtime record
+did not receive Pi's exact session path. Pi's native late title overwrote the
+canonical callsign/task presentation. Finally, three Cursor-backed Pi sessions
+were absent from plain Pi's All-session resume view.
+
+The last failure came from a temporary wrapper created by Kuma. It selected
+Cursor correctly but also set a provider-specific Pi home. That turned a
+provider choice into a second session pool, so sessions written there were
+invisible to the standard unified Pi inventory. The wrapper has since been
+deleted. This candidate has no wrapper dependency and never sets
+`PI_CODING_AGENT_DIR` or `--session-dir`; Cursor and Codex are provider
+arguments to one Pi runtime and one inventory.
+
+The durable launch descriptor records runtime, provider, model, effort, exact
+cwd, role, placement, callsign, project code, two-word task label, routing
+name, session mode, lineage, and release/state roots. A new project fork can
+occur once for an exact parent path plus cwd. Restarts use the bound child
+session path, never fork again. One restart intent/effect key prevents a retry
+from starting a second process or session.
+
+Pi's trust prompt is treated as pre-activation. League first verifies the
+assigned worktree as the exact repository root and only then supplies Pi's
+scoped `--approve` input for that cwd; it does not change global trust. The Pi
+extension reports canonical metadata only after native `session_start` exposes
+an absolute session file and ID. Activation requires exact cwd, one Pi process,
+provider/session/descriptor metadata, canonical title, and two consecutive
+stable readbacks. A late native `π - session - folder` title therefore cannot
+win the activation race.
+
+For legacy sessions, migration is permitted only when the exact restored Herdr
+pane is shell-only. League reads the first JSONL record, verifies the parent
+session's first record when present, bounds the unified inventory scan, rejects
+duplicate IDs or changed bytes, and creates a mode-0600 destination with
+exclusive create and fsync. It never rewrites the JSONL or parent path. Crash
+retries recognize the same digest and finish the descriptor bind without
+creating a second identity.
+
+Implementation failures were kept as regression evidence. The first focused
+test used a private SQLite timestamp helper that the storage facade does not
+expose; the implementation now uses a local strict RFC3339 validator. The
+first late-title test injected the native title into the start-command receipt
+instead of the first live readback; the fake now models the real ordering. The
+schema-21 rollback test initially advanced through the new schema-22 target;
+it now pins its intended target while schema 22 has its own crash/rollback
+test. None of these failures changed live Pi sessions.
+
+The controlled three-session acceptance found additional provider-faithful
+boundaries. Unified Pi initially had no Cursor credential even though the
+provider documents automatic desktop/CLI discovery; a no-session canary failed
+closed, then the supported `/login cursor` flow succeeded and the canary passed.
+Herdr represents a shell-only pane as one shell process, not always an empty
+process list, so the guard now accepts only the exact shell PID/process group,
+known shell executable, and stored cwd. Pi rejected the first extension load
+because a strict-mode local binding used the reserved name `arguments`; the
+binding was renamed and an explicit extension-load smoke was added.
+
+Restored panes also do not propagate League or pane environment into the new Pi
+child. Every required launch field, including the exact pane, is now a Pi CLI
+extension flag. Herdr metadata retains higher-priority legacy token names and
+bounds token/path length, so launch proof uses collision-free `launch_*`
+metadata, native session paths when available, and SHA-256 for paths and parent
+lineage. A first parent-digest key exceeded Herdr's supported key length and was
+shortened. A nanosecond metadata sequence exceeded Herdr's safe numeric range;
+the adapter now matches Pi's microsecond-scale sequence.
+
+Two attempted metadata commands used a dotted name and then a command added
+after an explicit-extension reload. Pi treated each as a model prompt because
+dotted names are not parsed as slash commands and `/reload` does not retain a
+new CLI-explicit extension command in that already-running process. Both turns
+were interrupted after read-only discovery commands; the issue worktree stayed
+clean. Exact restart reconciliation now lives in the launcher, not a reload
+command. Herdr also accepted but did not expose a supplemental native session
+report for one already-detected legacy pane. For exact resume only, League uses
+the byte-bound durable path plus launch path digest and exact process/cwd; fresh
+create/fork still requires Herdr's native absolute session path.
+
+Final live acceptance copied the three stopped JSONLs byte-for-byte into the
+unified inventory, preserved both Champion parent paths, showed all three in
+plain `pi --resume` under All, resumed the exact stored children and cwd, and
+returned effect-applied receipts. Repeating all three restart IDs returned the
+stored receipts with unchanged foreground PIDs. The clean issue-215 worktree
+remained clean, and the issue-190 dirty/untracked inventory remained exact.
+This is a Pi provider installation and live source-candidate acceptance; it is
+not a League merge or League installation claim.
+
+Independent exact-head review then found five pre-landing contract gaps. The
+Pi runtime receipt used its UUID where Herdr cleanup reads the provider-native
+JSONL path; the receipt now binds `thread_id` to that path while reporting both
+path and UUID. The routed Cursor action omitted the required state root; the
+emitted argv now includes it and the test executes that exact argv. Restart
+did not revalidate its stored cwd before supplying scoped approval. The first
+fix only required a canonical Git worktree and still admitted a different
+repository recreated at the same path. The descriptor now binds the canonical
+repository root and exact `.git` marker filesystem identity; restart must
+reproduce that digest before any resume. The
+inventory scan returned on its first matching UUID and could miss a later
+duplicate; it now completes the bounded scan and refuses more than one match.
+Finally, terminal Cursor status `done` was treated as idle; steering now
+refuses it without an input effect. Focused regressions cover all five fixes.
+
+A final pre-landing pass found two Pi retry defects that the earlier fresh-
+launch acceptance did not exercise. An already-active launch could reuse the
+correct pane but context verification discarded its stored tab and terminal
+IDs, so the idempotent assignment retry failed after prompting. Context
+verification now reloads and fences the complete active endpoint before its
+readback. Pi launch selection also performed the Codex continuation lookup
+before choosing the runtime branch, even though Pi owns an explicit session
+descriptor. That lookup now exists only in the Codex branch. The focused Pi
+provider and visible-launch suites cover the replacement behavior, and the
+full repository gate passes without touching a live Pi process.
+
+Installed 0.2.39 acceptance then exposed four source-only blind spots. The
+release manifest did not include the Pi extension or sandbox profile, the
+exact resume command had no Herdr-startup caller, migration rejected sessions
+already stored in the unified inventory, and restart applied Champion Git
+worktree proof to Shotcallers intentionally rooted at a non-Git project
+folder. The corrective release stages both integration files explicitly,
+allows byte-identical in-place adoption only at the same shell-only boundary,
+keeps exact Git identity mandatory for Champions, and binds a Shotcaller to
+the exact project-directory device and inode. Launch metadata now carries the
+durable descriptor ID and state root required by the Herdr startup plugin;
+the plugin derives one generation from the live socket identity and invokes
+the existing effect-fenced resume command. Focused acceptance covers the
+installed file manifest, already-unified adoption, role-aware cwd binding,
+and repeated same-generation recovery. A live three-agent restart remains the
+final installed gate.
+
+The same install found a macOS pointer-update hazard: moving a temporary
+symlink onto a stable symlink whose target is a directory followed the target
+instead of replacing the stable link. The install removed only that temporary
+artifact and used an atomic path replacement. Future installers must verify
+the stable link target after every switch and must not use directory-following
+`mv` semantics for release activation.
+
+The final single-profile adoption correction preserves Pi's immutable child
+history without reviving the retired provider-specific inventory. Two existing
+Champion children still contain their historical parent path, while the exact
+parent JSONL already exists in the unified inventory under the same filename.
+Migration manifest v2 therefore binds a separately verified parent-evidence
+path and digest inside the unified root. League validates its regular-file
+identity, containment, filename, digest, and session UUID, but leaves the child
+bytes and embedded parent path unchanged. Root sessions cannot declare parent
+evidence. A proposal to recreate the retired profile path with filesystem links
+was rejected because it would violate the one-active-profile contract; no such
+path is created by this release.
+
+The first 0.2.41 installation staging attempt also refused before activation
+because the prior installed Python release had accumulated bytecode cache files.
+The repository-local launchers previously depended on the caller to suppress
+bytecode, and the staged acceptance environment accidentally supplied that
+setting, hiding the installed-shape defect. Both League launchers now suppress
+bytecode themselves. Acceptance removes the masking environment for launcher
+checks, executes both launchers, and then compares every post-execution staged
+file and digest with the source-owned release manifest. The rejected staging
+directory was never activated and contained no canonical data.
+
+The first adopted Shotcaller resume then exposed a Herdr metadata-capacity
+boundary that the fake adapter did not model. The new descriptor digest selected
+a second League metadata source while the old source already contributed enough
+tokens to reach Herdr's limit. Pi started with the exact session, but the
+post-start metadata report refused before the restart effect was committed.
+The same intent was preserved and completed without starting another process by
+reusing the owner-verified prior source and clearing only redundant League-owned
+legacy runtime/session tokens. The permanent launcher now derives that source
+only from matching Pi routing metadata, passes it explicitly to the Pi extension,
+and publishes a reduced non-duplicative token set. Native Pi session identity,
+toolkit presentation tokens, JSONL bytes, and Job Journey state remain unchanged.
+
+## Provider-neutral restart display provenance
+
+A real named Herdr restart restored the same Codex/Pi sessions, panes, working
+directories, and process identities without duplicates, but discarded every
+League display token. The sidebar's role/provider/title fallback matched its
+missing inputs. A display-only replay restored all four named presentations,
+which isolated ownership to League restart replay rather than the renderer.
+
+The first source candidate incorrectly introduced a schema-23 duplicate
+presentation store and a nonexistent blocking startup-barrier dependency.
+Owner correction removed both before publication. The final core reconciler
+selects both registries without provider or Herdr command strings, reconstructs
+presentation from existing canonical records, binds a newly restored terminal
+to the exact native session/cwd/routing name and one foreground process, and
+advances the stable League metadata source from the observed native sequence.
+The Herdr adapter reports at most 16 tokens per call and requires two stable
+readbacks. An exact retry observes convergence and performs no report; a missing,
+replaced, duplicated, or mismatched session refuses without launching a process.
+
+Herdr's supported `[[startup]]` hook runs asynchronously after session restore
+and API readiness. The bundled plugin uses that one-shot hook directly. A brief
+fallback display is therefore expected and accepted; eventual exact convergence
+is the contract. Hook failure remains visible in Herdr's plugin command log but
+does not cause League to target a best guess. Disabling the plugin retains
+ordinary Herdr startup. This repository does not install, patch, restart, or
+steer the live Herdr server, and the focused restart regression uses only
+synthetic canonical state and a fake Herdr adapter.
+The full repository gate also exposed an older help assertion that omitted the
+already-merged `continuation` command while the parser correctly advertised it.
+Only that expected command inventory was updated; CLI behavior is unchanged.
+
+## Issue-#84 adapter and routing completion
+
+The final #84 repository candidate keeps provider selection out of the command
+facade. `assign run` asks the registered Codex, Pi, or Cursor-CLI adapter for
+its visible-launch driver; the dedicated adapter folder validates native
+create/resume/provider inputs. Multiplexer placement, discovery, routing,
+metadata, delivery, and close effects likewise flow through the multiplexer
+registry. Herdr advertises those concrete operations; tmux advertises none
+until a callable native implementation lands. Shared contract tests require a
+callable method for every advertised capability.
+
+Ordinary Champion launch now defaults to Pi+Codex. It consumes exactly one
+persisted `ModelRouter` decision and verifies the bound request/task/assignment,
+Champion role, selected provider, required capabilities, and selected state.
+Model and effort are optional CLI inputs only as an exact paired override.
+Explicit runtime/provider overrides remain exact, including Pi+Cursor. The
+schema-3 release policy retains Sol/xhigh as the unevaluated strong-worker
+baseline. A bounded, idempotent migration installs retained schema-1/2 policy
+only with an explicit destination and backup; rollback is digest-fenced. No
+install or migration was applied to user state in this lane.
+
+The shared pre-tool decision seam is implemented here for all three agent
+adapters. Issue #81 remains the owner of autonomous authorization evidence and
+its installed hook policy; #84 neither fabricates authorization nor duplicates
+that producer. The public restart entrypoint is `runtime
+reconcile-restored-agent`; `replay-restored-display` remains a compatibility
+step inside that operation.
+
+Focused verification exposed and resolved only repository-local or synthetic
+failures:
+
+| Failure | Resolution |
+| --- | --- |
+| The script-style tests were first invoked through unittest discovery and reported zero tests. | Re-ran each file through its supported direct Python entrypoint. |
+| The Shotcaller adapter refactor initially referenced the former harness option name. | Bound identity and presentation to `runtime_kind` and added Codex, Cursor, Pi+Codex, and Pi+Cursor cases. |
+| Multiplexer test doubles did not accept the production runner timeout keyword. | Kept the production runner contract explicit and updated the synthetic doubles. |
+| A routing-aware Roster fixture omitted its required assignment role. | Added the exact synthetic Champion role before asserting the persisted decision. |
+| A restored Cursor fixture inserted its runtime before the canonical agent row. | Corrected fixture order; production foreign-key behavior was unchanged. |
+| A synthetic metadata-effect error exceeded the bounded report chunk. | Reduced only the fake error text and retained the production limit. |
+| The new adapter-factory fixture used a hyphenated fake Herdr workspace ID rejected by the production identity grammar. | Replaced it with a valid synthetic `w...` identity; production validation was unchanged. |
+| The restricted test sandbox denied creation of the supervisor Unix socket. | The same focused suite is rerun with only temporary-directory socket permission; no live service or endpoint is used. |
+| The missing-supervisor fixture retained two verified Shotcaller runtimes, so the exact-binding guard refused before the intended Stop assertion. | Closed only the fixture's obsolete second runtime, matching the already-established delivery fixture setup. |
+
+No installation, live Herdr restart, live agent discovery, prompt, steering,
+cleanup, migration, or cutover is claimed by these source and synthetic tests.
+
+The independent #84 repository audit found that the first generic replacement
+candidate persisted only launch and completion receipts, leaving process-crash
+gaps around successor creation, route promotion, and predecessor retirement.
+Schema 23 now records an intent state before every external effect, fences task,
+agent, and pre-tool mutation while the operation is open, adopts only one exact
+staged successor, and compensates verified post-switch failures. Synthetic
+faults cover interruption after launch, both route renames, physical retirement,
+and each canonical receipt commit. Pi descriptors settle to one resumable owner,
+and the service layer dispatches the successor handoff exactly once after the
+predecessor retirement receipt commits.
+
+The same audit found that public Pi resume and migration commands selected Herdr
+directly while the capability matrix claimed a neutral seam. Both commands now
+resolve `provider_session_lifecycle` through the multiplexer registry. Herdr
+owns the current implementation; tmux advertises no such capability and refuses
+before reading a migration manifest or applying a process effect.
+
+The final exact-head audit found four additional source-only gaps before
+publication. First, a missing successor receipt could be mistaken for proof of
+absence after an ambiguous crash-gap discovery. Unknown identity now records an
+open recovery obligation and retains the mutation fence; only explicit native
+absence or verified cleanup can roll back. Second, direct Cursor CLI had not
+participated in the A-to-B transaction matrix. The registered Cursor adapter now
+covers predecessor and successor success, launch-crash recovery, post-switch
+compensation, retirement, and exactly-once handoff. Third, the canonical
+pre-tool hook path now proves the same open-replacement refusal for Codex, Pi,
+and Cursor. Fourth, Pi owns its bounded descriptor storage transaction while
+core validates the exact operation, assignment, participant, and source adapter
+before invoking it atomically. Cross-assignment, cross-adapter, and
+cross-operation probes refuse before an adapter callback; no non-Pi descriptor
+lifecycle is claimed. Launch-gap recovery also retains the replacement fence
+when no exact staged successor can be bound, because absence of a routing name
+does not prove that a pre-start pane or tab was never created.
+
+PR #136 merged the independently audited #84 candidate at tree
+`71a2f71b9eb1a226a7a7c6c2c3346f3c4fcd70d0`. Release `0.2.44` assigns the
+next unallocated immutable install identity to those provider-lifecycle bytes;
+the release delta changes only the version contract, its deterministic staging
+expectations, and this provenance record.
+
+Release `0.2.45` accepts the retained minimal schema-1 routing shape produced
+by the historical installer (`schema` plus exact tier selections). The
+migration preserves those tiers, supplies the conservative schema-3
+`WORKER_STRONG` policy and unevaluated fast-tier evidence, rejects unknown or
+malformed fields, backs up the original bytes, and retains exact rollback. It
+does not silently select Luna for the strongest tier.

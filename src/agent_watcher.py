@@ -1198,11 +1198,6 @@ def codex_stop_hook(records_root: Path, store: Store, shotcaller: Optional[str])
         store.mutate(consume)
         _emit({})
         return 0
-    if state.get("stop_blocked"):
-        # One block per attempted stop; do not manufacture a continuation loop.
-        _emit({})
-        return 0
-
     def block(value: Dict[str, Any]) -> None:
         value["stop_blocked"] = True
 
@@ -1210,7 +1205,7 @@ def codex_stop_hook(records_root: Path, store: Store, shotcaller: Optional[str])
     _emit(
         {
             "decision": "block",
-            "reason": f"Delegates for Shotcaller {shotcaller or 'current'} remain active. Run agent-watcher --shotcaller {shotcaller or '<Callsign>'} supervise; it blocks until one material event and gives ordinary user messages priority. A ready_to_land Champion remains intact until the Shotcaller supplies exact landing/release proof to teardown. The Stop hook blocks only once.",
+            "reason": f"Delegates for attached Shotcaller {shotcaller or 'current'} remain active. Every unchanged Stop remains blocked until obligations settle or the explicit allow-stop --once override is used. A ready_to_land Champion remains intact until the Shotcaller supplies exact landing/release proof to teardown.",
         }
     )
     return 0

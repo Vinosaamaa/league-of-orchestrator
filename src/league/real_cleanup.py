@@ -15,6 +15,7 @@ from .cleanup import CleanupAdapterRegistry, cleanup_action_digest
 from .sqlite_runtime_ops import runtime_cleanup_identity
 from .sqlite_store import SQLiteStorage
 from .storage import StorageRefusal
+from .provider_lifecycle import provider_lifecycle
 
 
 CONFIG_SCHEMA = "league.cleanup-canary-adapters.v1"
@@ -313,7 +314,8 @@ class HerdrHarnessAdapter(_BaseAdapter):
             return dict(action["intended_state"])
         session = agent.get("agent_session", {})
         session_id = session.get("value") if isinstance(session, Mapping) else None
-        if session_id is None:
+        profile = provider_lifecycle(str(self.identity.get("provider_kind", "codex")))
+        if session_id is None and profile.kind == "codex":
             title = agent.get("terminal_title_stripped")
             matched = CODEX_SESSION_TITLE.fullmatch(title) if isinstance(title, str) else None
             session_id = matched.group("session") if matched is not None else None
@@ -324,6 +326,8 @@ class HerdrHarnessAdapter(_BaseAdapter):
         }
         if observed != action["expected_identity"]:
             raise StorageRefusal("cleanup_identity_mismatch", "Herdr agent identity changed")
+        if agent.get("agent") != profile.kind:
+            raise StorageRefusal("cleanup_identity_mismatch", "Herdr provider identity changed")
         if agent.get("agent_status") == "done":
             return dict(action["intended_state"])
         return observed
@@ -335,17 +339,17 @@ class HerdrHarnessAdapter(_BaseAdapter):
                 "agent",
                 "prompt",
                 self.identity["agent_name"],
-                "/exit",
+                str(self.identity.get("exit_prompt", "/exit")),
                 "--wait",
                 "--timeout",
                 "30000",
             )
         )
         if completed.returncode != 0:
-            raise StorageRefusal("cleanup_adapter_failed", "Codex canary exit was rejected")
+            raise StorageRefusal("cleanup_adapter_failed", "provider exit was rejected")
         remaining = self._agent()
         if remaining is not None and remaining.get("agent_status") != "done":
-            raise StorageRefusal("cleanup_adapter_failed", "Codex canary did not exit")
+            raise StorageRefusal("cleanup_adapter_failed", "provider did not exit")
         return {"command_exit": completed.returncode, "exact_agent": True}
 
 

@@ -403,6 +403,35 @@ def test_roster_groups_and_evidence(root: Path) -> None:
         project = catalog_project(store)
         project_id = str(project["project_id"])
         add_roster_tasks(store, project_id)
+        routed_receipt = {
+            "routing": {
+                "decision_id": "route:synthetic-task-19",
+                "provider": "codex",
+                "model": "gpt-5.6-sol",
+                "effort": "high",
+                "tier": "WORKER_STRONG",
+                "reason": "Synthetic exact persisted routing decision.",
+            }
+        }
+        store.connection.execute(
+            """
+            INSERT INTO task_assignments
+              (task_assignment_id,task_id,request_id,coordinator_agent_id,
+               champion_agent_id,runtime_instance_id,callsign,assignment_role,state,
+               acceptance_receipt_json,failure_class,cleanup_required,version,
+               created_at,updated_at)
+            VALUES('assignment:roster-routing',?,NULL,?,?,NULL,'Thresh','champion','active',
+                   ?,NULL,0,3,?,?)
+            """,
+            (
+                TASK_ID,
+                "11111111-1111-4111-8111-111111111111",
+                CHAMPION_ID,
+                json.dumps(routed_receipt, sort_keys=True, separators=(",", ":")),
+                AT3,
+                AT3,
+            ),
+        )
         snapshot = store.roster_snapshot(
             as_of=AT5,
             recent_since=AT2,
@@ -427,6 +456,10 @@ def test_roster_groups_and_evidence(root: Path) -> None:
             item.get("task_id") for item in unresolved_group["groups"]["unresolved"]
         }
         task_item = next(item for item in project_group["groups"]["underway"] if item.get("task_id") == TASK_ID)
+        routed_agent = next(
+            agent for agent in task_item["agents"] if agent["agent_id"] == CHAMPION_ID
+        )
+        assert routed_agent["routing"] == routed_receipt["routing"]
         assert any(link["key"] == {"task_id": TASK_ID} for link in task_item["evidence_links"])
         assert all(link["locator"].startswith("league://") for link in task_item["evidence_links"])
 

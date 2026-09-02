@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import os
 import subprocess
 import uuid
 from datetime import datetime, timedelta
@@ -15,7 +14,13 @@ from .request_services import (
     DeliveryService,
     DeliveryUnavailable,
 )
-from .persistent_supervisor import SupervisorUnavailable, send_supervisor_message
+from .agent_adapters import adapter_kind_from_runtime, builtin_agent_adapter_registry
+from .multiplexer_adapters import builtin_multiplexer_adapter_registry
+from .persistent_supervisor import (
+    CallableMultiplexerRunner,
+    SupervisorUnavailable,
+    send_supervisor_message,
+)
 
 
 class _Clock:
@@ -39,8 +44,13 @@ class InstalledDeliveryAdapter:
     def __init__(
         self,
         runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+        *,
+        store: Any | None = None,
+        at: str | None = None,
     ) -> None:
         self.runner = runner
+        self.store = store
+        self.at = at
 
     def send(
         self, channel: str, target: dict[str, Any], envelope: dict[str, Any]
@@ -52,36 +62,34 @@ class InstalledDeliveryAdapter:
             ).encode()
         ).hexdigest()
         if channel == "direct":
-            routing_target = target.get("routing_name") or target.get("locator")
-            if target.get("backend_kind") != "herdr" or not routing_target:
-                raise DeliveryUnavailable("receiver_unavailable")
-            command = ["herdr"]
-            if os.environ.get("HERDR_SESSION"):
-                command.extend(("--session", os.environ["HERDR_SESSION"]))
-            summary = " ".join(str(envelope.get("summary", "")).split())
-            command.extend(
-                (
-                    "agent",
-                    "prompt",
-                    str(routing_target),
-                    (
-                        f"CHAMPION TRANSITION [{envelope['event_id']}] "
-                        f"{envelope.get('status')}: {summary}"
-                    ),
-                )
-            )
             try:
-                completed = self.runner(
-                    command,
-                    check=False,
-                    capture_output=True,
-                    text=True,
-                    timeout=15,
-                )
-            except (OSError, subprocess.SubprocessError) as exc:
+                agent_kind = adapter_kind_from_runtime(str(target.get("harness_kind", "")))
+                agent = builtin_agent_adapter_registry().adapter(agent_kind)
+            except DeliveryUnavailable:
+                raise
+            except Exception as exc:
                 raise DeliveryUnavailable("receiver_unavailable") from exc
-            if completed.returncode != 0:
+            if "delivery" not in agent.lifecycle_operations:
                 raise DeliveryUnavailable("receiver_unavailable")
+            try:
+                multiplexer = builtin_multiplexer_adapter_registry(
+                    herdr_runner=CallableMultiplexerRunner(self.runner),
+                    herdr_binary="herdr",
+                ).adapter(str(target.get("backend_kind", "")))
+                delivered = agent.deliver(
+                    target=target,
+                    envelope=envelope,
+                    multiplexer=multiplexer,
+                    store=self.store,
+                    at=self.at,
+                    runner=self.runner,
+                )
+            except DeliveryUnavailable:
+                raise
+            except Exception as exc:
+                raise DeliveryUnavailable("receiver_unavailable") from exc
+            if isinstance(delivered, DeliveryReceipt):
+                return delivered
         elif channel == "watcher":
             locator = str(target.get("locator", ""))
             if locator.startswith("unix:"):
@@ -142,18 +150,18 @@ def dispatch_event(
         }
     service = DeliveryService(
         store,
-        adapter or InstalledDeliveryAdapter(),
+        adapter or InstalledDeliveryAdapter(store=store, at=at),
         _Clock(at),
         _Ids(),
         dispatcher_id="dispatcher:installed-agent-transition",
     )
     try:
         return service.dispatch_source(outbox_id, event_id, recipient_agent_id)
-    except DeliveryUnavailable:
+    except DeliveryUnavailable as exc:
         return {
             "outbox_id": outbox_id,
             "event_id": event_id,
             "recipient_agent_id": recipient_agent_id,
             "state": "pending",
-            "reason": "receiver_unavailable",
+            "reason": str(exc) or "receiver_unavailable",
         }

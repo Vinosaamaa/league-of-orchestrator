@@ -69,12 +69,14 @@ The source service boundary is one service-manager-owned `agent-watcher
 service-run` process per canonical state root. It owns one same-user Unix
 socket and one root lock, while multiplexing one independently renewable,
 monotonically fenced watcher registration per active Squad Shotcaller. Each
-binding keeps its own cursor, generations, wake target, Calm policy, recovery,
-and exact-once delivery state. Hooks are bounded socket clients; they resolve
-their canonical Squad owner before selecting a binding and do not start a
-foreground supervisor or another model. The repository contains an inert
-launchd template with placeholders. Rendering, installing, loading, or starting
-it requires separate exact-source install/cutover authority and rollback proof.
+binding keeps its own cursor, generations, wake target, notification policy,
+attachment mode, recovery, and exact-once delivery state. Hooks are bounded
+socket clients; they resolve their canonical Squad owner before selecting a
+binding and do not start a foreground supervisor or another model. The
+hash-bound `service-install` controller renders the launchd template, preserves
+one exact prior plist, loads it, and waits for aggregate liveness; `service-start`
+uses launchd restart and `service-rollback` unloads and restores only authorized
+bytes. This report did not execute those commands against the owner machine.
 
 The one-process `request turn` path records a durable active-turn marker before
 emitting intake. Attention events commit while that marker is active but do not
@@ -88,17 +90,16 @@ only quarantined prompts or prompts whose owner has no verified live runtime,
 and returns from the hook before recovery finishes. No production recovery
 model is selected by this source slice.
 
-Calm mode is the machine policy value `calm` and has two variants. With
-supervision on (`supervising`), exact prompt capture and attention-worthy
-Champion transitions signal the renewable, fenced Unix socket; the Shotcaller
-wait is outside model inference. With supervision off (`paused`), Ashe ends the
-model turn, but the non-model monitor, watcher lease, socket, and global hooks
-remain active. The same Calm filter applies in both variants: routine events
-stay silent. Supervision-on attention uses the watcher socket; supervision-off
-attention uses the verified exact-once direct recipient path to start or wake
-Ashe. Stop ignores delegated in-flight work only while supervision is off, but
-still blocks once for owner-actionable obligations. Resume returns one bounded
-page of silent events from the saved cursor. Real owner prompts retain priority.
+Notification and attachment are independent. `calm` versus `all_material`
+controls filtering only; routine Calm events stay silent whether the model is
+attached or detached. `attached` versus `detached` controls model participation
+only; the non-model monitor, watcher lease, socket, and global hooks stay live.
+Attached attention uses the watcher socket and detached attention uses the
+verified exact-once direct recipient path. Attached Stop blocks every unchanged
+attempt while any obligation remains. Detached Stop still blocks owner action
+and permits delegated-only handoff only while the durable detachment receipt
+matches the live watcher identity and fence. Attach returns one bounded page of
+silent events from the saved cursor. Real owner prompts retain priority.
 
 Normal transition delivery is immediate and event-driven. Runtime exit without
 a canonical transition starts one configurable 60-second grace; recovery
@@ -109,14 +110,13 @@ The monitor renews its lease silently every 20 seconds, the lease expires after
 60 seconds, and launchd's restart throttle is five seconds. The diagnostic
 `--poll-seconds 1` foreground loop is not this production boundary.
 
-The timer distinction is material. Owner-source installed 0.2.28 has no
-always-running watchdog, launch service, or independent OS timer. Its legacy
-foreground `supervise` command keeps an in-memory 30-second runtime snapshot and
-requires two matching observations (about 60 seconds) before its stall fallback.
-Its separate 300-second liveness deadline currently only resets silently and
-performs no health operation. Both vanish when `supervise` exits. The candidate
+The timer distinction is material. Installed 0.2.45 was healthy as a release,
+but Ashe's service status was `live:false`, `monitor_live:false`,
+`reason:registration_missing`; attachment resume refused
+`supervisor_not_live`, and no persistent service process existed. The candidate
 has no normal one-second poll, 30-second snapshot loop, or self-resetting
-liveness deadline. The source launchd/socket service in PR #94 is uninstalled.
+liveness deadline. The source launchd/socket service in PR #126 remains
+uninstalled pending Ashe's release/cutover step.
 
 ## Bounded pre-decision candidate inventory
 
@@ -259,6 +259,34 @@ sideband serialization p50 0.068–0.130 ms, local validate/dedup/commit p50
 183.343–305.416 ms. Whole-turn p95 ranged 192.979–616.987 ms. The local
 SQLite boundary is not the dominant source of latency.
 
+### Owner-machine watcher fast-path plan and result
+
+The successor benchmark plan is deliberately local and non-invasive: create a
+temporary canonical state with three synthetic active Squads, start one real
+`PersistentSupervisor` thread with fake runtime/wake/delivery adapters, warm the
+Unix socket, then measure 500 aggregate three-binding health requests and 500
+exact-recipient health requests. The benchmark starts zero model processes,
+uses no live multiplexer, and removes its temporary state after the one service
+process stops cleanly. Reproduce it with:
+
+```sh
+python3 scripts/benchmark_watcher_service.py --samples 500
+```
+
+The 2026-09-02 owner-machine run produced output SHA-256
+`356756ce1f5d6ae81ab932d46178a9b248a65403e93f5ad61148286253441b96`:
+
+| Operation | p50 ms | p95 ms | min / max ms |
+| --- | ---: | ---: | ---: |
+| Aggregate `service-ping`, three isolated bindings | 2.810 | 3.200 | 2.486 / 4.813 |
+| Targeted exact-actor `ping` | 0.085 | 0.115 | 0.068 / 0.648 |
+
+This is real wall-clock execution on the owner machine but synthetic source
+acceptance, not installed/live Herdr proof. Ashe's cutover must repeat prompt and
+Champion wake p50/p95 against the exact installed head after service status is
+live; the target is sub-second p95 with one recipient receipt and no cross-Squad
+wake.
+
 ## What is proved and what remains
 
 ### Source-proved
@@ -276,14 +304,13 @@ SQLite boundary is not the dominant source of latency.
   socket, exact prompt broker, Stop feedback suppression, same-turn rearm,
   Champion wake, asynchronous recovery, stale-socket recovery, and bounded stop
   pass with temporary roots and injected fakes.
-- Calm Detached source acceptance proves bounded prompt wake, exactly-once
-  attention-transition wake through the watcher while supervision is on and
-  through verified direct delivery while it is off, complete routine/attention
-  classification, owner-prompt priority, stale-fence refusal, recovery of one
-  deliberately omitted notification, 60/300/20/60/5 timer defaults, grace
-  cancellation, bounded silent replay, both Stop variants, restart/lease
-  recovery, and one canonical runtime-reconciliation event after two exact
-  observations and the configured grace.
+- The independent `all_material`/`calm` × `attached`/`detached` matrix proves
+  bounded prompt wake, exactly-once watcher/direct attention delivery, complete
+  routine/attention classification, owner-prompt priority, stale-fence refusal,
+  repeated attached Stop blocking, delegated-only verified detachment, recovery
+  of one omitted notification, 60/300/20/60/5 timer defaults, grace cancellation,
+  bounded silent replay, restart/lease recovery, and one canonical runtime-
+  reconciliation event after two exact observations and the configured grace.
 - Stop alone changes no request semantics; explicit reconciliation closes only
   B, preserves provenance, is idempotent, and removes B from unfinished work.
 - Schema 19 migration, backup, rollback, foreign keys, integrity, command
@@ -293,8 +320,9 @@ SQLite boundary is not the dominant source of latency.
 
 - Independent source review, hosted exact-head CI, merge authority, and a
   separately authorized exact-source install with verified backup and rollback.
-- Render/install/load the service definition and prove `service-status` live at
-  the owner source. No service is live from this work.
+- Under Ashe's cutover authority, execute the exact hash-bound service install,
+  prove aggregate and Ashe `service-status` live, and retain the rollback
+  receipt. No service is live from this work.
 - Installed exact-once prompt capture, correct Shotcaller binding, a genuine
   same-turn steer, semantic accounting, Stop self-feedback suppression, and
   prompt/Champion wake p50/p95.
@@ -314,9 +342,9 @@ and separate synchronous classifiers are not production modes.
 | --- | --- |
 | Inline turn, candidate digest, candidate version, dispatch fence | [`src/league/cli.py`](../../src/league/cli.py), [`src/league/sqlite_request_ops.py`](../../src/league/sqlite_request_ops.py) |
 | Persistent process, socket, lease, wake, recovery boundary | [`src/league/persistent_supervisor.py`](../../src/league/persistent_supervisor.py), [`src/league/sqlite_watcher_ops.py`](../../src/league/sqlite_watcher_ops.py) |
-| Source-only service-manager boundary | [`config/league-supervisor.launchd.plist.in`](../../config/league-supervisor.launchd.plist.in) |
+| Source-only service-manager boundary | [`src/league/supervisor_service.py`](../../src/league/supervisor_service.py), [`config/league-supervisor.launchd.plist.in`](../../config/league-supervisor.launchd.plist.in), [`tests/test_supervisor_service.py`](../../tests/test_supervisor_service.py) |
 | Duplicate reconciliation schema and transition | [`src/league/sqlite_request_reconciliation_schema.py`](../../src/league/sqlite_request_reconciliation_schema.py), [`schema/league-request-reconciliation.schema.json`](../../schema/league-request-reconciliation.schema.json) |
 | Prompt-shape corpus and measurement boundaries | [`tests/fixtures/semantic_prompt_shape_matrix.v1.json`](../../tests/fixtures/semantic_prompt_shape_matrix.v1.json), [`scripts/benchmark_inline_triage_prompt_shapes.py`](../../scripts/benchmark_inline_triage_prompt_shapes.py) |
-| Focused source acceptance | [`tests/test_request_turn_batch.py`](../../tests/test_request_turn_batch.py), [`tests/test_persistent_supervisor.py`](../../tests/test_persistent_supervisor.py), [`tests/test_calm_supervision.py`](../../tests/test_calm_supervision.py), [`tests/test_request_reconciliation.py`](../../tests/test_request_reconciliation.py), [`tests/test_inline_triage_prompt_shapes.py`](../../tests/test_inline_triage_prompt_shapes.py) |
+| Focused source acceptance | [`tests/test_request_turn_batch.py`](../../tests/test_request_turn_batch.py), [`tests/test_persistent_supervisor.py`](../../tests/test_persistent_supervisor.py), [`tests/test_multisquad_supervisor.py`](../../tests/test_multisquad_supervisor.py), [`tests/test_supervisor_delivery.py`](../../tests/test_supervisor_delivery.py), [`tests/test_supervisor_service.py`](../../tests/test_supervisor_service.py), [`tests/test_calm_supervision.py`](../../tests/test_calm_supervision.py), [`tests/test_request_reconciliation.py`](../../tests/test_request_reconciliation.py), [`tests/test_inline_triage_prompt_shapes.py`](../../tests/test_inline_triage_prompt_shapes.py) |
 | SQLite WAL, transaction, and migration behavior | [SQLite WAL documentation](https://sqlite.org/wal.html), [SQLite transaction documentation](https://sqlite.org/lang_transaction.html), [SQLite backup API](https://sqlite.org/backup.html) |
 | macOS persistent-service contract | [Apple Daemons and Services Programming Guide](https://developer.apple.com/library/archive/documentation/MacOSX/Conceptual/BPSystemStartup/Chapters/CreatingLaunchdJobs.html) |

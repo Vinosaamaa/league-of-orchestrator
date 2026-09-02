@@ -222,7 +222,8 @@ def active_callsign(store: SQLiteStorage) -> dict[str, Any]:
 
 
 class FakeHerdrRunner:
-    def __init__(self) -> None:
+    def __init__(self, agent_kind: str = "codex") -> None:
+        self.agent_kind = agent_kind
         self.agent = True
         self.pane = True
         self.fail_close_once = False
@@ -238,6 +239,7 @@ class FakeHerdrRunner:
             agents = (
                 [
                     {
+                        "agent": self.agent_kind,
                         "name": "cleanupcanary",
                         "pane_id": "w-test:p-canary",
                         "agent_status": str(self.agent),
@@ -582,6 +584,7 @@ if args[:2] == ["agent", "list"]:
     agents = []
     if state["agent"]:
         agents = [{
+            "agent": "codex",
             "name": state["agent_name"],
             "pane_id": "w-test:p-canary",
             "agent_status": "done" if state["done"] else "idle",
@@ -825,11 +828,38 @@ def test_session_title_fallback_and_strict_canary_schemas() -> None:
     }
 
 
+def test_cursor_and_pi_use_provider_exit_contract() -> None:
+    action = {
+        "expected_identity": {
+            "agent_name": "cleanupcanary",
+            "pane_id": "w-test:p-canary",
+            "session_id": "canary-session",
+        },
+        "intended_state": {"completed": True, "action": "session_exit"},
+    }
+    for provider, exit_prompt in (("cursor", "/exit"), ("pi", "/quit")):
+        runner = FakeHerdrRunner(provider)
+        identity = {
+            **herdr_identity(),
+            "provider_kind": provider,
+            "exit_prompt": exit_prompt,
+        }
+        adapter = HerdrHarnessAdapter(identity, runner)
+        assert adapter.inspect(action) == action["expected_identity"]
+        adapter.apply(action)
+        assert any(
+            call[:5]
+            == ("herdr", "agent", "prompt", "cleanupcanary", exit_prompt)
+            for call in runner.calls
+        )
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="league-real-cleanup-") as directory:
         root = Path(directory)
         test_archive_git_and_scope(root / "git")
         test_herdr_and_callsign_exact_cleanup(root / "runtime")
+        test_cursor_and_pi_use_provider_exit_contract()
         test_repository_artifact_squash_tree_is_cleanup_eligible(root / "artifact")
         test_backend_close_resumes_after_external_failure(root / "backend-retry")
         test_real_canary_sqlite_setup_uses_explicit_root(root / "canary-setup")

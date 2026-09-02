@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 
 from .sqlite_request_ops import _time
 from .storage_watcher import RuntimeRegistrationCommand
@@ -279,6 +279,8 @@ def _policy_from_scope(row: Any) -> dict[str, Any]:
     grace_seconds = raw.get("unreachable_grace_seconds", DEFAULT_UNREACHABLE_GRACE_SECONDS)
     runtime_state = raw.get("runtime_state", "supervising")
     silent_cursor = raw.get("silent_event_cursor", 0)
+    attachment_mode = raw.get("attachment_mode", "attached")
+    detachment_receipt = raw.get("detachment_receipt")
     if (
         mode not in SUPERVISION_MODES
         or runtime_state not in {"supervising", "paused"}
@@ -286,6 +288,8 @@ def _policy_from_scope(row: Any) -> dict[str, Any]:
         or not 1 <= grace_seconds <= 3600
         or not isinstance(silent_cursor, int)
         or silent_cursor < 0
+        or attachment_mode not in {"attached", "detached"}
+        or (attachment_mode == "detached" and not isinstance(detachment_receipt, dict))
     ):
         raise StorageRefusal(
             "supervision_policy_invalid", "watcher supervision policy is outside supported bounds"
@@ -294,15 +298,186 @@ def _policy_from_scope(row: Any) -> dict[str, Any]:
         "scope_id": str(row["scope_id"]),
         "actor_agent_id": str(row["actor_agent_id"]),
         "mode": str(mode),
-        "runtime_state": str(runtime_state),
-        "wake_policy": (
-            "normal"
-            if mode == "all_material"
-            else "calm_paused" if runtime_state == "paused" else "calm"
-        ),
+        # ``runtime_state`` remains a compatibility read field.  The monitor is
+        # always supervising; model attachment is the independent lifecycle
+        # axis and notification mode never changes it.
+        "runtime_state": "supervising",
+        "wake_policy": "normal" if mode == "all_material" else "calm",
         "silent_event_cursor": silent_cursor,
         "unreachable_grace_seconds": grace_seconds,
+        "attachment_mode": attachment_mode,
+        "detachment_receipt": detachment_receipt,
     }
+
+
+def set_supervision_attachment(
+    store: Any,
+    scope_id: str,
+    actor_agent_id: str,
+    mode: str,
+    at: str,
+    *,
+    expected_watcher_id: str | None = None,
+    expected_fence: int | None = None,
+) -> dict[str, Any]:
+    """Durably attach the model or detach only to one verified live watcher."""
+
+    now = _time(at, "supervision attachment time")
+    if mode not in {"attached", "detached"} or (
+        (expected_watcher_id is None) != (expected_fence is None)
+    ):
+        raise StorageRefusal(
+            "supervision_attachment_invalid", "attachment mode is unsupported"
+        )
+    try:
+        with store._transaction():
+            ensure_watcher_scope(
+                store, scope_id, actor_agent_id, block_on_obligations=None
+            )
+            scope = store.connection.execute(
+                "SELECT * FROM watcher_scopes WHERE scope_id=?", (scope_id,)
+            ).fetchone()
+            metadata = _scope_metadata(scope)
+            supervision = metadata.setdefault("supervision", {})
+            if not isinstance(supervision, dict):
+                raise StorageRefusal(
+                    "supervision_policy_invalid",
+                    "watcher supervision policy is malformed",
+                )
+            watcher = store.connection.execute(
+                """
+                SELECT w.watcher_id,w.runtime_instance_id,w.wake_locator,
+                       w.leased_until,w.fence,r.runtime_generation
+                  FROM watcher_registrations w
+                  JOIN runtime_instances r
+                    ON r.runtime_instance_id=w.runtime_instance_id
+                   AND r.actor_agent_id=w.actor_agent_id
+                 WHERE w.actor_agent_id=? AND r.status IN ('active','idle')
+                   AND r.verified=1
+                """,
+                (actor_agent_id,),
+            ).fetchone()
+            if (
+                watcher is None
+                or not str(watcher["watcher_id"]).startswith("watcher:persistent:")
+                or not str(watcher["wake_locator"]).startswith("unix:")
+                or _time(str(watcher["leased_until"]), "watcher lease") <= now
+            ):
+                raise StorageRefusal(
+                    "supervisor_unavailable",
+                    "attachment changes require one verified live persistent watcher",
+                )
+            if expected_watcher_id is not None and (
+                watcher["watcher_id"] != expected_watcher_id
+                or int(watcher["fence"]) != expected_fence
+            ):
+                raise StorageRefusal(
+                    "watcher_fenced", "attachment alias uses a stale supervisor fence"
+                )
+            receipt = None
+            if mode == "detached":
+                receipt = {
+                    "schema": "league.supervision-detachment.v1",
+                    "watcher_id": watcher["watcher_id"],
+                    "runtime_instance_id": watcher["runtime_instance_id"],
+                    "runtime_generation": watcher["runtime_generation"],
+                    "wake_locator": watcher["wake_locator"],
+                    "fence": int(watcher["fence"]),
+                    "verified_at": at,
+                }
+                receipt["receipt_digest"] = hashlib.sha256(
+                    json.dumps(
+                        receipt, sort_keys=True, separators=(",", ":")
+                    ).encode("utf-8")
+                ).hexdigest()
+            supervision["attachment_mode"] = mode
+            supervision["runtime_state"] = "supervising"
+            supervision["attachment_updated_at"] = at
+            if receipt is None:
+                supervision.pop("detachment_receipt", None)
+            else:
+                supervision["detachment_receipt"] = receipt
+            counts = _obligation_counts(store, actor_agent_id)
+            store.connection.execute(
+                """
+                UPDATE watcher_scopes
+                   SET wait_active=?,stop_blocked=0,allow_stop_once=0,metadata_json=?
+                 WHERE scope_id=?
+                """,
+                (
+                    int(mode == "attached" and sum(counts.values()) > 0),
+                    json.dumps(metadata, sort_keys=True, separators=(",", ":")),
+                    scope_id,
+                ),
+            )
+            reconciliation = (
+                _silent_supervision_updates(
+                    store, actor_agent_id, limit=20, advance_cursor=True, at=at
+                )
+                if mode == "attached"
+                else None
+            )
+    except StorageRefusal:
+        raise
+    except sqlite3.DatabaseError as exc:
+        raise store._translate_database_error(
+            exc, "supervision attachment conflicted"
+        ) from exc
+    final_policy = supervision_policy(store, actor_agent_id)
+    return {
+        "scope_id": scope_id,
+        "actor_agent_id": actor_agent_id,
+        "attachment_mode": mode,
+        "mode": final_policy["mode"],
+        "runtime_state": "supervising",
+        "wake_policy": final_policy["wake_policy"],
+        "fence": int(watcher["fence"]),
+        "notification_policy": final_policy["mode"],
+        "detachment_receipt": receipt,
+        "silent_reconciliation": reconciliation,
+        "in_flight_count": (
+            counts["active_champions"] + counts["pending_assignments"]
+        ),
+        "hooks_changed": False,
+        "monitor_live": True,
+    }
+
+
+def _detached_watcher_live(
+    store: Any, actor_agent_id: str, policy: Mapping[str, Any], at: str
+) -> bool:
+    receipt = policy.get("detachment_receipt")
+    if not isinstance(receipt, dict):
+        return False
+    row = store.connection.execute(
+        """
+        SELECT w.watcher_id,w.runtime_instance_id,w.wake_locator,w.leased_until,
+               w.fence,r.runtime_generation,r.status,r.verified
+          FROM watcher_registrations w
+          JOIN runtime_instances r ON r.runtime_instance_id=w.runtime_instance_id
+         WHERE w.actor_agent_id=? AND r.actor_agent_id=?
+        """,
+        (actor_agent_id, actor_agent_id),
+    ).fetchone()
+    if row is None:
+        return False
+    return bool(
+        row["status"] in {"active", "idle"}
+        and row["verified"]
+        and str(row["watcher_id"]).startswith("watcher:persistent:")
+        and str(row["wake_locator"]).startswith("unix:")
+        and _time(str(row["leased_until"]), "watcher lease") > _time(at, "Stop time")
+        and all(
+            receipt.get(key) == row[key]
+            for key in (
+                "watcher_id",
+                "runtime_instance_id",
+                "runtime_generation",
+                "wake_locator",
+                "fence",
+            )
+        )
+    )
 
 
 def supervision_policy(store: Any, actor_agent_id: str) -> dict[str, Any]:
@@ -315,12 +490,35 @@ def supervision_policy(store: Any, actor_agent_id: str) -> dict[str, Any]:
             "scope_id": None,
             "actor_agent_id": actor_agent_id,
             "mode": "all_material",
-            "runtime_state": "paused",
+            "runtime_state": "supervising",
             "wake_policy": "normal",
             "silent_event_cursor": 0,
             "unreachable_grace_seconds": DEFAULT_UNREACHABLE_GRACE_SECONDS,
+            "attachment_mode": "attached",
+            "detachment_receipt": None,
         }
     return _policy_from_scope(row)
+
+
+def persistent_supervision_required(store: Any, actor_agent_id: str) -> bool:
+    row = store.connection.execute(
+        "SELECT metadata_json FROM watcher_scopes WHERE actor_agent_id=? ORDER BY scope_id LIMIT 1",
+        (actor_agent_id,),
+    ).fetchone()
+    if row is None:
+        return False
+    metadata = _scope_metadata(row)
+    supervision = metadata.get("supervision", {})
+    if not isinstance(supervision, dict):
+        raise StorageRefusal(
+            "supervision_policy_invalid", "watcher supervision policy is malformed"
+        )
+    owner = supervision.get("service_owner")
+    if owner not in {None, "persistent"}:
+        raise StorageRefusal(
+            "supervision_policy_invalid", "watcher supervision owner is unsupported"
+        )
+    return owner == "persistent"
 
 
 def runtime_monitor_candidates(
@@ -483,13 +681,18 @@ def configure_supervision_policy(
                     "supervision_policy_invalid",
                     "watcher supervision lifecycle state is malformed",
                 )
-            metadata["supervision"] = {
-                "mode": mode,
-                "runtime_state": prior_runtime_state,
-                "silent_event_cursor": prior_cursor,
-                "unreachable_grace_seconds": unreachable_grace_seconds,
-                "updated_at": at,
-            }
+            metadata["supervision"] = (
+                dict(prior) if isinstance(prior, dict) else {}
+            )
+            metadata["supervision"].update(
+                {
+                    "mode": mode,
+                    "runtime_state": "supervising",
+                    "silent_event_cursor": prior_cursor,
+                    "unreachable_grace_seconds": unreachable_grace_seconds,
+                    "updated_at": at,
+                }
+            )
             store.connection.execute(
                 "UPDATE watcher_scopes SET metadata_json=? WHERE scope_id=?",
                 (json.dumps(metadata, sort_keys=True, separators=(",", ":")), scope_id),
@@ -504,11 +707,10 @@ def configure_supervision_policy(
         "scope_id": scope_id,
         "actor_agent_id": actor_agent_id,
         "mode": mode,
-        "runtime_state": prior_runtime_state,
-        "wake_policy": (
-            "normal"
-            if mode == "all_material"
-            else "calm" if prior_runtime_state == "supervising" else "calm_paused"
+        "runtime_state": "supervising",
+        "wake_policy": "normal" if mode == "all_material" else "calm",
+        "attachment_mode": metadata["supervision"].get(
+            "attachment_mode", "attached"
         ),
         "silent_event_cursor": prior_cursor,
         "unreachable_grace_seconds": unreachable_grace_seconds,
@@ -683,11 +885,7 @@ def apply_supervision_delivery_policy(
         ) from exc
     return {
         "action": "silent",
-        "reason": (
-            "calm_paused"
-            if policy["runtime_state"] == "paused"
-            else "routine_champion_update"
-        ),
+        "reason": "routine_champion_update",
         "idempotent": False,
     }
 
@@ -1013,6 +1211,7 @@ def register_watcher(
                 and existing["runtime_instance_id"] == runtime_instance_id
                 and existing["wake_locator"] == wake_locator
             )
+            renewing_same_fence = False
             if existing is not None and int(existing["fence"]) >= fence:
                 exact = (
                     int(existing["fence"]) == fence
@@ -1031,21 +1230,68 @@ def register_watcher(
                         "mode": policy["mode"],
                         "runtime_state": policy["runtime_state"],
                         "wake_policy": policy["wake_policy"],
+                        "attachment_mode": policy["attachment_mode"],
                         "silent_reconciliation": None,
                         "idempotent": True,
                     }
-                raise StorageRefusal("watcher_fenced", "watcher registration fence is stale")
-            store.connection.execute(
-                "DELETE FROM watcher_registrations WHERE actor_agent_id=?", (actor_agent_id,)
-            )
-            store.connection.execute(
-                """
-                INSERT INTO watcher_registrations
-                  (watcher_id,actor_agent_id,runtime_instance_id,wake_locator,leased_until,fence,registered_at)
-                VALUES(?,?,?,?,?,?,?)
-                """,
-                (watcher_id, actor_agent_id, runtime_instance_id, wake_locator, leased_until, fence, at),
-            )
+                renewing_same_fence = bool(
+                    int(existing["fence"]) == fence
+                    and renewing
+                    and _time(leased_until, "watcher lease expiry")
+                    > _time(str(existing["leased_until"]), "stored watcher lease")
+                )
+                if not renewing_same_fence:
+                    raise StorageRefusal(
+                        "watcher_fenced", "watcher registration fence is stale"
+                    )
+            if renewing_same_fence:
+                store.connection.execute(
+                    """
+                    UPDATE watcher_registrations
+                       SET leased_until=?,registered_at=?
+                     WHERE actor_agent_id=? AND watcher_id=? AND fence=?
+                    """,
+                    (leased_until, at, actor_agent_id, watcher_id, fence),
+                )
+            else:
+                store.connection.execute(
+                    "DELETE FROM watcher_registrations WHERE actor_agent_id=?",
+                    (actor_agent_id,),
+                )
+                store.connection.execute(
+                    """
+                    INSERT INTO watcher_registrations
+                      (watcher_id,actor_agent_id,runtime_instance_id,wake_locator,leased_until,fence,registered_at)
+                    VALUES(?,?,?,?,?,?,?)
+                    """,
+                    (
+                        watcher_id,
+                        actor_agent_id,
+                        runtime_instance_id,
+                        wake_locator,
+                        leased_until,
+                        fence,
+                        at,
+                    ),
+                )
+            if watcher_id.startswith("watcher:persistent:"):
+                scope = store.connection.execute(
+                    "SELECT scope_id,actor_agent_id,metadata_json FROM watcher_scopes WHERE scope_id=?",
+                    (scope_id,),
+                ).fetchone()
+                metadata = _scope_metadata(scope)
+                supervision = metadata.setdefault("supervision", {})
+                if not isinstance(supervision, dict):
+                    raise StorageRefusal(
+                        "supervision_policy_invalid",
+                        "watcher supervision policy is malformed",
+                    )
+                supervision["service_owner"] = "persistent"
+                supervision["service_required_at"] = at
+                store.connection.execute(
+                    "UPDATE watcher_scopes SET metadata_json=? WHERE scope_id=?",
+                    (json.dumps(metadata, sort_keys=True, separators=(",", ":")), scope_id),
+                )
             if not renewing:
                 store.connection.execute(
                     """
@@ -1079,6 +1325,7 @@ def register_watcher(
         "mode": policy["mode"],
         "runtime_state": policy["runtime_state"],
         "wake_policy": policy["wake_policy"],
+        "attachment_mode": policy["attachment_mode"],
         "silent_reconciliation": reconciliation,
         "idempotent": False,
     }
@@ -1185,12 +1432,64 @@ def supervisor_binding(store: Any, callsign: Optional[str] = None) -> dict[str, 
         for binding in supervisor_bindings(store)
         if callsign is None or binding["callsign"] == callsign
     )
-    if len(bindings) != 1:
+    if len(bindings) == 1:
+        return bindings[0]
+    if callsign is None or bindings:
         raise StorageRefusal(
             "supervisor_binding_invalid",
             "persistent supervision requires one exact verified Shotcaller runtime",
         )
-    return bindings[0]
+
+    # Retain the explicit-callsign compatibility surface for source canaries and
+    # restored-agent recovery.  The OS-managed production service never uses
+    # this branch: it calls ``supervisor_bindings`` and owns active Squads only.
+    rows = store.connection.execute(
+        """
+        SELECT a.agent_id,a.callsign,a.routing_name,r.runtime_instance_id,
+               r.runtime_generation,r.backend_kind,r.endpoint,r.session_ref
+          FROM agent_instances a
+          JOIN runtime_instances r ON r.actor_agent_id=a.agent_id
+         WHERE a.role='shotcaller' AND a.retired_at IS NULL AND a.callsign=?
+           AND r.status IN ('active','idle') AND r.verified=1
+         ORDER BY a.agent_id,r.runtime_instance_id LIMIT 2
+        """,
+        (callsign,),
+    ).fetchall()
+    if len(rows) != 1:
+        raise StorageRefusal(
+            "supervisor_binding_invalid",
+            "persistent supervision requires one exact verified Shotcaller runtime",
+        )
+    row = rows[0]
+    scopes = store.connection.execute(
+        """
+        SELECT scope_id,generation FROM watcher_scopes
+         WHERE actor_agent_id=? ORDER BY scope_id LIMIT 2
+        """,
+        (row["agent_id"],),
+    ).fetchall()
+    if len(scopes) > 1:
+        raise StorageRefusal(
+            "supervisor_binding_invalid",
+            "persistent supervision requires one exact Shotcaller watcher scope",
+        )
+    return {
+        "squad_id": f"compat:{row['agent_id']}",
+        "actor_agent_id": str(row["agent_id"]),
+        "callsign": str(row["callsign"]),
+        "routing_name": row["routing_name"],
+        "runtime_instance_id": str(row["runtime_instance_id"]),
+        "runtime_generation": str(row["runtime_generation"]),
+        "backend_kind": str(row["backend_kind"]),
+        "endpoint": str(row["endpoint"]),
+        "session_ref": str(row["session_ref"]),
+        "scope_id": (
+            str(scopes[0]["scope_id"])
+            if scopes
+            else f"watcher:{row['callsign']}"
+        ),
+        "fence_floor": int(scopes[0]["generation"]) if scopes else 0,
+    }
 
 
 def supervision_owner(store: Any, actor_agent_id: str) -> Optional[str]:
@@ -1236,17 +1535,15 @@ def begin_shotcaller_turn(
         with store._transaction():
             actor = store.connection.execute(
                 """
-                SELECT a.callsign FROM agent_instances a JOIN squads s
-                  ON s.shotcaller_agent_id=a.agent_id
-                 WHERE a.agent_id=? AND a.role='shotcaller' AND a.retired_at IS NULL
-                   AND s.state='active'
+                SELECT callsign FROM agent_instances
+                 WHERE agent_id=? AND role='shotcaller' AND retired_at IS NULL
                 """,
                 (actor_agent_id,),
             ).fetchone()
             if actor is None:
                 raise StorageRefusal(
                     "shotcaller_turn_invalid",
-                    "Shotcaller turn requires one active Squad owner",
+                    "Shotcaller turn requires one active Shotcaller",
                 )
             scopes = store.connection.execute(
                 """
@@ -1538,17 +1835,9 @@ def release_watcher(
                 "DELETE FROM watcher_registrations WHERE actor_agent_id=?",
                 (actor_agent_id,),
             )
-            scope = store.connection.execute(
-                "SELECT scope_id,actor_agent_id,metadata_json FROM watcher_scopes WHERE actor_agent_id=?",
-                (actor_agent_id,),
-            ).fetchone()
-            metadata = _scope_metadata(scope)
             store.connection.execute(
-                "UPDATE watcher_scopes SET wait_active=0,metadata_json=? WHERE actor_agent_id=?",
-                (
-                    json.dumps(metadata, sort_keys=True, separators=(",", ":")),
-                    actor_agent_id,
-                ),
+                "UPDATE watcher_scopes SET wait_active=0 WHERE actor_agent_id=?",
+                (actor_agent_id,),
             )
     except StorageRefusal:
         raise
@@ -1808,7 +2097,7 @@ def _obligation_counts(store: Any, actor_agent_id: str) -> dict[str, int]:
     return {name: int(row[name]) for name in row.keys()}
 
 
-def _paused_actionable_counts(store: Any, actor_agent_id: str) -> dict[str, int]:
+def _owner_actionable_counts(store: Any, actor_agent_id: str) -> dict[str, int]:
     row = store.connection.execute(
         """
         SELECT
@@ -1874,86 +2163,20 @@ def stop_decision(
             policy = _policy_from_scope(scope)
             turn = _shotcaller_turn(_scope_metadata(scope))
             turn_active = turn is not None and turn.get("active") is True
-            paused_calm = (
-                policy["mode"] == "calm" and policy["runtime_state"] == "paused"
-            )
-            immediate_counts = (
-                _paused_actionable_counts(store, actor_agent_id)
-                if turn_active or paused_calm
+            detached = policy["attachment_mode"] == "detached"
+            all_counts = _obligation_counts(store, actor_agent_id)
+            owner_counts = (
+                _owner_actionable_counts(store, actor_agent_id)
+                if turn_active or detached
                 else {}
             )
-            if (
-                turn_active
-                and turn is not None
-                and turn.get("committed") is not True
-            ):
-                immediate_counts["turn_commit_pending"] = 1
-            if (
-                turn_active
-                and turn is not None
-                and turn.get("committed") is True
-                and policy["runtime_state"] == "supervising"
-                and sum(immediate_counts.values()) == 0
-            ):
-                registration = store.connection.execute(
-                    """
-                    SELECT w.watcher_id,w.runtime_instance_id,w.leased_until,w.fence,
-                           r.status,r.verified
-                      FROM watcher_registrations w JOIN runtime_instances r
-                        ON r.runtime_instance_id=w.runtime_instance_id
-                     WHERE w.actor_agent_id=?
-                    """,
-                    (actor_agent_id,),
-                ).fetchone()
-                if (
-                    registration is not None
-                    and _time(str(registration["leased_until"]), "watcher lease")
-                    > _time(at, "Stop decision time")
-                    and registration["status"] in {"active", "idle"}
-                    and registration["verified"]
-                ):
-                    metadata = _scope_metadata(scope)
-                    active_turn = _shotcaller_turn(metadata)
-                    assert active_turn is not None
-                    active_turn["active"] = False
-                    active_turn["handed_off_at"] = at
-                    store.connection.execute(
-                        """
-                        UPDATE watcher_scopes
-                           SET stop_blocked=0,wait_active=1,last_terminal_generation=?,
-                               pending_stop_feedback_digest=NULL,
-                               pending_stop_terminal_generation=NULL,
-                               pending_stop_wait_generation=NULL,metadata_json=?
-                         WHERE scope_id=?
-                        """,
-                        (
-                            terminal_generation,
-                            json.dumps(metadata, sort_keys=True, separators=(",", ":")),
-                            scope_id,
-                        ),
-                    )
-                    return {
-                        "scope_id": scope_id,
-                        "status": "supervision_handoff",
-                        "decision": "allow",
-                        "priority": "supervisor",
-                        "wait_generation": int(scope["wait_generation"]),
-                        "terminal_fresh": terminal_fresh,
-                        "obligations": _obligation_counts(store, actor_agent_id),
-                        "immediate_actions": immediate_counts,
-                        "supervision_mode": policy["mode"],
-                        "supervision_state": policy["runtime_state"],
-                        "unresolved_summaries": [],
-                        "supervision_handoff": True,
-                    }
-            effective_counts = (
-                immediate_counts
-                if paused_calm
-                else _obligation_counts(store, actor_agent_id)
-            )
             if turn_active and turn is not None and turn.get("committed") is not True:
-                effective_counts["turn_commit_pending"] = 1
+                owner_counts["turn_commit_pending"] = 1
+                if not detached:
+                    all_counts["turn_commit_pending"] = 1
+            effective_counts = owner_counts if detached else all_counts
             total = sum(effective_counts.values())
+            delegated_total = sum(all_counts.values())
             if effective_counts.get("unresolved_requests", 0) or effective_counts.get(
                 "owner_decisions", 0
             ):
@@ -1978,6 +2201,7 @@ def stop_decision(
                 "obligations": effective_counts,
                 "supervision_mode": policy["mode"],
                 "supervision_state": policy["runtime_state"],
+                "attachment_mode": policy["attachment_mode"],
                 "unresolved_summaries": list(summaries),
             }
             store.connection.execute(
@@ -1993,6 +2217,29 @@ def stop_decision(
                     """,
                     (scope_id,),
                 )
+            if policy["attachment_mode"] == "detached":
+                if total > 0:
+                    return {
+                        **common,
+                        "status": "blocked_detached_owner_action",
+                        "decision": "block",
+                        "priority": None,
+                    }
+                if delegated_total > 0:
+                    if _detached_watcher_live(store, actor_agent_id, policy, at):
+                        return {
+                            **common,
+                            "status": "detached_handoff_verified",
+                            "decision": "allow",
+                            "priority": "verified_watcher_handoff",
+                            "supervision_handoff": True,
+                        }
+                    return {
+                        **common,
+                        "status": "supervisor_unavailable",
+                        "decision": "block",
+                        "priority": None,
+                    }
             if total == 0:
                 store.connection.execute(
                     """
@@ -2005,65 +2252,30 @@ def stop_decision(
                     (scope_id,),
                 )
                 return {**common, "status": "allowed", "decision": "allow", "priority": None}
-            if not scope["enabled"] or not scope["block_on_obligations"]:
-                return {**common, "status": "unavailable", "decision": "allow", "priority": None}
-            if scope["allow_stop_once"]:
-                store.connection.execute(
-                    """
-                    UPDATE watcher_scopes SET allow_stop_once=0,stop_blocked=0,
-                           pending_stop_feedback_digest=NULL,
-                           pending_stop_terminal_generation=NULL,
-                           pending_stop_wait_generation=NULL
-                     WHERE scope_id=?
-                    """,
-                    (scope_id,),
-                )
-                return {
-                    **common,
-                    "status": "allowed",
-                    "decision": "allow",
-                    "priority": "explicit_allow_stop_once",
-                }
             wait_generation = int(scope["wait_generation"])
-            # A provider terminal identifier scopes Stop retries; it is not a
-            # user-event identity.  Only a durable wait rearm (including a
-            # newly captured prompt event) earns another one-shot block.
-            should_block = int(scope["last_blocked_wait_generation"]) < wait_generation
-            if should_block:
-                reason_digest = hashlib.sha256(
-                    stop_feedback_reason(
-                        actor["callsign"], wait_generation, summaries
-                    ).encode("utf-8")
-                ).hexdigest()
-                store.connection.execute(
-                    """
-                    UPDATE watcher_scopes
-                       SET last_blocked_wait_generation=?,stop_blocked=1,wait_active=1,
-                           pending_stop_feedback_digest=?,
-                           pending_stop_terminal_generation=?,
-                           pending_stop_wait_generation=?
-                     WHERE scope_id=?
-                    """,
-                    (
-                        wait_generation,
-                        reason_digest,
-                        terminal_generation,
-                        wait_generation,
-                        scope_id,
-                    ),
-                )
-                return {**common, "status": "blocked_once", "decision": "block", "priority": None}
+            reason_digest = hashlib.sha256(
+                stop_feedback_reason(
+                    actor["callsign"], wait_generation, summaries
+                ).encode("utf-8")
+            ).hexdigest()
             store.connection.execute(
                 """
-                UPDATE watcher_scopes SET stop_blocked=0,wait_active=0,
-                       pending_stop_feedback_digest=NULL,
-                       pending_stop_terminal_generation=NULL,
-                       pending_stop_wait_generation=NULL
+                UPDATE watcher_scopes
+                   SET last_blocked_wait_generation=?,stop_blocked=1,wait_active=1,
+                       allow_stop_once=0,pending_stop_feedback_digest=?,
+                       pending_stop_terminal_generation=?,
+                       pending_stop_wait_generation=?
                  WHERE scope_id=?
                 """,
-                (scope_id,),
+                (
+                    wait_generation,
+                    reason_digest,
+                    terminal_generation,
+                    wait_generation,
+                    scope_id,
+                ),
             )
-            return {**common, "status": "allowed", "decision": "allow", "priority": None}
+            return {**common, "status": "blocked_attached", "decision": "block", "priority": None}
     except StorageRefusal:
         raise
     except sqlite3.DatabaseError as exc:

@@ -16,7 +16,7 @@ sys.path[:0] = [str(ROOT / "src"), str(ROOT / "tests")]
 
 import league.cli as league_cli  # noqa: E402
 from league.protected_gate import ProtectedGateExecutor  # noqa: E402
-from league.sqlite_store import DATABASE_NAME, SQLiteStorage  # noqa: E402
+from league.sqlite_store import CURRENT_SCHEMA_VERSION, DATABASE_NAME, SQLiteStorage  # noqa: E402
 from league.storage import (  # noqa: E402
     BeginProtectedGateCommand,
     SettleProtectedGateCommand,
@@ -770,7 +770,7 @@ def test_mode_records_survive_verified_backup_and_bounded_export(root: Path) -> 
     authorized = _authorize(state, root)
     with SQLiteStorage(state) as source:
         backup = source.backup("backups/mode.sqlite3")
-        assert backup["database_schema_version"] == 20
+        assert backup["database_schema_version"] == CURRENT_SCHEMA_VERSION
         inspection = json.loads(
             source.export_bytes(
                 format_name="json", purpose="inspection", max_records=10_000
@@ -919,7 +919,7 @@ def test_one_grant_propagates_across_protected_gates_without_reprompt(
         assert len(rollback["tables"]["protected_gate_uses"]) == 4
         assert len(rollback["tables"]["protected_gate_settlements"]) == 4
         backup = active.backup("backups/protected-gates.sqlite3")
-        assert backup["database_schema_version"] == 20
+        assert backup["database_schema_version"] == CURRENT_SCHEMA_VERSION
     recovered = root / "protected-gate-recovered"
     recovered.mkdir()
     shutil.copy2(
@@ -1236,6 +1236,7 @@ def test_cli_rollover_refresh_bindings_is_scoped_and_settled_retry_is_effect_fre
             "expected_snapshot_digest": "d" * 64,
             "expected_snapshot_version": 2,
             "expires_at": "2026-01-01T01:00:00Z",
+            "multiplexer_kind": "herdr",
             "operation_id": "rollover:synthetic",
             "predecessor_agent_id": "agent:old",
             "refresh_id": "refresh:synthetic",

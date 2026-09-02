@@ -150,6 +150,24 @@ def acknowledge_outbox(
             if existing is not None:
                 if existing["effect_kind"] != effect_kind or existing["effect_id"] != effect_id:
                     raise StorageRefusal("receipt_conflict", "duplicate delivery has a different recipient effect")
+                if effect_kind == "cursor_steering":
+                    cursor_effect = store.connection.execute(
+                        "SELECT effect_state,effect_id FROM cursor_steering_effects WHERE outbox_id=?",
+                        (outbox_id,),
+                    ).fetchone()
+                    if (
+                        cursor_effect is None
+                        or cursor_effect["effect_id"] != effect_id
+                        or cursor_effect["effect_state"] not in {"effect_applied", "acknowledged"}
+                    ):
+                        raise StorageRefusal(
+                            "cursor_steering_receipt_mismatch",
+                            "recipient receipt does not bind one exact Cursor steering effect",
+                        )
+                    store.connection.execute(
+                        "UPDATE cursor_steering_effects SET effect_state='acknowledged',updated_at=? WHERE outbox_id=?",
+                        (existing["received_at"], outbox_id),
+                    )
                 _reconcile_delivered(store, outbox_id, existing["received_at"])
                 return {
                     "outbox_id": outbox_id,
@@ -174,6 +192,20 @@ def acknowledge_outbox(
             ).fetchone()
             if event is None:
                 raise StorageRefusal("event_unknown", "acknowledgement source event is absent")
+            if effect_kind == "cursor_steering":
+                cursor_effect = store.connection.execute(
+                    "SELECT effect_state,effect_id FROM cursor_steering_effects WHERE outbox_id=?",
+                    (outbox_id,),
+                ).fetchone()
+                if (
+                    cursor_effect is None
+                    or cursor_effect["effect_state"] != "effect_applied"
+                    or cursor_effect["effect_id"] != effect_id
+                ):
+                    raise StorageRefusal(
+                        "cursor_steering_receipt_mismatch",
+                        "Cursor steering acknowledgement has no exact applied effect",
+                    )
             store.connection.execute(
                 """
                 INSERT INTO recipient_receipts
@@ -190,6 +222,11 @@ def acknowledge_outbox(
                 """,
                 (at, outbox_id),
             )
+            if effect_kind == "cursor_steering":
+                store.connection.execute(
+                    "UPDATE cursor_steering_effects SET effect_state='acknowledged',updated_at=? WHERE outbox_id=?",
+                    (at, outbox_id),
+                )
             store.connection.execute(
                 "DELETE FROM outbox_dispatch_leases WHERE outbox_id=?", (outbox_id,)
             )
@@ -366,10 +403,7 @@ def delivery_target(store: Any, recipient_agent_id: str, at: str) -> Optional[di
     )
     if watcher_eligible:
         supervision = store.supervision_policy(recipient_agent_id)
-        if not (
-            supervision["mode"] == "calm"
-            and supervision["runtime_state"] == "paused"
-        ):
+        if supervision["attachment_mode"] == "attached":
             return {
                 "channel": "watcher",
                 "runtime_instance_id": watcher["runtime_instance_id"],
@@ -380,7 +414,7 @@ def delivery_target(store: Any, recipient_agent_id: str, at: str) -> Optional[di
     runtime = store.connection.execute(
         """
         SELECT r.runtime_instance_id,r.endpoint,r.runtime_generation,r.status,r.verified,
-               r.backend_kind,r.session_ref,a.routing_name,a.thread_id
+               r.harness_kind,r.backend_kind,r.session_ref,a.routing_name,a.thread_id
           FROM runtime_instances r
           JOIN agent_instances a ON a.agent_id=r.actor_agent_id
          WHERE r.actor_agent_id=? AND r.status IN ('active','idle') AND r.verified=1
@@ -398,6 +432,7 @@ def delivery_target(store: Any, recipient_agent_id: str, at: str) -> Optional[di
         "locator": runtime["endpoint"],
         "generation": runtime["runtime_generation"],
         "backend_kind": runtime["backend_kind"],
+        "harness_kind": runtime["harness_kind"],
         "session_ref": runtime["session_ref"],
         "routing_name": runtime["routing_name"],
         "thread_id": runtime["thread_id"],

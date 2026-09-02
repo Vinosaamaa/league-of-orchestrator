@@ -15,18 +15,25 @@ from typing import Any, BinaryIO, Callable, Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from . import MAX_ACCEPTANCE_SENTINEL_PATHS, __version__
-from .adapters import builtin_contract_registry
+from .adapters import builtin_contract_registry, production_capability_matrix
 from .artifacts import ArtifactLifecycle
 from .cleanup import CleanupExecutor, CleanupFaultEvent, CleanupPlanner
 from .continuation import (
     ContinuationIssueReopener,
     GitHubIssueAdapter,
-    continuation_resume_thread,
     verified_binding,
 )
+from .agent_adapters import builtin_agent_adapter_registry
+from .multiplexer_adapters import builtin_multiplexer_adapter_registry
 from .importer import build_import_plan
 from .orchestration import OrchestrationSignals
-from .routing import ModelRouter, load_routing_config
+from .routing import (
+    ModelRouter,
+    install_migrated_routing_config,
+    load_routing_config,
+    migrate_routing_config,
+    rollback_routing_config,
+)
 from .reporting import REPORT_FORMATS, render_report
 from .skill_contracts import (
     audit_installations,
@@ -57,22 +64,15 @@ from .storage_assignment import FinishHiddenAssignmentCommand
 from .storage_mode import PROTECTED_GATE_ACTIONS
 from .protected_gate import ProtectedGateExecutor
 from .request_services import AssignmentSpec
+from .runtime_replacement import RuntimeReplacementService, RuntimeReplacementSpec
 from .shotcaller_bootstrap import (
-    HerdrShotcallerBootstrapAdapter,
     ShotcallerBootstrapOptions,
     ShotcallerBootstrapService,
     ShotcallerBootstrapSpec,
 )
-from .rollover_descendant import (
-    HerdrDescendantRuntimeAdapter,
-    RolloverDescendantService,
-)
-from .rollover_snapshot import (
-    HerdrRolloverSnapshotAdapter,
-    RolloverSnapshotRefreshService,
-)
+from .rollover_descendant import RolloverDescendantService
+from .rollover_snapshot import RolloverSnapshotRefreshService
 from .visible_launch import (
-    HerdrCodexLaunchAdapter,
     SubprocessRunner,
     VisibleChampionLaunchService,
     VisibleLaunchOptions,
@@ -80,6 +80,8 @@ from .visible_launch import (
     derived_champion_agent_id,
     derive_task_label,
 )
+from .display_replay import replay_restored_display
+from .restored_agent import reconcile_restored_agents, utc_now
 from .legacy_display_reconciliation import (
     HerdrLegacyDisplayAdapter,
     LegacyDisplayReconciliationService,
@@ -129,6 +131,21 @@ class _BoundedSentinelPath(argparse.Action):
             )
         paths.append(value)
         setattr(namespace, self.dest, paths)
+
+
+class _ExplicitChoice(argparse.Action):
+    """Keep the public default while recording whether the owner supplied it."""
+
+    def __call__(
+        self,
+        parser: argparse.ArgumentParser,
+        namespace: argparse.Namespace,
+        value: str,
+        option_string: Optional[str] = None,
+    ) -> None:
+        del parser, option_string
+        setattr(namespace, self.dest, value)
+        setattr(namespace, f"{self.dest}_explicit", True)
 
 
 def _turn_prompt_limit(value: str) -> int:
@@ -302,12 +319,12 @@ def _add_mode_gate_options(parser: argparse.ArgumentParser) -> None:
 
 def _add_shotcaller_commands(groups: argparse._SubParsersAction) -> None:
     shotcaller = groups.add_parser(
-        "shotcaller", help="Create one canonical Shotcaller in the exact calling Codex pane."
+        "shotcaller", help="Create one canonical Shotcaller in the exact calling agent pane."
     )
     commands = shotcaller.add_subparsers(dest="action", required=True)
     create = commands.add_parser(
         "create",
-        help="Allocate and bind the calling unnamed Codex thread without creating Herdr layout.",
+        help="Allocate and bind the calling unnamed agent session without creating Herdr layout.",
     )
     for name in (
         "callsign-assignment-id",
@@ -318,6 +335,9 @@ def _add_shotcaller_commands(groups: argparse._SubParsersAction) -> None:
     ):
         create.add_argument(f"--{name}", required=True)
     create.add_argument("--capability", action="append", default=[])
+    create.add_argument("--runtime-kind", default="codex")
+    create.add_argument("--provider-kind", default=None)
+    create.add_argument("--multiplexer-kind", default="herdr")
     _add_mode_gate_options(create)
 
 
@@ -373,6 +393,7 @@ def _add_rollover_commands(groups: argparse._SubParsersAction) -> None:
     refresh_bindings.add_argument(
         "--expected-snapshot-version", type=int, required=True
     )
+    refresh_bindings.add_argument("--multiplexer-kind", default="herdr")
     _add_mode_gate_options(refresh_bindings)
     acknowledge = commands.add_parser(
         "acknowledge", help="Acknowledge exact successor identity, capability, and snapshot coverage."
@@ -421,6 +442,7 @@ def _add_rollover_commands(groups: argparse._SubParsersAction) -> None:
         default=[],
         help="Declare one exact pending descendant outbox still targeting the predecessor.",
     )
+    reconcile_descendant.add_argument("--multiplexer-kind", default="herdr")
     _add_mode_gate_options(reconcile_descendant)
     reconcile_intake = commands.add_parser(
         "reconcile-intake",
@@ -510,6 +532,11 @@ def _add_delivery_commands(groups: argparse._SubParsersAction) -> None:
     backlog.add_argument("--at", required=True)
     backlog.add_argument("--limit", type=int, default=100)
     backlog.add_argument("--per-recipient", type=int, default=2)
+    dispatch = commands.add_parser(
+        "dispatch", help="Dispatch one exact source event through its verified provider adapter."
+    )
+    for name in ("outbox-id", "event-id", "recipient-agent-id"):
+        dispatch.add_argument(f"--{name}", required=True)
 
 
 def _add_project_commands(groups: argparse._SubParsersAction) -> None:
@@ -706,6 +733,41 @@ def _add_runtime_commands(groups: argparse._SubParsersAction) -> None:
     runtime = groups.add_parser("runtime", help="Inspect registered harness/backend capabilities.")
     commands = runtime.add_subparsers(dest="action", required=True)
     commands.add_parser("matrix", help="Report supported, unsupported, and unverified adapter operations.")
+    resume_launch = commands.add_parser(
+        "resume-launch",
+        help="Resume one exact durable Pi session in its restored Herdr pane once per restart.",
+    )
+    for name in ("descriptor-id", "restart-id", "pane-id", "at"):
+        resume_launch.add_argument(f"--{name}", required=True)
+    resume_launch.add_argument("--multiplexer-kind", default="herdr")
+    resume_launch.add_argument("--startup-timeout-ms", type=int, default=120_000)
+    migrate_pi = commands.add_parser(
+        "migrate-pi-session",
+        help="Copy one stopped legacy Pi JSONL into the unified inventory and bind its exact resume descriptor.",
+    )
+    migrate_pi.add_argument("--manifest", type=Path, required=True)
+    migrate_pi.add_argument("--multiplexer-kind", default="herdr")
+    migrate_pi.add_argument("--at", required=True)
+    replay = commands.add_parser(
+        "replay-restored-display",
+        help=(
+            "Reconcile canonical League presentation onto exact already-restored "
+            "agent sessions without launching or resuming a process."
+        ),
+    )
+    replay.add_argument("--multiplexer-kind", default="herdr")
+    replay.add_argument("--timeout-ms", type=int, default=30_000)
+    replay.add_argument("--poll-ms", type=int, default=100)
+    reconcile_restored = commands.add_parser(
+        "reconcile-restored-agent",
+        help=(
+            "Reconcile exact restored sessions, routing, runtime generations, "
+            "Shotcaller watchers, and presentation without process effects."
+        ),
+    )
+    reconcile_restored.add_argument("--multiplexer-kind", required=True)
+    reconcile_restored.add_argument("--timeout-ms", type=int, default=30_000)
+    reconcile_restored.add_argument("--poll-ms", type=int, default=100)
 
 
 def _add_skill_commands(groups: argparse._SubParsersAction) -> None:
@@ -775,6 +837,25 @@ def _add_routing_commands(groups: argparse._SubParsersAction) -> None:
     outcome.add_argument("--latency-ms", type=int, required=True)
     outcome.add_argument("--cost-microunits", type=int)
     outcome.add_argument("--at", required=True)
+    migrate = commands.add_parser(
+        "migrate-config",
+        help="Render a retained schema-1/2 routing policy as validated schema 3.",
+    )
+    migrate.add_argument("--config", type=Path, required=True)
+    migrate.add_argument("--destination", type=Path)
+    migrate.add_argument("--backup", type=Path)
+    rollback = commands.add_parser(
+        "rollback-config",
+        help="Restore one exact backed-up routing policy after a verified migration.",
+    )
+    rollback.add_argument("--destination", type=Path, required=True)
+    rollback.add_argument("--backup", type=Path, required=True)
+    rollback.add_argument("--expected-installed-sha256", required=True)
+    rollback.add_argument("--expected-backup-sha256", required=True)
+    validate = commands.add_parser(
+        "validate-config", help="Validate one exact schema-3 routing policy."
+    )
+    validate.add_argument("--config", type=Path, required=True)
 
 
 def _add_resource_commands(groups: argparse._SubParsersAction) -> None:
@@ -997,6 +1078,12 @@ def _add_request_commands(groups: argparse._SubParsersAction) -> None:
     )
     for name in ("request-id", "runtime-instance-id", "claim-token", "leased-until", "at"):
         accept.add_argument(f"--{name}", required=True)
+    accept_routed = commands.add_parser(
+        "accept-routed",
+        help="Accept one structured routed delivery using canonical current time and exact runtime.",
+    )
+    for name in ("event-id", "recipient-agent-id", "runtime-instance-id"):
+        accept_routed.add_argument(f"--{name}", required=True)
     progress = commands.add_parser(
         "progress", help="Emit immediate requester progress or coalesce a changed routine aggregate."
     )
@@ -1121,7 +1208,7 @@ def _add_assignment_commands(groups: argparse._SubParsersAction) -> None:
     prepare.add_argument("--requires", action="append", default=[])
     launch = commands.add_parser(
         "run",
-        help="Reserve, start, verify, activate, and brief one visible Herdr/Codex Champion.",
+        help="Reserve, start, verify, activate, and brief one visible Champion through registered agent and multiplexer adapters.",
     )
     for name in (
         "request-id",
@@ -1132,11 +1219,23 @@ def _add_assignment_commands(groups: argparse._SubParsersAction) -> None:
         "repository",
         "branch",
         "worktree",
-        "model",
-        "effort",
     ):
         launch.add_argument(f"--{name}", required=True)
+    launch.add_argument("--model")
+    launch.add_argument("--effort")
+    launch.add_argument("--routing-decision-id")
     launch.add_argument("--task-label")
+    launch.set_defaults(runtime_kind_explicit=False, provider_kind_explicit=False)
+    launch.add_argument("--runtime-kind", default="pi", action=_ExplicitChoice)
+    launch.add_argument("--provider-kind", default="codex", action=_ExplicitChoice)
+    launch.add_argument("--multiplexer-kind", default="herdr")
+    launch.add_argument("--project-code")
+    launch.add_argument("--release-root")
+    launch.add_argument("--session-mode", choices=("create", "fork", "resume"), default="create")
+    launch.add_argument("--session-id")
+    launch.add_argument("--session-path")
+    launch.add_argument("--parent-session-id")
+    launch.add_argument("--parent-session-path")
     launch.add_argument("--issue", type=int, required=True)
     launch.add_argument("--assignment-id")
     launch.add_argument("--champion-agent-id")
@@ -1145,6 +1244,43 @@ def _add_assignment_commands(groups: argparse._SubParsersAction) -> None:
     launch.add_argument("--requires", action="append", default=[])
     launch.add_argument("--startup-timeout-ms", type=int, default=120_000)
     launch.add_argument("--issue-selection-receipt-digest", required=True)
+    replacement = commands.add_parser(
+        "replace-runtime",
+        help=(
+            "Atomically replace one exact active Champion runtime through registered "
+            "predecessor, successor, and multiplexer adapters."
+        ),
+    )
+    for name in (
+        "operation-id",
+        "assignment-id",
+        "predecessor-agent-id",
+        "predecessor-runtime-instance-id",
+        "successor-agent-id",
+        "successor-runtime-instance-id",
+        "successor-runtime-kind",
+        "successor-provider-kind",
+        "staging-routing-name",
+        "at",
+    ):
+        replacement.add_argument(f"--{name}", required=True)
+    replacement.add_argument("--expected-assignment-version", type=int, required=True)
+    replacement.add_argument("--expected-agent-version", type=int, required=True)
+    replacement.add_argument("--expected-task-version", type=int, required=True)
+    replacement.add_argument("--multiplexer-kind", default="herdr")
+    replacement.add_argument("--routing-decision-id")
+    replacement.add_argument("--model")
+    replacement.add_argument("--effort")
+    replacement.add_argument("--project-code")
+    replacement.add_argument("--release-root")
+    replacement.add_argument("--session-mode", choices=("create", "fork", "resume"), default="create")
+    replacement.add_argument("--session-id")
+    replacement.add_argument("--session-path")
+    replacement.add_argument("--parent-session-id")
+    replacement.add_argument("--parent-session-path")
+    replacement.add_argument("--workspace-id")
+    replacement.add_argument("--league-command")
+    replacement.add_argument("--startup-timeout-ms", type=int, default=120_000)
     launching = commands.add_parser("launching", help="Commit launch intent before adapter work.")
     launching.add_argument("--assignment-id", required=True)
     launching.add_argument("--expected-version", type=int, required=True)
@@ -1275,6 +1411,13 @@ def _add_hook_commands(groups: argparse._SubParsersAction) -> None:
         policy.add_argument(f"--{name}", required=True)
     policy.add_argument("--mode", choices=("all_material", "calm"), required=True)
     policy.add_argument("--unreachable-grace-seconds", type=int, default=60)
+    attachment = commands.add_parser(
+        "set-attachment",
+        help="Attach Stop to the model or detach only to one verified live watcher.",
+    )
+    for name in ("scope-id", "actor-agent-id", "at"):
+        attachment.add_argument(f"--{name}", required=True)
+    attachment.add_argument("--mode", choices=("attached", "detached"), required=True)
     reconcile_silent = commands.add_parser(
         "reconcile-silent",
         help="Return and acknowledge one bounded page of Calm-suppressed transitions.",
@@ -1522,9 +1665,9 @@ def _agent_transition(store: Storage, args: argparse.Namespace) -> CommandResult
         args.agent_id, args.expected_version, args.status, args.update, args.at
     )
     if transition.get("outbox_id"):
-        from .canonical_delivery import dispatch_event
+        from .persistent_supervisor import handoff_transition_delivery
 
-        transition["delivery"] = dispatch_event(
+        transition["delivery"] = handoff_transition_delivery(
             store,
             outbox_id=transition["outbox_id"],
             event_id=transition["event_id"],
@@ -1592,6 +1735,15 @@ def _callsign_status(store: Storage, args: argparse.Namespace) -> CommandResult:
 
 
 def _shotcaller_create(store: Storage, args: argparse.Namespace) -> CommandResult:
+    multiplexer = builtin_multiplexer_adapter_registry().adapter(
+        args.multiplexer_kind
+    )
+    if "shotcaller_bootstrap" not in multiplexer.capabilities or "calling_context" not in multiplexer.capabilities:
+        raise StorageRefusal(
+            "multiplexer_shotcaller_unsupported",
+            "selected multiplexer has no Shotcaller bootstrap and calling-context driver",
+        )
+    context = multiplexer.calling_context()
     spec = ShotcallerBootstrapSpec(
         assignment_id=args.callsign_assignment_id,
         agent_id=args.agent_id,
@@ -1600,17 +1752,19 @@ def _shotcaller_create(store: Storage, args: argparse.Namespace) -> CommandResul
         capabilities=tuple(args.capability),
     )
     options = ShotcallerBootstrapOptions(
-        workspace_id=os.environ.get("HERDR_WORKSPACE_ID", ""),
-        tab_id=os.environ.get("HERDR_TAB_ID", ""),
-        pane_id=os.environ.get("HERDR_PANE_ID", ""),
+        workspace_id=context["workspace_id"],
+        tab_id=context["tab_id"],
+        pane_id=context["pane_id"],
         worktree=str(Path.cwd().resolve()),
+        runtime_kind=args.runtime_kind,
+        provider_kind=args.provider_kind or args.runtime_kind,
     )
     class FixedClock:
         def now(self) -> str:
             return args.at
 
     return ShotcallerBootstrapService(
-        store, HerdrShotcallerBootstrapAdapter(options), FixedClock()
+        store, multiplexer.shotcaller_bootstrap_driver(options), FixedClock()
     ).bootstrap(spec), None
 
 
@@ -1645,8 +1799,16 @@ def _rollover_bindings(store: Storage, args: argparse.Namespace) -> CommandResul
 def _rollover_refresh_bindings(
     store: Storage, args: argparse.Namespace
 ) -> CommandResult:
+    multiplexer = builtin_multiplexer_adapter_registry().adapter(
+        args.multiplexer_kind
+    )
+    if "rollover_reconciliation" not in multiplexer.capabilities:
+        raise StorageRefusal(
+            "multiplexer_rollover_unsupported",
+            "selected multiplexer has no rollover reconciliation driver",
+        )
     return RolloverSnapshotRefreshService(
-        store, HerdrRolloverSnapshotAdapter()
+        store, multiplexer.rollover_snapshot_driver()
     ).refresh(
         operation_id=args.operation_id,
         refresh_id=args.refresh_id,
@@ -1692,8 +1854,16 @@ def _rollover_commit(store: Storage, args: argparse.Namespace) -> CommandResult:
 def _rollover_reconcile_descendant(
     store: Storage, args: argparse.Namespace
 ) -> CommandResult:
+    multiplexer = builtin_multiplexer_adapter_registry().adapter(
+        args.multiplexer_kind
+    )
+    if "rollover_reconciliation" not in multiplexer.capabilities:
+        raise StorageRefusal(
+            "multiplexer_rollover_unsupported",
+            "selected multiplexer has no rollover reconciliation driver",
+        )
     return RolloverDescendantService(
-        store, HerdrDescendantRuntimeAdapter()
+        store, multiplexer.rollover_descendant_driver()
     ).reconcile(
         operation_id=args.operation_id,
         reconciliation_id=args.reconciliation_id,
@@ -1954,9 +2124,9 @@ def _task_transition(store: Storage, args: argparse.Namespace) -> CommandResult:
         args.attention_required,
     )
     if transition.get("outbox_id"):
-        from .canonical_delivery import dispatch_event
+        from .persistent_supervisor import handoff_transition_delivery
 
-        transition["delivery"] = dispatch_event(
+        transition["delivery"] = handoff_transition_delivery(
             store,
             outbox_id=transition["outbox_id"],
             event_id=transition["event_id"],
@@ -1999,7 +2169,65 @@ def _read_bounded_text(path: Path, maximum: int, label: str) -> str:
 
 
 def _runtime_matrix(_: Storage, __: argparse.Namespace) -> CommandResult:
-    return builtin_contract_registry().capability_matrix(), None
+    return production_capability_matrix(), None
+
+
+def _runtime_resume_launch(store: Storage, args: argparse.Namespace) -> CommandResult:
+    multiplexer = builtin_multiplexer_adapter_registry(
+        herdr_runner=SubprocessRunner()
+    ).adapter(args.multiplexer_kind)
+    if "provider_session_lifecycle" not in multiplexer.capabilities:
+        raise StorageRefusal(
+            "provider_session_multiplexer_unsupported",
+            "selected multiplexer cannot resume an exact provider session",
+        )
+    return multiplexer.resume_provider_session(
+        store=store,
+        descriptor_id=args.descriptor_id,
+        restart_id=args.restart_id,
+        pane_id=args.pane_id,
+        at=args.at,
+        startup_timeout_ms=args.startup_timeout_ms,
+    ), None
+
+
+def _runtime_migrate_pi_session(store: Storage, args: argparse.Namespace) -> CommandResult:
+    multiplexer = builtin_multiplexer_adapter_registry(
+        herdr_runner=SubprocessRunner()
+    ).adapter(args.multiplexer_kind)
+    if "provider_session_lifecycle" not in multiplexer.capabilities:
+        raise StorageRefusal(
+            "provider_session_multiplexer_unsupported",
+            "selected multiplexer cannot migrate an exact provider session",
+        )
+    return multiplexer.migrate_provider_session(
+        store=store,
+        manifest=_read_json_object(args.manifest),
+        at=args.at,
+    ), None
+
+
+def _runtime_replay_restored_display(
+    store: Storage, args: argparse.Namespace
+) -> CommandResult:
+    return replay_restored_display(
+        store,
+        multiplexer_kind=args.multiplexer_kind,
+        timeout_ms=args.timeout_ms,
+        poll_ms=args.poll_ms,
+    ), None
+
+
+def _runtime_reconcile_restored_agent(
+    store: Storage, args: argparse.Namespace
+) -> CommandResult:
+    return reconcile_restored_agents(
+        store,
+        multiplexer_kind=args.multiplexer_kind,
+        timeout_ms=args.timeout_ms,
+        poll_ms=args.poll_ms,
+        at=utc_now(),
+    ), None
 
 
 def _skill_contract(args: argparse.Namespace) -> dict[str, Any]:
@@ -2068,6 +2296,32 @@ def _routing_outcome(store: Storage, args: argparse.Namespace) -> CommandResult:
         latency_ms=args.latency_ms,
         cost_microunits=args.cost_microunits,
         recorded_at=args.at,
+    ), None
+
+
+def _routing_migrate_config(args: argparse.Namespace) -> CommandResult:
+    if (args.destination is None) != (args.backup is None):
+        raise StorageRefusal(
+            "routing_install_invalid",
+            "routing migration installation requires both destination and backup",
+        )
+    if args.destination is not None:
+        return install_migrated_routing_config(
+            args.config, args.destination, args.backup
+        ), None
+    return migrate_routing_config(_read_json_object(args.config)), None
+
+
+def _routing_validate_config(args: argparse.Namespace) -> CommandResult:
+    return load_routing_config(args.config), None
+
+
+def _routing_rollback_config(args: argparse.Namespace) -> CommandResult:
+    return rollback_routing_config(
+        args.destination,
+        args.backup,
+        expected_installed_sha256=args.expected_installed_sha256,
+        expected_backup_sha256=args.expected_backup_sha256,
     ), None
 
 
@@ -2594,6 +2848,19 @@ def _request_claim(store: Storage, args: argparse.Namespace) -> CommandResult:
     ), None
 
 
+def _request_accept_routed(store: Storage, args: argparse.Namespace) -> CommandResult:
+    observed = datetime.now().astimezone()
+    at = observed.isoformat(timespec="seconds")
+    leased_until = (observed + timedelta(minutes=15)).isoformat(timespec="seconds")
+    return store.accept_routed_delivery(
+        args.event_id,
+        args.recipient_agent_id,
+        args.runtime_instance_id,
+        leased_until,
+        at,
+    ), None
+
+
 def _request_release(store: Storage, args: argparse.Namespace) -> CommandResult:
     return store.release_request_claim(
         args.request_id, args.runtime_instance_id, args.claim_token, args.at
@@ -2846,6 +3113,137 @@ def _assign_prepare(store: Storage, args: argparse.Namespace) -> CommandResult:
     ), None
 
 
+def _champion_launch_route(
+    store: Storage,
+    args: argparse.Namespace,
+    *,
+    assignment_id: str,
+) -> dict[str, Any]:
+    runtime_kind = getattr(args, "runtime_kind", "pi")
+    agent_adapter = builtin_agent_adapter_registry().adapter(runtime_kind)
+    explicit = (args.model, args.effort)
+    if (args.model is None) != (args.effort is None):
+        raise StorageRefusal(
+            "launch_route_incomplete",
+            "explicit launch routing requires both model and effort",
+        )
+    decision = (
+        store.routing_decision(args.routing_decision_id)
+        if args.routing_decision_id is not None
+        else None
+    )
+    if args.routing_decision_id is not None and decision is None:
+        raise StorageRefusal(
+            "launch_routing_decision_unknown",
+            "Champion launch routing decision does not exist",
+        )
+    if decision is not None:
+        subject_targets = {
+            "request": args.request_id,
+            "task": args.task_id,
+            "assignment": assignment_id,
+        }
+        try:
+            decision_capabilities = tuple(
+                json.loads(str(decision["required_capabilities_json"]))
+            )
+        except (KeyError, TypeError, json.JSONDecodeError) as exc:
+            raise StorageRefusal(
+                "launch_routing_decision_invalid",
+                "Champion launch routing decision is malformed",
+            ) from exc
+        try:
+            selected_provider = agent_adapter.normalize_provider(
+                str(decision.get("provider", ""))
+            )
+            requested_provider = agent_adapter.normalize_provider(args.provider_kind)
+        except StorageRefusal as exc:
+            raise StorageRefusal(
+                "launch_routing_decision_mismatch",
+                "Champion routing selected a provider unsupported by the runtime adapter",
+            ) from exc
+        runtime_explicit = bool(getattr(args, "runtime_kind_explicit", False))
+        provider_explicit = bool(getattr(args, "provider_kind_explicit", True))
+        resolved_provider = requested_provider
+        provider_compatible = selected_provider == resolved_provider
+        exact = bool(
+            decision.get("subject_kind") in subject_targets
+            and decision.get("subject_id")
+            == subject_targets.get(str(decision.get("subject_kind")))
+            and decision.get("role") == "champion"
+            and decision.get("state") in {"selected", "escalated"}
+            and isinstance(decision.get("model"), str)
+            and bool(decision["model"])
+            and isinstance(decision.get("effort"), str)
+            and bool(decision["effort"])
+            and provider_compatible
+            and agent_adapter.accepts_provider(resolved_provider)
+            and sorted(decision_capabilities) == sorted(args.requires)
+        )
+        if not exact:
+            raise StorageRefusal(
+                "launch_routing_decision_mismatch",
+                "Champion launch routing decision does not match the exact assignment",
+            )
+        if args.model is not None and explicit != (
+            decision["model"],
+            decision["effort"],
+        ):
+            raise StorageRefusal(
+                "launch_routing_decision_mismatch",
+                "explicit model or effort conflicts with the persisted routing decision",
+            )
+        args.provider_kind = str(resolved_provider)
+        return {
+            "decision_id": str(decision["decision_id"]),
+            "provider": str(resolved_provider),
+            "model": str(decision["model"]),
+            "effort": str(decision["effort"]),
+            "tier": decision.get("tier"),
+            "reason": decision.get("reason"),
+            "reason_code": decision.get("reason_code"),
+            "policy_version": decision.get("policy_version"),
+            "provider_config_version": decision.get("provider_config_version"),
+            "explicit": {
+                "runtime": runtime_explicit,
+                "provider": provider_explicit,
+                "model": args.model is not None,
+                "effort": args.effort is not None,
+            },
+        }
+    if args.model is None:
+        raise StorageRefusal(
+            "launch_routing_decision_required",
+            "default Champion launch requires one exact persisted ModelRouter decision",
+        )
+    runtime_kind = getattr(args, "runtime_kind", "pi")
+    runtime_explicit = bool(getattr(args, "runtime_kind_explicit", False))
+    provider_explicit = bool(getattr(args, "provider_kind_explicit", True))
+    args.provider_kind = agent_adapter.normalize_provider(args.provider_kind)
+    if not agent_adapter.accepts_provider(args.provider_kind):
+        raise StorageRefusal(
+            "launch_provider_invalid",
+            "explicit provider does not belong to the selected runtime adapter",
+        )
+    return {
+        "decision_id": None,
+        "provider": str(args.provider_kind),
+        "model": str(args.model),
+        "effort": str(args.effort),
+        "tier": "EXPLICIT",
+        "reason": "Explicit launch override.",
+        "reason_code": "explicit_override",
+        "policy_version": None,
+        "provider_config_version": None,
+        "explicit": {
+            "runtime": runtime_explicit,
+            "provider": provider_explicit,
+            "model": True,
+            "effort": True,
+        },
+    }
+
+
 def _assign_launch(store: Storage, args: argparse.Namespace) -> CommandResult:
     if args.state_root is None:
         raise StorageRefusal("state_root_required", "visible launch requires canonical state")
@@ -2855,18 +3253,23 @@ def _assign_launch(store: Storage, args: argparse.Namespace) -> CommandResult:
     champion_agent_id = args.champion_agent_id or derived_champion_agent_id(
         assignment_id
     )
-    resume_thread_id = continuation_resume_thread(
-        store,
-        assignment_id=assignment_id,
-        task_id=args.task_id,
-        champion_agent_id=champion_agent_id,
-        repository=args.repository,
-        issue=args.issue,
-        branch=args.branch,
-        worktree=args.worktree,
-        at=_turn_time(),
+    routing = _champion_launch_route(
+        store, args, assignment_id=assignment_id
     )
-    workspace_id = args.workspace_id or os.environ.get("HERDR_WORKSPACE_ID", "")
+    model, effort = str(routing["model"]), str(routing["effort"])
+    runner = SubprocessRunner()
+    multiplexer = builtin_multiplexer_adapter_registry(
+        herdr_runner=runner, herdr_binary="herdr"
+    ).adapter(args.multiplexer_kind)
+    if args.workspace_id:
+        workspace_id = args.workspace_id
+    else:
+        if "calling_context" not in multiplexer.capabilities:
+            raise StorageRefusal(
+                "multiplexer_context_unavailable",
+                "selected multiplexer cannot identify the calling workspace",
+            )
+        workspace_id = multiplexer.calling_context()["workspace_id"]
     league_command = str(
         Path(args.league_command).resolve()
         if args.league_command
@@ -2875,11 +3278,12 @@ def _assign_launch(store: Storage, args: argparse.Namespace) -> CommandResult:
     options = VisibleLaunchOptions(
         workspace_id=workspace_id,
         task_label=args.task_label or derive_task_label(args.task_summary),
-        model=args.model,
-        effort=args.effort,
+        model=model,
+        effort=effort,
         league_command=league_command,
         state_root=str(args.state_root.resolve()),
         startup_timeout_ms=args.startup_timeout_ms,
+        routing=routing,
     )
     spec = AssignmentSpec(
         assignment_id=assignment_id,
@@ -2896,9 +3300,40 @@ def _assign_launch(store: Storage, args: argparse.Namespace) -> CommandResult:
         issue_receipt=None,
         required_capabilities=tuple(args.requires),
     )
-    runner = SubprocessRunner()
-    adapter = HerdrCodexLaunchAdapter(
-        options, runner, resume_thread_id=resume_thread_id
+    launch_time = _turn_time()
+    release_root = Path(
+        args.release_root or Path(league_command).parent.parent
+    ).resolve()
+    agent_adapter = builtin_agent_adapter_registry().adapter(args.runtime_kind)
+    adapter = agent_adapter.visible_launch(
+        store=store,
+        options=options,
+        multiplexer=multiplexer,
+        startup_timeout_ms=args.startup_timeout_ms,
+        launch={
+            "assignment_id": assignment_id,
+            "task_id": args.task_id,
+            "champion_agent_id": champion_agent_id,
+            "repository": args.repository,
+            "issue": args.issue,
+            "branch": args.branch,
+            "worktree": args.worktree,
+            "provider_kind": args.provider_kind,
+            "project_code": args.project_code,
+            "release_root": args.release_root,
+            "resolved_release_root": str(release_root),
+            "session_path": args.session_path,
+            "parent_session_id": args.parent_session_id,
+            "parent_session_path": args.parent_session_path,
+            "session_id": args.session_id,
+            "session_mode": args.session_mode,
+            "workspace_id": workspace_id,
+            "state_root": str(args.state_root.resolve()),
+            "model": model,
+            "effort": effort,
+            "routing": routing,
+            "at": launch_time,
+        },
     )
     verifier = GitHubIssueVerifier(
         runner,
@@ -2907,6 +3342,113 @@ def _assign_launch(store: Storage, args: argparse.Namespace) -> CommandResult:
     return VisibleChampionLaunchService(
         store, adapter, options, issue_verifier=verifier
     ).launch(spec), None
+
+
+def _assign_replace_runtime(
+    store: Storage, args: argparse.Namespace
+) -> CommandResult:
+    if args.state_root is None:
+        raise StorageRefusal(
+            "state_root_required", "runtime replacement requires canonical state"
+        )
+    context = store.runtime_replacement_launch_context(args.assignment_id)
+    route_args = argparse.Namespace(
+        request_id=context["request_id"],
+        task_id=context["task_id"],
+        requires=list(context["required_capabilities"]),
+        runtime_kind=args.successor_runtime_kind,
+        provider_kind=args.successor_provider_kind,
+        runtime_kind_explicit=True,
+        provider_kind_explicit=True,
+        routing_decision_id=args.routing_decision_id,
+        model=args.model,
+        effort=args.effort,
+    )
+    routing = _champion_launch_route(
+        store, route_args, assignment_id=args.assignment_id
+    )
+    runner = SubprocessRunner()
+    multiplexers = builtin_multiplexer_adapter_registry(
+        herdr_runner=runner, herdr_binary="herdr"
+    )
+    multiplexer = multiplexers.adapter(args.multiplexer_kind)
+    if args.workspace_id:
+        workspace_id = args.workspace_id
+    else:
+        if "calling_context" not in multiplexer.capabilities:
+            raise StorageRefusal(
+                "multiplexer_context_unavailable",
+                "selected multiplexer cannot identify the calling workspace",
+            )
+        workspace_id = multiplexer.calling_context()["workspace_id"]
+    league_command = str(
+        Path(args.league_command).resolve()
+        if args.league_command
+        else Path(sys.argv[0]).resolve()
+    )
+    release_root = Path(
+        args.release_root or Path(league_command).parent.parent
+    ).resolve()
+    options = VisibleLaunchOptions(
+        workspace_id=workspace_id,
+        task_label=derive_task_label(context["task_summary"]),
+        model=str(routing["model"]),
+        effort=str(routing["effort"]),
+        league_command=league_command,
+        state_root=str(args.state_root.resolve()),
+        startup_timeout_ms=args.startup_timeout_ms,
+        routing=routing,
+    )
+    agents = builtin_agent_adapter_registry()
+    successor = agents.adapter(args.successor_runtime_kind)
+    request = {
+        "schema": "league.runtime-replacement-request.v1",
+        "operation_id": args.operation_id,
+        "assignment_id": args.assignment_id,
+        "predecessor_agent_id": args.predecessor_agent_id,
+        "predecessor_runtime_instance_id": args.predecessor_runtime_instance_id,
+        "successor_agent_id": args.successor_agent_id,
+        "successor_runtime_instance_id": args.successor_runtime_instance_id,
+        "successor_adapter_kind": args.successor_runtime_kind,
+        "successor_harness_kind": successor.launch_profile.runtime_kind,
+        "successor_provider_kind": route_args.provider_kind,
+        "multiplexer_kind": args.multiplexer_kind,
+        "canonical_routing_name": context["routing_name"],
+        "staging_routing_name": args.staging_routing_name,
+        "routing_decision_id": args.routing_decision_id,
+        "model": str(routing["model"]),
+        "effort": str(routing["effort"]),
+        "expected_assignment_version": args.expected_assignment_version,
+        "expected_agent_version": args.expected_agent_version,
+        "expected_task_version": args.expected_task_version,
+    }
+    launch_inputs = {
+        "runtime_instance_id": args.successor_runtime_instance_id,
+        "provider_kind": route_args.provider_kind,
+        "project_code": args.project_code,
+        "release_root": args.release_root,
+        "resolved_release_root": str(release_root),
+        "session_path": args.session_path,
+        "parent_session_id": args.parent_session_id,
+        "parent_session_path": args.parent_session_path,
+        "session_id": args.session_id,
+        "session_mode": args.session_mode,
+        "workspace_id": workspace_id,
+        "state_root": str(args.state_root.resolve()),
+        "model": str(routing["model"]),
+        "effort": str(routing["effort"]),
+        "routing": routing,
+    }
+    return RuntimeReplacementService(
+        store, agents, multiplexers, _ProvidedClock(args.at)
+    ).replace(
+        RuntimeReplacementSpec(
+            request=request,
+            launch_options=options,
+            launch_inputs=launch_inputs,
+            startup_timeout_ms=args.startup_timeout_ms,
+        )
+    ), None
 
 
 def _assign_launching(store: Storage, args: argparse.Namespace) -> CommandResult:
@@ -3062,6 +3604,19 @@ def _delivery_backlog(store: Storage, args: argparse.Namespace) -> CommandResult
     }, None
 
 
+def _delivery_dispatch(store: Storage, args: argparse.Namespace) -> CommandResult:
+    from .canonical_delivery import dispatch_event
+
+    at = datetime.now().astimezone().isoformat(timespec="seconds")
+    return dispatch_event(
+        store,
+        outbox_id=args.outbox_id,
+        event_id=args.event_id,
+        recipient_agent_id=args.recipient_agent_id,
+        at=at,
+    ), None
+
+
 def _hook_register_runtime(store: Storage, args: argparse.Namespace) -> CommandResult:
     return store.register_runtime(
         RuntimeRegistrationCommand(
@@ -3173,6 +3728,14 @@ def _hook_set_supervision_policy(
     ), None
 
 
+def _hook_set_attachment(
+    store: Storage, args: argparse.Namespace
+) -> CommandResult:
+    return store.set_supervision_attachment(
+        args.scope_id, args.actor_agent_id, args.mode, args.at
+    ), None
+
+
 def _issue_select(store: Storage, args: argparse.Namespace) -> CommandResult:
     runner = SubprocessRunner()
     service = GitHubIssueSelectionService(store, runner)
@@ -3235,6 +3798,7 @@ HANDLERS: dict[str, CommandHandler] = {
     "delivery.ack-outbox": _delivery_ack_outbox,
     "delivery.fail-outbox": _delivery_fail_outbox,
     "delivery.backlog": _delivery_backlog,
+    "delivery.dispatch": _delivery_dispatch,
     "project.put": _project_put,
     "project.resolve": _project_resolve,
     "project.list": _project_list,
@@ -3250,6 +3814,10 @@ HANDLERS: dict[str, CommandHandler] = {
     "task.transfer-owner": _task_transfer,
     "task.transition": _task_transition,
     "runtime.matrix": _runtime_matrix,
+    "runtime.resume-launch": _runtime_resume_launch,
+    "runtime.migrate-pi-session": _runtime_migrate_pi_session,
+    "runtime.replay-restored-display": _runtime_replay_restored_display,
+    "runtime.reconcile-restored-agent": _runtime_reconcile_restored_agent,
     "routing.choose": _routing_choose,
     "routing.escalate": _routing_escalate,
     "routing.outcome": _routing_outcome,
@@ -3269,6 +3837,7 @@ HANDLERS: dict[str, CommandHandler] = {
     "request.bind-prompt": _request_bind_prompt,
     "request.claim": _request_claim,
     "request.accept": _request_claim,
+    "request.accept-routed": _request_accept_routed,
     "request.release": _request_release,
     "request.dispatch": _request_dispatch,
     "request.decide-route": _request_decide_route,
@@ -3286,6 +3855,7 @@ HANDLERS: dict[str, CommandHandler] = {
     "request.reconcile-duplicate": _request_reconcile_duplicate,
     "assign.prepare": _assign_prepare,
     "assign.run": _assign_launch,
+    "assign.replace-runtime": _assign_replace_runtime,
     "assign.launching": _assign_launching,
     "assign.activate": _assign_activate,
     "assign.reconcile-runtime": _assign_reconcile_runtime,
@@ -3306,6 +3876,7 @@ HANDLERS: dict[str, CommandHandler] = {
     "mode.revoke": _mode_revoke,
     "issue.select": _issue_select,
     "hook.set-supervision-policy": _hook_set_supervision_policy,
+    "hook.set-attachment": _hook_set_attachment,
     "hook.reconcile-silent": _hook_reconcile_silent,
 }
 
@@ -3355,6 +3926,9 @@ CONFIG_ONLY_COMMANDS = {
     "skill.validate": _skill_validate,
     "skill.audit": _skill_audit,
     "skill.matrix": _skill_matrix,
+    "routing.migrate-config": _routing_migrate_config,
+    "routing.rollback-config": _routing_rollback_config,
+    "routing.validate-config": _routing_validate_config,
 }
 
 

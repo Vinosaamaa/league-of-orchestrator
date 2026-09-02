@@ -1515,6 +1515,78 @@ def claim_request(
     }
 
 
+def accept_routed_delivery(
+    store: Any,
+    event_id: str,
+    recipient_agent_id: str,
+    runtime_instance_id: str,
+    leased_until: str,
+    at: str,
+) -> dict[str, Any]:
+    """Accept one exact received route without caller-manufactured claim mechanics."""
+
+    _time(at, "routed acceptance time")
+    _time(leased_until, "routed acceptance lease")
+    route = store.connection.execute(
+        """
+        SELECT e.request_id,e.event_type,o.outbox_id,o.recipient_agent_id,
+               r.state,r.owner_agent_id,r.pending_owner_agent_id,r.last_route_event_id
+          FROM events e
+          JOIN delivery_outbox o ON o.event_id=e.event_id
+          JOIN requests r ON r.request_id=e.request_id
+         WHERE e.event_id=? AND o.recipient_agent_id=?
+        """,
+        (event_id, recipient_agent_id),
+    ).fetchone()
+    if (
+        route is None
+        or route["event_type"] != "request_routed"
+        or route["last_route_event_id"] != event_id
+        or route["state"] not in {"routed", "accepted"}
+        or (
+            route["state"] == "routed"
+            and route["pending_owner_agent_id"] != recipient_agent_id
+        )
+        or (
+            route["state"] == "accepted"
+            and route["owner_agent_id"] != recipient_agent_id
+        )
+    ):
+        raise StorageRefusal(
+            "routed_delivery_mismatch",
+            "event is not the exact current routed request for this recipient",
+        )
+    receipt = store.connection.execute(
+        "SELECT 1 FROM recipient_receipts WHERE event_id=? AND recipient_agent_id=?",
+        (event_id, recipient_agent_id),
+    ).fetchone()
+    if receipt is None:
+        raise StorageRefusal(
+            "route_unreceived", "routed request cannot be accepted before exact receipt"
+        )
+    claim_token = "routed-" + hashlib.sha256(
+        (
+            f"league.accept-routed.v1\0{event_id}\0{recipient_agent_id}\0"
+            f"{runtime_instance_id}"
+        ).encode()
+    ).hexdigest()
+    result = claim_request(
+        store,
+        str(route["request_id"]),
+        runtime_instance_id,
+        claim_token,
+        leased_until,
+        at,
+    )
+    return {
+        **result,
+        "route_event_id": event_id,
+        "route_outbox_id": route["outbox_id"],
+        "claim_token": claim_token,
+        "leased_until": leased_until,
+    }
+
+
 def release_request_claim(
     store: Any,
     request_id: str,

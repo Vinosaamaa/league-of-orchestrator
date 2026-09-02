@@ -1,0 +1,13 @@
+(version 1)
+(allow default)
+
+; Pi keeps network access for its model provider. Only the bash child is
+; executed under this profile, so shell subprocesses cannot make network calls
+; or write outside the exact assignment roots and macOS temporary directories.
+(deny network*)
+(deny file-write*)
+(allow file-write*
+  (subpath (param "WORKTREE"))
+  (subpath (param "STATE_ROOT"))
+  (subpath "/private/tmp")
+  (subpath "/private/var/folders"))

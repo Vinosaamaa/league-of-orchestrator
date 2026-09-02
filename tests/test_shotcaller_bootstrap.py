@@ -41,11 +41,15 @@ class RecordingHerdr:
         worktree: Path,
         *,
         thread_id: str = THREAD_ID,
+        agent_kind: str = "codex",
+        provider_kind: str | None = None,
         publish_mismatch: bool = False,
         delayed_auto_title_reads: int | None = None,
     ) -> None:
         self.worktree = str(worktree.resolve())
         self.thread_id = thread_id
+        self.agent_kind = agent_kind
+        self.provider_kind = provider_kind or agent_kind
         self.terminal_id = "terminal:1"
         self.agent_status = "working"
         self.publish_mismatch = publish_mismatch
@@ -55,7 +59,7 @@ class RecordingHerdr:
         self.routing_alias_field: object | None = None
         self.tokens: dict[str, str] | None = {}
         self.title = ""
-        self.metadata_source = "herdr:codex"
+        self.metadata_source = f"herdr:{agent_kind}"
         self.expose_metadata_source = True
         self.provider_managed_presentation = False
         self.source_sequences: dict[str, int] = {}
@@ -68,9 +72,12 @@ class RecordingHerdr:
 
     def _agent(self) -> dict[str, object]:
         value: dict[str, object] = {
-            "agent": "codex",
+            "agent": self.agent_kind,
             "agent_status": self.agent_status,
-            "agent_session": {"source": "herdr:codex", "value": self.thread_id},
+            "agent_session": {
+                "source": f"herdr:{self.agent_kind}",
+                "value": self.thread_id,
+            },
             "cwd": self.worktree,
             "foreground_cwd": self.worktree,
             "pane_id": "w1:p1",
@@ -107,7 +114,7 @@ class RecordingHerdr:
         if self.pending_auto_title_reads > 0:
             return
         self.pending_auto_title_reads = None
-        self.metadata_source = "herdr:codex"
+        self.metadata_source = f"herdr:{self.agent_kind}"
         self.state_change_seq += 1
         self.title = "Create the Shotcaller for this pane | codex"
 
@@ -130,15 +137,15 @@ class RecordingHerdr:
                 callsign = self.name[0].upper() + self.name[1:]
                 self.tokens = {
                     "callsign": callsign,
-                    "harness": "codex",
+                    "harness": self.agent_kind,
                     "identity_thread_id": self.thread_id,
-                    "identity_title": f"Codex | {callsign}",
-                    "orchestrator_identity": f"codex · {self.name}",
+                    "identity_title": f"{self.agent_kind.title()} | {callsign}",
+                    "orchestrator_identity": f"{self.agent_kind} · {self.name}",
                     "routing_alias": self.name,
                     "sidebar_name": callsign,
                     "thread_title": callsign,
                 }
-                self.title = f"{callsign} | codex"
+                self.title = f"{callsign} | {self.agent_kind}"
             result = {"agent": self._agent()}
         elif command[:3] == ("herdr", "pane", "report-metadata"):
             source = command[command.index("--source") + 1]
@@ -151,7 +158,7 @@ class RecordingHerdr:
                 return subprocess.CompletedProcess(command, 0, "", "")
             if "--applies-to-source" in command:
                 applies_to = command[command.index("--applies-to-source") + 1]
-                if applies_to != "herdr:codex":
+                if applies_to != f"herdr:{self.agent_kind}":
                     return subprocess.CompletedProcess(
                         command, 1, "", "metadata source mismatch"
                     )
@@ -698,7 +705,7 @@ def test_in_place_bootstrap_creates_shotcaller_without_layout_or_squad_registrat
     turn_pid = turn.pid
     assert turn.stdin is not None and turn.stdout is not None
     intake = json.loads(turn.stdout.readline())
-    assert intake["result"]["phase"] == "intake"
+    assert intake.get("result", {}).get("phase") == "intake", intake
     assert [row["body"] for row in intake["result"]["prompts"]] == [prompt_body]
     turn.stdin.write(
         json.dumps(
@@ -800,6 +807,72 @@ def test_in_place_bootstrap_creates_shotcaller_without_layout_or_squad_registrat
             "FROM watcher_scopes WHERE scope_id='watcher:Ashe'"
         ).fetchone()
         assert tuple(scope) == (AGENT_ID, 2, 3)
+
+
+def test_in_place_bootstrap_is_provider_neutral_and_never_creates_layout(
+    root: Path,
+) -> None:
+    cases = (
+        ("codex", "codex", THREAD_ID, "codex-thread"),
+        ("cursor", "cursor", "77777777-7777-4777-8777-777777777777", "cursor-thread"),
+        ("pi", "codex", "/synthetic/pi/sessions/shotcaller.jsonl", "pi-thread"),
+        ("pi", "cursor", "/synthetic/pi/sessions/cursor-shotcaller.jsonl", "pi-thread"),
+    )
+    for index, (runtime_kind, provider_kind, session_ref, harness_kind) in enumerate(cases):
+        state, _ = migrated_state(root, f"in-place-shotcaller-{index}")
+        worktree = root / f"in-place-shotcaller-{index}" / "worktree"
+        worktree.mkdir()
+        clock = FakeClock()
+        runner = RecordingHerdr(
+            worktree,
+            thread_id=session_ref,
+            agent_kind=runtime_kind,
+            provider_kind=provider_kind,
+        )
+        spec = ShotcallerBootstrapSpec(
+            assignment_id=f"callsign-assignment:bootstrap:provider-{index}",
+            agent_id=f"agent:shotcaller:provider-{index}",
+            runtime_instance_id=f"runtime:shotcaller:provider-{index}",
+            thread_id=session_ref,
+            capabilities=("request.triage", "rollover.accept"),
+        )
+        options = ShotcallerBootstrapOptions(
+            workspace_id="w1",
+            tab_id="w1:t1",
+            pane_id="w1:p1",
+            worktree=str(worktree.resolve()),
+            runtime_kind=runtime_kind,
+            provider_kind=provider_kind,
+        )
+        with SQLiteStorage(state) as store:
+            _seed_available_ashe(store, clock)
+            created = ShotcallerBootstrapService(
+                store,
+                HerdrShotcallerBootstrapAdapter(
+                    options,
+                    runner,
+                    environment={
+                        "HERDR_ENV": "1",
+                        "HERDR_WORKSPACE_ID": "w1",
+                        "HERDR_TAB_ID": "w1:t1",
+                        "HERDR_PANE_ID": "w1:p1",
+                    },
+                ),
+                clock,
+            ).bootstrap(spec)
+            assert created["state"] == "active"
+            row = store.connection.execute(
+                "SELECT kind,thread_id,display_agent FROM agent_instances WHERE agent_id=?",
+                (spec.agent_id,),
+            ).fetchone()
+            assert tuple(row) == (harness_kind, session_ref, provider_kind)
+        forbidden = {
+            ("herdr", "tab", "create"),
+            ("herdr", "pane", "split"),
+            ("herdr", "workspace", "create"),
+            ("herdr", "agent", "start"),
+        }
+        assert not any(call[:3] in forbidden for call in runner.calls)
 
 
 def test_in_place_bootstrap_retries_transient_malformed_identity_read_without_layout(
@@ -4007,6 +4080,7 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="league-shotcaller-bootstrap-") as temporary:
         root = Path(temporary)
         test_in_place_bootstrap_creates_shotcaller_without_layout_or_squad_registration(root)
+        test_in_place_bootstrap_is_provider_neutral_and_never_creates_layout(root)
         test_in_place_bootstrap_retries_transient_malformed_identity_read_without_layout(root)
         test_in_place_bootstrap_refuses_persistently_malformed_identity_without_mutation(root)
         test_bootstrap_refuses_later_provider_title_without_overwriting_it(root)

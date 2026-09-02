@@ -427,7 +427,7 @@ def main() -> None:
 
         time.sleep(0.45)
         renewed = supervisor_status(state, "Garen")
-        assert renewed["live"] and renewed["fence"] > first["fence"]
+        assert renewed["live"] and renewed["fence"] == first["fence"]
         stopped = stop_supervisor(state, "Garen")
         assert stopped["stopped"] and not stopped["live"]
         thread.join(timeout=5)
@@ -497,9 +497,11 @@ def main() -> None:
             store_factory=factory,
         )
         renewal_thread, renewal_errors = _start(renewal_runtime)
+        initial = supervisor_status(state, "Garen")
         time.sleep(0.4)
         renewed = supervisor_status(state, "Garen")
-        assert factory.failed and renewed["live"] and renewed["fence"] >= 3
+        assert factory.failed and renewed["live"]
+        assert renewed["fence"] == initial["fence"]
         stop_supervisor(state, "Garen")
         renewal_thread.join(timeout=5)
         assert not renewal_thread.is_alive() and not renewal_errors

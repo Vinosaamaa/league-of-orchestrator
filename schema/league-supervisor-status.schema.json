@@ -19,6 +19,7 @@
     "mode": {"enum": ["all_material", "calm"]},
     "runtime_state": {"enum": ["supervising", "paused"]},
     "wake_policy": {"enum": ["normal", "calm", "calm_paused"]},
+    "attachment_mode": {"enum": ["attached", "detached"]},
     "monitor_live": {"type": "boolean"},
     "paused": {"type": "boolean"},
     "hooks_changed": {"const": false},
@@ -27,6 +28,7 @@
       "type": ["object", "null"]
     },
     "reason": {"enum": ["registration_missing", "process_unreachable"]},
+    "deprecated_alias": {"enum": ["service-pause", "service-resume"]},
     "stopped": {"type": "boolean"}
   }
 }

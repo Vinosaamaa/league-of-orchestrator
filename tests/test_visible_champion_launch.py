@@ -189,17 +189,21 @@ class FakeHerdrRunner:
         wrong_thread: bool = False,
         delayed_context_title_reads: int | None = None,
         routing_name: str = "lux",
+        occupied_names: tuple[str, ...] = (),
+        harness_kind: str = "codex",
     ) -> None:
         self.worktree = str(worktree.resolve())
         self.wrong_thread = wrong_thread
         self.delayed_context_title_reads = delayed_context_title_reads
         self.routing_name = routing_name
+        self.occupied_names = occupied_names
+        self.harness_kind = harness_kind
         self.started = False
         self.session_reported = False
         self.closed = False
         self.title = ""
         self.tokens: dict[str, str] = {}
-        self.metadata_source = "herdr:codex"
+        self.metadata_source = f"herdr:{harness_kind}"
         self.source_sequences: dict[str, int] = {}
         self.overlay_baselines: dict[
             str, tuple[str | None, str, dict[str, str], str, dict[str, str]]
@@ -212,7 +216,7 @@ class FakeHerdrRunner:
     def _agent(self) -> dict[str, object]:
         thread = "not-a-thread" if self.wrong_thread else THREAD_ID
         agent = {
-            "agent": "codex",
+            "agent": self.harness_kind,
             "agent_status": "idle",
             "interactive_ready": True,
             "cwd": self.worktree,
@@ -229,9 +233,9 @@ class FakeHerdrRunner:
             "workspace_id": "w1",
         }
         agent["agent_session"] = {
-            "agent": "codex",
+            "agent": self.harness_kind,
             "kind": "id",
-            "source": "herdr:codex",
+            "source": f"herdr:{self.harness_kind}",
             "value": thread,
         }
         return agent
@@ -243,7 +247,7 @@ class FakeHerdrRunner:
         if self.pending_title_reads > 0:
             return
         self.pending_title_reads = None
-        self.metadata_source = "herdr:codex"
+        self.metadata_source = f"herdr:{self.harness_kind}"
         self.state_change_seq += 1
         self.title = "League assignment context | codex"
         self.tokens.update(
@@ -256,7 +260,11 @@ class FakeHerdrRunner:
         )
 
     def active_copy(self) -> "FakeHerdrRunner":
-        copied = FakeHerdrRunner(Path(self.worktree), routing_name=self.routing_name)
+        copied = FakeHerdrRunner(
+            Path(self.worktree),
+            routing_name=self.routing_name,
+            harness_kind=self.harness_kind,
+        )
         copied.started = True
         copied.title = self.title
         copied.tokens = dict(self.tokens)
@@ -289,7 +297,9 @@ class FakeHerdrRunner:
         self.calls.append(command)
         result: dict[str, object]
         if command[:3] == ("herdr", "agent", "list"):
-            agents = [self._agent()] if self.started and not self.closed else []
+            agents = [{"name": name} for name in self.occupied_names]
+            if self.started and not self.closed:
+                agents.append(self._agent())
             result = {"agents": agents}
         elif command[:3] == ("herdr", "tab", "create"):
             result = {
@@ -300,6 +310,8 @@ class FakeHerdrRunner:
                 },
             }
         elif command[:3] == ("herdr", "agent", "start"):
+            if "--name" in command:
+                self.routing_name = command[command.index("--name") + 1]
             self.started = True
             result = {"agent": self._agent()}
         elif command[:3] == ("herdr", "agent", "get"):
@@ -309,7 +321,7 @@ class FakeHerdrRunner:
             source = command[command.index("--source") + 1]
             if "--applies-to-source" in command:
                 applies_to = command[command.index("--applies-to-source") + 1]
-                if applies_to != "herdr:codex":
+                if applies_to != f"herdr:{self.harness_kind}":
                     return subprocess.CompletedProcess(
                         command, 1, "", "metadata source mismatch"
                     )
@@ -480,14 +492,47 @@ class FakeIssueVerifier:
         return receipt
 
 
-def _adapter(options: VisibleLaunchOptions, runner: FakeHerdrRunner, store):
+def _adapter(
+    options: VisibleLaunchOptions,
+    runner: FakeHerdrRunner,
+    store,
+    *,
+    harness_kind: str = "codex",
+):
     adapter = HerdrCodexLaunchAdapter(
         options,
         runner,
         environment={"HERDR_ENV": "1", "HERDR_WORKSPACE_ID": "w1"},
+        harness_kind=harness_kind,
     )
     adapter.issue_verifier = FakeIssueVerifier(store=store)
     return adapter
+
+
+def test_direct_cursor_launch_uses_one_new_tab_and_exact_provider_arguments(
+    root: Path,
+) -> None:
+    store, _, worktree = _context(root, "cursor-direct")
+    options = _options(root)
+    runner = FakeHerdrRunner(worktree, harness_kind="cursor")
+    adapter = _adapter(options, runner, store, harness_kind="cursor")
+    receipt = adapter.launch(replace(_spec(worktree, "cursor-direct"), callsign="Lux"))
+    assert receipt["harness_kind"] == "cursor-thread"
+    assert receipt["display_agent"] == "cursor"
+    start = next(call for call in runner.calls if call[:3] == ("herdr", "agent", "start"))
+    assert start[start.index("--kind") + 1] == "cursor"
+    separator = start.index("--")
+    assert start[separator + 1 :] == (
+        "--model",
+        f"{options.model}[effort={options.effort}]",
+        "--sandbox",
+        "enabled",
+        "--add-dir",
+        options.state_root,
+    )
+    assert len([call for call in runner.calls if call[:3] == ("herdr", "tab", "create")]) == 1
+    assert not any(call[:3] == ("herdr", "pane", "split") for call in runner.calls)
+    store.close()
 
 
 class ResumeSessionReportRunner(FakeHerdrRunner):
@@ -755,7 +800,10 @@ def test_real_adapter_one_command_success_and_retry(root: Path) -> None:
     assert retry_verifier.calls == 1
     retry_calls = retry_runner.calls
     assert retry_calls
-    assert all(call[:3] == ("herdr", "agent", "get") for call in retry_calls)
+    assert all(
+        call[:3] in {("herdr", "agent", "list"), ("herdr", "agent", "get")}
+        for call in retry_calls
+    )
     assert retry_runner.contexts == []
     assert len(runner.contexts) == contexts_before_retry == 1
 
@@ -788,6 +836,8 @@ def test_real_adapter_one_command_success_and_retry(root: Path) -> None:
     )
     assert runner.title == "Lux · Tiny Gate"
     assert runner.tokens["launch_title_source"] == display_receipt["source"]
+
+
     assert runner.metadata_source == display_receipt["source"]
     assert len(runner.contexts) == contexts_before_retry == 1
     durable_display_receipt = store.assignment_launch_context(
@@ -837,6 +887,56 @@ def test_real_adapter_one_command_success_and_retry(root: Path) -> None:
         "assignment_context",
     )
     assert activation_delivery["effect_id"] == result["context_delivery"]["effect_sha256"]
+    store.close()
+
+
+def test_live_multiplexer_names_fence_stale_available_callsigns(root: Path) -> None:
+    store, clock, worktree = _context(root, "live-name-fence")
+    for pool_position, queue_position, callsign in (
+        (98, -2, "Heimerdinger"),
+        (99, -1, "KaiSa"),
+    ):
+        store.connection.execute(
+            """
+            INSERT INTO callsigns
+              (callsign,pool_role,enabled,pool_position,last_released_at)
+            VALUES(?,'champion',1,?,NULL)
+            """,
+            (callsign, pool_position),
+        )
+        store.connection.execute(
+            """
+            INSERT INTO callsign_queue
+              (callsign,pool_role,queue_position,state,reservation_assignment_id,
+               version,updated_at)
+            VALUES(?,'champion',?,'available',NULL,1,?)
+            """,
+            (callsign, queue_position, clock.now()),
+        )
+    options = _options(root)
+    runner = FakeHerdrRunner(
+        worktree, occupied_names=("heimerdinger", "kaisa")
+    )
+    result = VisibleChampionLaunchService(
+        store, _adapter(options, runner, store), options, clock
+    ).launch(_spec(worktree, "live-name-fence"))
+    assert result["callsign"] not in {"Heimerdinger", "KaiSa"}
+    untouched = store.connection.execute(
+        """
+        SELECT callsign,state,reservation_assignment_id,version
+          FROM callsign_queue WHERE callsign IN ('Heimerdinger','KaiSa')
+         ORDER BY callsign
+        """
+    ).fetchall()
+    assert [tuple(row) for row in untouched] == [
+        ("Heimerdinger", "available", None, 1),
+        ("KaiSa", "available", None, 1),
+    ]
+    assert not any(
+        call[:3] == ("herdr", "agent", "get")
+        and call[3] in {"heimerdinger", "kaisa"}
+        for call in runner.calls
+    )
     store.close()
 
 
@@ -891,7 +991,8 @@ def test_active_retry_refuses_changed_owner_issue_before_title_read(root: Path) 
     else:
         raise AssertionError("active retry accepted a changed owner issue")
     assert changed.calls == 1
-    assert retry_runner.calls == []
+    assert retry_runner.calls
+    assert all(call[:3] == ("herdr", "agent", "list") for call in retry_runner.calls)
     store.close()
 
 
@@ -1727,7 +1828,8 @@ def test_issue_first_refuses_missing_and_mismatched_scope_before_launch(root: Pa
         assert exc.code == "issue_selection_unproven"
     else:
         raise AssertionError("visible launch accepted an unproven issue-selection receipt")
-    assert runner.calls == []
+    assert runner.calls
+    assert all(call[:3] == ("herdr", "agent", "list") for call in runner.calls)
 
     changed_scope = FakeIssueVerifier(store=store, receipt_scope_digest="a" * 64)
     try:
@@ -1738,7 +1840,8 @@ def test_issue_first_refuses_missing_and_mismatched_scope_before_launch(root: Pa
         assert exc.code == "issue_selection_unproven"
     else:
         raise AssertionError("visible launch accepted a changed semantic issue scope")
-    assert runner.calls == []
+    assert runner.calls
+    assert all(call[:3] == ("herdr", "agent", "list") for call in runner.calls)
 
     mismatch = FakeIssueVerifier(
         store=store, repository="https://example.invalid/different.git"
@@ -1751,7 +1854,8 @@ def test_issue_first_refuses_missing_and_mismatched_scope_before_launch(root: Pa
         assert exc.code == "issue_scope_mismatch"
     else:
         raise AssertionError("visible launch accepted a mismatched issue scope")
-    assert runner.calls == []
+    assert runner.calls
+    assert all(call[:3] == ("herdr", "agent", "list") for call in runner.calls)
     assert store.connection.execute(
         "SELECT COUNT(*) FROM task_assignments WHERE task_assignment_id LIKE 'assignment:issue-first-%'"
     ).fetchone()[0] == 0
@@ -1962,6 +2066,14 @@ class FailingAdapter:
         self.cleanup_result = cleanup
         self.issue_verifier = FakeIssueVerifier(store=store)
 
+    @property
+    def created_endpoint(self):
+        return True
+
+    @property
+    def launch_receipt(self):
+        return None
+
     def launch(self, spec: AssignmentSpec):
         raise LaunchAdapterError(
             "synthetic_partial_launch", cleanup_required=True, cleanup_proven=False
@@ -1991,6 +2103,14 @@ class ContextFailureAdapter:
         self._created = {"pane_id": "herdr:lux"}
         self.cleanup_result = cleanup
         self.issue_verifier = FakeIssueVerifier(store=store)
+
+    @property
+    def created_endpoint(self):
+        return True
+
+    @property
+    def launch_receipt(self):
+        return None
 
     def launch(self, spec: AssignmentSpec):
         return self.base.launch(spec)
@@ -2095,10 +2215,12 @@ def main() -> None:
         test_generated_task_labels_are_deterministic_two_word_names()
         test_legacy_display_command_exposes_exact_owner_cas_inputs()
         test_task_label_defaults_and_explicit_labels_stay_two_words(root)
+        test_direct_cursor_launch_uses_one_new_tab_and_exact_provider_arguments(root)
         test_exact_resume_uses_declared_thread_and_skips_fresh_handshake(root)
         test_immediate_resume_session_still_requires_exact_process_identity(root)
         test_resume_retry_reconciles_owned_endpoint_without_second_launch(root)
         test_real_adapter_one_command_success_and_retry(root)
+        test_live_multiplexer_names_fence_stale_available_callsigns(root)
         test_active_retry_requires_migration18_issue_binding(root)
         test_active_retry_refuses_changed_owner_issue_before_title_read(root)
         test_legacy_active_champion_display_is_reconciled_once_with_exact_receipt(root)

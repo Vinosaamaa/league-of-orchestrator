@@ -23,6 +23,8 @@
           "actor_agent_id": {"type": "string", "minLength": 1},
           "squad_id": {"type": "string", "minLength": 1},
           "fence": {"type": "integer", "minimum": 1},
+          "notification_policy": {"enum": ["all_material", "calm"]},
+          "attachment_mode": {"enum": ["attached", "detached"]},
           "live": {"type": "boolean"},
           "monitor_live": {"type": "boolean"},
           "reason": {"enum": ["registration_missing", "process_unreachable"]}

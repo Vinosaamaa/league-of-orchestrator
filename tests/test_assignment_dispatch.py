@@ -354,7 +354,11 @@ def test_assignment_retry_compares_complete_launch_identity(root: Path) -> None:
     store, clock = champion_context(root, "assignment-retry-identity")
     base = issue_bound_spec(store, spec("claim-r3", suffix="identity"), clock.now())
     command = PrepareAssignmentCommand(
-        **{key: value for key, value in vars(base).items() if key != "callsign"},
+        **{
+            key: value
+            for key, value in vars(base).items()
+            if key not in {"callsign", "routing_name", "launch_operation_id"}
+        },
         at=clock.now(),
     )
     created = store.prepare_assignment(command)

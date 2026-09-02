@@ -17,9 +17,9 @@ sys.path[:0] = [str(ROOT / "src"), str(ROOT / "tests")]
 from league.persistent_supervisor import (  # noqa: E402
     PersistentSupervisor,
     SupervisorUnavailable,
+    attach_shotcaller,
+    detach_shotcaller,
     notify_user_message,
-    pause_supervisor,
-    resume_supervisor,
     send_supervisor_message,
     supervisor_status,
 )
@@ -487,7 +487,7 @@ def test_brokered_prompt_resolves_and_wakes_only_its_shotcaller(root: Path) -> N
     assert not thread.is_alive() and not errors
 
 
-def test_calm_pause_and_delivery_targets_are_isolated_per_squad(root: Path) -> None:
+def test_notification_and_attachment_axes_are_isolated_per_squad(root: Path) -> None:
     state, store = _multisquad_state(root, "calm-isolation")
     startup_delivery = FakeDeliveryAdapter()
     runtime = PersistentSupervisor(
@@ -501,13 +501,26 @@ def test_calm_pause_and_delivery_targets_are_isolated_per_squad(root: Path) -> N
     try:
         _finish_startup_recovery(store, startup_delivery)
         jarvan = store.supervisor_binding("Jarvan")
-        store.configure_supervision_policy(
+        calm_attached = store.configure_supervision_policy(
             jarvan["scope_id"], JARVAN_ID, "calm", 60, "2026-01-01T00:01:00Z"
         )
-        paused = pause_supervisor(state, "Jarvan")
-        assert paused["runtime_state"] == "paused"
-        assert supervisor_status(state, "Garen")["runtime_state"] == "supervising"
-        assert supervisor_status(state, "Azir")["runtime_state"] == "supervising"
+        assert calm_attached["attachment_mode"] == "attached"
+        detached = detach_shotcaller(state, "Jarvan")
+        assert detached["mode"] == "calm"
+        assert detached["attachment_mode"] == "detached"
+        assert detached["runtime_state"] == "supervising"
+        all_material_detached = store.configure_supervision_policy(
+            jarvan["scope_id"], JARVAN_ID, "all_material", 60,
+            "2026-01-01T00:01:00.100000Z",
+        )
+        assert all_material_detached["attachment_mode"] == "detached"
+        calm_detached = store.configure_supervision_policy(
+            jarvan["scope_id"], JARVAN_ID, "calm", 60,
+            "2026-01-01T00:01:00.200000Z",
+        )
+        assert calm_detached["attachment_mode"] == "detached"
+        assert supervisor_status(state, "Garen")["attachment_mode"] == "attached"
+        assert supervisor_status(state, "Azir")["attachment_mode"] == "attached"
 
         targets = FakeDeliveryAdapter()
         jarvan_fault = store.record_supervision_fault(
@@ -537,8 +550,14 @@ def test_calm_pause_and_delivery_targets_are_isolated_per_squad(root: Path) -> N
         assert [item.channel for item in targets.sent] == ["direct", "watcher"]
         assert targets.sent[0].target["runtime_instance_id"] == JARVAN_RUNTIME
         assert targets.sent[1].envelope["recipient_agent_id"] == SHOTCALLER_ID
-        resumed = resume_supervisor(state, "Jarvan")
-        assert resumed["runtime_state"] == "supervising"
+        attached = attach_shotcaller(state, "Jarvan")
+        assert attached["mode"] == "calm"
+        assert attached["attachment_mode"] == "attached"
+        all_material_attached = store.configure_supervision_policy(
+            jarvan["scope_id"], JARVAN_ID, "all_material", 60,
+            "2026-01-01T00:01:05Z",
+        )
+        assert all_material_attached["attachment_mode"] == "attached"
     finally:
         store.close()
         send_supervisor_message(f"unix:{runtime.socket_path}", {"kind": "stop"})
@@ -680,7 +699,7 @@ def test_discovery_observation_and_aggregate_status_are_batched(root: Path) -> N
     assert not thread.is_alive() and not errors
 
 
-def test_committed_turn_stop_hands_pending_attention_to_supervisor(root: Path) -> None:
+def test_attached_committed_turn_still_blocks_pending_attention(root: Path) -> None:
     state, store = _multisquad_state(root, "stop-handoff")
     delivery = FakeDeliveryAdapter()
     runtime = PersistentSupervisor(
@@ -732,12 +751,27 @@ def test_committed_turn_stop_hands_pending_attention_to_supervisor(root: Path) -
                 },
             },
         )
-        assert stopped["hook_output"] == {}
-        deadline = time.monotonic() + 2
-        while not delivery.sent and time.monotonic() < deadline:
-            time.sleep(0.01)
-        delivered_event_ids = [item.envelope["event_id"] for item in delivery.sent]
-        assert delivered_event_ids == [fault["event_id"]], delivered_event_ids
+        assert stopped["hook_output"]["decision"] == "block"
+        repeated = send_supervisor_message(
+            f"unix:{runtime.socket_path}",
+            {
+                "kind": "hook",
+                "hook": {
+                    "command": "codex-stop-hook",
+                    "shotcaller": "Garen",
+                    "session_id": None,
+                    "capture_event_id": None,
+                    "payload": {
+                        "session_id": "session:runtime:garen:one",
+                        "turn_id": "turn:garen-stop-handoff",
+                        "hook_event_name": "Stop",
+                        "stop_hook_active": True,
+                    },
+                },
+            },
+        )
+        assert repeated["hook_output"]["decision"] == "block"
+        assert delivery.sent == []
     finally:
         store.close()
         send_supervisor_message(f"unix:{runtime.socket_path}", {"kind": "stop"})
@@ -753,14 +787,14 @@ def main() -> None:
         test_attention_uses_exact_direct_fallback_without_service(Path(temporary))
         test_restart_recovers_one_lost_notification_for_exact_squad(Path(temporary))
         test_brokered_prompt_resolves_and_wakes_only_its_shotcaller(Path(temporary))
-        test_calm_pause_and_delivery_targets_are_isolated_per_squad(Path(temporary))
+        test_notification_and_attachment_axes_are_isolated_per_squad(Path(temporary))
         test_active_turn_persists_attention_without_duplicate_wake(Path(temporary))
         test_turn_reuses_existing_shotcaller_scope(Path(temporary))
         test_priority_publish_refuses_removed_binding_without_global_signal(
             Path(temporary)
         )
         test_discovery_observation_and_aggregate_status_are_batched(Path(temporary))
-        test_committed_turn_stop_hands_pending_attention_to_supervisor(Path(temporary))
+        test_attached_committed_turn_still_blocks_pending_attention(Path(temporary))
     print("PASS: one persistent service multiplexes isolated Shotcaller bindings")
 
 

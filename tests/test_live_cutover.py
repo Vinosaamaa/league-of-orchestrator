@@ -187,7 +187,7 @@ def test_universal_target_refuses_without_any_filesystem_change(root: Path) -> N
 def test_release_identity_collisions_refuse_before_any_filesystem_change(
     root: Path,
 ) -> None:
-    assert __version__ == "0.2.38"
+    assert __version__ == "0.2.45"
     for collision_kind in ("release", "bundle"):
         case = root / collision_kind
         namespace = f"{collision_kind}-collision"
@@ -278,8 +278,10 @@ def test_authority_bound_live_apply(root: Path) -> None:
     assert watcher.returncode == 0, watcher.stderr
     assert json.loads(watcher.stdout)["writer"] == "sqlite"
     hook_receipts = {item["harness"]: item for item in applied["hooks"]}
-    assert hook_receipts["codex"]["added"] == ["UserPromptSubmit", "Stop"]
-    assert hook_receipts["cursor"]["added"] == ["beforeSubmitPrompt", "stop"]
+    assert hook_receipts["codex"]["added"] == ["UserPromptSubmit", "PreToolUse", "Stop"]
+    assert hook_receipts["cursor"]["added"] == [
+        "beforeSubmitPrompt", "beforeShellExecution", "stop"
+    ]
     assert json.loads(fixture["cursor_hooks"].read_text())["hooks"][
         "sessionStart"
     ] == [{"command": "keep-me"}]

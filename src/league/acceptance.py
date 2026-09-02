@@ -431,8 +431,24 @@ def _release_files(source_root: Path) -> list[Path]:
         source_root / "src/league/report_template.html",
         source_root / "skills/league-report/SKILL.md",
         source_root / "global-agent-instructions/league/AGENTS.md",
+        source_root / "integrations/pi/league-runtime.ts",
+        source_root / "integrations/pi/league-bash.sb",
+        source_root / "integrations/herdr/league-restore/herdr-plugin.toml",
+        source_root / "integrations/herdr/league-restore/restore.sh",
+        source_root / "integrations/herdr/league-restore/README.md",
+        source_root / "config/league-model-routing.example.json",
     ]
     files.extend(_release_directory_files(source_root, Path("src/league"), ".py"))
+    for package in (
+        Path("src/league/agent_adapters"),
+        Path("src/league/agent_adapters/codex"),
+        Path("src/league/agent_adapters/pi"),
+        Path("src/league/agent_adapters/cursor_cli"),
+        Path("src/league/multiplexer_adapters"),
+        Path("src/league/multiplexer_adapters/herdr"),
+        Path("src/league/multiplexer_adapters/tmux"),
+    ):
+        files.extend(_release_directory_files(source_root, package, ".py"))
     files.extend(_release_directory_files(source_root, Path("schema"), ".json"))
     for path in files:
         _validate_regular_file(
@@ -955,7 +971,6 @@ def _stage_release_bytes(
 def _staged_environment() -> dict[str, str]:
     return {
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-        "PYTHONDONTWRITEBYTECODE": "1",
         "LC_ALL": "C",
     }
 
@@ -1025,6 +1040,30 @@ def _check_staged_schemas_and_hooks(
         value = json.loads(schema_file.read_text(encoding="utf-8"))
         if value.get("$schema") != "https://json-schema.org/draft/2020-12/schema":
             raise StorageRefusal("staged_schema_failed", "staged schema is malformed")
+    routing_script = (
+        "import json,sys;"
+        "sys.path.insert(0,sys.argv[1]);"
+        "from league.routing import load_routing_config;"
+        "print(json.dumps(load_routing_config(__import__('pathlib').Path(sys.argv[2])),"
+        "sort_keys=True,separators=(',',':')))"
+    )
+    routing = json.loads(
+        _run_checked(
+            [
+                sys.executable,
+                "-c",
+                routing_script,
+                str(release / "src"),
+                str(release / "config/league-model-routing.example.json"),
+            ],
+            cwd=home,
+            env={**environment, "PYTHONDONTWRITEBYTECODE": "1"},
+        )
+    )
+    if routing.get("schema") != 3:
+        raise StorageRefusal(
+            "staged_schema_failed", "installed model routing policy is not schema 3"
+        )
     hook_script = (
         "import json,sys;"
         "sys.path.insert(0,sys.argv[1]);"
@@ -1034,17 +1073,49 @@ def _check_staged_schemas_and_hooks(
         "'session_ref':'synthetic-'+h+'-session'};"
         "print(json.dumps(validate_hook_fixture(h,p),sort_keys=True,separators=(',',':')))"
     )
+    hook_environment = {**environment, "PYTHONDONTWRITEBYTECODE": "1"}
     hook_checks = [
         json.loads(
             _run_checked(
                 [sys.executable, "-c", hook_script, str(release / "src"), harness],
                 cwd=home,
-                env=environment,
+                env=hook_environment,
             )
         )
         for harness in ("codex", "cursor", "pi")
     ]
+    watcher_help = _run_checked(
+        [str(release / "bin/agent-watcher"), "--help"],
+        cwd=home,
+        env=environment,
+    )
+    if "usage:" not in watcher_help:
+        raise StorageRefusal("staged_check_failed", "staged watcher help check failed")
     return len(schema_files), hook_checks
+
+
+def _check_staged_manifest_unchanged(
+    release: Path, manifest: Mapping[str, str]
+) -> None:
+    actual: dict[str, str] = {}
+    for candidate in sorted(release.rglob("*")):
+        relative = candidate.relative_to(release).as_posix()
+        status = candidate.lstat()
+        if stat.S_ISDIR(status.st_mode):
+            continue
+        if not stat.S_ISREG(status.st_mode) or candidate.is_symlink():
+            raise StorageRefusal(
+                "staged_parity_failed", "staged runtime created a non-regular release node"
+            )
+        actual[relative] = _regular_file_digest(
+            candidate,
+            root=release,
+            refusal_code="staged_parity_failed",
+        )
+    if actual != dict(manifest):
+        raise StorageRefusal(
+            "staged_parity_failed", "staged runtime changed the immutable release manifest"
+        )
 
 
 def _check_staged_permissions(
@@ -1251,6 +1322,7 @@ def _staged_install(
         schema_count, hook_checks = _check_staged_schemas_and_hooks(
             release, home, environment
         )
+        _check_staged_manifest_unchanged(release, staged_hashes)
         _check_staged_permissions(
             release_bundle, prefix, releases, release, legacy, staged_hashes
         )

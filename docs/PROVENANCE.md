@@ -1309,3 +1309,11 @@ migration preserves those tiers, supplies the conservative schema-3
 `WORKER_STRONG` policy and unevaluated fast-tier evidence, rejects unknown or
 malformed fields, backs up the original bytes, and retains exact rollback. It
 does not silently select Luna for the strongest tier.
+
+Release `0.2.46` assigns the next immutable install identity to merged PR #126
+at source tree `67d0fd8b23e8cf1e2e2e5b1d647282b64f8ae978`. It adds the
+OS-manager-owned multi-Squad watcher service, repeated attached Stop blocking,
+verified detached handoff, independent Calm and attachment policy, watcher
+takeover fencing, exact restored-runtime rebinding, and durable exact-once
+delivery. Installation and live Herdr restart acceptance remain separate,
+receipt-bearing cutover operations.

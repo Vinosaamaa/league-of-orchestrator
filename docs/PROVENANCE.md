@@ -1108,3 +1108,13 @@ bytes and embedded parent path unchanged. Root sessions cannot declare parent
 evidence. A proposal to recreate the retired profile path with filesystem links
 was rejected because it would violate the one-active-profile contract; no such
 path is created by this release.
+
+The first 0.2.41 installation staging attempt also refused before activation
+because the prior installed Python release had accumulated bytecode cache files.
+The repository-local launchers previously depended on the caller to suppress
+bytecode, and the staged acceptance environment accidentally supplied that
+setting, hiding the installed-shape defect. Both League launchers now suppress
+bytecode themselves. Acceptance removes the masking environment for launcher
+checks, executes both launchers, and then compares every post-execution staged
+file and digest with the source-owned release manifest. The rejected staging
+directory was never activated and contained no canonical data.

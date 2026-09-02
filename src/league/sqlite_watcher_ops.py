@@ -1761,10 +1761,11 @@ def watcher_registration(
 ) -> Optional[dict[str, Any]]:
     row = store.connection.execute(
         """
-        SELECT watcher_id,actor_agent_id,runtime_instance_id,wake_locator,
-               leased_until,fence,registered_at
-          FROM watcher_registrations
-         WHERE actor_agent_id=?
+        SELECT w.watcher_id,w.actor_agent_id,w.runtime_instance_id,w.wake_locator,
+               w.leased_until,w.fence,w.registered_at,r.runtime_generation
+          FROM watcher_registrations w
+          JOIN runtime_instances r ON r.runtime_instance_id=w.runtime_instance_id
+         WHERE w.actor_agent_id=?
         """,
         (actor_agent_id,),
     ).fetchone()
@@ -1790,11 +1791,12 @@ def watcher_registrations(
     placeholders = ",".join("?" for _ in actor_agent_ids)
     rows = store.connection.execute(
         f"""
-        SELECT watcher_id,actor_agent_id,runtime_instance_id,wake_locator,
-               leased_until,fence,registered_at
-          FROM watcher_registrations
-         WHERE actor_agent_id IN ({placeholders})
-         ORDER BY actor_agent_id
+        SELECT w.watcher_id,w.actor_agent_id,w.runtime_instance_id,w.wake_locator,
+               w.leased_until,w.fence,w.registered_at,r.runtime_generation
+          FROM watcher_registrations w
+          JOIN runtime_instances r ON r.runtime_instance_id=w.runtime_instance_id
+         WHERE w.actor_agent_id IN ({placeholders})
+         ORDER BY w.actor_agent_id
         """,
         actor_agent_ids,
     ).fetchall()

@@ -743,6 +743,8 @@ class PersistentSupervisor:
             or int(registration["fence"]) != fence
             or registration["runtime_instance_id"]
             != state["runtime_instance_id"]
+            or registration["runtime_generation"]
+            != state["runtime_generation"]
             or registration["wake_locator"] != _locator(self.socket_path)
             or datetime.fromisoformat(str(registration["leased_until"])) <= _now()
         ):

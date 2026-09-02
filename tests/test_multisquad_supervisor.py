@@ -257,8 +257,8 @@ def test_service_stop_requires_exact_aggregate_fences(root: Path) -> None:
     state, store = _multisquad_state(root, "service-stop-fences")
     runtime = PersistentSupervisor(
         state,
-        lease_seconds=0.8,
-        renew_seconds=0.2,
+        lease_seconds=20,
+        renew_seconds=10,
         wake_adapter=FakeWakeAdapter(),
         delivery_adapter=FakeDeliveryAdapter(),
     )
@@ -290,14 +290,55 @@ def test_service_stop_requires_exact_aggregate_fences(root: Path) -> None:
             }
             for binding in sorted(bindings, key=lambda item: item["actor_agent_id"])
         ]
-        controls[0] = {**controls[0], "fence": controls[0]["fence"] - 1}
+        stale_controls = [dict(control) for control in controls]
+        stale_controls[0]["fence"] -= 1
         try:
-            send_supervisor_message(locator, {"kind": "stop", "bindings": controls})
+            send_supervisor_message(
+                locator, {"kind": "stop", "bindings": stale_controls}
+            )
         except SupervisorUnavailable:
             pass
         else:
             raise AssertionError("stale aggregate Stop terminated all Squads")
         assert thread.is_alive()
+        assert supervisor_status(state)["live"]
+
+        target = controls[0]
+        with store._transaction():
+            store.connection.execute(
+                """
+                UPDATE runtime_instances SET runtime_generation=?
+                 WHERE runtime_instance_id=?
+                """,
+                (
+                    "generation:synthetic-stop-control-drift",
+                    target["runtime_instance_id"],
+                ),
+            )
+        try:
+            try:
+                send_supervisor_message(
+                    locator, {"kind": "stop", "bindings": controls}
+                )
+            except StorageRefusal as exc:
+                assert exc.code == "watcher_fenced"
+            else:
+                raise AssertionError(
+                    "canonical runtime-generation drift terminated all Squads"
+                )
+            assert thread.is_alive()
+        finally:
+            with store._transaction():
+                store.connection.execute(
+                    """
+                    UPDATE runtime_instances SET runtime_generation=?
+                     WHERE runtime_instance_id=?
+                    """,
+                    (
+                        target["runtime_generation"],
+                        target["runtime_instance_id"],
+                    ),
+                )
         assert supervisor_status(state)["live"]
     finally:
         store.close()

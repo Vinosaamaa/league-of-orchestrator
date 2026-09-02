@@ -602,16 +602,22 @@ def test_schema_one_migration_is_versioned_and_never_silently_luna(root: Path) -
             "WORKER_FAST": {"model": "gpt-5.6-luna", "effort": "medium"},
             "WORKER_STRONG": {"model": "gpt-5.6-sol", "effort": "xhigh"},
         },
-        "evaluations": {"WORKER_FAST": {"approved": False}},
-        "policy": {
-            "quality_baseline": "WORKER_STRONG",
-            "safe_boundary_escalations": 1,
-        },
     }
     migrated = migrate_routing_config(legacy)
     assert migrated["schema"] == 3
     assert migrated["policy_version"] == "league.model-routing.migrated-v3.1"
     assert migrated["evaluations"]["openai/WORKER_FAST"]["representative_tasks"] == 0
+    assert migrated["policy"] == {
+        "quality_baseline": "WORKER_STRONG",
+        "safe_boundary_escalations": 1,
+    }
+    assert migrated["providers"]["openai"]["tiers"] == legacy["tiers"]
+    enriched = json.loads(json.dumps(legacy))
+    enriched["evaluations"] = {
+        "WORKER_FAST": {"approved": False, "representative_tasks": 0}
+    }
+    enriched["policy"] = migrated["policy"]
+    assert migrate_routing_config(enriched) == migrated
     legacy_path = root / "legacy-routing.json"
     legacy_path.write_text(json.dumps(legacy), encoding="utf-8")
     output = io.BytesIO()
@@ -718,6 +724,48 @@ def test_schema_one_migration_is_versioned_and_never_silently_luna(root: Path) -
     unsafe = json.loads(json.dumps(legacy))
     unsafe["tiers"]["WORKER_STRONG"]["model"] = "gpt-5.6-luna"
     refused(lambda: migrate_routing_config(unsafe), "routing_migration_unsafe")
+    malformed = json.loads(json.dumps(legacy))
+    malformed["evaluations"] = []
+    refused(lambda: migrate_routing_config(malformed), "routing_migration_unsafe")
+    boolean_schema = json.loads(json.dumps(legacy))
+    boolean_schema["schema"] = True
+    refused(
+        lambda: migrate_routing_config(boolean_schema), "routing_migration_unsupported"
+    )
+    extra_tier = json.loads(json.dumps(legacy))
+    extra_tier["tiers"]["WORKER_STRONG"]["fallback"] = "gpt-5.6-luna"
+    refused(lambda: migrate_routing_config(extra_tier), "routing_migration_unsafe")
+    extra_policy = json.loads(json.dumps(enriched))
+    extra_policy["policy"]["fallback_tier"] = "WORKER_FAST"
+    refused(lambda: migrate_routing_config(extra_policy), "routing_migration_unsafe")
+    nested_evaluation = json.loads(json.dumps(enriched))
+    nested_evaluation["evaluations"]["WORKER_FAST"]["approved"] = "false"
+    refused(
+        lambda: migrate_routing_config(nested_evaluation), "routing_migration_unsafe"
+    )
+    missing_evaluation = json.loads(json.dumps(enriched))
+    del missing_evaluation["evaluations"]["WORKER_FAST"]["representative_tasks"]
+    refused(
+        lambda: migrate_routing_config(missing_evaluation), "routing_migration_unsafe"
+    )
+    typed_evaluation = json.loads(json.dumps(enriched))
+    typed_evaluation["evaluations"]["WORKER_FAST"]["representative_tasks"] = "0"
+    refused(
+        lambda: migrate_routing_config(typed_evaluation), "routing_migration_unsafe"
+    )
+    negative_evaluation = json.loads(json.dumps(enriched))
+    negative_evaluation["evaluations"]["WORKER_FAST"]["representative_tasks"] = -1
+    refused(
+        lambda: migrate_routing_config(negative_evaluation), "routing_migration_unsafe"
+    )
+    extra_evaluation = json.loads(json.dumps(enriched))
+    extra_evaluation["evaluations"]["WORKER_FAST"]["fallback"] = True
+    refused(
+        lambda: migrate_routing_config(extra_evaluation), "routing_migration_unsafe"
+    )
+    unknown = json.loads(json.dumps(legacy))
+    unknown["fallback_model"] = "gpt-5.6-luna"
+    refused(lambda: migrate_routing_config(unknown), "routing_migration_unsupported")
 
 
 def main() -> None:

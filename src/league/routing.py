@@ -255,34 +255,72 @@ def migrate_routing_config(value: Mapping[str, Any]) -> dict[str, Any]:
         )
     if value.get("schema") == 3:
         return validate_routing_config(dict(value))
-    if value.get("schema") not in {1, 2} or set(value) != {
-        "schema",
-        "tiers",
-        "evaluations",
-        "policy",
-    }:
+    legacy_schema = value.get("schema")
+    legacy_fields = set(value)
+    if (
+        isinstance(legacy_schema, bool)
+        or legacy_schema not in {1, 2}
+        or not {"schema", "tiers"}.issubset(legacy_fields)
+        or not legacy_fields.issubset({"schema", "tiers", "evaluations", "policy"})
+    ):
         raise StorageRefusal(
             "routing_migration_unsupported",
             "only the retained schema-1/2 routing policy can be migrated",
         )
     tiers = value.get("tiers")
-    policy = value.get("policy")
+    policy = value.get(
+        "policy",
+        {
+            "quality_baseline": WORKER_STRONG,
+            "safe_boundary_escalations": 1,
+        },
+    )
     if (
         not isinstance(tiers, Mapping)
         or set(tiers) != TIERS
         or not isinstance(policy, Mapping)
+        or set(policy) != {"quality_baseline", "safe_boundary_escalations"}
         or policy.get("quality_baseline") != WORKER_STRONG
+        or isinstance(policy.get("safe_boundary_escalations"), bool)
         or policy.get("safe_boundary_escalations") != 1
     ):
         raise StorageRefusal(
             "routing_migration_unsafe",
             "legacy routing policy does not preserve the strongest baseline",
         )
+    if "evaluations" in value:
+        evaluations = value["evaluations"]
+        if not isinstance(evaluations, Mapping) or not set(evaluations).issubset(
+            {WORKER_FAST}
+        ):
+            raise StorageRefusal(
+                "routing_migration_unsafe", "legacy routing evaluations are malformed"
+            )
+        if WORKER_FAST in evaluations:
+            fast_evaluation = evaluations[WORKER_FAST]
+            representative_tasks = (
+                fast_evaluation.get("representative_tasks")
+                if isinstance(fast_evaluation, Mapping)
+                else None
+            )
+            if (
+                not isinstance(fast_evaluation, Mapping)
+                or set(fast_evaluation) != {"approved", "representative_tasks"}
+                or not isinstance(fast_evaluation.get("approved"), bool)
+                or isinstance(representative_tasks, bool)
+                or not isinstance(representative_tasks, int)
+                or representative_tasks < 0
+            ):
+                raise StorageRefusal(
+                    "routing_migration_unsafe",
+                    "legacy routing evaluations are malformed",
+                )
     normalized_tiers: dict[str, dict[str, str]] = {}
     for tier in sorted(TIERS):
         entry = tiers.get(tier)
         if (
             not isinstance(entry, Mapping)
+            or set(entry) != {"model", "effort"}
             or not isinstance(entry.get("model"), str)
             or not entry["model"]
             or not isinstance(entry.get("effort"), str)

@@ -1007,6 +1007,8 @@ class PersistentSupervisor:
                     str(state["actor_agent_id"]),
                     attachment_mode,
                     _at(),
+                    expected_watcher_id=str(state["watcher_id"]),
+                    expected_fence=fence,
                 )
             with self._fence_lock:
                 current = self._bindings.get(str(state["actor_agent_id"]))

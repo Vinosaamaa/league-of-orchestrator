@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta
 from pathlib import Path
 import tempfile
 import threading
@@ -27,7 +28,7 @@ from league.canonical_delivery import dispatch_event  # noqa: E402
 from league.canonical_watcher import handle_brokered_hook  # noqa: E402
 from league.sqlite_handoff_schema import SHOTCALLER_SEED, SHUFFLE_VERSION  # noqa: E402
 from league.sqlite_store import SQLiteStorage  # noqa: E402
-from league.storage import RuntimeRegistrationCommand  # noqa: E402
+from league.storage import RuntimeRegistrationCommand, StorageRefusal  # noqa: E402
 from lifecycle_fakes import FakeDeliveryAdapter  # noqa: E402
 from request_lifecycle_fixture import (  # noqa: E402
     GAREN_RUNTIME_TWO,
@@ -565,6 +566,51 @@ def test_notification_and_attachment_axes_are_isolated_per_squad(root: Path) -> 
     assert not thread.is_alive() and not errors
 
 
+def test_attachment_refuses_concurrent_watcher_takeover(root: Path) -> None:
+    state, store = _multisquad_state(root, "attachment-takeover")
+    runtime = PersistentSupervisor(
+        state,
+        lease_seconds=20,
+        renew_seconds=10,
+        wake_adapter=FakeWakeAdapter(),
+        delivery_adapter=FakeDeliveryAdapter(),
+    )
+    thread, errors = _start(runtime)
+    jarvan = store.supervisor_binding("Jarvan")
+    registration = store.watcher_registration(JARVAN_ID)
+    assert registration is not None
+    now = datetime.now().astimezone()
+    store.register_watcher(
+        str(jarvan["scope_id"]),
+        "watcher:persistent:synthetic-takeover",
+        JARVAN_ID,
+        JARVAN_RUNTIME,
+        str(registration["wake_locator"]),
+        (now + timedelta(seconds=30)).isoformat(timespec="microseconds"),
+        int(registration["fence"]) + 1,
+        now.isoformat(timespec="microseconds"),
+    )
+    try:
+        send_supervisor_message(
+            str(registration["wake_locator"]),
+            {
+                "kind": "detach-shotcaller",
+                "actor_agent_id": JARVAN_ID,
+                "fence": int(registration["fence"]),
+                "runtime_generation": jarvan["runtime_generation"],
+            },
+        )
+    except StorageRefusal as exc:
+        assert exc.code == "watcher_fenced"
+    else:
+        raise AssertionError("stale attachment request crossed watcher takeover")
+    assert store.supervision_policy(JARVAN_ID)["attachment_mode"] == "attached"
+    store.close()
+    send_supervisor_message(f"unix:{runtime.socket_path}", {"kind": "stop"})
+    thread.join(timeout=5)
+    assert not thread.is_alive() and not errors
+
+
 def test_active_turn_persists_attention_without_duplicate_wake(root: Path) -> None:
     state, store = _multisquad_state(root, "active-turn")
     wake = FakeWakeAdapter()
@@ -788,6 +834,7 @@ def main() -> None:
         test_restart_recovers_one_lost_notification_for_exact_squad(Path(temporary))
         test_brokered_prompt_resolves_and_wakes_only_its_shotcaller(Path(temporary))
         test_notification_and_attachment_axes_are_isolated_per_squad(Path(temporary))
+        test_attachment_refuses_concurrent_watcher_takeover(Path(temporary))
         test_active_turn_persists_attention_without_duplicate_wake(Path(temporary))
         test_turn_reuses_existing_shotcaller_scope(Path(temporary))
         test_priority_publish_refuses_removed_binding_without_global_signal(

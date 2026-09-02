@@ -3609,9 +3609,18 @@ class SQLiteStorage(SQLiteTransactionCore):
         actor_agent_id: str,
         mode: str,
         at: str,
+        *,
+        expected_watcher_id: str | None = None,
+        expected_fence: int | None = None,
     ) -> dict[str, Any]:
         return set_supervision_attachment_operation(
-            self, scope_id, actor_agent_id, mode, at
+            self,
+            scope_id,
+            actor_agent_id,
+            mode,
+            at,
+            expected_watcher_id=expected_watcher_id,
+            expected_fence=expected_fence,
         )
 
     def apply_supervision_delivery_policy(

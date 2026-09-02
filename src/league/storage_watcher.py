@@ -98,6 +98,9 @@ class WatcherStorage(Protocol):
         actor_agent_id: str,
         mode: str,
         at: str,
+        *,
+        expected_watcher_id: Optional[str] = None,
+        expected_fence: Optional[int] = None,
     ) -> dict[str, Any]: ...
 
     def apply_supervision_delivery_policy(

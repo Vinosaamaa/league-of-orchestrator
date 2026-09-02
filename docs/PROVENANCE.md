@@ -829,6 +829,7 @@ failure evidence:
 | Main's runtime-replacement pre-tool test expected the pre-#123 two-field broker result. | Its exact expectation now includes the resolved `actor_agent_id` required for per-Squad dispatch; the full provider-neutral runtime lifecycle passes. |
 | The first acceptance run used a legacy synthetic wake locator for direct detachment. | The fixture now declares the same persistent/Unix identity required by production while remaining temporary and effect-free. |
 | Main's in-place Shotcaller bootstrap has a valid pre-Squad request turn, but the first multi-Squad integration required an active Squad too early. | Turn ownership again accepts one exact active Shotcaller; only OS service discovery requires an active Squad. Bootstrap and multi-Squad gates both pass. |
+| Fresh exact-head review found attachment authorization could validate the old service fence before the transaction but create a receipt for a concurrent takeover fence. | The service now passes its exact watcher ID and fence into the attachment transaction; a focused takeover race proves stale attachment refuses without changing policy. |
 
 No row above involved a live install, Herdr restart, canonical-state mutation,
 real multiplexer effect, or provider call.

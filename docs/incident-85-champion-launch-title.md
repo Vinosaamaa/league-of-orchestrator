@@ -2,7 +2,7 @@
 
 ## Incident
 
-The visible Champion launcher wrote and verified `<Callsign> · <Task>` before
+The visible Champion launcher wrote and verified a callsign/task title before
 delivering its launch handshake or assignment context. Herdr/Codex could then
 auto-title the visible sidebar, thread, and terminal from that prompt. League
 recorded context delivery without observing the final display state, so the
@@ -42,7 +42,8 @@ The final ordering invariant is:
 3. activate and deliver the bounded assignment context with a settled wait;
 4. require the same endpoint, thread, routing name, metadata source, agent
    authority source, and ownership token;
-5. restore `<Callsign> · <Task>` with the fresh observed sequence;
+5. restore the explicit canonical role-specific names with the fresh observed
+   sequence;
 6. require two consecutive matching sidebar, task-label, thread-title, and
    terminal-title observations at one state-change sequence;
 7. bind that source/sequence observation into the successful context receipt.
@@ -64,9 +65,15 @@ ownership-safe restoration. If a newer user-owned or unowned write is present,
 League performs no metadata mutation and records `cleanup_pending` against the
 exact runtime. Unproven cleanup remains a truthful cleanup obligation.
 
-Generated Champion task labels use a deterministic two-word default derived
-from the task summary. Explicit labels remain limited to at most two words, so
-the generated visible contract has no vague one-word fallback.
+Generated and explicit Champion task labels contain exactly two words. The
+provider-neutral naming contract is callsign-only for Shotcallers, callsign-only
+for Champion sidebars, and `<Callsign> · <PROJECT>` for Champion thread and
+terminal title when an explicit catalog project code is available, otherwise
+`<Callsign> · <Two Word Task>`. Runtime/provider labels are never embedded and
+League never parses a title to discover identity. Prompt, context, OSC,
+restart, and icon refreshes cannot replace exact owned names; a newer
+user-owned presentation remains authoritative. Provider launch behavior and
+Herdr rendering remain owned by issues #84 and the Herdr layer respectively.
 
 ## Legacy recovery invariant
 
@@ -89,8 +96,9 @@ league --state-root <canonical-root> assign reconcile-legacy-display \
   --target-task-label <exact-two-word-label> --owner-authorized --at <timestamp>
 ```
 
-The presentation JSON has exactly three fields: `source`, `title`, and the
-integer `state_change_seq`. Extra, missing, or differently typed fields refuse.
+The presentation JSON normally has exactly three fields: `source`, `title`,
+and the integer `state_change_seq`. A retained endpoint may add only
+`"agent_status":"done"`; no other status or extra field is accepted.
 
 The store first appends one immutable intent after proving that the canonical
 assignment/runtime/route are exact, that only one live runtime matches, and
@@ -116,6 +124,49 @@ The operation does not create, replace, stop, or clean a runtime; allocate or
 release a callsign; create layout; register a Squad; or mutate task progress.
 It patches only display keys owned by this recovery and preserves every
 unrelated metadata token.
+
+### Retained-done classification
+
+A pre-fix Champion may finish at the provider while League deliberately retains
+its pane, route, runtime row, assignment, and callsign. That endpoint is not an
+active worker and must not be made to look active merely to repair its stale
+handshake title. The retained-done v2 intent is therefore available only when
+the exact canonical assignment and callsign assignment are still active, one
+verified runtime binds the same agent/thread/pane/generation, the route and
+physical worktree remain exact, the task is already in a terminal state, and
+the legacy context contains no modern display receipt. If the task is not yet
+terminal, reconciliation refuses with `legacy_display_lifecycle_unsettled`;
+the ordinary durable task transition must settle lifecycle first.
+
+The v2 intent records the terminal lifecycle class and expected provider status
+`done`. The final receipt binds that same status to the stable source, title,
+sequence, and observation digest. Metadata repair does not prompt, start,
+close, rename, or resume the endpoint, and the final canonical events use a
+completed status instead of claiming active work. Two fresh observations still
+fence the effect, unrelated tokens are preserved, modern ownership metadata or
+identity drift refuses, and exact retry revalidates the stored receipt without
+a second report.
+
+## Canonical role-token invariant
+
+League publishes exactly one provider-neutral role key with its owned display
+overlay: `orchestrator_role=shotcaller` for a canonically verified Shotcaller or
+`orchestrator_role=champion` for a canonically verified Champion. The value is
+derived from the assignment/callsign role, never from provider title text or a
+best-effort guess. Missing and unknown roles therefore emit no token.
+
+Champion launch, active retry, legacy reconciliation, and retained-done
+reconciliation include the token in the same final source/sequence receipt as
+their title. Shotcaller create and exact retry include it in the existing
+title-owner/source overlay and the durable creation event receipt. Codex and
+Cursor presentation authorities follow the same rule. An exact owned retry may
+restore a changed value; an unowned source or ambiguous role refuses. Rollback
+clears only League's role token while preserving unrelated provider/user
+metadata.
+
+This is only the League metadata half of the cross-repository presentation
+contract. League adds no marker text, glyph, color, ANSI, conditional renderer
+logic, name/title length change, or pane styling.
 
 Shotcaller bootstrap applies a corresponding read boundary: current-pane and
 agent-inventory queries may retry malformed JSON up to three attempts each, but
@@ -197,8 +248,9 @@ unbound Codex pane can have a provider-generated callsign/sidebar/thread/title
 such as an owner prompt while having no routing binding and no
 `metadata_source` field. League now treats those values only as presentation:
 it infers the provider source solely from a complete, self-consistent Codex
-session/thread/identity-title envelope and normalizes Herdr's terminal
-` | codex` suffix. A real bind still requires a consistent top-level `name`,
+session/thread/identity-title envelope and consumes Herdr's explicit stripped
+terminal-title field without parsing provider suffixes. A real bind still
+requires a consistent top-level `name`,
 `routing_name`, or `routing_alias`; conflicting fields, a present invalid
 source, partial tokens, or endpoint identity drift refuse before mutation.
 

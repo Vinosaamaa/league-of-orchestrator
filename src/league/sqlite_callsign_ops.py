@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
 
 from .storage_types import FaultInjector, StorageRefusal
+from .presentation import ORCHESTRATOR_ROLE_TOKEN
 
 
 ROLES = {"shotcaller", "champion", "hidden-worker"}
@@ -51,6 +52,7 @@ SHOTCALLER_BASELINE_V1_KEYS = {
     "title",
 }
 SHOTCALLER_BASELINE_V2_KEYS = SHOTCALLER_BASELINE_V1_KEYS | {"presentation_source"}
+_SHOTCALLER_ROLE_KEY = ORCHESTRATOR_ROLE_TOKEN
 SHOTCALLER_PUBLICATION_V1_KEYS = {
     "schema",
     "assignment_id",
@@ -115,7 +117,7 @@ def _shotcaller_baseline(value: Mapping[str, Any]) -> dict[str, Any]:
     )
     if (
         not isinstance(value, Mapping)
-        or set(value) != keys
+        or set(value) not in (keys, keys | {_SHOTCALLER_ROLE_KEY})
         or value.get("routing_name") is not None
         or type(value.get("state_change_seq")) is not int
         or value["state_change_seq"] < 0
@@ -144,6 +146,15 @@ def _shotcaller_baseline(value: Mapping[str, Any]) -> dict[str, Any]:
         raise StorageRefusal(
             "bootstrap_baseline_unverified",
             "Shotcaller bootstrap baseline presentation source is invalid",
+        )
+    if _SHOTCALLER_ROLE_KEY in value and value[_SHOTCALLER_ROLE_KEY] not in {
+        None,
+        "shotcaller",
+        "champion",
+    }:
+        raise StorageRefusal(
+            "bootstrap_baseline_unverified",
+            "Shotcaller bootstrap baseline role token is invalid",
         )
     return dict(value)
 
@@ -1674,11 +1685,13 @@ def record_shotcaller_bootstrap(
                 "runtime_instance_id": normalized["runtime_instance_id"],
                 "acceptance_digest": receipt_digest,
                 "placement": "existing-current-pane",
+                ORCHESTRATOR_ROLE_TOKEN: "shotcaller",
             }
             existing = store.connection.execute(
                 "SELECT detail_json FROM events WHERE event_id=?", (event_id,)
             ).fetchone()
             idempotent = existing is not None
+            role_owned = existing is None or existing["detail_json"] == stable_json(detail)
             if existing is None:
                 store.connection.execute(
                     """
@@ -1699,7 +1712,16 @@ def record_shotcaller_bootstrap(
                 )
                 if fault:
                     fault("after_shotcaller_created_event")
-            elif existing["detail_json"] != stable_json(detail):
+            elif existing["detail_json"] not in {
+                stable_json(detail),
+                stable_json(
+                    {
+                        key: value
+                        for key, value in detail.items()
+                        if key != ORCHESTRATOR_ROLE_TOKEN
+                    }
+                ),
+            }:
                 raise StorageRefusal(
                     "receipt_conflict", "Shotcaller creation retry changed its receipt"
                 )
@@ -1709,7 +1731,7 @@ def record_shotcaller_bootstrap(
         raise store._translate_database_error(
             exc, "Shotcaller creation receipt conflicted with canonical state"
         ) from exc
-    return {
+    result = {
         "assignment_id": assignment_id,
         "agent_id": assignment["agent_id"],
         "callsign": assignment["callsign"],
@@ -1719,6 +1741,10 @@ def record_shotcaller_bootstrap(
         "receipt_digest": receipt_digest,
         "idempotent": idempotent,
     }
+    # The exact active assignment is the source of role truth.  Historical
+    # creation events may predate this token, but retries still return it.
+    result[ORCHESTRATOR_ROLE_TOKEN] = "shotcaller"
+    return result
 
 
 def shotcaller_bootstrap_status(store: Any, assignment_id: str) -> Optional[dict[str, Any]]:
@@ -1741,25 +1767,30 @@ def shotcaller_bootstrap_status(store: Any, assignment_id: str) -> Optional[dict
         raise StorageRefusal(
             "receipt_conflict", "stored Shotcaller creation receipt is malformed"
         ) from exc
+    expected_detail = {
+        "assignment_id": assignment_id,
+        "agent_id": assignment["agent_id"],
+        "runtime_instance_id": assignment["runtime_instance_id"],
+        "acceptance_digest": assignment["acceptance_digest"],
+        "placement": "existing-current-pane",
+    }
+    role_owned = detail.get(ORCHESTRATOR_ROLE_TOKEN) == "shotcaller"
     exact = (
         assignment["role"] == "shotcaller"
         and assignment["scope_kind"] == "shotcaller"
         and assignment["scope_id"] == assignment["agent_id"]
         and assignment["state"] == "active"
         and detail
-        == {
-            "assignment_id": assignment_id,
-            "agent_id": assignment["agent_id"],
-            "runtime_instance_id": assignment["runtime_instance_id"],
-            "acceptance_digest": assignment["acceptance_digest"],
-            "placement": "existing-current-pane",
-        }
+        in (
+            expected_detail,
+            {**expected_detail, ORCHESTRATOR_ROLE_TOKEN: "shotcaller"},
+        )
     )
     if not exact:
         raise StorageRefusal(
             "receipt_conflict", "stored Shotcaller creation state is not exact"
         )
-    return {
+    result = {
         "assignment_id": assignment_id,
         "agent_id": assignment["agent_id"],
         "callsign": assignment["callsign"],
@@ -1769,6 +1800,10 @@ def shotcaller_bootstrap_status(store: Any, assignment_id: str) -> Optional[dict
         "receipt_digest": assignment["acceptance_digest"],
         "idempotent": True,
     }
+    # Re-read callers have already passed the exact live-assignment checks;
+    # expose canonical role metadata even for pre-token receipts.
+    result[ORCHESTRATOR_ROLE_TOKEN] = "shotcaller"
+    return result
 
 
 def _rollback_reserved_in_transaction(

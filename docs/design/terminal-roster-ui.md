@@ -34,6 +34,37 @@ Private roots, repository identities, session locators, endpoints, model names,
 prompt text, and update prose are redacted in outbound mode. The design samples
 below are synthetic and contain no live names, paths, repositories, or records.
 
+### Provider presentation role boundary
+
+Provider-facing display metadata may carry one canonical League role token:
+`orchestrator_role=shotcaller` or `orchestrator_role=champion`. League derives
+it only from exact canonical role ownership and omits it for missing or unknown
+roles. It is independent of `sidebar_name`, thread title, terminal title, and
+task label, and provider-generated title refreshes do not own it. The token is
+receipt-bound to League's existing presentation overlay; a changed unowned
+value refuses or an exact owned retry restores it.
+
+This document assigns no rendering to that token. In particular it defines no
+marker, glyph, color, ANSI, conditional style, pane decoration, or additional
+sidebar text; any source-managed terminal renderer remains an owning-layer
+decision outside League.
+
+### Canonical naming boundary
+
+League renders names from explicit role, callsign, project-code, and two-word
+task metadata. Shotcaller sidebar/thread/terminal names are the callsign.
+Champion sidebar is the callsign; Champion thread and terminal title are
+`<Callsign> · <PROJECT>` when an exact project code is supplied and
+`<Callsign> · <Two Word Task>` otherwise. The fallback task is always exactly
+two words.
+
+Provider/runtime names are neither display inputs nor title-parsing hints.
+Codex, Cursor, and Pi-backed endpoints consume the same metadata contract;
+provider launch and Herdr rendering remain outside this issue's boundary.
+Prompt/context/OSC/restart refreshes may be repaired only under exact League
+ownership. Token-only icon/status refreshes leave correct names untouched, and
+a newer user-owned source is never overwritten.
+
 ## Layout options
 
 ### Layout A — Project Ledger (selected)

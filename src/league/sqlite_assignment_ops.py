@@ -23,6 +23,7 @@ from .storage_assignment import (
     PrepareAssignmentCommand,
 )
 from .storage_types import LIFECYCLE_STATES, StorageRefusal
+from .presentation import ORCHESTRATOR_ROLE_TOKEN
 from .issue_first import (
     issue_scope_digest,
     normalize_issue_title,
@@ -115,6 +116,15 @@ def _legacy_result_receipt(row: Any) -> dict[str, Any]:
         "terminal_title",
         "observation_digest",
     }
+    retained_done = bool(
+        isinstance(receipt, dict)
+        and receipt.get("schema") == "league.legacy-display-reconciliation.v2"
+    )
+    if retained_done:
+        receipt_keys.add("endpoint_status")
+    role_receipt = receipt.get(ORCHESTRATOR_ROLE_TOKEN) if isinstance(receipt, dict) else None
+    if role_receipt is not None:
+        receipt_keys.add(ORCHESTRATOR_ROLE_TOKEN)
     string_keys = receipt_keys - {"state_change_seq"}
     exact = bool(
         set(detail) == {"schema", "intent_digest", "receipt"}
@@ -128,7 +138,14 @@ def _legacy_result_receipt(row: Any) -> dict[str, Any]:
             isinstance(receipt.get(key), str) and receipt[key]
             for key in string_keys
         )
-        and receipt.get("schema") == "league.legacy-display-reconciliation.v1"
+        and receipt.get("schema")
+        == (
+            "league.legacy-display-reconciliation.v2"
+            if retained_done
+            else "league.legacy-display-reconciliation.v1"
+        )
+        and (not retained_done or receipt.get("endpoint_status") == "done")
+        and (role_receipt is None or role_receipt == "champion")
         and type(receipt.get("state_change_seq")) is int
         and receipt["state_change_seq"] >= 0
         and bool(re.fullmatch(r"[0-9a-f]{64}", receipt["observation_digest"]))
@@ -1654,10 +1671,19 @@ def assignment_launch_context(store: Any, assignment_id: str) -> dict[str, Any]:
                 "target_title",
                 "owner_authorized",
             }
+            retained_done = legacy_intent.get("expected_agent_status") == "done"
+            if retained_done:
+                intent_keys.update(
+                    {"expected_agent_status", "canonical_lifecycle"}
+                )
             exact_result = bool(
                 set(legacy_intent) == intent_keys
                 and legacy_intent.get("schema")
-                == "league.legacy-display-reconciliation-intent.v1"
+                == (
+                    "league.legacy-display-reconciliation-intent.v2"
+                    if retained_done
+                    else "league.legacy-display-reconciliation-intent.v1"
+                )
                 and legacy_intent.get("owner_authorized") is True
                 and type(legacy_intent.get("expected_version")) is int
                 and legacy_intent["expected_version"] >= 1
@@ -1680,6 +1706,22 @@ def assignment_launch_context(store: Any, assignment_id: str) -> dict[str, Any]:
                 and legacy_receipt["terminal_title"]
                 == legacy_intent.get("target_title")
                 and legacy_receipt["state_change_seq"] == expected_sequence + 1
+                and legacy_receipt.get(ORCHESTRATOR_ROLE_TOKEN) in {None, "champion"}
+                and legacy_receipt.get("schema")
+                == (
+                    "league.legacy-display-reconciliation.v2"
+                    if retained_done
+                    else "league.legacy-display-reconciliation.v1"
+                )
+                and (
+                    not retained_done
+                    or (
+                        legacy_intent.get("canonical_lifecycle") == "terminal"
+                        and legacy_receipt.get("schema")
+                        == "league.legacy-display-reconciliation.v2"
+                        and legacy_receipt.get("endpoint_status") == "done"
+                    )
+                )
             )
             if not exact_result:
                 raise StorageRefusal(
@@ -1705,8 +1747,10 @@ def assignment_launch_context(store: Any, assignment_id: str) -> dict[str, Any]:
 
 def _legacy_display_detail(
     command: LegacyDisplayReconciliationCommand,
+    *,
+    canonical_lifecycle: str | None = None,
 ) -> dict[str, Any]:
-    return {
+    detail = {
         "schema": "league.legacy-display-reconciliation-intent.v1",
         "assignment_id": command.assignment_id,
         "expected_version": command.expected_version,
@@ -1725,6 +1769,15 @@ def _legacy_display_detail(
         "target_title": f"{command.callsign} · {command.target_task_label}",
         "owner_authorized": command.owner_authorized,
     }
+    if command.expected_agent_status is not None:
+        detail.update(
+            {
+                "schema": "league.legacy-display-reconciliation-intent.v2",
+                "expected_agent_status": command.expected_agent_status,
+                "canonical_lifecycle": canonical_lifecycle,
+            }
+        )
+    return detail
 
 
 def _validate_legacy_display_command(
@@ -1762,6 +1815,10 @@ def _validate_legacy_display_command(
         or " ".join(command.target_task_label.split()) != command.target_task_label
         or len(command.target_task_label) > 48
         or command.routing_name != command.callsign.lower()
+        or (
+            command.expected_agent_status is not None
+            and command.expected_agent_status != "done"
+        )
     ):
         raise StorageRefusal(
             "legacy_display_invalid",
@@ -1790,12 +1847,20 @@ def _validate_legacy_display_command(
     ).fetchone()
     runtime_rows = store.connection.execute(
         """
-        SELECT runtime_instance_id,session_ref,endpoint,runtime_generation,verified
+        SELECT runtime_instance_id,session_ref,endpoint,runtime_generation,status,verified
           FROM runtime_instances
          WHERE actor_agent_id=? AND status IN ('active','idle') LIMIT 2
         """,
         (command.champion_agent_id,),
     ).fetchall()
+    task = store.connection.execute(
+        "SELECT state FROM tasks WHERE task_id=?",
+        (assignment["task_id"],),
+    ).fetchone()
+    callsign_assignment = store.connection.execute(
+        "SELECT * FROM callsign_assignments WHERE callsign_assignment_id=?",
+        (f"callsign-assignment:{command.assignment_id}",),
+    ).fetchone()
     receipt = (
         _stored_object(
             assignment["acceptance_receipt_json"],
@@ -1825,6 +1890,15 @@ def _validate_legacy_display_command(
         and runtime["endpoint"] == command.pane_id
         and runtime["runtime_generation"] == expected_generation
         and bool(runtime["verified"])
+        and task is not None
+        and callsign_assignment is not None
+        and callsign_assignment["callsign"] == command.callsign
+        and callsign_assignment["subject_id"] == f"agent:{command.champion_agent_id}"
+        and callsign_assignment["agent_id"] == command.champion_agent_id
+        and callsign_assignment["role"] == "champion"
+        and callsign_assignment["scope_kind"] == "task"
+        and callsign_assignment["scope_id"] == assignment["task_id"]
+        and callsign_assignment["state"] == "active"
         and receipt.get("champion_agent_id") == command.champion_agent_id
         and receipt.get("runtime_instance_id") == command.runtime_instance_id
         and receipt.get("callsign") == command.callsign
@@ -1839,6 +1913,14 @@ def _validate_legacy_display_command(
         raise StorageRefusal(
             "legacy_display_conflict",
             "legacy display reconciliation identity or route is ambiguous or mismatched",
+        )
+    if (
+        command.expected_agent_status == "done"
+        and task["state"] not in TASK_TERMINAL_STATES
+    ):
+        raise StorageRefusal(
+            "legacy_display_lifecycle_unsettled",
+            "retained-done display reconciliation requires a durably terminal task",
         )
     contexts = store.connection.execute(
         """
@@ -1890,7 +1972,12 @@ def _validate_legacy_display_command(
             "legacy_display_ambiguous",
             "legacy display reconciliation context has malformed display ownership evidence",
         )
-    detail = _legacy_display_detail(command)
+    detail = _legacy_display_detail(
+        command,
+        canonical_lifecycle=(
+            "terminal" if command.expected_agent_status == "done" else None
+        ),
+    )
     reconciliation_id = "legacy-display:" + hashlib.sha256(
         _json(detail).encode("utf-8")
     ).hexdigest()[:24]
@@ -1929,12 +2016,17 @@ def begin_legacy_display_reconciliation(
                         "legacy display reconciliation retry changed its exact intent",
                     )
             else:
+                event_status = (
+                    "completed"
+                    if detail.get("canonical_lifecycle") == "terminal"
+                    else "active"
+                )
                 store.connection.execute(
                     """
                     INSERT INTO events
                       (event_id,agent_id,task_id,entity_version,event_type,status,update_text,
                        occurred_at,detail_json,aggregate_kind,aggregate_id)
-                    VALUES(?,?,?,?,'assignment_legacy_display_reconciliation_intent','active',
+                    VALUES(?,?,?,?,'assignment_legacy_display_reconciliation_intent',?,
                            'owner-authorized legacy Champion display reconciliation intent',?,?,'assignment',?)
                     """,
                     (
@@ -1942,6 +2034,7 @@ def begin_legacy_display_reconciliation(
                         None,
                         assignment["task_id"],
                         command.expected_version,
+                        event_status,
                         command.at,
                         _json(detail),
                         command.assignment_id,
@@ -2004,12 +2097,17 @@ def finalize_legacy_display_reconciliation(
                 "thread_title",
                 "terminal_title",
                 "observation_digest",
+                ORCHESTRATOR_ROLE_TOKEN,
             }
+            expected_schema = "league.legacy-display-reconciliation.v1"
+            if command.expected_agent_status is not None:
+                expected_keys.add("endpoint_status")
+                expected_schema = "league.legacy-display-reconciliation.v2"
             target = f"{command.callsign} · {command.target_task_label}"
             expected_source = f"league-legacy-{reconciliation_id.rsplit(':', 1)[-1]}"
             valid = bool(
                 set(receipt) == expected_keys
-                and receipt.get("schema") == "league.legacy-display-reconciliation.v1"
+                and receipt.get("schema") == expected_schema
                 and receipt.get("reconciliation_id") == reconciliation_id
                 and receipt.get("assignment_id") == command.assignment_id
                 and receipt.get("champion_agent_id") == command.champion_agent_id
@@ -2018,6 +2116,7 @@ def finalize_legacy_display_reconciliation(
                 and receipt.get("task_label") == command.target_task_label
                 and receipt.get("thread_title") == target
                 and receipt.get("terminal_title") == target
+                and receipt.get(ORCHESTRATOR_ROLE_TOKEN) == "champion"
                 and isinstance(receipt.get("source"), str)
                 and bool(receipt.get("source"))
                 and isinstance(receipt.get("applies_to_source"), str)
@@ -2029,6 +2128,11 @@ def finalize_legacy_display_reconciliation(
                 and receipt.get("source") == expected_source
                 and int(receipt["state_change_seq"])
                 == int(command.expected_state_change_seq) + 1
+                and (
+                    command.expected_agent_status is None
+                    or receipt.get("endpoint_status")
+                    == command.expected_agent_status
+                )
             )
             if not valid:
                 raise StorageRefusal(
@@ -2055,12 +2159,17 @@ def finalize_legacy_display_reconciliation(
                         "legacy display reconciliation final receipt conflicts with history",
                     )
             else:
+                event_status = (
+                    "completed"
+                    if detail.get("canonical_lifecycle") == "terminal"
+                    else "active"
+                )
                 store.connection.execute(
                     """
                     INSERT INTO events
                       (event_id,agent_id,task_id,entity_version,event_type,status,update_text,
                        occurred_at,detail_json,aggregate_kind,aggregate_id)
-                    VALUES(?,?,?,?,'assignment_legacy_display_reconciled','active',
+                    VALUES(?,?,?,?,'assignment_legacy_display_reconciled',?,
                            'legacy Champion display reconciled with stable final observation',?,?,'assignment',?)
                     """,
                     (
@@ -2068,6 +2177,7 @@ def finalize_legacy_display_reconciliation(
                         None,
                         assignment["task_id"],
                         command.expected_version,
+                        event_status,
                         at,
                         _json(final_detail),
                         command.assignment_id,
@@ -2180,17 +2290,23 @@ def record_assignment_context_delivery(
         "task_label",
         "thread_title",
         "terminal_title",
+        ORCHESTRATOR_ROLE_TOKEN,
     }
+    receipt_keys = frozenset(display_receipt)
     if (
         not digest_pattern.fullmatch(context_sha256)
         or not digest_pattern.fullmatch(effect_sha256)
         or not event_id
         or byte_count < 1
         or byte_count > 4096
-        or set(display_receipt) != display_keys
+        or receipt_keys
+        not in {
+            frozenset(display_keys),
+            frozenset(display_keys | {"project_code"}),
+        }
         or not all(
             isinstance(display_receipt[key], str) and display_receipt[key]
-            for key in display_keys - {"state_change_seq"}
+            for key in receipt_keys - {"state_change_seq"}
         )
         or not isinstance(display_receipt["state_change_seq"], int)
         or display_receipt["state_change_seq"] < 0
@@ -2313,13 +2429,19 @@ def record_assignment_title_revalidation(
         "task_label",
         "thread_title",
         "terminal_title",
+        ORCHESTRATOR_ROLE_TOKEN,
     }
+    receipt_keys = frozenset(display_receipt)
     if (
         not event_id
-        or set(display_receipt) != display_keys
+        or receipt_keys
+        not in {
+            frozenset(display_keys),
+            frozenset(display_keys | {"project_code"}),
+        }
         or not all(
             isinstance(display_receipt[key], str) and display_receipt[key]
-            for key in display_keys - {"state_change_seq"}
+            for key in receipt_keys - {"state_change_seq"}
         )
         or not isinstance(display_receipt["state_change_seq"], int)
         or display_receipt["state_change_seq"] < 0

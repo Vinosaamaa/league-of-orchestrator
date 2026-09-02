@@ -2872,6 +2872,12 @@ def _assign_launch(store: Storage, args: argparse.Namespace) -> CommandResult:
         if args.league_command
         else Path(sys.argv[0]).resolve()
     )
+    project = store.resolve_project(args.repository, visibility="local")
+    project_code = (
+        str(project["code"])
+        if isinstance(project, dict) and isinstance(project.get("code"), str)
+        else None
+    )
     options = VisibleLaunchOptions(
         workspace_id=workspace_id,
         task_label=args.task_label or derive_task_label(args.task_summary),
@@ -2879,6 +2885,7 @@ def _assign_launch(store: Storage, args: argparse.Namespace) -> CommandResult:
         effort=args.effort,
         league_command=league_command,
         state_root=str(args.state_root.resolve()),
+        project_code=project_code,
         startup_timeout_ms=args.startup_timeout_ms,
     )
     spec = AssignmentSpec(
@@ -2961,18 +2968,23 @@ def _assign_reconcile_legacy_display(
     expected = _decode_json(
         args.expected_presentation_json, "legacy display expected presentation"
     )
-    if not isinstance(expected, dict) or set(expected) != {
-        "source",
-        "title",
-        "state_change_seq",
-    }:
+    expected_keys = set(expected) if isinstance(expected, dict) else set()
+    if not isinstance(expected, dict) or expected_keys not in (
+        {"source", "title", "state_change_seq"},
+        {"source", "title", "state_change_seq", "agent_status"},
+    ):
         raise StorageRefusal(
             "legacy_display_invalid",
-            "expected presentation must contain only source, title, and state_change_seq",
+            "expected presentation must contain source, title, state_change_seq, and optional agent_status",
         )
     expected_source = expected["source"]
     expected_title = expected["title"]
     expected_sequence = expected["state_change_seq"]
+    if "agent_status" in expected and expected["agent_status"] != "done":
+        raise StorageRefusal(
+            "legacy_display_invalid",
+            "expected presentation agent_status must be done",
+        )
     spec = LegacyDisplayReconciliationSpec(
         assignment_id=args.assignment_id,
         expected_version=args.expected_version,
@@ -2989,6 +3001,7 @@ def _assign_reconcile_legacy_display(
         expected_state_change_seq=expected_sequence,
         target_task_label=args.target_task_label,
         owner_authorized=args.owner_authorized or args.mode_action is not None,
+        expected_agent_status=expected.get("agent_status"),
     )
     return LegacyDisplayReconciliationService(
         store, HerdrLegacyDisplayAdapter(), _ProvidedClock(args.at)

@@ -561,9 +561,11 @@ class HerdrInventoryRunner:
         agents: list[dict[str, object]],
         *,
         process_info: dict[str, object] | None = None,
+        process_failure: subprocess.CompletedProcess[str] | None = None,
     ) -> None:
         self.agents = agents
         self.process_info = process_info
+        self.process_failure = process_failure
         self.calls: list[tuple[str, ...]] = []
 
     def run(self, arguments, timeout_seconds: int = 30):
@@ -571,11 +573,13 @@ class HerdrInventoryRunner:
         self.calls.append(tuple(arguments))
         if tuple(arguments[1:3]) == ("pane", "process-info"):
             if self.process_info is None:
+                if self.process_failure is not None:
+                    return self.process_failure
                 return subprocess.CompletedProcess(
                     arguments,
                     1,
-                    json.dumps({"error": {"code": "not_found"}}),
                     "",
+                    json.dumps({"error": {"code": "pane_not_found"}}),
                 )
             return subprocess.CompletedProcess(
                 arguments,
@@ -675,6 +679,84 @@ def test_herdr_proves_absence_and_refuses_live_or_ambiguous_identity() -> None:
             assert exc.code == code, (exc.code, code)
         else:
             raise AssertionError(f"Herdr retirement proof accepted {code}")
+
+
+def test_herdr_absent_pane_uses_runner_stderr_failure_envelope() -> None:
+    target = {
+        "runtime_instance_id": "runtime:stopped",
+        "session_ref": "cursor-session-exact",
+        "endpoint": "workspace:pane-stopped",
+        "runtime_generation": "generation-exact",
+        "routing_name": "lux",
+    }
+    runner = HerdrInventoryRunner([])
+    proof = builtin_agent_adapter_registry().adapter("cursor").verify_stopped_retirement(
+        target=target,
+        provider_kind="cursor",
+        multiplexer=HerdrMultiplexerAdapter(runner, binary="test-herdr"),
+    )
+    assert proof["verified"] is True
+    assert proof["endpoint_absent"] is True
+    assert runner.calls[0] == (
+        "test-herdr",
+        "pane",
+        "process-info",
+        "--pane",
+        "workspace:pane-stopped",
+    )
+
+
+def test_herdr_refuses_noncanonical_absent_pane_contracts() -> None:
+    target = {
+        "runtime_instance_id": "runtime:stopped",
+        "session_ref": "cursor-session-exact",
+        "endpoint": "workspace:pane-stopped",
+        "runtime_generation": "generation-exact",
+        "routing_name": "lux",
+    }
+    failures = (
+        subprocess.CompletedProcess(
+            ("test-herdr",),
+            1,
+            json.dumps({"error": {"code": "pane_not_found"}}),
+            "",
+        ),
+        subprocess.CompletedProcess(
+            ("test-herdr",),
+            1,
+            "",
+            json.dumps({"error": {"code": "not_found"}}),
+        ),
+        subprocess.CompletedProcess(
+            ("test-herdr",),
+            2,
+            "",
+            json.dumps({"error": {"code": "pane_not_found"}}),
+        ),
+        subprocess.CompletedProcess(
+            ("test-herdr",),
+            1,
+            "",
+            json.dumps(
+                {"error": {"code": "pane_not_found", "detail": "x" * 70_000}}
+            ),
+        ),
+    )
+    cursor = builtin_agent_adapter_registry().adapter("cursor")
+    for completed in failures:
+        try:
+            cursor.verify_stopped_retirement(
+                target=target,
+                provider_kind="cursor",
+                multiplexer=HerdrMultiplexerAdapter(
+                    HerdrInventoryRunner([], process_failure=completed),
+                    binary="test-herdr",
+                ),
+            )
+        except StorageRefusal as exc:
+            assert exc.code == "stopped_retirement_process_unavailable"
+        else:
+            raise AssertionError("noncanonical absent-pane proof was accepted")
 
 
 def test_live_endpoint_and_stale_generation_refuse_without_mutation(root: Path) -> None:
@@ -956,7 +1038,7 @@ def test_stable_cli_retires_imported_hook_runtime_end_to_end(root: Path) -> None
     fake_herdr.write_text(
         "#!/bin/sh\n"
         "if [ \"$1 $2\" = \"pane process-info\" ]; then\n"
-        "  printf '%s\\n' '{\"error\":{\"code\":\"not_found\"}}'\n"
+        "  printf '%s\\n' '{\"error\":{\"code\":\"pane_not_found\"}}' >&2\n"
         "  exit 1\n"
         "fi\n"
         "printf '%s\\n' '{\"result\":{\"agents\":[]}}'\n",
@@ -1060,6 +1142,8 @@ def main() -> None:
         )
     test_stable_cli_exposes_exact_retirement_identity()
     test_herdr_proves_absence_and_refuses_live_or_ambiguous_identity()
+    test_herdr_absent_pane_uses_runner_stderr_failure_envelope()
+    test_herdr_refuses_noncanonical_absent_pane_contracts()
     print("PASS: exact stopped-agent retirement preserves repository state")
 
 

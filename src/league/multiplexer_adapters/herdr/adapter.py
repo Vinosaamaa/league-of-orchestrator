@@ -14,6 +14,7 @@ from ..contract import CommandRunner, RestoredEndpoint
 
 
 MAX_TOKENS_PER_REPORT = 16
+MAX_STOPPED_RETIREMENT_PROCESS_OUTPUT_BYTES = 65_536
 
 
 class SubprocessRunner:
@@ -48,6 +49,45 @@ def _result(completed: subprocess.CompletedProcess[str], label: str) -> dict[str
 def _session_value(item: Mapping[str, Any]) -> Any:
     session = item.get("agent_session")
     return session.get("value") if isinstance(session, Mapping) else None
+
+
+def _stopped_retirement_process_envelope(
+    payload: Any,
+) -> Mapping[str, Any]:
+    if not isinstance(payload, str):
+        raise StorageRefusal(
+            "stopped_retirement_process_unavailable",
+            "Herdr process inspection returned non-text output",
+        )
+    try:
+        encoded = payload.encode("utf-8")
+    except UnicodeError as exc:
+        raise StorageRefusal(
+            "stopped_retirement_process_unavailable",
+            "Herdr process inspection returned invalid text",
+        ) from exc
+    if (
+        not encoded
+        or len(encoded) > MAX_STOPPED_RETIREMENT_PROCESS_OUTPUT_BYTES
+        or b"\x00" in encoded
+    ):
+        raise StorageRefusal(
+            "stopped_retirement_process_unavailable",
+            "Herdr process inspection output was empty or outside its byte bound",
+        )
+    try:
+        envelope = json.loads(payload)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise StorageRefusal(
+            "stopped_retirement_process_unavailable",
+            "Herdr process inspection returned malformed JSON",
+        ) from exc
+    if not isinstance(envelope, Mapping):
+        raise StorageRefusal(
+            "stopped_retirement_process_unavailable",
+            "Herdr process inspection returned a non-object envelope",
+        )
+    return envelope
 
 
 def _overlaps_identity(
@@ -1050,29 +1090,39 @@ class HerdrMultiplexerAdapter:
             ),
             timeout_seconds=30,
         )
-        try:
-            process_envelope = json.loads(completed.stdout)
-        except (TypeError, json.JSONDecodeError) as exc:
-            raise StorageRefusal(
-                "stopped_retirement_process_unavailable",
-                "Herdr process inspection returned malformed JSON",
-            ) from exc
-        process_result = (
-            process_envelope.get("result")
-            if isinstance(process_envelope, Mapping)
-            else None
-        )
-        process_error = (
-            process_envelope.get("error")
-            if isinstance(process_envelope, Mapping)
-            else None
-        )
-        pane_absent = bool(
-            completed.returncode != 0
-            and isinstance(process_error, Mapping)
-            and process_error.get("code") == "not_found"
-        )
-        if completed.returncode != 0 and not pane_absent:
+        if completed.returncode == 0:
+            if completed.stderr != "":
+                raise StorageRefusal(
+                    "stopped_retirement_process_unavailable",
+                    "Herdr process inspection mixed success and failure streams",
+                )
+            process_envelope = _stopped_retirement_process_envelope(completed.stdout)
+            process_result = process_envelope.get("result")
+            if not isinstance(process_result, Mapping):
+                raise StorageRefusal(
+                    "stopped_retirement_process_unavailable",
+                    "Herdr process inspection returned no success result",
+                )
+            pane_absent = False
+        elif completed.returncode == 1:
+            if completed.stdout != "":
+                raise StorageRefusal(
+                    "stopped_retirement_process_unavailable",
+                    "Herdr process inspection mixed success and failure streams",
+                )
+            process_envelope = _stopped_retirement_process_envelope(completed.stderr)
+            process_error = process_envelope.get("error")
+            if (
+                not isinstance(process_error, Mapping)
+                or process_error.get("code") != "pane_not_found"
+            ):
+                raise StorageRefusal(
+                    "stopped_retirement_process_unavailable",
+                    "Herdr could not prove the exact pane process surface",
+                )
+            process_result = None
+            pane_absent = True
+        else:
             raise StorageRefusal(
                 "stopped_retirement_process_unavailable",
                 "Herdr could not prove the exact pane process surface",

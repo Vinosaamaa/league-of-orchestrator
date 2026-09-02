@@ -124,7 +124,9 @@ the multiplexer adapter proves that the exact endpoint, route, native session,
 pane, and registered provider process names have no live or ambiguous inventory
 match. An unsupported pair refuses without a fallback. Herdr uses structured
 `agent list` and exact-pane `process-info`; only an explicit structured
-`not_found` establishes pane absence. tmux remains explicitly unsupported until
+`pane_not_found` failure envelope on stderr with exit status 1 establishes pane
+absence. Successful process inspection is accepted only as bounded structured
+JSON on stdout. tmux remains explicitly unsupported until
 its adapter can provide equivalent owner-source evidence.
 
 One bounded `BEGIN IMMEDIATE` transaction rechecks the immutable runtime/session/

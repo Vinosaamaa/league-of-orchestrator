@@ -430,6 +430,38 @@ class SupervisorServiceInstaller:
                 "service rollback backup does not match the active manifest",
             )
 
+    def _assert_exact_rolled_back_state(self, manifest: Mapping[str, Any]) -> None:
+        if self.service_manager.is_loaded(SERVICE_LABEL):
+            raise StorageRefusal(
+                "supervisor_service_recovery_required",
+                "rolled-back service state still has a loaded launchd job",
+            )
+        self._assert_no_unmanaged_process()
+        current = _read_optional_owned_regular(self.plist_path, "restored plist")
+        backup = _read_optional_owned_regular(
+            self.backup_path, "service rollback backup"
+        )
+        previous_digest = manifest.get("previous_plist_sha256")
+        exact = (
+            (
+                previous_digest is None
+                and current is None
+                and backup is None
+            )
+            or (
+                isinstance(previous_digest, str)
+                and current is not None
+                and backup is not None
+                and _sha256(current) == previous_digest
+                and _sha256(backup) == previous_digest
+            )
+        )
+        if not exact:
+            raise StorageRefusal(
+                "supervisor_service_recovery_required",
+                "rolled-back service bytes do not match their exact prior state",
+            )
+
     def install(
         self,
         *,
@@ -479,10 +511,13 @@ class SupervisorServiceInstaller:
                     "idempotent": True,
                     "service_status": status,
                 }
-            raise StorageRefusal(
-                "supervisor_service_recovery_required",
-                "an earlier service installation must be rolled back exactly first",
-            )
+            if existing_manifest["state"] == "rolled_back":
+                self._assert_exact_rolled_back_state(existing_manifest)
+            else:
+                raise StorageRefusal(
+                    "supervisor_service_recovery_required",
+                    "an earlier service installation must be rolled back exactly first",
+                )
         if self.service_manager.is_loaded(SERVICE_LABEL):
             raise StorageRefusal(
                 "supervisor_service_conflict",
@@ -491,12 +526,16 @@ class SupervisorServiceInstaller:
         self._assert_no_unmanaged_process()
         previous = _read_optional_owned_regular(self.plist_path, "existing plist")
         if previous is not None:
-            if self.backup_path.exists():
+            existing_backup = _read_optional_owned_regular(
+                self.backup_path, "service rollback backup"
+            )
+            if existing_backup is not None and existing_backup != previous:
                 raise StorageRefusal(
                     "supervisor_service_backup_conflict",
                     "service rollback backup already exists",
                 )
-            _atomic_write(self.backup_path, previous)
+            if existing_backup is None:
+                _atomic_write(self.backup_path, previous)
         manifest = {
             "schema": MANIFEST_SCHEMA,
             "state": "prepared",

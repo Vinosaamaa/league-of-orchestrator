@@ -1245,3 +1245,9 @@ cross-operation probes refuse before an adapter callback; no non-Pi descriptor
 lifecycle is claimed. Launch-gap recovery also retains the replacement fence
 when no exact staged successor can be bound, because absence of a routing name
 does not prove that a pre-start pane or tab was never created.
+
+PR #136 merged the independently audited #84 candidate at tree
+`71a2f71b9eb1a226a7a7c6c2c3346f3c4fcd70d0`. Release `0.2.44` assigns the
+next unallocated immutable install identity to those provider-lifecycle bytes;
+the release delta changes only the version contract, its deterministic staging
+expectations, and this provenance record.

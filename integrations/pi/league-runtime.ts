@@ -21,6 +21,7 @@ let taskLabel = process.env.LEAGUE_TASK_LABEL;
 let routingAlias = process.env.LEAGUE_ROUTING_ALIAS;
 let descriptorDigest = process.env.LEAGUE_LAUNCH_DESCRIPTOR_DIGEST;
 let descriptorId = process.env.LEAGUE_LAUNCH_DESCRIPTOR_ID;
+let metadataSource = process.env.LEAGUE_LAUNCH_METADATA_SOURCE;
 
 function exactRoot(value: string | undefined): string | undefined {
   if (!value || !path.isAbsolute(value) || value === "/") return undefined;
@@ -94,7 +95,9 @@ function exactMetadataInputs(): boolean {
       taskLabel &&
       routingAlias &&
       descriptorDigest &&
-      descriptorId,
+      descriptorId &&
+      metadataSource &&
+      /^league:pi-launch:[A-Za-z0-9._:-]{1,64}$/.test(metadataSource),
   );
 }
 
@@ -106,20 +109,13 @@ function reportLeagueMetadata(session: SessionIdentity): void {
     launchRole === "shotcaller"
       ? callsign!
       : `${callsign} · ${projectCode}|${taskLabel}`;
-  const source = `league:pi-launch:${descriptorDigest!.slice(0, 16)}`;
+  const source = metadataSource!;
   const tokens = [
-    `runtime_kind=${runtimeKind}`,
-    `provider_kind=${providerKind}`,
-    `role=${launchRole}`,
-    `placement=${launchPlacement}`,
     `sidebar_name=${callsign}`,
     `project_code=${projectCode}`,
     `task_label=${taskLabel}`,
     `routing_alias=${routingAlias}`,
-    `session_id=${session.id}`,
-    `session_path=${session.file}`,
     `thread_title=${threadTitle}`,
-    "activation_phase=session_started",
     `launch_runtime_kind=${runtimeKind}`,
     `launch_provider_kind=${providerKind}`,
     `launch_role=${launchRole}`,
@@ -133,6 +129,7 @@ function reportLeagueMetadata(session: SessionIdentity): void {
     `launch_descriptor_sha256=${descriptorDigest}`,
     `launch_descriptor_id=${descriptorId}`,
     `launch_state_root=${exactStateRoot}`,
+    `launch_metadata_source=${source}`,
     "launch_activation_phase=session_started",
   ];
   if (session.parentFile) {
@@ -171,7 +168,7 @@ export default function (pi) {
     "pane-id", "state-root", "watcher-command", "worktree", "sandbox-profile",
     "runtime-kind", "provider-kind", "role", "placement", "callsign",
     "project-code", "task-label", "routing-alias", "descriptor-digest",
-    "descriptor-id",
+    "descriptor-id", "metadata-source",
   ];
   for (const name of flags) {
     pi.registerFlag(`league-${name}`, {
@@ -198,6 +195,7 @@ export default function (pi) {
   routingAlias = supplied("routing-alias", routingAlias);
   descriptorDigest = supplied("descriptor-digest", descriptorDigest);
   descriptorId = supplied("descriptor-id", descriptorId);
+  metadataSource = supplied("metadata-source", metadataSource);
   exactStateRoot = exactRoot(stateRoot);
   exactWorktree = exactRoot(worktree);
   let sessionIdentity: SessionIdentity | undefined;

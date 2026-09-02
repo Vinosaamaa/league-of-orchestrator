@@ -55,6 +55,13 @@ unified inventory. League requires the exact historical filename, a unique
 contained regular file, its manifest-bound digest, and the parent session ID;
 it never recreates the retired profile or rewrites the child JSONL.
 
+Restart metadata reuses one exact League-owned Herdr source. A legacy source is
+derived only from matching Pi runtime, routing, and descriptor tokens; later
+restarts carry that source explicitly. Before adding the durable descriptor ID
+and state root, League removes only its redundant legacy runtime/session tokens.
+This keeps the combined pane metadata beneath Herdr's fixed token limit without
+clearing native Pi or toolkit-owned identity and presentation fields.
+
 League reads only the first JSONL record for identity/cwd/parent validation,
 and the first parent record when lineage exists. It hashes the complete source,
 rejects a duplicate session ID at any other unified path or digest, copies with

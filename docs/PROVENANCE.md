@@ -1118,3 +1118,15 @@ bytecode themselves. Acceptance removes the masking environment for launcher
 checks, executes both launchers, and then compares every post-execution staged
 file and digest with the source-owned release manifest. The rejected staging
 directory was never activated and contained no canonical data.
+
+The first adopted Shotcaller resume then exposed a Herdr metadata-capacity
+boundary that the fake adapter did not model. The new descriptor digest selected
+a second League metadata source while the old source already contributed enough
+tokens to reach Herdr's limit. Pi started with the exact session, but the
+post-start metadata report refused before the restart effect was committed.
+The same intent was preserved and completed without starting another process by
+reusing the owner-verified prior source and clearing only redundant League-owned
+legacy runtime/session tokens. The permanent launcher now derives that source
+only from matching Pi routing metadata, passes it explicitly to the Pi extension,
+and publishes a reduced non-duplicative token set. Native Pi session identity,
+toolkit presentation tokens, JSONL bytes, and Job Journey state remain unchanged.

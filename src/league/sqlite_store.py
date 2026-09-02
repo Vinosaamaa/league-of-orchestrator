@@ -21,6 +21,7 @@ from . import sqlite_provider_launch_ops
 from . import sqlite_runtime_replacement_ops
 from . import sqlite_pi_session_migration_ops
 from . import sqlite_runtime_ops
+from . import sqlite_stopped_retirement_ops
 from . import sqlite_mode_ops
 from . import sqlite_issue_ops
 from . import sqlite_continuation_ops
@@ -227,13 +228,19 @@ from .sqlite_request_reconciliation_schema import (
 from .sqlite_protected_gate_schema import (
     MIGRATION_NAME as PROTECTED_GATE_MIGRATION_NAME,
 )
+from .sqlite_stopped_retirement_schema import (
+    MIGRATION_NAME as STOPPED_RETIREMENT_MIGRATION_NAME,
+)
+from .sqlite_stopped_retirement_schema import (
+    STATEMENTS as STOPPED_RETIREMENT_MIGRATION_STATEMENTS,
+)
 from .sqlite_protected_gate_schema import (
     STATEMENTS as PROTECTED_GATE_MIGRATION_STATEMENTS,
 )
 
 
 WAL_MINIMUM = (3, 51, 3)
-CURRENT_SCHEMA_VERSION = 23
+CURRENT_SCHEMA_VERSION = 24
 DATABASE_NAME = "league.sqlite3"
 DEFAULT_BUSY_TIMEOUT_MS = 500
 MAX_BUSY_TIMEOUT_MS = 10_000
@@ -1275,6 +1282,11 @@ MIGRATIONS = (
         RUNTIME_REPLACEMENT_MIGRATION_STATEMENTS,
         rebuilds_foreign_keys=True,
     ),
+    Migration(
+        24,
+        STOPPED_RETIREMENT_MIGRATION_NAME,
+        STOPPED_RETIREMENT_MIGRATION_STATEMENTS,
+    ),
 )
 
 
@@ -1543,6 +1555,7 @@ _EXPORT_TABLES = (
     "provider_restart_effects",
     "pi_session_migrations",
     "runtime_replacements",
+    "stopped_agent_retirements",
     "recipient_receipts",
     "watcher_registrations",
     "obligations",
@@ -1629,6 +1642,7 @@ _EXPORT_ORDER = {
     "provider_restart_effects": "created_at,descriptor_id,restart_id",
     "pi_session_migrations": "created_at,migration_id",
     "runtime_replacements": "created_at,operation_id",
+    "stopped_agent_retirements": "completed_at,operation_id",
     "recipient_receipts": "received_at,event_id,recipient_agent_id",
     "watcher_registrations": "actor_agent_id,watcher_id",
     "obligations": "created_at,obligation_id",
@@ -1745,6 +1759,13 @@ _INSPECTION_REDACTIONS = {
         "cwd",
         "pane_id",
         "intent_json",
+        "receipt_json",
+    },
+    "stopped_agent_retirements": {
+        "session_ref",
+        "endpoint",
+        "runtime_generation",
+        "proof_json",
         "receipt_json",
     },
     "runtime_replacements": {
@@ -3843,6 +3864,36 @@ class SQLiteStorage(SQLiteTransactionCore):
             endpoint_generation,
             capabilities,
             at,
+        )
+
+    def stopped_agent_retirement_target(
+        self, request: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        return sqlite_stopped_retirement_ops.target(self, request)
+
+    def stopped_agent_retirement(
+        self, operation_id: str
+    ) -> Optional[dict[str, Any]]:
+        return sqlite_stopped_retirement_ops.status(self, operation_id)
+
+    def complete_stopped_agent_retirement(
+        self,
+        request: Mapping[str, Any],
+        *,
+        adapter_kind: str,
+        proof: Mapping[str, Any],
+        request_digest: str,
+        at: str,
+        fault: Optional[Callable[[str], None]] = None,
+    ) -> dict[str, Any]:
+        return sqlite_stopped_retirement_ops.complete(
+            self,
+            request,
+            adapter_kind=adapter_kind,
+            proof=proof,
+            request_digest=request_digest,
+            at=at,
+            fault=fault,
         )
 
     def prepare_provider_launch(

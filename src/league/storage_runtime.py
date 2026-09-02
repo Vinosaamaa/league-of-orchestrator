@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Mapping, Optional, Protocol
+from typing import Any, Callable, Mapping, Optional, Protocol
 
 
 class RuntimeBindingStorage(Protocol):
@@ -19,6 +19,25 @@ class RuntimeBindingStorage(Protocol):
         endpoint_generation: str,
         capabilities: Mapping[str, Any],
         at: str,
+    ) -> dict[str, Any]: ...
+
+    def stopped_agent_retirement_target(
+        self, request: Mapping[str, Any]
+    ) -> dict[str, Any]: ...
+
+    def stopped_agent_retirement(
+        self, operation_id: str
+    ) -> Optional[dict[str, Any]]: ...
+
+    def complete_stopped_agent_retirement(
+        self,
+        request: Mapping[str, Any],
+        *,
+        adapter_kind: str,
+        proof: Mapping[str, Any],
+        request_digest: str,
+        at: str,
+        fault: Optional[Callable[[str], None]] = None,
     ) -> dict[str, Any]: ...
 
     def prepare_provider_launch(

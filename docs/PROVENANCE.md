@@ -1354,3 +1354,14 @@ generation set, while start/restart and idempotent install revalidate exact
 executable/template bytes after liveness and stop the service before refusing
 observable check/use drift. The release preserves 0.2.49 launchd runtime
 selection and exact rolled-back-install recovery.
+
+Issue #127 separates total retirement of an already-stopped Champion from the
+existing destructive cleanup plan. Migration 24 stores one exact operation and
+absence-proof receipt. Agent and multiplexer registries own provider and native
+inventory semantics; core has no Cursor-, Pi-, Codex-, Herdr-, or tmux-specific
+retirement branch. After read-only absence proof, one SQLite transaction closes
+the stale runtime, terminalizes and retires the Champion, removes only its Squad
+membership, and releases its callsign. Repository coordinates and bytes are
+never cleanup inputs or effects. Exact retry after restart is receipt-only;
+identity drift, untransferred ownership, live/ambiguous endpoints, and
+unsupported pairs refuse without partial mutation.

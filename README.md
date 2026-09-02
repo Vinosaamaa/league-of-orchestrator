@@ -327,6 +327,20 @@ execute inside the canonical ownership transaction. Core validates their exact
 operation, assignment, participant, and source adapter; Pi-specific descriptor
 queries remain inside the Pi adapter's storage facade.
 
+An already-stopped Champion whose pane has disappeared but whose imported
+runtime is still canonically `active` or `idle` is retired with `league runtime
+retire-stopped-agent`. The caller supplies the exact operation, agent, runtime,
+native session, endpoint, generation, provider, multiplexer, agent version,
+callsign-assignment version, and explicit terminal status. League first asks the
+registered provider adapter and multiplexer adapter to prove that no live
+endpoint overlaps the routing name, pane, or native session. It then closes the
+stale runtime, terminalizes the agent, removes its Squad membership, releases
+the callsign, and records one durable receipt in a single SQLite transaction.
+The command never deletes or modifies a repository, worktree, branch, provider
+session file, pane, or process. Exact retries return the original receipt;
+changed identity, untransferred task ownership, another active runtime, a live
+or ambiguous endpoint, and an unsupported adapter pair fail before mutation.
+
 Issue #66's inline-triage, candidate-inventory, persistent-supervision, and
 measured source-only boundaries are in the
 [issue #66 benchmark report](docs/research/issue-66-inline-triage-supervision-benchmark.md).

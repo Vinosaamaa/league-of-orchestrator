@@ -54,6 +54,7 @@ class HerdrMultiplexerAdapter:
             "rollover_reconciliation", "production_cleanup",
             "provider_session_lifecycle",
             "runtime_replacement",
+            "stopped_retirement",
         }
     )
 
@@ -989,6 +990,91 @@ class HerdrMultiplexerAdapter:
             "endpoint": target.get("endpoint"),
             "runtime_generation": target.get("runtime_generation"),
             "state": "retired",
+        }
+
+    def verify_stopped_agent(self, **inputs: Any) -> Mapping[str, Any]:
+        """Prove an exact canonical identity is absent from Herdr inventory."""
+
+        target = inputs.get("target")
+        adapter_kind = inputs.get("adapter_kind")
+        provider_kind = inputs.get("provider_kind")
+        process_names = inputs.get("process_names")
+        if (
+            not isinstance(target, Mapping)
+            or not isinstance(adapter_kind, str)
+            or not adapter_kind
+            or not isinstance(provider_kind, str)
+            or not provider_kind
+            or not isinstance(process_names, frozenset)
+            or not process_names
+        ):
+            raise StorageRefusal(
+                "stopped_retirement_identity_mismatch",
+                "stopped endpoint proof identity is incomplete",
+            )
+        required = (
+            "runtime_instance_id",
+            "session_ref",
+            "endpoint",
+            "runtime_generation",
+            "routing_name",
+        )
+        if any(
+            not isinstance(target.get(key), str) or not target[key]
+            for key in required
+        ):
+            raise StorageRefusal(
+                "stopped_retirement_identity_mismatch",
+                "stopped endpoint proof lacks immutable runtime identity",
+            )
+        matches: list[Mapping[str, Any]] = []
+        for item in self.discover():
+            session = item.get("agent_session")
+            session_ref = session.get("value") if isinstance(session, Mapping) else None
+            if (
+                item.get("pane_id") == target["endpoint"]
+                or item.get("name") == target["routing_name"]
+                or session_ref == target["session_ref"]
+            ):
+                matches.append(item)
+        if len(matches) > 1:
+            raise StorageRefusal(
+                "stopped_retirement_identity_ambiguous",
+                "more than one live endpoint overlaps the retirement identity",
+            )
+        if matches:
+            item = matches[0]
+            session = item.get("agent_session")
+            observed_session = (
+                session.get("value") if isinstance(session, Mapping) else None
+            )
+            exact = bool(
+                item.get("pane_id") == target["endpoint"]
+                and item.get("name") == target["routing_name"]
+                and item.get("agent") == adapter_kind
+                and item.get("display_agent") == provider_kind
+                and observed_session == target["session_ref"]
+            )
+            if exact:
+                raise StorageRefusal(
+                    "stopped_retirement_endpoint_live",
+                    "exact retirement endpoint is still live",
+                )
+            raise StorageRefusal(
+                "stopped_retirement_identity_mismatch",
+                "a live endpoint overlaps but does not match the retirement identity",
+            )
+        return {
+            "schema": "league.stopped-agent-proof.v1",
+            "verified": True,
+            "adapter_kind": adapter_kind,
+            "provider_kind": provider_kind,
+            "multiplexer_kind": self.kind,
+            "runtime_instance_id": target["runtime_instance_id"],
+            "session_ref": target["session_ref"],
+            "endpoint": target["endpoint"],
+            "runtime_generation": target["runtime_generation"],
+            "endpoint_absent": True,
         }
 
     def close(

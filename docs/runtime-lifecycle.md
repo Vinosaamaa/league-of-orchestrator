@@ -110,6 +110,38 @@ matches the exact switched rollover predecessor and version. Completion derives
 the rollover drain receipt from immutable cleanup action receipts; retries reuse
 the same cleanup operation and rollover receipt.
 
+## Already-stopped total retirement
+
+Issue [#127](https://github.com/Vinosaamaa/league-of-orchestrator/issues/127)
+adds a narrow retirement path for an exact Champion whose provider process and
+multiplexer pane are already absent while an imported runtime remains active.
+This is not repository cleanup. `runtime retire-stopped-agent` never exits,
+closes, resumes, launches, prompts, steers, deletes, or rewrites external state.
+
+Core resolves the runtime kind and multiplexer kind only through their adapter
+registries. The agent adapter validates its provider and process vocabulary;
+the multiplexer adapter proves that the exact endpoint, route, and native
+session have no live or ambiguous inventory match. An unsupported pair refuses
+without a fallback. Herdr implements the proof; tmux remains explicitly
+unsupported until its adapter can provide equivalent owner-source evidence.
+
+After proof, one SQLite transaction rechecks the immutable runtime/session/
+endpoint/generation, expected agent and callsign versions, unique active runtime
+and callsign ownership, and transferred-task boundary. It then marks the runtime
+closed and unverified, releases the exact callsign at the queue tail,
+terminalizes and retires the Champion, removes only that Champion's Squad
+membership, records immutable proof and receipt digests, and emits a retirement
+event. A fault at either internal boundary rolls everything back. Reopening the
+store and retrying the same operation returns the stored receipt without
+consulting or changing the multiplexer again. Repository coordinates are
+retained only as immutable agent history; no filesystem adapter participates.
+
+Focused acceptance uses synthetic SQLite state, temporary retained bytes, and
+fake adapter inventories. It covers direct Codex, direct Cursor CLI, Pi with
+Cursor, Pi with Codex, an injected non-Herdr multiplexer, imported callsign/runtime
+binding, live/ambiguous/mismatched refusal, unsupported pairs, transaction
+rollback, and exact retry after storage restart.
+
 ## Issue-coupled cleanup and exact-thread continuation
 
 Migration v16 is named

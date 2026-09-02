@@ -297,6 +297,36 @@ class DeclaredAgentAdapter:
             target=target,
         )
 
+    def verify_stopped_retirement(
+        self,
+        *,
+        target: Mapping[str, Any],
+        provider_kind: str,
+        multiplexer: Any,
+    ) -> Mapping[str, Any]:
+        if "retirement" not in self.lifecycle_operations:
+            raise StorageRefusal(
+                "stopped_retirement_adapter_unsupported",
+                "agent adapter does not support retirement",
+            )
+        normalized = self.normalize_provider(provider_kind)
+        if not self.accepts_provider(normalized):
+            raise StorageRefusal(
+                "stopped_retirement_provider_mismatch",
+                "provider does not belong to the selected agent adapter",
+            )
+        if "stopped_retirement" not in multiplexer.capabilities:
+            raise StorageRefusal(
+                "stopped_retirement_multiplexer_unsupported",
+                "multiplexer cannot prove an already-stopped endpoint",
+            )
+        return multiplexer.verify_stopped_agent(
+            adapter_kind=self.contract.kind,
+            provider_kind=normalized,
+            process_names=self.process_names,
+            target=target,
+        )
+
     def translate_event(self, native_event: str, payload: Mapping[str, Any]) -> LifecycleEvent:
         operation = self.native_events.get(native_event)
         if operation is None:

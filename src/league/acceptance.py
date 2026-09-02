@@ -437,6 +437,7 @@ def _release_files(source_root: Path) -> list[Path]:
         source_root / "integrations/herdr/league-restore/restore.sh",
         source_root / "integrations/herdr/league-restore/README.md",
         source_root / "config/league-model-routing.example.json",
+        source_root / "config/league-supervisor.launchd.plist.in",
     ]
     files.extend(_release_directory_files(source_root, Path("src/league"), ".py"))
     for package in (

@@ -781,6 +781,19 @@ def test_herdr_refuses_noncanonical_absent_pane_contracts() -> None:
             ),
             "",
         ),
+        subprocess.CompletedProcess(
+            ("test-herdr",),
+            1,
+            "",
+            '{"error":{"code":"other"},'
+            '"error":{"code":"pane_not_found"}}',
+        ),
+        subprocess.CompletedProcess(
+            ("test-herdr",),
+            1,
+            "",
+            '{"error":{"code":"other","code":"pane_not_found"}}',
+        ),
     )
     cursor = builtin_agent_adapter_registry().adapter("cursor")
     for completed in failures:

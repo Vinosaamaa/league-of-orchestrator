@@ -128,8 +128,9 @@ match. An unsupported pair refuses without a fallback. Herdr uses structured
 absence. Successful process inspection is accepted only as bounded structured
 JSON on stdout. Both streams require finite JSON and exactly one top-level
 member: `result` on success or `error` on failure. Mixed result/error envelopes
-and non-finite constants fail closed. tmux remains explicitly unsupported until
-its adapter can provide equivalent owner-source evidence.
+and non-finite constants fail closed. Duplicate JSON members at any depth also
+fail closed before shape or identity evaluation. tmux remains explicitly
+unsupported until its adapter can provide equivalent owner-source evidence.
 
 One bounded `BEGIN IMMEDIATE` transaction rechecks the immutable runtime/session/
 endpoint/generation, expected agent and callsign versions, unique active runtime

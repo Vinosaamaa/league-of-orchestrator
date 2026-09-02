@@ -55,6 +55,15 @@ def _reject_nonfinite_json_constant(_constant: str) -> Any:
     raise ValueError("non-finite JSON constants are not accepted")
 
 
+def _strict_json_object(pairs: Sequence[tuple[str, Any]]) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("duplicate JSON members are not accepted")
+        value[key] = item
+    return value
+
+
 def _stopped_retirement_process_envelope(
     payload: Any,
 ) -> Mapping[str, Any]:
@@ -82,6 +91,7 @@ def _stopped_retirement_process_envelope(
     try:
         envelope = json.loads(
             payload,
+            object_pairs_hook=_strict_json_object,
             parse_constant=_reject_nonfinite_json_constant,
         )
     except (TypeError, ValueError) as exc:

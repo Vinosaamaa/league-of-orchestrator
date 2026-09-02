@@ -278,8 +278,10 @@ def test_authority_bound_live_apply(root: Path) -> None:
     assert watcher.returncode == 0, watcher.stderr
     assert json.loads(watcher.stdout)["writer"] == "sqlite"
     hook_receipts = {item["harness"]: item for item in applied["hooks"]}
-    assert hook_receipts["codex"]["added"] == ["UserPromptSubmit", "Stop"]
-    assert hook_receipts["cursor"]["added"] == ["beforeSubmitPrompt", "stop"]
+    assert hook_receipts["codex"]["added"] == ["UserPromptSubmit", "PreToolUse", "Stop"]
+    assert hook_receipts["cursor"]["added"] == [
+        "beforeSubmitPrompt", "beforeShellExecution", "stop"
+    ]
     assert json.loads(fixture["cursor_hooks"].read_text())["hooks"][
         "sessionStart"
     ] == [{"command": "keep-me"}]

@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .sqlite_request_ops import _active_claim, _bounded_public_text, _request_row, _time
+from .sqlite_runtime_replacement_ops import assert_runtime_replacement_mutation_allowed
 from .sqlite_project_ops import canonical_repository, resolve_project_routing_identity
 from .sqlite_callsign_ops import (
     _reserve_in_transaction,
@@ -198,6 +199,19 @@ def _validate_assignment_command(command: PrepareAssignmentCommand) -> None:
             "hidden scientist assignment requires one dispatch and no issue or worktree lifecycle",
         )
     capabilities(command.required_capabilities)
+    if (
+        len(set(value.casefold() for value in command.excluded_callsigns))
+        != len(command.excluded_callsigns)
+        or any(
+            not isinstance(value, str)
+            or not value
+            or len(value.encode("utf-8")) > 64
+            for value in command.excluded_callsigns
+        )
+    ):
+        raise StorageRefusal(
+            "invalid_assignment", "live multiplexer name fence is invalid"
+        )
 
 
 def _assignment_retry(
@@ -389,6 +403,7 @@ def _persist_assignment_reservation(
         command.task_id,
         capabilities(command.required_capabilities),
         command.at,
+        excluded_callsigns=command.excluded_callsigns,
     )
     hidden_input = json.loads(hidden_dispatch["input_json"]) if hidden_dispatch is not None else {}
     hidden_signals = hidden_input.get("signals", {}) if isinstance(hidden_input, dict) else {}
@@ -714,10 +729,44 @@ def activate_assignment(
                 if assignment["assignment_role"] == "hidden-worker"
                 else champion_required
             )
-            if set(receipt) != required or receipt.get("verified") is not True:
+            routing_fields = {"runtime_kind", "provider_kind", "routing"}
+            allowed_shapes = {frozenset(required)}
+            if assignment["assignment_role"] == "champion":
+                allowed_shapes.add(frozenset(required | routing_fields))
+            if frozenset(receipt) not in allowed_shapes or receipt.get("verified") is not True:
                 raise StorageRefusal(
                     "receipt_unverified", "assignment activation requires one exact role-specific receipt"
                 )
+            if routing_fields <= set(receipt):
+                routing = receipt["routing"]
+                runtime_kind = receipt["runtime_kind"]
+                provider_kind = receipt["provider_kind"]
+                route_exact = bool(
+                    isinstance(routing, dict)
+                    and isinstance(runtime_kind, str)
+                    and bool(runtime_kind)
+                    and isinstance(provider_kind, str)
+                    and bool(provider_kind)
+                    and routing.get("provider") == provider_kind
+                    and isinstance(routing.get("model"), str)
+                    and bool(routing["model"])
+                    and isinstance(routing.get("effort"), str)
+                    and bool(routing["effort"])
+                    and isinstance(routing.get("explicit"), dict)
+                    and set(routing["explicit"])
+                    == {"runtime", "provider", "model", "effort"}
+                    and all(
+                        isinstance(value, bool)
+                        for value in routing["explicit"].values()
+                    )
+                    and receipt["harness_kind"] == f"{runtime_kind}-thread"
+                    and receipt["display_agent"] == provider_kind
+                )
+                if not route_exact:
+                    raise StorageRefusal(
+                        "receipt_mismatch",
+                        "launch receipt runtime, provider, and routing decision disagree",
+                    )
             if assignment["state"] == "active":
                 stored = json.loads(assignment["acceptance_receipt_json"])
                 if stored != receipt:
@@ -789,7 +838,6 @@ def activate_assignment(
                 and agent["role"] == assignment["assignment_role"]
                 and role_exact
                 and receipt["routing_name"] == str(assignment["callsign"]).lower()
-                and receipt["backend_kind"] in {"herdr", "tmux"}
                 and all(
                     isinstance(receipt[name], str) and receipt[name]
                     for name in required
@@ -2819,6 +2867,15 @@ def _validated_transition_context(
     assignment = store.connection.execute(
         "SELECT * FROM task_assignments WHERE task_id=?", (task_id,)
     ).fetchone()
+    assert_runtime_replacement_mutation_allowed(
+        store,
+        task_id=task_id,
+        assignment_id=(
+            None
+            if assignment is None
+            else str(assignment["task_assignment_id"])
+        ),
+    )
     if task is None or assignment is None or assignment["state"] != "active":
         raise StorageRefusal("assignment_inactive", "task has no active verified assignment")
     if assignment["assignment_role"] == "hidden-worker":

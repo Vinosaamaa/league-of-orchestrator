@@ -72,6 +72,30 @@ The repository keeps the proven runtime and new storage boundary separate:
   adapters. `cleanup.py` and `routing.py` own proof-first teardown policy and
   assignment-neutral model/effort selection; `sqlite_runtime_ops.py` persists
   their bindings, decisions, resources, operations, and receipts.
+- `src/league/agent_adapters/` is the explicit Codex, Pi, and Cursor CLI
+  translation registry. Every adapter uses the same lifecycle vocabulary and
+  advertises only the operations its native contract supports;
+  `SharedLifecyclePolicy` owns the common accept/refuse seam consumed by prompt
+  capture and exposed for issue #81 enforcement. Each adapter also owns its
+  provider-specific visible-launch factory, so the CLI selects an adapter and
+  does not contain a Codex/Pi/Cursor launch switch. Cursor configured inside Pi
+  remains only a provider field, not a Cursor CLI runtime identity or session
+  pool.
+- `src/league/multiplexer_adapters/` independently registers Herdr and tmux.
+  Multiplexer adapters advertise only callable native operations. The current
+  Herdr adapter owns restored-agent discovery, exact endpoint/process
+  observation, routing, Champion-tab/Shotcaller-pane placement, display
+  metadata, delivery, and close transport; the tmux adapter advertises no
+  unimplemented capability. `display_replay.py` composes the selected
+  multiplexer adapter with the canonical runtime's agent adapter and contains no
+  Herdr command strings. It reconstructs presentation from existing schema-22
+  state rather than creating a second durable presentation store.
+- `routing.py` is the single model/effort policy implementation. Ordinary
+  visible launch defaults to Pi+Codex but requires the exact persisted routing
+  decision for its request/task/assignment, role, provider, and capabilities.
+  Explicit overrides are accepted only as an exact model+effort pair. The
+  packaged schema-3 policy and schema-1/2 migration/rollback path preserve the
+  strong-worker baseline and cannot silently fall back to Luna.
 - `src/league/skill_contracts.py` owns strict custom-skill provenance,
   capability-profile resolution, bounded content hashing, and sanitized
   duplicate/install parity. It consumes the existing adapter matrix but does
@@ -235,14 +259,20 @@ performs no hosted mutation.
 
 ## Portability boundary
 
-The repository-local runtime core uses opaque namespaced session identity and
-declared capabilities. Codex+Herdr and Codex+tmux remain named contracts, and a
-deterministic Pi adapter proves the shared lifecycle without being labeled a
-real-runtime canary. The imported live watcher is unchanged: its Champion UUID,
-Codex hook, Herdr/tmux branch, and Herdr launch assumptions remain until issue
-#23 verifies and authorizes a cutover. Provider model names remain configuration
-data. Repository-local portability is implemented without claiming installed
-portability.
+The repository-local runtime core uses opaque namespaced session identity,
+declared capabilities, and explicit agent and multiplexer registries. Codex,
+Pi, and Cursor CLI keep native provider mechanics in dedicated adapter folders;
+Herdr advertises only its callable transport operations and tmux fails closed
+until its own adapter supplies them. Launch, restored-session reconciliation,
+and active Champion A-to-B replacement select those contracts without a
+provider/multiplexer branch in core policy. Adapters may return bounded storage
+transaction objects. Core validates their exact operation, assignment,
+participant, and source adapter before invoking them inside the ownership
+transaction. Pi-specific descriptor queries remain in
+`agent_adapters/pi/descriptor.py`; core storage does not interpret Pi's schema.
+Provider model names remain configuration data.
+The source and synthetic acceptance do not claim installed or live-runtime
+portability; issue #23 still owns cutover proof.
 
 The skill capability matrix selects one pair from the same registered adapter
 matrix, then evaluates orthogonal harness/tool/platform/browser/forge/

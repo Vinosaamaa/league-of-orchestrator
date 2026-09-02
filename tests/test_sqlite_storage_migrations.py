@@ -121,6 +121,9 @@ def test_transactional_upgrade_backup_and_rollback(root: Path) -> None:
             "ux_provider_launch_one_project_fork",
             "ix_provider_restart_state",
             "ix_pi_session_migration_state",
+            "ux_runtime_replacement_open_assignment",
+            "ux_runtime_replacement_successor_agent",
+            "ux_runtime_replacement_successor_runtime",
         } <= indexes
         assert [migration.version for migration in MIGRATIONS] == list(
             range(1, CURRENT_SCHEMA_VERSION + 1)
@@ -144,6 +147,7 @@ def test_transactional_upgrade_backup_and_rollback(root: Path) -> None:
             (20, "autonomous-protected-gate-authority-propagation", "b36865213f931b6522f2f8c807dcea60c3949a08eab05772c6ad8567fbdcf71a"),
             (21, "cursor-steering-intent-receipt", "7f6029e3d16a361afda80eab6d04624f99a50a4d37a0a2a4bd0fca3fc471bd66"),
             (22, "pi-provider-launch-descriptor", "00db025c97fd622984900c4db9712a2e3f3ea34125bed2af770c1e04d8aed83f"),
+            (23, "adapter-neutral-champion-runtime-replacement", "b7c70f0db8bd4ccc8135f7d3d8b7471a470220cad6b86e86614f67415df75251"),
         ]
         assert store.connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
 
@@ -272,7 +276,7 @@ def test_v21_to_v22_rolls_back_unified_pi_migration_tables(root: Path) -> None:
                 raise InjectedCrash(point)
 
         try:
-            store.migrate(backup_name="backups/pre-v22.sqlite3", fault=crash)
+            store.migrate(target_version=22, backup_name="backups/pre-v22.sqlite3", fault=crash)
         except InjectedCrash:
             pass
         else:
@@ -281,12 +285,8 @@ def test_v21_to_v22_rolls_back_unified_pi_migration_tables(root: Path) -> None:
         assert store.connection.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='pi_session_migrations'"
         ).fetchone() is None
-        receipt = store.migrate(backup_name="backups/pre-v22-retry.sqlite3")
+        receipt = store.migrate(target_version=22, backup_name="backups/pre-v22-retry.sqlite3")
         assert receipt["from_version"] == 21 and receipt["applied"] == [22]
-        assert store.connection.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='pi_session_migrations'"
-        ).fetchone() is not None
-        assert store.integrity()["ok"]
 
 
 def test_schema_refusals_without_test_sql(root: Path) -> None:

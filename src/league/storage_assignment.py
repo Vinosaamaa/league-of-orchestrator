@@ -25,6 +25,7 @@ class PrepareAssignmentCommand:
     assignment_role: str = "champion"
     dispatch_id: Optional[str] = None
     promoted_from_assignment_id: Optional[str] = None
+    excluded_callsigns: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

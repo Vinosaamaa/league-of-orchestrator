@@ -3,9 +3,13 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
+import subprocess
 import sys
 import tempfile
+from types import SimpleNamespace
 from pathlib import Path
 
 
@@ -26,8 +30,22 @@ from league.adapters import (
     builtin_registry,
 )  # noqa: E402
 from league.runtime import RuntimeCreateSpec, RuntimeLifecycle  # noqa: E402
+from league.persistent_supervisor import HerdrRuntimeObservationAdapter  # noqa: E402
+from league.agent_adapters import (  # noqa: E402
+    OPERATION_METHODS,
+    SharedLifecyclePolicy,
+    builtin_agent_adapter_registry,
+)
+from league.multiplexer_adapters import (  # noqa: E402
+    CommandRunner,
+    MULTIPLEXER_OPERATIONS,
+    MultiplexerAdapter,
+    RestoredEndpoint,
+    builtin_multiplexer_adapter_registry,
+)
 from league.sqlite_store import SQLiteStorage  # noqa: E402
 from league.storage import StorageRefusal  # noqa: E402
+from league.visible_launch import VisibleLaunchOptions  # noqa: E402
 from runtime_doubles import DeterministicBackend  # noqa: E402
 from storage_fixture import CHAMPION_ID, TASK_ID  # noqa: E402
 from storage_test_support import seeded_state  # noqa: E402
@@ -49,6 +67,35 @@ class TitleFailureBackend(DeterministicBackend):
         return super().input(endpoint, instruction)
 
 
+class HerdrOperationRunner:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, ...]] = []
+
+    def run(self, arguments, timeout_seconds=30):
+        del timeout_seconds
+        command = tuple(arguments)
+        self.calls.append(command)
+        result = None
+        if command[1:3] == ("tab", "create"):
+            result = {
+                "tab": {"tab_id": "w1:t2"},
+                "root_pane": {"pane_id": "w1:p2", "terminal_id": "term:2"},
+            }
+        elif command[1:3] == ("pane", "split"):
+            result = {
+                "tab_id": "w1:t1",
+                "pane": {"pane_id": "w1:p3", "terminal_id": "term:3"},
+            }
+        elif command[1:3] == ("agent", "list"):
+            result = {"agents": []}
+        elif command[1:3] not in {
+            ("agent", "prompt"), ("pane", "close"), ("pane", "rename")
+        }:
+            raise AssertionError(command)
+        stdout = "" if result is None else json.dumps({"result": result})
+        return subprocess.CompletedProcess(command, 0, stdout, "")
+
+
 def pi_registry(backend: DeterministicBackend) -> AdapterRegistry:
     registry = AdapterRegistry()
     pi = next(adapter for adapter in builtin_harness_contracts() if adapter.contract.kind == "pi")
@@ -61,7 +108,7 @@ def test_named_compatibility_matrix_and_opaque_identity() -> None:
     matrix = builtin_contract_registry().capability_matrix()
     pairs = {(item["harness"], item["backend"]): item for item in matrix["pairs"]}
     assert pairs[("codex", "herdr")]["operations"]["create"] == "driver_unavailable"
-    assert pairs[("codex", "herdr")]["operations"]["resume"] == "unsupported"
+    assert pairs[("codex", "herdr")]["operations"]["resume"] == "driver_unavailable"
     assert pairs[("codex", "tmux")]["operations"]["backend.allocate"] == "unsupported"
     assert pairs[("cursor", "herdr")]["operations"]["resume"] == "driver_unavailable"
     assert pairs[("pi", "herdr")]["evidence"] == "inherited-contract"
@@ -84,7 +131,49 @@ def test_runtime_matrix_cli_and_unsupported_create(root: Path) -> None:
         for item in matrix_command["result"]["pairs"]
     }
     for provider in ("codex", "cursor", "pi"):
-        assert production_pairs[(provider, "herdr")]["availability"] == "operational"
+        pair = production_pairs[(provider, "herdr")]
+        assert pair["availability"] == "contract-only"
+        assert pair["operations"]["create"] == "driver_unavailable"
+        assert pair["semantic_availability"] == "operational"
+        assert pair["lifecycle_operations"]["launch"] == "supported"
+    assert production_pairs[("cursor", "tmux")]["semantic_availability"] == "contract-only"
+    assert production_pairs[("cursor", "tmux")]["lifecycle_operations"]["launch"] == "driver_unavailable"
+    for provider in ("codex", "cursor", "pi"):
+        assert production_pairs[(provider, "tmux")]["lifecycle_operations"][
+            "replacement"
+        ] == "driver_unavailable"
+    resume = invoke_cli(
+        state,
+        "runtime",
+        "resume-launch",
+        "--descriptor-id",
+        "descriptor:synthetic",
+        "--restart-id",
+        "restart:synthetic",
+        "--pane-id",
+        "pane:synthetic",
+        "--multiplexer-kind",
+        "tmux",
+        "--at",
+        AT3,
+        expected=2,
+    )
+    assert resume["ok"] is False
+    assert resume["error"]["code"] == "provider_session_multiplexer_unsupported"
+    migrate = invoke_cli(
+        state,
+        "runtime",
+        "migrate-pi-session",
+        "--manifest",
+        str(root / "unread-manifest.json"),
+        "--multiplexer-kind",
+        "tmux",
+        "--at",
+        AT3,
+        expected=2,
+    )
+    assert migrate["ok"] is False
+    assert migrate["error"]["code"] == "provider_session_multiplexer_unsupported"
     with SQLiteStorage(state) as store:
         unavailable = RuntimeLifecycle(store, builtin_contract_registry())
         try:
@@ -156,6 +245,289 @@ def test_adapter_contract_validation() -> None:
             raise AssertionError("invalid adapter contract was accepted")
 
 
+def test_parameterized_provider_lifecycle_event_parity() -> None:
+    registry = builtin_agent_adapter_registry()
+    policy = SharedLifecyclePolicy()
+    cases = (
+        ("codex", "UserPromptSubmit", {"session_id": "session:codex", "turn_id": "turn:1"}),
+        ("pi", "input", {"session_path": "/tmp/session.jsonl", "input_id": "input:1"}),
+        ("cursor", "beforeSubmitPrompt", {"conversation_id": "conversation:1", "generation_id": "generation:1"}),
+    )
+    for kind, native_event, payload in cases:
+        adapter = registry.adapter(kind)
+        expected_operations = frozenset({
+            "prompt_intake", "pre_tool_authorization", "stop_supervision", "launch",
+            "resume", "steer", "title", "delivery", "retirement", "cleanup",
+            "replacement",
+        })
+        assert adapter.lifecycle_operations == expected_operations
+        for operation in adapter.lifecycle_operations:
+            for method in OPERATION_METHODS[operation]:
+                assert callable(getattr(adapter, method, None)), (kind, operation, method)
+        event = adapter.translate_event(native_event, payload)
+        decision = policy.decide(event)
+        assert event.operation == "prompt_intake"
+        assert decision == type(decision)("prompt_intake", "accept", "policy_accepted")
+    pre_tool_cases = (
+        ("codex", "PreToolUse", {"session_id": "session:codex", "turn_id": "turn:2"}),
+        ("pi", "tool_call", {"session_path": "/tmp/session.jsonl", "input_id": "input:2"}),
+        ("cursor", "beforeShellExecution", {"conversation_id": "conversation:1", "generation_id": "generation:2"}),
+    )
+    for kind, native_event, payload in pre_tool_cases:
+        event = registry.adapter(kind).translate_event(native_event, payload)
+        role_refused = policy.decide(event, authorized=True)
+        assert role_refused.reason_code == "shotcaller_delegation_unverified"
+        refused = policy.decide(
+            event, authorized=False, actor_role="shotcaller"
+        )
+        assert refused.outcome == "refuse" and refused.reason_code == "tool_not_authorized"
+        accepted = policy.decide(
+            event,
+            authorized=True,
+            actor_role="champion",
+            delegated_by_shotcaller=True,
+        )
+        assert accepted.outcome == "accept"
+
+    restore_cases = (
+        ("codex", "codex", "codex"),
+        ("pi", "cursor", "pi"),
+        ("pi", "codex", "pi"),
+        ("cursor", "cursor", "/opt/provider/cursor-agent"),
+    )
+    for kind, provider, process in restore_cases:
+        descriptor = {
+            "agent_adapter_kind": kind,
+            "runtime_kind": kind,
+            "provider_kind": provider,
+            "session_ref": f"session:{kind}:{provider}",
+            "cwd": "/tmp/synthetic-worktree",
+            "routing_name": f"{kind}-{provider}",
+            "metadata_source": f"league:{kind}:{provider}",
+            "applies_to_source": f"provider:{kind}",
+            "title": f"{kind} fixture",
+            "tokens": {"display_provider": provider},
+        }
+        observation = {
+            "agent": {"agent": kind},
+            "process": {"argv0": process},
+            "session_ref": descriptor["session_ref"],
+            "session_source": descriptor["applies_to_source"],
+        }
+        packet = registry.adapter(kind).restored_presentation(descriptor, observation)
+        assert packet["provider_kind"] == provider
+        assert set(packet) == {
+            "agent_adapter_kind", "provider_kind", "session_ref", "cwd",
+            "routing_name", "metadata_source", "applies_to_source", "title", "tokens",
+        }
+
+
+def test_registered_visible_launch_factories_own_provider_selection(root: Path) -> None:
+    class SecondMultiplexer:
+        kind = "fixture"
+        capabilities = frozenset({"visible_launch"})
+
+        def __init__(self) -> None:
+            self.calls = []
+
+        def visible_launch_driver(self, agent_kind, **inputs):
+            self.calls.append((agent_kind, inputs))
+            return SimpleNamespace(
+                profile=SimpleNamespace(kind=agent_kind),
+                descriptor=inputs.get("descriptor", {}),
+            )
+
+    state_root = root / "state"
+    state_root.mkdir(parents=True)
+    _, state, _ = seeded_state(root, "visible-factory")
+    options = VisibleLaunchOptions(
+        workspace_id="wsynthetic",
+        task_label="Adapter Launch",
+        model="gpt-5.6-sol",
+        effort="xhigh",
+        league_command=str(ROOT / "bin" / "league"),
+        state_root=str(state_root),
+        routing={"decision_id": "route:synthetic"},
+    )
+    common = {
+        "assignment_id": "assignment:synthetic",
+        "task_id": TASK_ID,
+        "champion_agent_id": CHAMPION_ID,
+        "repository": "https://example.invalid/league.git",
+        "issue": 84,
+        "branch": "agent/test/synthetic",
+        "worktree": str(root),
+        "project_code": None,
+        "release_root": None,
+        "resolved_release_root": str(ROOT),
+        "session_path": None,
+        "parent_session_id": None,
+        "parent_session_path": None,
+        "session_id": None,
+        "session_mode": "create",
+        "workspace_id": "wsynthetic",
+        "state_root": str(state_root),
+        "model": "gpt-5.6-sol",
+        "effort": "xhigh",
+        "routing": {"decision_id": "route:synthetic"},
+        "at": AT3,
+    }
+    multiplexer = SecondMultiplexer()
+    with SQLiteStorage(state) as store:
+        registry = builtin_agent_adapter_registry()
+        codex = registry.adapter("codex").visible_launch(
+            store=store,
+            options=options,
+            multiplexer=multiplexer,
+            startup_timeout_ms=120_000,
+            launch={**common, "provider_kind": "codex"},
+        )
+        cursor = registry.adapter("cursor").visible_launch(
+            store=store,
+            options=options,
+            multiplexer=multiplexer,
+            startup_timeout_ms=120_000,
+            launch={**common, "provider_kind": "cursor"},
+        )
+        pi = registry.adapter("pi").visible_launch(
+            store=store,
+            options=options,
+            multiplexer=multiplexer,
+            startup_timeout_ms=120_000,
+            launch={
+                **common,
+                "provider_kind": "cursor",
+                "project_code": "synthetic",
+            },
+        )
+    assert codex.profile.kind == "codex"
+    assert cursor.profile.kind == "cursor"
+    assert pi.descriptor["runtime_kind"] == "pi"
+    assert pi.descriptor["provider_kind"] == "cursor"
+    assert pi.descriptor["model"] == "gpt-5.6-sol"
+    assert pi.descriptor["effort"] == "xhigh"
+    assert [kind for kind, _ in multiplexer.calls] == ["codex", "cursor", "pi"]
+
+
+def test_multiplexer_registry_and_fail_closed_tmux_restore() -> None:
+    assert "metadata" in MultiplexerAdapter.__dict__
+    assert "metadata" not in CommandRunner.__dict__
+    assert "run" in CommandRunner.__dict__
+    registry = builtin_multiplexer_adapter_registry()
+    assert registry.adapter("herdr").capabilities == frozenset(
+        {
+            "calling_context", "discover", "routing", "placement", "metadata", "title",
+            "delivery", "steering_delivery", "close", "visible_launch",
+            "shotcaller_bootstrap", "rollover_reconciliation",
+            "production_cleanup", "provider_session_lifecycle",
+            "runtime_replacement",
+        }
+    )
+    assert registry.adapter("tmux").capabilities == frozenset()
+    for adapter in registry.adapters():
+        assert adapter.capabilities <= MULTIPLEXER_OPERATIONS
+        from league.multiplexer_adapters import MULTIPLEXER_OPERATION_METHODS
+        for capability in adapter.capabilities:
+            for method in MULTIPLEXER_OPERATION_METHODS[capability]:
+                assert callable(getattr(adapter, method, None)), (
+                    adapter.kind, capability, method
+                )
+    try:
+        registry.adapter("tmux").metadata(
+            {}, RestoredEndpoint("synthetic", "w", "t", "p", "term"), 1
+        )
+    except StorageRefusal as exc:
+        assert exc.code == "multiplexer_restore_unsupported"
+    else:
+        raise AssertionError("tmux restore was fabricated without its native integration")
+
+
+def test_registered_herdr_placement_delivery_and_close_are_concrete(root: Path) -> None:
+    cwd = root / "mux-cwd"
+    cwd.mkdir(parents=True)
+    runner = HerdrOperationRunner()
+    herdr = builtin_multiplexer_adapter_registry(herdr_runner=runner).adapter("herdr")
+    champion = herdr.placement(
+        {
+            "descriptor_id": "descriptor:champion",
+            "workspace_id": "w1",
+            "role": "champion",
+            "cwd": str(cwd),
+        }
+    )
+    shotcaller = herdr.placement(
+        {
+            "descriptor_id": "descriptor:shotcaller",
+            "workspace_id": "w1",
+            "role": "shotcaller",
+            "cwd": str(cwd),
+            "creator_pane_id": "w1:p1",
+        }
+    )
+    assert (champion.tab_id, champion.pane_id) == ("w1:t2", "w1:p2")
+    assert (shotcaller.tab_id, shotcaller.pane_id) == ("w1:t1", "w1:p3")
+    delivered = herdr.delivery("lux", "Synthetic exact delivery.")
+    assert delivered["target"] == "lux"
+    titled = herdr.title(champion, "Synthetic Champion")
+    assert titled["title"] == "Synthetic Champion"
+    assert herdr.close(champion)["closed"] is True
+    assert any(call[1:3] == ("tab", "create") for call in runner.calls)
+    assert any(call[1:3] == ("pane", "split") for call in runner.calls)
+    assert any(call[1:3] == ("agent", "prompt") for call in runner.calls)
+    assert any(call[1:3] == ("pane", "rename") for call in runner.calls)
+    assert any(call[1:3] == ("pane", "close") for call in runner.calls)
+
+
+def test_registered_runtime_observer_matches_all_agent_kinds_once() -> None:
+    sessions = {
+        "codex": "11111111-1111-4111-8111-111111111111",
+        "cursor": "22222222-2222-4222-8222-222222222222",
+        "pi": "/synthetic/pi/sessions/observer.jsonl",
+    }
+    agents = []
+    candidates = []
+    for index, (kind, session_ref) in enumerate(sessions.items()):
+        terminal_id = f"terminal:{kind}"
+        agents.append(
+            {
+                "agent": kind,
+                "agent_session": {"value": session_ref},
+                "agent_status": "working",
+                "name": f"route-{kind}",
+                "pane_id": f"pane:{kind}",
+                "terminal_id": terminal_id,
+            }
+        )
+        candidates.append(
+            {
+                "assignment_id": f"assignment:{kind}",
+                "harness_kind": f"{kind}-thread",
+                "backend_kind": "herdr",
+                "session_ref": session_ref,
+                "routing_name": f"route-{kind}",
+                "endpoint": f"pane:{kind}",
+                "runtime_generation": "herdr:"
+                + hashlib.sha256(
+                    f"{terminal_id}\0{session_ref}".encode("utf-8")
+                ).hexdigest()[:24],
+            }
+        )
+
+    calls = []
+
+    def runner(arguments, *, check, capture_output, text, timeout):
+        assert not check and capture_output and text and timeout == 30
+        calls.append(tuple(arguments))
+        return subprocess.CompletedProcess(
+            arguments, 0, json.dumps({"result": {"agents": agents}}), ""
+        )
+
+    observed = HerdrRuntimeObservationAdapter(runner).observe(tuple(candidates))
+    assert set(observed) == {f"assignment:{kind}" for kind in sessions}
+    assert all(item["state"] == "live" for item in observed.values())
+    assert len(calls) == 1 and calls[0][-2:] == ("agent", "list")
+
+
 def assert_runtime_export_redaction(store: SQLiteStorage) -> None:
     exported = store.export_bytes(format_name="json", purpose="inspection", max_records=1000)
     value = json.loads(exported)
@@ -199,8 +571,7 @@ def test_non_codex_shared_lifecycle(root: Path) -> None:
         )
         assert transition["version"] == 3
         lifecycle.wake("binding:pi-fixture", "transition:agent-progress")
-        lifecycle.interrupt("binding:pi-fixture")
-        assert lifecycle.status("binding:pi-fixture") == "idle"
+        assert lifecycle.status("binding:pi-fixture") == "active"
         lifecycle.resume("binding:pi-fixture")
         assert lifecycle.status("binding:pi-fixture") == "active"
         closed = lifecycle.guarded_exit(
@@ -221,7 +592,7 @@ def test_non_codex_shared_lifecycle(root: Path) -> None:
         assert lifecycle.status("binding:pi-fixture") == "missing"
         assert_runtime_export_redaction(store)
     operations = [operation for operation, _ in backend.operations]
-    assert all(name in operations for name in ("allocate", "create", "title", "prompt", "hook", "interrupt", "resume", "exit", "close"))
+    assert all(name in operations for name in ("allocate", "create", "title", "prompt", "hook", "resume", "exit", "close"))
 
 
 def test_cursor_shared_contract_supports_exact_resume(root: Path) -> None:
@@ -284,7 +655,7 @@ def test_create_rolls_back_allocated_endpoint_before_persistence(root: Path) -> 
     assert [operation for operation, _ in backend.operations].count("close") == 1
 
 
-def test_unsupported_resume_fails_before_backend_input(root: Path) -> None:
+def test_declared_codex_resume_reaches_backend_once(root: Path) -> None:
     _, state, _ = seeded_state(root, "unsupported-resume")
     backend = DeterministicBackend()
     with SQLiteStorage(state) as store:
@@ -302,13 +673,9 @@ def test_unsupported_resume_fails_before_backend_input(root: Path) -> None:
             )
         )
         before = len(backend.operations)
-        try:
-            lifecycle.resume(created["binding_id"])
-        except StorageRefusal as exc:
-            assert exc.code == "unsupported_capability"
-        else:
-            raise AssertionError("undeclared Codex resume capability was invoked")
-        assert len(backend.operations) == before
+        resumed = lifecycle.resume(created["binding_id"])
+        assert resumed.observed_state == "active"
+        assert len(backend.operations) == before + 2
 
 
 def test_named_codex_herdr_and_tmux_contract_behavior(root: Path) -> None:
@@ -329,8 +696,7 @@ def test_named_codex_herdr_and_tmux_contract_behavior(root: Path) -> None:
             )
         )
         lifecycle.prompt("binding:codex-herdr", "Synthetic Codex prompt.")
-        lifecycle.interrupt("binding:codex-herdr")
-        assert lifecycle.status("binding:codex-herdr") == "idle"
+        assert lifecycle.status("binding:codex-herdr") == "active"
         lifecycle.guarded_exit(
             "binding:codex-herdr",
             expected_version=1,
@@ -340,7 +706,7 @@ def test_named_codex_herdr_and_tmux_contract_behavior(root: Path) -> None:
             at=AT4,
         )
     herdr_operations = [operation for operation, _ in herdr.operations]
-    assert all(name in herdr_operations for name in ("allocate", "create", "prompt", "interrupt", "exit", "close"))
+    assert all(name in herdr_operations for name in ("allocate", "create", "prompt", "exit", "close"))
 
     tmux = DeterministicBackend("tmux", BACKEND_CAPABILITIES - {"allocate"})
     endpoint = OpaqueIdentity("tmux", "attached-endpoint")
@@ -360,7 +726,7 @@ def test_named_codex_herdr_and_tmux_contract_behavior(root: Path) -> None:
             endpoint.encoded,
             "attached-generation",
             {
-                "harness": ["create", "exit", "identify", "interrupt", "prompt", "status", "title"],
+                "harness": ["create", "exit", "identify", "prompt", "status", "title"],
                 "backend": ["close", "input", "inspect"],
             },
             AT3,
@@ -368,7 +734,6 @@ def test_named_codex_herdr_and_tmux_contract_behavior(root: Path) -> None:
         lifecycle = RuntimeLifecycle(store, builtin_registry((tmux,)))
         lifecycle.prompt("binding:codex-tmux", "Synthetic attached prompt.")
         assert lifecycle.status("binding:codex-tmux") == "active"
-        lifecycle.interrupt("binding:codex-tmux")
         lifecycle.guarded_exit(
             "binding:codex-tmux",
             expected_version=1,
@@ -379,7 +744,7 @@ def test_named_codex_herdr_and_tmux_contract_behavior(root: Path) -> None:
         )
     tmux_operations = [operation for operation, _ in tmux.operations]
     assert "allocate" not in tmux_operations
-    assert all(name in tmux_operations for name in ("prompt", "interrupt", "exit", "close"))
+    assert all(name in tmux_operations for name in ("prompt", "exit", "close"))
 
 
 def test_runtime_exit_fence_recovers_without_duplicate_effects(root: Path) -> None:
@@ -458,13 +823,18 @@ def test_runtime_exit_fence_recovers_without_duplicate_effects(root: Path) -> No
 def main() -> None:
     test_named_compatibility_matrix_and_opaque_identity()
     test_adapter_contract_validation()
+    test_parameterized_provider_lifecycle_event_parity()
+    test_multiplexer_registry_and_fail_closed_tmux_restore()
+    test_registered_runtime_observer_matches_all_agent_kinds_once()
     with tempfile.TemporaryDirectory(prefix="league-runtime-adapter-") as temporary:
         root = Path(temporary)
         test_runtime_matrix_cli_and_unsupported_create(root / "matrix")
+        test_registered_herdr_placement_delivery_and_close_are_concrete(root / "mux")
+        test_registered_visible_launch_factories_own_provider_selection(root / "factory")
         test_non_codex_shared_lifecycle(root / "lifecycle")
         test_cursor_shared_contract_supports_exact_resume(root / "cursor-lifecycle")
         test_create_rolls_back_allocated_endpoint_before_persistence(root / "rollback")
-        test_unsupported_resume_fails_before_backend_input(root / "unsupported")
+        test_declared_codex_resume_reaches_backend_once(root / "codex-resume")
         test_named_codex_herdr_and_tmux_contract_behavior(root / "codex-contracts")
         test_runtime_exit_fence_recovers_without_duplicate_effects(root / "exit-fence")
     print("PASS: named Codex/Herdr/tmux contracts, opaque identity, and isolated non-Codex create-to-cleanup lifecycle")

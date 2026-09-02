@@ -5,6 +5,16 @@ providers share Pi's standard home and session inventory. League never selects
 a provider by setting a Pi home, and no wrapper participates in launch or
 resume.
 
+Ordinary future Champion launch defaults to runtime `pi` and provider `codex`.
+Model and effort come from one exact canonical `ModelRouter` decision already
+persisted for the request, task or assignment; launch verifies its Champion
+role, provider, capability set and state before any effect. Explicit overrides
+remain available only as an exact model+effort pair, and explicit Pi+Cursor is
+supported. Missing or mismatched decisions fail closed. The packaged policy is
+schema 3, while `league routing migrate-config` provides an idempotent,
+backup-bound schema-1/2 migration and digest-fenced rollback; neither the
+migration nor ordinary launch silently selects Luna.
+
 ## Durable descriptor
 
 Each launch records a checksummed descriptor before external effects. It binds
@@ -75,6 +85,34 @@ stored cwd. All launch metadata, including pane identity, is passed as explicit
 Pi arguments rather than inherited environment. A restart ID can apply that
 effect once; retry returns the original receipt without new terminal input or
 another process.
+
+## Multiplexer restoration
+
+After a multiplexer restores the exact Pi process, League selects the Pi agent
+adapter from the existing runtime and launch descriptor and independently
+selects the configured multiplexer adapter. The agent adapter verifies the
+exact JSONL session identity and produces the logical provider/title/token
+packet. The multiplexer adapter binds the new terminal identity, replays that
+packet, and returns two stable readbacks. No second display store is created.
+Cursor remains the Pi provider label; it never selects a second Pi home or a
+Cursor CLI adapter.
+
+The ordinary Herdr owner command remains `herdr --session <name>`. When the
+League plugin is enabled, Herdr restores panes and processes, exposes its API,
+and invokes the one-shot startup hook asynchronously. A brief native fallback
+display is allowed. The hook waits for exact sessions to become discoverable,
+then converges metadata without a prompt, manual binding, second owner command,
+blocking barrier, launchd dependency, or extra coordinator. A mismatch refuses
+without process creation and is retained in Herdr's plugin command log.
+
+The plugin's public entrypoint is `league runtime reconcile-restored-agent
+--multiplexer-kind herdr`. `replay-restored-display` remains an internal
+compatibility step and is not the startup contract. Reconciliation first proves
+the restored immutable agent session, pane, terminal, single process and cwd;
+it then restores the real routing name, CAS-supersedes stale runtime generation,
+renews the one Shotcaller watcher/wake locator when applicable, and finally
+replays canonical presentation. It never launches, resumes, prompts, closes or
+duplicates an agent.
 
 ## Refusals
 

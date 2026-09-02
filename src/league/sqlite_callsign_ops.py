@@ -539,7 +539,12 @@ def reconcile_callsign_pool(
     return result
 
 
-def _availability(store: Any, role: str, required: tuple[str, ...]) -> tuple[Any, dict[str, Any]]:
+def _availability(
+    store: Any,
+    role: str,
+    required: tuple[str, ...],
+    excluded_callsigns: tuple[str, ...] = (),
+) -> tuple[Any, dict[str, Any]]:
     rows = store.connection.execute(
         """
         SELECT q.*,c.enabled
@@ -566,8 +571,15 @@ def _availability(store: Any, role: str, required: tuple[str, ...]) -> tuple[Any
     reasons: dict[str, int] = {}
     incompatible = 0
     selected = None
+    excluded = {value.casefold() for value in excluded_callsigns}
     for row in rows:
         if row["state"] != "available":
+            continue
+        if str(row["callsign"]).casefold() in excluded:
+            incompatible += 1
+            reasons["live_multiplexer_name"] = (
+                reasons.get("live_multiplexer_name", 0) + 1
+            )
             continue
         if not row["enabled"]:
             incompatible += 1
@@ -892,6 +904,7 @@ def _reserve_in_transaction(
     fault: Optional[FaultInjector] = None,
     recovery_baseline: Optional[Mapping[str, Any]] = None,
     recovery_thread_id: Optional[str] = None,
+    excluded_callsigns: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     existing = store.connection.execute(
         "SELECT * FROM callsign_assignments WHERE callsign_assignment_id=?",
@@ -931,7 +944,7 @@ def _reserve_in_transaction(
             recovery_thread_id,
         )
     meta = _meta(store, role)
-    selected, refusal = _availability(store, role, required)
+    selected, refusal = _availability(store, role, required, excluded_callsigns)
     if selected is None:
         raise StorageRefusal(
             "callsign_unavailable",
@@ -1175,11 +1188,7 @@ def _activate_in_transaction(
             normalized["harness_kind"],
             normalized["endpoint_identity"],
             normalized["session_identity"],
-            (
-                normalized["backend_kind"]
-                if normalized["backend_kind"] in {"herdr", "tmux"}
-                else None
-            ),
+            normalized["backend_kind"],
             normalized["routing_name"],
             normalized["display_agent"],
             agent_version,

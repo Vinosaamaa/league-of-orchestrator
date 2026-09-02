@@ -56,7 +56,7 @@ def test_launcher_help_and_schemas() -> None:
     )
     assert "SQL is not exposed" in " ".join(launcher.stdout.split())
     assert (
-        "{storage,agent,callsign,shotcaller,rollover,delivery,project,roster,evidence,artifact,report,squad,task,runtime,skill,routing,resource,cleanup,request,assign,hook,mode,issue,help,acceptance}"
+        "{storage,agent,callsign,shotcaller,rollover,delivery,project,roster,evidence,artifact,report,squad,task,runtime,skill,routing,resource,cleanup,continuation,request,assign,hook,mode,issue,help,acceptance}"
         in launcher.stdout
     )
     parser = cli._parser()

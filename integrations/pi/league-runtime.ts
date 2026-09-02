@@ -102,6 +102,7 @@ function exactMetadataInputs(): boolean {
 }
 
 let metadataSeq = Date.now() * 1000;
+const MAX_TOKENS_PER_REPORT = 16;
 
 function reportLeagueMetadata(session: SessionIdentity): void {
   if (!exactMetadataInputs()) return;
@@ -111,11 +112,6 @@ function reportLeagueMetadata(session: SessionIdentity): void {
       : `${callsign} · ${projectCode}|${taskLabel}`;
   const source = metadataSource!;
   const tokens = [
-    `sidebar_name=${callsign}`,
-    `project_code=${projectCode}`,
-    `task_label=${taskLabel}`,
-    `routing_alias=${routingAlias}`,
-    `thread_title=${threadTitle}`,
     `launch_runtime_kind=${runtimeKind}`,
     `launch_provider_kind=${providerKind}`,
     `launch_role=${launchRole}`,
@@ -133,10 +129,12 @@ function reportLeagueMetadata(session: SessionIdentity): void {
     "launch_activation_phase=session_started",
   ];
   if (session.parentFile) {
-    tokens.push(`parent_session_path=${session.parentFile}`);
     tokens.push(
       `launch_parent_digest=${crypto.createHash("sha256").update(session.parentFile).digest("hex")}`,
     );
+  }
+  if (tokens.length > MAX_TOKENS_PER_REPORT) {
+    throw new Error("League Pi metadata exceeds Herdr's per-report token limit");
   }
   const commandArguments = [
     "pane",
@@ -287,45 +285,67 @@ export default function (pi) {
   });
 
   pi.on("tool_call", (event, ctx) => {
-    if (!exactWorktree || !exactStateRoot || !sandboxProfile) {
-      return { block: true, reason: "League Pi sandbox identity is incomplete", terminate: true };
-    }
+    const exactSession = refreshSession(ctx);
+    let authorized = Boolean(
+      exactSession && inputId && exactWorktree && exactStateRoot && sandboxProfile,
+    );
+    let reason = "League Pi sandbox identity is incomplete";
+    let shellCommand: string | undefined;
     if (event.toolName === "write" || event.toolName === "edit") {
       const supplied = event.input?.path;
       if (typeof supplied !== "string") {
-        return { block: true, reason: "League requires an exact mutation path", terminate: true };
+        authorized = false;
+        reason = "League requires an exact mutation path";
+      } else if (exactWorktree && exactStateRoot) {
+        const lexical = path.isAbsolute(supplied) ? supplied : path.resolve(ctx.cwd, supplied);
+        const candidate = canonicalMutationPath(lexical);
+        authorized = Boolean(
+          authorized &&
+            candidate &&
+            (inside(candidate, exactWorktree) || inside(candidate, exactStateRoot)),
+        );
+        reason = "League blocked a write outside assignment roots";
       }
-      const lexical = path.isAbsolute(supplied) ? supplied : path.resolve(ctx.cwd, supplied);
-      const candidate = canonicalMutationPath(lexical);
-      if (
-        !candidate ||
-        (!inside(candidate, exactWorktree) && !inside(candidate, exactStateRoot))
-      ) {
-        return { block: true, reason: "League blocked a write outside assignment roots", terminate: true };
-      }
-      return;
-    }
-    if (event.toolName === "bash") {
+    } else if (event.toolName === "bash") {
       const command = event.input?.command;
       if (typeof command !== "string" || !command) {
-        return { block: true, reason: "League requires an exact shell command", terminate: true };
+        authorized = false;
+        reason = "League requires an exact shell command";
+      } else if (exactWorktree && exactStateRoot && sandboxProfile) {
+        shellCommand = [
+          "/usr/bin/sandbox-exec",
+          "-f",
+          quoted(sandboxProfile),
+          "-D",
+          quoted(`WORKTREE=${exactWorktree}`),
+          "-D",
+          quoted(`STATE_ROOT=${exactStateRoot}`),
+          "/bin/zsh",
+          "-lc",
+          quoted(command),
+        ].join(" ");
       }
-      event.input.command = [
-        "/usr/bin/sandbox-exec",
-        "-f",
-        quoted(sandboxProfile),
-        "-D",
-        quoted(`WORKTREE=${exactWorktree}`),
-        "-D",
-        quoted(`STATE_ROOT=${exactStateRoot}`),
-        "/bin/zsh",
-        "-lc",
-        quoted(command),
-      ].join(" ");
-      return;
+    } else if (!["read", "grep", "find", "ls"].includes(event.toolName)) {
+      authorized = false;
+      reason = "League blocked an undeclared Pi tool";
     }
-    if (!["read", "grep", "find", "ls"].includes(event.toolName)) {
-      return { block: true, reason: "League blocked an undeclared Pi tool", terminate: true };
+    const shared = exactSession && inputId
+      ? runWatcher("pi-pre-tool-hook", {
+          hook_event_name: "PiToolCall",
+          session_id: exactSession.id,
+          session_path: exactSession.file,
+          input_id: inputId,
+          tool_name: event.toolName,
+          authorized,
+        })
+      : undefined;
+    if (!shared || shared.decision !== "accept") {
+      return {
+        block: true,
+        reason: typeof shared?.reason_code === "string" ? shared.reason_code : reason,
+        terminate: true,
+      };
     }
+    if (shellCommand) event.input.command = shellCommand;
   });
 }

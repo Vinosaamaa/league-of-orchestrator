@@ -1515,6 +1515,12 @@ def _integrated_lifecycle(home: Path, source_root: Path) -> dict[str, Any]:
                 at=clock.now(),
             )
         )
+        store.set_supervision_attachment(
+            "synthetic-precutover-scope",
+            SHOTCALLER_ID,
+            "detached",
+            clock.now(),
+        )
         stop_after = store.stop_decision(
             "synthetic-precutover-scope",
             SHOTCALLER_ID,
@@ -1644,7 +1650,8 @@ def _runtime_canaries(home: Path, source_root: Path) -> dict[str, Any]:
         ):
             backend = _BackendDouble(backend_kind)
             backend.sequence = index * 100
-            lifecycle = RuntimeLifecycle(store, _registry_for(harness_kind, backend))
+            registry = _registry_for(harness_kind, backend)
+            lifecycle = RuntimeLifecycle(store, registry)
             binding_id = f"binding:{harness_kind}:{backend_kind}:{index}"
             created = lifecycle.create(
                 RuntimeCreateSpec(
@@ -1660,7 +1667,9 @@ def _runtime_canaries(home: Path, source_root: Path) -> dict[str, Any]:
             )
             lifecycle.prompt(binding_id, "Synthetic pre-cutover prompt")
             lifecycle.wake(binding_id, "synthetic-precutover-event")
-            lifecycle.interrupt(binding_id)
+            harness = registry.harness(harness_kind)
+            if "interrupt" in harness.contract.capabilities:
+                lifecycle.interrupt(binding_id)
             if harness_kind == "pi":
                 lifecycle.resume(binding_id)
             lifecycle.guarded_exit(
@@ -1700,7 +1709,7 @@ def _runtime_canaries(home: Path, source_root: Path) -> dict[str, Any]:
             endpoint.encoded,
             "attached-precutover-generation",
             {
-                "harness": ["create", "exit", "hook", "identify", "interrupt", "prompt", "status", "title"],
+                "harness": ["create", "exit", "hook", "identify", "prompt", "status", "title"],
                 "backend": ["close", "input", "inspect"],
                 "evidence": {"harness": "inherited-contract", "backend": "isolated-double"},
             },
@@ -1709,7 +1718,6 @@ def _runtime_canaries(home: Path, source_root: Path) -> dict[str, Any]:
         tmux_lifecycle = RuntimeLifecycle(store, builtin_registry((tmux,)))
         tmux_lifecycle.prompt("binding:codex:tmux:attached", "Synthetic attached prompt")
         tmux_lifecycle.wake("binding:codex:tmux:attached", "synthetic-attached-event")
-        tmux_lifecycle.interrupt("binding:codex:tmux:attached")
         tmux_lifecycle.guarded_exit(
             "binding:codex:tmux:attached",
             expected_version=1,

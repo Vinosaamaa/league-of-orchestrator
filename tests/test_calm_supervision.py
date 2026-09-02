@@ -546,7 +546,8 @@ def test_paused_stop_and_unreachable_are_bounded(root: Path) -> None:
         repeated = store.stop_decision(
             scope, SHOTCALLER_ID, "terminal:actionable", _at(), block_on_fresh_terminal=True
         )
-        assert actionable["decision"] == "block" and repeated["decision"] == "allow"
+        assert actionable["decision"] == "block" and repeated["decision"] == "block"
+        assert actionable["status"] == repeated["status"] == "blocked_attached"
         assert actionable["obligations"]["untriaged_prompts"] == 1
 
     liveness_state, liveness_store, _ = _active_champion(root, "calm-liveness")

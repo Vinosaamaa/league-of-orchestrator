@@ -535,7 +535,7 @@ def test_stable_execute_command_refuses_unknown_operation(root: Path) -> None:
     assert result["error"]["code"] == "cleanup_operation_unknown"
 
 
-def test_production_cleanup_accepts_visible_codex_thread_runtime() -> None:
+def test_production_cleanup_accepts_all_registered_visible_runtime_kinds() -> None:
     actions = [
         {
             "action_kind": "session_exit",
@@ -555,23 +555,25 @@ def test_production_cleanup_accepts_visible_codex_thread_runtime() -> None:
             },
         },
     ]
-    context = {
-        "runtime_instances": [
-            {
-                "runtime_instance_id": "runtime:lux",
-                "harness_kind": "codex-thread",
-                "backend_kind": "herdr",
-                "session_ref": "00000000-0000-4000-8000-000000000099",
-                "endpoint": "w1:p99",
-                "runtime_generation": "generation:99",
-                "status": "active",
-                "verified": True,
-            }
-        ]
-    }
-    identity = _validate_runtime_context(context, actions)
-    assert identity["agent_name"] == "lux"
-    assert identity["session_id"] == "00000000-0000-4000-8000-000000000099"
+    for harness_kind in ("codex-thread", "cursor-thread", "pi-thread"):
+        context = {
+            "runtime_instances": [
+                {
+                    "runtime_instance_id": "runtime:lux",
+                    "harness_kind": harness_kind,
+                    "backend_kind": "herdr",
+                    "session_ref": "00000000-0000-4000-8000-000000000099",
+                    "endpoint": "w1:p99",
+                    "runtime_generation": "generation:99",
+                    "status": "active",
+                    "verified": True,
+                }
+            ]
+        }
+        identity = _validate_runtime_context(context, actions)
+        assert identity["agent_name"] == "lux"
+        assert identity["session_id"] == "00000000-0000-4000-8000-000000000099"
+        assert identity["provider_kind"] == harness_kind.removesuffix("-thread")
 
 
 def test_production_registry_injects_exact_issue_adapter_boundary() -> None:
@@ -652,7 +654,7 @@ def test_production_registry_injects_exact_issue_adapter_boundary() -> None:
 def main() -> None:
     test_rollover_predecessor_requires_exact_switch_and_emits_drain_receipt()
     test_process_inspection_uses_one_exact_query()
-    test_production_cleanup_accepts_visible_codex_thread_runtime()
+    test_production_cleanup_accepts_all_registered_visible_runtime_kinds()
     test_production_registry_injects_exact_issue_adapter_boundary()
     with tempfile.TemporaryDirectory(prefix="league-production-cleanup-") as temporary:
         root = Path(temporary)

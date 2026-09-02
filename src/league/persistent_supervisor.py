@@ -24,6 +24,8 @@ from .request_services import DeliveryAdapter
 from .sqlite_store import SQLiteStorage
 from .storage import StorageRefusal
 from .storage_watcher import RuntimeRegistrationCommand
+from .agent_adapters import adapter_kind_from_runtime
+from .multiplexer_adapters import builtin_multiplexer_adapter_registry
 
 
 MAX_MESSAGE_BYTES = 1_100_000
@@ -105,7 +107,7 @@ class RuntimeObservationAdapter(Protocol):
 
 
 class HerdrRuntimeObservationAdapter:
-    """Read one bounded Herdr inventory without prompting or changing a pane."""
+    """Compatibility facade over registered read-only multiplexer inventories."""
 
     LIVE_STATUSES = frozenset({"active", "blocked", "done", "idle", "waiting", "working"})
 
@@ -114,6 +116,10 @@ class HerdrRuntimeObservationAdapter:
         runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
     ) -> None:
         self.runner = runner or BoundedRuntimeCommandRunner()
+        self.multiplexers = builtin_multiplexer_adapter_registry(
+            herdr_runner=CallableMultiplexerRunner(self.runner),
+            herdr_binary="herdr",
+        )
 
     @staticmethod
     def _session(agent: Mapping[str, Any]) -> str | None:
@@ -126,143 +132,140 @@ class HerdrRuntimeObservationAdapter:
     ) -> dict[str, dict[str, str]]:
         if not candidates:
             return {}
-        if any(candidate.get("backend_kind") != "herdr" for candidate in candidates):
-            raise StorageRefusal(
-                "runtime_observation_unsupported",
-                "runtime monitor encountered an unsupported backend",
-            )
-        try:
-            completed = self.runner(
-                ["herdr", "agent", "list"],
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=15,
-            )
-            payload = json.loads(completed.stdout)
-            agents = payload["result"]["agents"]
-        except (OSError, subprocess.SubprocessError, KeyError, TypeError, json.JSONDecodeError) as exc:
-            raise StorageRefusal(
-                "runtime_observation_refused",
-                "Herdr runtime inventory could not be observed exactly",
-                retryable=True,
-            ) from exc
-        if completed.returncode != 0 or not isinstance(agents, list) or any(
-            not isinstance(agent, Mapping) for agent in agents
-        ):
-            raise StorageRefusal(
-                "runtime_observation_refused",
-                "Herdr runtime inventory could not be observed exactly",
-                retryable=True,
-            )
-        indexes: dict[str, dict[str, set[int]]] = {
-            "pane": {},
-            "route": {},
-            "session": {},
-        }
-        for index, agent in enumerate(agents):
-            values = {
-                "pane": agent.get("pane_id"),
-                "route": agent.get("name"),
-                "session": self._session(agent),
-            }
-            for kind, value in values.items():
-                if isinstance(value, str) and value:
-                    indexes[kind].setdefault(value, set()).add(index)
         results: dict[str, dict[str, str]] = {}
-        for candidate in candidates:
-            assignment_id = str(candidate["assignment_id"])
-            related_indexes: set[int] = set()
-            for kind, value in (
-                ("pane", candidate.get("endpoint")),
-                ("route", candidate.get("routing_name")),
-                ("session", candidate.get("session_ref")),
-            ):
-                if isinstance(value, str) and value:
-                    related_indexes.update(indexes[kind].get(value, ()))
-            related = [agents[index] for index in sorted(related_indexes)]
-            if not related:
-                results[assignment_id] = {"state": "missing", "fingerprint": "missing"}
-                continue
-            if len(related) != 1:
-                results[assignment_id] = {"state": "mismatch", "fingerprint": "ambiguous"}
-                continue
-            agent = related[0]
-            session_ref = self._session(agent)
-            terminal_id = agent.get("terminal_id")
-            generation = (
-                "herdr:"
-                + hashlib.sha256(f"{terminal_id}\0{session_ref}".encode("utf-8")).hexdigest()[:24]
-                if isinstance(terminal_id, str) and isinstance(session_ref, str)
-                else ""
-            )
-            exact = (
-                agent.get("agent") == "codex"
-                and agent.get("pane_id") == candidate.get("endpoint")
-                and agent.get("name") == candidate.get("routing_name")
-                and session_ref == candidate.get("session_ref")
-                and generation == candidate.get("runtime_generation")
-                and agent.get("agent_status") in self.LIVE_STATUSES
-            )
-            results[assignment_id] = {
-                "state": "live" if exact else "mismatch",
-                "fingerprint": hashlib.sha256(
-                    json.dumps(
-                        {
-                            "pane": agent.get("pane_id"),
-                            "route": agent.get("name"),
-                            "session": session_ref,
-                            "generation": generation,
-                            "status": agent.get("agent_status"),
-                        },
-                        sort_keys=True,
-                        separators=(",", ":"),
-                    ).encode("utf-8")
-                ).hexdigest(),
+        backends = sorted({str(item.get("backend_kind", "")) for item in candidates})
+        for backend_kind in backends:
+            try:
+                multiplexer = self.multiplexers.adapter(backend_kind)
+                if "discover" not in multiplexer.capabilities:
+                    raise StorageRefusal(
+                        "runtime_observation_unsupported",
+                        "runtime monitor encountered an unsupported backend",
+                    )
+                agents = multiplexer.discover()
+            except StorageRefusal:
+                raise
+            except (OSError, subprocess.SubprocessError) as exc:
+                raise StorageRefusal(
+                    "runtime_observation_refused",
+                    "runtime inventory could not be observed exactly",
+                    retryable=True,
+                ) from exc
+            indexes: dict[str, dict[str, set[int]]] = {
+                "pane": {}, "route": {}, "session": {}
             }
+            for index, agent in enumerate(agents):
+                for kind, value in {
+                    "pane": agent.get("pane_id"),
+                    "route": agent.get("name"),
+                    "session": self._session(agent),
+                }.items():
+                    if isinstance(value, str) and value:
+                        indexes[kind].setdefault(value, set()).add(index)
+            for candidate in (
+                item for item in candidates if item.get("backend_kind") == backend_kind
+            ):
+                assignment_id = str(candidate["assignment_id"])
+                related_indexes: set[int] = set()
+                for kind, value in (
+                    ("pane", candidate.get("endpoint")),
+                    ("route", candidate.get("routing_name")),
+                    ("session", candidate.get("session_ref")),
+                ):
+                    if isinstance(value, str) and value:
+                        related_indexes.update(indexes[kind].get(value, ()))
+                related = [agents[index] for index in sorted(related_indexes)]
+                if not related:
+                    results[assignment_id] = {"state": "missing", "fingerprint": "missing"}
+                    continue
+                if len(related) != 1:
+                    results[assignment_id] = {"state": "mismatch", "fingerprint": "ambiguous"}
+                    continue
+                agent = related[0]
+                session_ref = self._session(agent)
+                try:
+                    generation = multiplexer.runtime_generation(agent, str(session_ref or ""))
+                    adapter_kind = adapter_kind_from_runtime(str(candidate["harness_kind"]))
+                except StorageRefusal:
+                    generation = ""
+                    adapter_kind = ""
+                exact = (
+                    agent.get("agent") == adapter_kind
+                    and agent.get("pane_id") == candidate.get("endpoint")
+                    and agent.get("name") == candidate.get("routing_name")
+                    and session_ref == candidate.get("session_ref")
+                    and generation == candidate.get("runtime_generation")
+                    and agent.get("agent_status") in self.LIVE_STATUSES
+                )
+                results[assignment_id] = {
+                    "state": "live" if exact else "mismatch",
+                    "fingerprint": hashlib.sha256(
+                        json.dumps(
+                            {
+                                "pane": agent.get("pane_id"),
+                                "route": agent.get("name"),
+                                "session": session_ref,
+                                "generation": generation,
+                                "status": agent.get("agent_status"),
+                            },
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ).encode("utf-8")
+                    ).hexdigest(),
+                }
         return results
 
 
+class CallableMultiplexerRunner:
+    def __init__(self, runner: Callable[..., subprocess.CompletedProcess[str]]) -> None:
+        self.runner = runner
+
+    def run(
+        self, arguments: Any, timeout_seconds: int = 30
+    ) -> subprocess.CompletedProcess[str]:
+        return self.runner(
+            list(arguments),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+        )
+
+
 class HerdrWakeAdapter:
-    """Wake the verified Shotcaller only after the service owns the event."""
+    """Compatibility facade over the registered multiplexer delivery transport."""
 
     def __init__(
         self,
         runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
     ) -> None:
-        self.runner = runner
+        self.multiplexers = builtin_multiplexer_adapter_registry(
+            herdr_runner=CallableMultiplexerRunner(runner),
+            herdr_binary="herdr",
+        )
 
     def send(self, binding: dict[str, Any], envelope: dict[str, Any]) -> None:
         routing_target = binding.get("routing_name") or binding.get("endpoint")
-        if binding.get("backend_kind") != "herdr" or not routing_target:
+        backend_kind = binding.get("backend_kind")
+        if not isinstance(backend_kind, str) or not backend_kind or not routing_target:
             raise SupervisorUnavailable("verified Shotcaller wake endpoint is unavailable")
-        command = ["herdr"]
-        if os.environ.get("HERDR_SESSION"):
-            command.extend(("--session", os.environ["HERDR_SESSION"]))
         summary = " ".join(str(envelope.get("summary", "")).split())
-        command.extend(
-            (
-                "agent",
-                "prompt",
+        try:
+            multiplexer = self.multiplexers.adapter(backend_kind)
+            if "delivery" not in multiplexer.capabilities:
+                raise StorageRefusal(
+                    "multiplexer_delivery_unsupported",
+                    "selected multiplexer has no delivery transport",
+                )
+            multiplexer.delivery(
                 str(routing_target),
                 (
                     f"CHAMPION TRANSITION [{envelope['event_id']}] "
                     f"{envelope.get('status')}: {summary}"
                 ),
             )
-        )
-        try:
-            completed = self.runner(
-                command,
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=15,
-            )
-        except (OSError, subprocess.SubprocessError) as exc:
+        except (OSError, subprocess.SubprocessError, StorageRefusal) as exc:
             raise SupervisorUnavailable("verified Shotcaller wake failed") from exc
-        if completed.returncode != 0 or completed.stdout or completed.stderr:
-            raise SupervisorUnavailable("verified Shotcaller wake failed")
 
 
 def _json_line(value: dict[str, Any]) -> bytes:
@@ -299,6 +302,12 @@ def _remove_owned_socket(path: Path) -> None:
 
 def _locator(path: Path) -> str:
     return f"unix:{path}"
+
+
+def supervisor_wake_locator(state_root: Path) -> str:
+    """Return the one supported local wake locator for canonical state."""
+
+    return _locator(_socket_path(state_root.resolve()))
 
 
 def _path_from_locator(locator: str) -> Path:
@@ -400,6 +409,66 @@ def notify_user_message(store: Any, actor_agent_id: str, prompt_id: str) -> bool
     except (SupervisorUnavailable, StorageRefusal):
         return False
     return response.get("priority") == "user"
+
+
+def handoff_transition_delivery(
+    store: Any,
+    *,
+    outbox_id: str,
+    event_id: str,
+    recipient_agent_id: str,
+    at: str,
+) -> dict[str, Any]:
+    """Notify the exact supervisor; never deliver from the Champion command."""
+
+    target = store.delivery_target(recipient_agent_id, at)
+    pending = {
+        "outbox_id": outbox_id,
+        "event_id": event_id,
+        "recipient_agent_id": recipient_agent_id,
+        "state": "pending",
+        "reason": "supervisor_unavailable",
+    }
+    if target is None or target.get("channel") != "watcher":
+        return pending
+    locator = str(target.get("locator", ""))
+    if locator.startswith("sqlite-supervise:"):
+        # Compatibility facade for the bounded legacy watcher. Delivery still
+        # belongs to the watcher path, never to the provider-facing direct path.
+        from .canonical_delivery import dispatch_event
+
+        return dispatch_event(
+            store,
+            outbox_id=outbox_id,
+            event_id=event_id,
+            recipient_agent_id=recipient_agent_id,
+            at=at,
+        )
+    if not locator.startswith("unix:"):
+        return pending
+    try:
+        response = send_supervisor_message(
+            locator,
+            {
+                "kind": "outbox-ready",
+                "outbox_id": outbox_id,
+                "event_id": event_id,
+                "recipient_agent_id": recipient_agent_id,
+                "fence": target["fence"],
+                "runtime_generation": target["generation"],
+            },
+            timeout_seconds=0.5,
+        )
+    except (SupervisorUnavailable, StorageRefusal):
+        return pending
+    return {
+        "outbox_id": outbox_id,
+        "event_id": event_id,
+        "recipient_agent_id": recipient_agent_id,
+        "state": "scheduled",
+        "reason": "supervisor_notified",
+        "fence": response["fence"],
+    }
 
 
 class PersistentSupervisor:
@@ -608,6 +677,48 @@ class PersistentSupervisor:
                     "event_driven": True,
                     "callsign": self._binding["callsign"],
                     "fence": fence,
+                    "actor_agent_id": self._binding["actor_agent_id"],
+                    "runtime_instance_id": self._binding["runtime_instance_id"],
+                    "runtime_generation": self._binding["runtime_generation"],
+                    "endpoint": self._binding["endpoint"],
+                    "session_ref": self._binding["session_ref"],
+                },
+            )
+            return
+        if kind == "reconcile-restored-runtime":
+            if message.get("fence") != fence:
+                raise SupervisorUnavailable("supervisor restore fence is stale")
+            required = {
+                "actor_agent_id",
+                "runtime_instance_id",
+                "runtime_generation",
+                "endpoint",
+                "session_ref",
+            }
+            if any(
+                not isinstance(message.get(key), str) or not message[key]
+                for key in required
+            ):
+                raise SupervisorUnavailable("supervisor restore identity is incomplete")
+            with self.store_factory(self.state_root) as store:
+                binding = store.supervisor_binding(self.callsign)
+            if any(binding[key] != message[key] for key in required):
+                raise SupervisorUnavailable("supervisor restore identity is not canonical")
+            receipt = self._register()
+            self._response(
+                connection,
+                {
+                    "ok": True,
+                    "schema": "league.supervisor-restore-binding.v1",
+                    "callsign": self._binding["callsign"],
+                    "actor_agent_id": self._binding["actor_agent_id"],
+                    "runtime_instance_id": self._binding["runtime_instance_id"],
+                    "runtime_generation": self._binding["runtime_generation"],
+                    "endpoint": self._binding["endpoint"],
+                    "session_ref": self._binding["session_ref"],
+                    "fence": receipt["fence"],
+                    "watcher_id": receipt["watcher_id"],
+                    "idempotent": False,
                 },
             )
             return
@@ -625,6 +736,32 @@ class PersistentSupervisor:
                 self._assert_fenced_registration(store, fence)
             self._publish_user_priority()
             self._response(connection, {"ok": True, "priority": "user", "fence": fence})
+            return
+        if kind == "outbox-ready":
+            if (
+                message.get("recipient_agent_id") != self._binding["actor_agent_id"]
+                or not all(
+                    isinstance(message.get(key), str) and message[key]
+                    for key in ("outbox_id", "event_id")
+                )
+            ):
+                raise SupervisorUnavailable("supervisor outbox identity is invalid")
+            if not self._submit(
+                self._recover_outbox,
+                str(message["outbox_id"]),
+                str(message["event_id"]),
+                str(message["recipient_agent_id"]),
+            ):
+                raise SupervisorUnavailable("supervisor delivery capacity is unavailable")
+            self._response(
+                connection,
+                {
+                    "ok": True,
+                    "scheduled": True,
+                    "event_id": message["event_id"],
+                    "fence": fence,
+                },
+            )
             return
         if kind == "runtime-observation":
             self._response(
@@ -720,6 +857,25 @@ class PersistentSupervisor:
                         at=_at(),
                         adapter=self.delivery_adapter,
                     )
+        except (StorageRefusal, SupervisorUnavailable):
+            return
+
+    def _recover_outbox(
+        self, outbox_id: str, event_id: str, recipient_agent_id: str
+    ) -> None:
+        from .canonical_delivery import dispatch_event
+
+        try:
+            with self.store_factory(self.state_root) as store:
+                self._assert_fenced_registration(store, self._fence)
+                dispatch_event(
+                    store,
+                    outbox_id=outbox_id,
+                    event_id=event_id,
+                    recipient_agent_id=recipient_agent_id,
+                    at=_at(),
+                    adapter=self.delivery_adapter,
+                )
         except (StorageRefusal, SupervisorUnavailable):
             return
 
@@ -1188,6 +1344,7 @@ __all__ = [
     "RuntimeObservationAdapter",
     "SemanticRecoveryAdapter",
     "SupervisorUnavailable",
+    "handoff_transition_delivery",
     "notify_user_message",
     "send_supervisor_message",
     "pause_supervisor",

@@ -226,7 +226,11 @@ def test_scope_expansion_promotes_to_new_visible_champion(root: Path) -> None:
         )
         promoted = store.prepare_assignment(
             PrepareAssignmentCommand(
-                **{key: value for key, value in vars(bound).items() if key != "callsign"},
+                **{
+                    key: value
+                    for key, value in vars(bound).items()
+                    if key not in {"callsign", "routing_name", "launch_operation_id"}
+                },
                 at=clock.now(),
                 assignment_role="champion",
                 promoted_from_assignment_id="assignment-hidden",

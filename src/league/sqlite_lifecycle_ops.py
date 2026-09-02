@@ -7,6 +7,7 @@ import sqlite3
 from typing import Any, Optional
 
 from .storage_types import FaultInjector, LIFECYCLE_STATES, StorageRefusal
+from .sqlite_runtime_replacement_ops import assert_runtime_replacement_mutation_allowed
 
 
 def agent_status(store: Any, agent_id: str) -> Optional[dict[str, Any]]:
@@ -38,6 +39,7 @@ def transition(
     event_id = f"agent:{agent_id}:{next_version}"
     try:
         with store._transaction():
+            assert_runtime_replacement_mutation_allowed(store, agent_id=agent_id)
             current = store.connection.execute(
                 """
                 SELECT version,role,shotcaller_agent_id

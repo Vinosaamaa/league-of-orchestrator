@@ -86,11 +86,20 @@ $HOME/.local/bin/league --state-root "$HOME/.local/state/league" request turn \
 
 ## Placement and launch
 
-- `league shotcaller create` converts only the calling live Codex pane in
-  place. League verifies exact workspace, tab, pane, terminal, thread,
-  worktree, route, and displayed identity before activation.
-- `league assign run` creates a distinct Codex runtime in a new Herdr tab root;
-  it never splits or reuses the Shotcaller pane.
+- `league shotcaller create` converts only the calling live registered-agent
+  pane in place. League verifies the adapter, multiplexer, workspace, tab, pane,
+  terminal, session, worktree, route, and displayed identity before activation.
+- `league assign run` creates the selected registered runtime in a distinct new
+  multiplexer tab; it never splits or reuses the Shotcaller pane. Ordinary
+  launch defaults to Pi with the Codex provider and consumes one exact persisted
+  `ModelRouter` decision. Explicit runtime, provider, model, and effort
+  overrides remain exact; missing or mismatched routing refuses before launch.
+- `league assign replace-runtime` freezes one active Champion assignment and
+  dispatches predecessor A and successor B through their registered adapters.
+  It publishes the ownership switch only after B verifies, retires A before
+  releasing one handoff outbox, and adopts or compensates exact retries without
+  allowing overlapping writes. Ambiguous native state remains a durable
+  recovery obligation.
 - Display labels contain one or two words. Routing identity remains separate
   from the human-visible label.
 - Dispatch, claim, execution mode, and the exact duplicate-preflight selection

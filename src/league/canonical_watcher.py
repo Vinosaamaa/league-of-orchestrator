@@ -15,8 +15,11 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterator
 
+from .agent_adapters import SharedLifecyclePolicy, builtin_agent_adapter_registry
+from .multiplexer_adapters import builtin_multiplexer_adapter_registry
 from .sqlite_store import DEFAULT_BUSY_TIMEOUT_MS, SQLiteStorage
 from .sqlite_watcher_ops import _obligation_counts, stop_feedback_reason
+from .sqlite_runtime_replacement_ops import runtime_replacement_mutation_fenced
 from .storage import RuntimeRegistrationCommand, StorageRefusal
 from .persistent_supervisor import (
     PersistentSupervisor,
@@ -48,9 +51,49 @@ def _payload() -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def _hook_routes(operation: str) -> dict[str, str]:
+    return {
+        str(adapter.hook_profile[operation]["command"]): adapter.contract.kind
+        for adapter in builtin_agent_adapter_registry().adapters()
+    }
+
+
+PROMPT_HOOK_ADAPTERS = _hook_routes("prompt_intake")
+STOP_HOOK_ADAPTERS = _hook_routes("stop_supervision")
+PRE_TOOL_HOOK_ADAPTERS = _hook_routes("pre_tool_authorization")
 BROKERED_HOOK_COMMANDS = frozenset(
-    {"codex-stop-hook", "codex-user-prompt-hook", "cursor-before-submit-hook"}
+    PROMPT_HOOK_ADAPTERS | STOP_HOOK_ADAPTERS | PRE_TOOL_HOOK_ADAPTERS
 )
+
+
+def _registered_multiplexer(kind: Any) -> bool:
+    if not isinstance(kind, str) or not kind:
+        return False
+    try:
+        builtin_multiplexer_adapter_registry().adapter(kind)
+    except StorageRefusal:
+        return False
+    return True
+
+
+def _hook_profile(command: str, operation: str) -> tuple[Any, dict[str, Any]]:
+    routes = {
+        "prompt_intake": PROMPT_HOOK_ADAPTERS,
+        "stop_supervision": STOP_HOOK_ADAPTERS,
+        "pre_tool_authorization": PRE_TOOL_HOOK_ADAPTERS,
+    }
+    adapter = builtin_agent_adapter_registry().adapter(routes[operation][command])
+    return adapter, dict(adapter.hook_profile[operation])
+
+
+def _stop_output_mode(command: str) -> str:
+    _, profile = _hook_profile(command, "stop_supervision")
+    return str(profile.get("output_mode", "followup"))
+
+
+def _needs_invocation_identity(command: str) -> bool:
+    _, profile = _hook_profile(command, "prompt_intake")
+    return profile.get("invocation_identity") is True
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -61,10 +104,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--state-dir")
     parser.add_argument("--record-format")
     commands = parser.add_subparsers(dest="command", required=True)
-    commands.add_parser("codex-stop-hook")
-    commands.add_parser("codex-user-prompt-hook")
-    commands.add_parser("cursor-stop-hook")
-    commands.add_parser("cursor-before-submit-hook")
+    for command in sorted(BROKERED_HOOK_COMMANDS):
+        commands.add_parser(command)
     commands.add_parser("status")
     service_run = commands.add_parser("service-run")
     service_run.add_argument("--lease-seconds", type=float, default=60)
@@ -83,7 +124,7 @@ def _parser() -> argparse.ArgumentParser:
         "enable", "disable", "allow-stop", "wait",
         "transition", "reconcile", "preflight", "launch", "resume", "teardown",
         "install-codex-hooks", "hidden-worker", "lead-relay", "route-model",
-        "resource-inspect", "codex-stop-hook", "codex-user-prompt-hook",
+        "resource-inspect",
     ):
         if name not in commands.choices:
             commands.add_parser(name, add_help=False)
@@ -95,12 +136,30 @@ def _state_root() -> Path:
     return Path(configured) if configured else Path.home() / ".local/state/league"
 
 
-def _actor(store: SQLiteStorage, args: argparse.Namespace, payload: dict[str, Any]) -> Any:
-    session = args.session_id or payload.get("session_id") or payload.get("conversation_id")
+def _adapter_kind_for_command(command: str) -> str | None:
+    for routes in (PROMPT_HOOK_ADAPTERS, STOP_HOOK_ADAPTERS, PRE_TOOL_HOOK_ADAPTERS):
+        if command in routes:
+            return routes[command]
+    return None
+
+
+def _actor(
+    store: SQLiteStorage,
+    args: argparse.Namespace,
+    payload: dict[str, Any],
+    *,
+    adapter_kind: str | None = None,
+) -> Any:
+    session = (
+        args.session_id
+        or payload.get("session_path")
+        or payload.get("session_id")
+        or payload.get("conversation_id")
+    )
     if session:
         runtime_rows = store.connection.execute(
             """
-            SELECT DISTINCT a.agent_id,a.callsign,a.role
+            SELECT DISTINCT a.agent_id,a.callsign,a.role,r.harness_kind
               FROM runtime_instances r
               JOIN agent_instances a ON a.agent_id=r.actor_agent_id
              WHERE r.session_ref=? AND r.status IN ('active','idle') AND r.verified=1
@@ -109,6 +168,12 @@ def _actor(store: SQLiteStorage, args: argparse.Namespace, payload: dict[str, An
             """,
             (session,),
         ).fetchall()
+        if adapter_kind is not None:
+            runtime_rows = [
+                row
+                for row in runtime_rows
+                if str(row["harness_kind"]).removesuffix("-thread") == adapter_kind
+            ]
         if len(runtime_rows) > 1:
             raise StorageRefusal(
                 "runtime_identity_ambiguous",
@@ -118,13 +183,19 @@ def _actor(store: SQLiteStorage, args: argparse.Namespace, payload: dict[str, An
             return runtime_rows[0]
         legacy_rows = store.connection.execute(
             """
-            SELECT agent_id,callsign,role
+            SELECT agent_id,callsign,role,kind AS harness_kind
               FROM agent_instances
              WHERE retired_at IS NULL AND (thread_id=? OR agent_id=?)
              ORDER BY agent_id
             """,
             (session, session),
         ).fetchall()
+        if adapter_kind is not None:
+            legacy_rows = [
+                row
+                for row in legacy_rows
+                if str(row["harness_kind"]).removesuffix("-thread") == adapter_kind
+            ]
         if len(legacy_rows) > 1:
             raise StorageRefusal(
                 "runtime_identity_ambiguous",
@@ -132,6 +203,7 @@ def _actor(store: SQLiteStorage, args: argparse.Namespace, payload: dict[str, An
             )
         if legacy_rows:
             return legacy_rows[0]
+        return None
     if args.shotcaller:
         return store.connection.execute(
             "SELECT agent_id,callsign,role FROM agent_instances WHERE retired_at IS NULL AND role='shotcaller' AND callsign=?",
@@ -148,30 +220,6 @@ def _scope(store: SQLiteStorage, actor_id: str, callsign: str) -> str:
     return str(row[0]) if row is not None else f"watcher:{callsign}"
 
 
-def _codex_stop_generation(
-    args: argparse.Namespace, payload: dict[str, Any]
-) -> tuple[str, str | None]:
-    """Bind the one-shot Stop guard to Codex's stable turn identity."""
-    if args.shotcaller and not payload:
-        explicit = f"explicit\0{args.shotcaller}"
-        return hashlib.sha256(explicit.encode()).hexdigest(), None
-    session_ref = payload.get("session_id")
-    turn_id = payload.get("turn_id")
-    if (
-        payload.get("hook_event_name") != "Stop"
-        or not isinstance(session_ref, str)
-        or not session_ref
-        or not isinstance(turn_id, str)
-        or not turn_id
-        or not isinstance(payload.get("stop_hook_active"), bool)
-    ):
-        raise StorageRefusal(
-            "stop_hook_invalid",
-            "Codex Stop hook requires its exact event, session, turn, and active flag",
-        )
-    return _codex_turn_generation(session_ref, turn_id), turn_id
-
-
 def _codex_turn_generation(session_ref: str, turn_id: str) -> str:
     identity = f"codex\0{session_ref}\0{turn_id}"
     return hashlib.sha256(identity.encode()).hexdigest()
@@ -180,14 +228,14 @@ def _codex_turn_generation(session_ref: str, turn_id: str) -> str:
 def _busy_stop_result(
     args: argparse.Namespace, payload: dict[str, Any]
 ) -> dict[str, str]:
-    if args.command == "cursor-stop-hook":
+    if _stop_output_mode(args.command) != "decision":
         return {
             "followup_message": (
                 "League canonical state is busy; unresolved obligations remain "
                 "authoritative and Stop is safely retryable."
             )
         }
-    _codex_stop_generation(args, payload)
+    _stop_generation(args.command, args, payload)
     return {
         "decision": "block",
         "reason": (
@@ -207,7 +255,19 @@ def _champion_stop_output(command: str, result: dict[str, Any]) -> dict[str, Any
     )
     return (
         {"decision": "block", "reason": reason}
-        if command == "codex-stop-hook"
+        if _stop_output_mode(command) == "decision"
+        else {"followup_message": reason}
+    )
+
+
+def _supervisor_unavailable_stop_output(command: str) -> dict[str, str]:
+    reason = (
+        "supervisor_unavailable: League persistent supervision is unavailable; "
+        "no handoff was claimed."
+    )
+    return (
+        {"decision": "block", "reason": reason}
+        if _stop_output_mode(command) == "decision"
         else {"followup_message": reason}
     )
 
@@ -221,9 +281,9 @@ def _codex_stop_reason(
 
 
 def _hook_busy_timeout(command: str) -> int:
-    if command in {"codex-stop-hook", "cursor-stop-hook"}:
+    if command in STOP_HOOK_ADAPTERS:
         return STOP_BUSY_TIMEOUT_MS
-    if command in {"codex-user-prompt-hook", "cursor-before-submit-hook"}:
+    if command in PROMPT_HOOK_ADAPTERS or command in PRE_TOOL_HOOK_ADAPTERS:
         return PROMPT_BUSY_TIMEOUT_MS
     return DEFAULT_BUSY_TIMEOUT_MS
 
@@ -270,10 +330,13 @@ def _capture_prompt(
     adapter_kind: str,
     capture_event_id: str | None = None,
 ) -> dict[str, Any]:
-    if adapter_kind == "codex":
-        event_name = "UserPromptSubmit"
-        session_ref = payload.get("session_id")
-        provider_turn_id = payload.get("turn_id")
+    adapter = builtin_agent_adapter_registry().adapter(adapter_kind)
+    profile = dict(adapter.hook_profile["prompt_intake"])
+    event_name = str(profile["native_event"])
+    session_ref = payload.get(str(profile["session_field"]))
+    provider_turn_id = payload.get(str(profile["source_field"]))
+    raw_source_event_key = provider_turn_id
+    if profile.get("invocation_identity") is True:
         raw_source_event_key = (
             f"{provider_turn_id}\0{capture_event_id}"
             if isinstance(provider_turn_id, str)
@@ -282,14 +345,10 @@ def _capture_prompt(
             and capture_event_id
             else None
         )
-    else:
-        event_name = "beforeSubmitPrompt"
-        session_ref = payload.get("conversation_id")
-        provider_turn_id = payload.get("generation_id")
-        raw_source_event_key = payload.get("generation_id")
     body = payload.get("prompt")
     if (
-        payload.get("hook_event_name") != event_name
+        payload.get("hook_event_name")
+        != profile["hook_event"]
         or not isinstance(session_ref, str)
         or not session_ref
         or not isinstance(raw_source_event_key, str)
@@ -301,11 +360,20 @@ def _capture_prompt(
             "prompt_hook_invalid",
             "prompt hook requires its exact event, session, turn/generation, and body",
         )
+    translated_payload = {**payload, "source_event_key": raw_source_event_key}
+    event = adapter.translate_event(
+        event_name, translated_payload
+    )
+    decision = SharedLifecyclePolicy().decide(event)
+    if decision.outcome != "accept":
+        raise StorageRefusal(decision.reason_code, "shared agent lifecycle policy refused prompt intake")
+    session_ref = event.session_ref
+    raw_source_event_key = event.source_event_key
     prompt_id, source_event_key = _prompt_identity(
         adapter_kind, session_ref, raw_source_event_key, body
     )
     if (
-        adapter_kind == "codex"
+        profile.get("stop_feedback_suppression") is True
         and actor_role == "shotcaller"
         and actor_id is not None
         and scope is not None
@@ -351,7 +419,7 @@ def _capture_prompt(
             if (
                 actor is not None
                 and actor["thread_id"] == session_ref
-                and actor["backend"] in {"herdr", "tmux"}
+                and _registered_multiplexer(actor["backend"])
                 and actor["address"]
             ):
                 runtime_digest = hashlib.sha256(
@@ -421,7 +489,7 @@ def _capture_prompt(
             actor is None
             or actor["role"] != "shotcaller"
             or actor["thread_id"] != session_ref
-            or actor["backend"] not in {"herdr", "tmux"}
+            or not _registered_multiplexer(actor["backend"])
             or not actor["address"]
         ):
             return store.quarantine_prompt(
@@ -486,6 +554,103 @@ def _capture_prompt(
         )
 
 
+def _stop_generation(
+    command: str, args: argparse.Namespace, payload: dict[str, Any]
+) -> tuple[str, str | None]:
+    adapter, profile = _hook_profile(command, "stop_supervision")
+    adapter_kind = adapter.contract.kind
+    if args.shotcaller and not payload and _stop_output_mode(command) == "decision":
+        explicit = f"explicit\0{args.shotcaller}"
+        return hashlib.sha256(explicit.encode()).hexdigest(), None
+    session = payload.get(str(profile["session_field"]))
+    source = payload.get(str(profile["source_field"]))
+    active_field = profile.get("active_field")
+    if (
+        payload.get("hook_event_name") != profile["hook_event"]
+        or not isinstance(session, str)
+        or not session
+        or not isinstance(source, str)
+        or not source
+        or (
+            isinstance(active_field, str)
+            and not isinstance(payload.get(active_field), bool)
+        )
+    ):
+        raise StorageRefusal(
+            "stop_hook_invalid",
+            "Stop hook requires its exact provider event, session, and generation",
+        )
+    event = adapter.translate_event(
+        str(profile["native_event"]),
+        {**payload, "source_event_key": source},
+    )
+    decision = SharedLifecyclePolicy().decide(event)
+    if decision.outcome != "accept":
+        raise StorageRefusal(decision.reason_code, "shared lifecycle policy refused Stop")
+    identity = f"{adapter_kind}\0{event.session_ref}\0{event.source_event_key}"
+    return hashlib.sha256(identity.encode()).hexdigest(), source
+
+
+def _pre_tool_output(
+    command: str,
+    payload: dict[str, Any],
+    *,
+    exact_binding: bool,
+    actor_role: str | None,
+    delegated_by_shotcaller: bool,
+    mutation_fenced: bool = False,
+) -> dict[str, Any]:
+    adapter, profile = _hook_profile(command, "pre_tool_authorization")
+    session = payload.get(str(profile["session_field"]))
+    source = payload.get(str(profile["source_field"]))
+    authorized = payload.get("authorized")
+    if (
+        payload.get("hook_event_name") != profile["hook_event"]
+        or not isinstance(session, str)
+        or not session
+        or not isinstance(source, str)
+        or not source
+        or not isinstance(authorized, bool)
+    ):
+        raise StorageRefusal(
+            "pre_tool_hook_invalid",
+            "pre-tool hook requires exact provider event, session, generation, and authorization evidence",
+        )
+    event = adapter.translate_event(
+        str(profile["native_event"]),
+        {**payload, "source_event_key": source},
+    )
+    decision = SharedLifecyclePolicy().decide(
+        event,
+        authorized=authorized,
+        exact_binding=exact_binding,
+        actor_role=actor_role,
+        delegated_by_shotcaller=delegated_by_shotcaller,
+        mutation_fenced=mutation_fenced,
+    )
+    return {
+        "decision": decision.outcome,
+        "reason_code": decision.reason_code,
+    }
+
+
+def _delegation_verified(
+    store: SQLiteStorage, actor_id: str | None, actor_role: str | None
+) -> bool:
+    if actor_id is None or actor_role not in {"champion", "hidden-worker"}:
+        return False
+    row = store.connection.execute(
+        """
+        SELECT owner.role,owner.retired_at
+          FROM agent_instances child
+          JOIN agent_instances owner ON owner.agent_id=child.shotcaller_agent_id
+         WHERE child.agent_id=? AND child.role=? AND child.retired_at IS NULL
+        """,
+        (actor_id, actor_role),
+    ).fetchone()
+    return bool(row is not None and row["role"] == "shotcaller" and row["retired_at"] is None)
+
+
 def _priority_eligible_capture(
     actor_id: str | None,
     actor_role: str | None,
@@ -529,22 +694,45 @@ def handle_brokered_hook(
         or (shotcaller is not None and not isinstance(shotcaller, str))
         or (session_id is not None and not isinstance(session_id, str))
         or (
-            command == "codex-user-prompt-hook"
+            command in PROMPT_HOOK_ADAPTERS
+            and _needs_invocation_identity(command)
             and not _valid_codex_prompt_invocation_id(capture_event_id)
         )
     ):
         raise StorageRefusal("prompt_hook_invalid", "brokered hook request is invalid")
     args = argparse.Namespace(shotcaller=shotcaller, session_id=session_id)
-    actor = _actor(store, args, payload)
+    actor = _actor(
+        store, args, payload, adapter_kind=_adapter_kind_for_command(str(command))
+    )
     actor_id = None if actor is None else str(actor[0])
     callsign = None if actor is None else str(actor[1])
     actor_role = None if actor is None else str(actor[2])
     scope = None if actor is None else _scope(store, actor_id, str(callsign))
-    if command == "codex-stop-hook":
+    if command in PRE_TOOL_HOOK_ADAPTERS:
+        return {
+            "hook_output": _pre_tool_output(
+                command,
+                payload,
+                exact_binding=actor is not None,
+                actor_role=actor_role,
+                delegated_by_shotcaller=_delegation_verified(
+                    store, actor_id, actor_role
+                ),
+                mutation_fenced=bool(
+                    actor_id
+                    and runtime_replacement_mutation_fenced(store, actor_id)
+                ),
+            ),
+            "capture": None,
+        }
+    if command in STOP_HOOK_ADAPTERS:
         if actor is None:
-            return {"hook_output": {}, "capture": None}
+            return {
+                "hook_output": _supervisor_unavailable_stop_output(str(command)),
+                "capture": None,
+            }
         assert actor_id is not None and callsign is not None and scope is not None
-        terminal, _ = _codex_stop_generation(args, payload)
+        terminal, _ = _stop_generation(command, args, payload)
         if actor_role == "champion":
             result = store.champion_stop_decision(
                 actor_id,
@@ -562,8 +750,12 @@ def handle_brokered_hook(
             datetime.now().astimezone().isoformat(timespec="seconds"),
             block_on_fresh_terminal=False,
         )
-        output = (
-            {
+        if result["decision"] != "block":
+            output = {}
+        elif _stop_output_mode(command) != "decision":
+            output = {"followup_message": "League has unresolved obligations."}
+        else:
+            output = {
                 "decision": "block",
                 "reason": _codex_stop_reason(
                     callsign,
@@ -571,9 +763,6 @@ def handle_brokered_hook(
                     tuple(result.get("unresolved_summaries", ())),
                 ),
             }
-            if result["decision"] == "block"
-            else {}
-        )
         return {"hook_output": output, "capture": None}
     captured = _capture_prompt(
         store,
@@ -581,7 +770,7 @@ def handle_brokered_hook(
         actor_id,
         actor_role,
         payload,
-        adapter_kind="codex" if command == "codex-user-prompt-hook" else "cursor",
+        adapter_kind=PROMPT_HOOK_ADAPTERS[command],
         capture_event_id=capture_event_id,
     )
     priority_eligible = _priority_eligible_capture(actor_id, actor_role, captured)
@@ -671,7 +860,12 @@ def _direct_hook_fallback_store(
             state_root,
             busy_timeout_ms=_hook_busy_timeout(args.command),
         ) as store:
-            actor = _actor(store, args, payload)
+            actor = _actor(
+                store,
+                args,
+                payload,
+                adapter_kind=_adapter_kind_for_command(args.command),
+            )
             registration = (
                 None if actor is None else store.watcher_registration(str(actor[0]))
             )
@@ -913,11 +1107,7 @@ def _supervise(
 
 def main(argv: list[str] | None = None) -> int:
     args, _ = _parser().parse_known_args(argv)
-    if args.command not in {
-        "codex-stop-hook",
-        "codex-user-prompt-hook",
-        "cursor-stop-hook",
-        "cursor-before-submit-hook",
+    if args.command not in BROKERED_HOOK_COMMANDS | {
         "deliver",
         "supervise",
         "service-run",
@@ -953,7 +1143,8 @@ def main(argv: list[str] | None = None) -> int:
     payload = _payload() if args.command.endswith("-hook") else {}
     capture_event_id = (
         _codex_prompt_invocation_id()
-        if args.command == "codex-user-prompt-hook"
+        if args.command in PROMPT_HOOK_ADAPTERS
+        and _needs_invocation_identity(args.command)
         else None
     )
     fallback_store = None
@@ -978,6 +1169,33 @@ def main(argv: list[str] | None = None) -> int:
                 else:
                     _emit(response["hook_output"])
                     return 0
+            if args.command in STOP_HOOK_ADAPTERS:
+                _stop_generation(args.command, args, payload)
+                try:
+                    with SQLiteStorage(
+                        _state_root(), busy_timeout_ms=STOP_BUSY_TIMEOUT_MS
+                    ) as observer:
+                        actor = _actor(
+                            observer,
+                            args,
+                            payload,
+                            adapter_kind=_adapter_kind_for_command(args.command),
+                        )
+                        persistent_required = bool(
+                            actor is not None
+                            and observer.persistent_supervision_required(str(actor[0]))
+                        )
+                except StorageRefusal as exc:
+                    if exc.code == "busy":
+                        _emit(_busy_stop_result(args, payload))
+                        return 0
+                    raise
+                if actor is None:
+                    _emit(_supervisor_unavailable_stop_output(args.command))
+                    return 0
+                if persistent_required:
+                    _emit(_supervisor_unavailable_stop_output(args.command))
+                    return 0
             fallback_store = _direct_hook_fallback_store(args, payload)
         else:
             _emit(response["hook_output"])
@@ -994,33 +1212,50 @@ def main(argv: list[str] | None = None) -> int:
         )
     except StorageRefusal as exc:
         stack.close()
-        if exc.code == "busy" and args.command in {
-            "codex-stop-hook",
-            "cursor-stop-hook",
-        }:
+        if exc.code == "busy" and args.command in STOP_HOOK_ADAPTERS:
             _emit(_busy_stop_result(args, payload))
             return 0
         raise
     with stack:
-        actor = _actor(store, args, payload)
+        actor = _actor(
+            store,
+            args,
+            payload,
+            adapter_kind=_adapter_kind_for_command(args.command),
+        )
         actor_id = None if actor is None else str(actor[0])
         callsign = None if actor is None else str(actor[1])
         actor_role = None if actor is None else str(actor[2])
         scope = None if actor is None else _scope(store, actor_id, callsign)
-        if args.command in {"codex-user-prompt-hook", "cursor-before-submit-hook"}:
+        if args.command in PROMPT_HOOK_ADAPTERS:
             captured = _capture_prompt(
                 store,
                 scope,
                 actor_id,
                 actor_role,
                 payload,
-                adapter_kind=(
-                    "codex" if args.command == "codex-user-prompt-hook" else "cursor"
-                ),
+                adapter_kind=PROMPT_HOOK_ADAPTERS[args.command],
                 capture_event_id=capture_event_id,
             )
             _notify_direct_user_priority(store, actor_id, actor_role, captured)
             _emit({})
+            return 0
+        if args.command in PRE_TOOL_HOOK_ADAPTERS:
+            _emit(
+                _pre_tool_output(
+                    args.command,
+                    payload,
+                    exact_binding=actor is not None,
+                    actor_role=actor_role,
+                    delegated_by_shotcaller=_delegation_verified(
+                        store, actor_id, actor_role
+                    ),
+                    mutation_fenced=bool(
+                        actor_id
+                        and runtime_replacement_mutation_fenced(store, actor_id)
+                    ),
+                )
+            )
             return 0
         if actor is None:
             _emit({})
@@ -1054,14 +1289,8 @@ def main(argv: list[str] | None = None) -> int:
                 )
             )
             return 0
-        if args.command in {"codex-stop-hook", "cursor-stop-hook"}:
-            if args.command == "codex-stop-hook":
-                terminal, turn_id = _codex_stop_generation(args, payload)
-            else:
-                terminal = hashlib.sha256(
-                    json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
-                ).hexdigest()
-                turn_id = None
+        if args.command in STOP_HOOK_ADAPTERS:
+            terminal, turn_id = _stop_generation(args.command, args, payload)
             try:
                 if actor_role == "champion":
                     result = store.champion_stop_decision(
@@ -1086,7 +1315,7 @@ def main(argv: list[str] | None = None) -> int:
                 _emit(_champion_stop_output(args.command, result))
                 return 0
             blocked = result["decision"] == "block"
-            if args.command == "cursor-stop-hook":
+            if _stop_output_mode(args.command) != "decision":
                 _emit({"followup_message": "League has unresolved obligations."} if blocked else {})
             else:
                 reason = _codex_stop_reason(

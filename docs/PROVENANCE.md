@@ -1053,8 +1053,11 @@ Pi runtime receipt used its UUID where Herdr cleanup reads the provider-native
 JSONL path; the receipt now binds `thread_id` to that path while reporting both
 path and UUID. The routed Cursor action omitted the required state root; the
 emitted argv now includes it and the test executes that exact argv. Restart
-did not revalidate its stored cwd before supplying scoped approval; it now
-requires the same canonical, non-symlink Git worktree before any resume. The
+did not revalidate its stored cwd before supplying scoped approval. The first
+fix only required a canonical Git worktree and still admitted a different
+repository recreated at the same path. The descriptor now binds the canonical
+repository root and exact `.git` marker filesystem identity; restart must
+reproduce that digest before any resume. The
 inventory scan returned on its first matching UUID and could miss a later
 duplicate; it now completes the bounded scan and refuses more than one match.
 Finally, terminal Cursor status `done` was treated as idle; steering now

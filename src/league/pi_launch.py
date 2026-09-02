@@ -14,7 +14,7 @@ from typing import Any, Mapping, Sequence
 from .request_services import AssignmentSpec, LaunchAdapterError
 from .storage_types import StorageRefusal
 from .visible_launch import MAX_CONTEXT_BYTES, CommandRunner, SubprocessRunner
-from .worktree import verified_worktree_repository_root
+from .worktree import exact_worktree_binding
 
 
 def _digest(value: Mapping[str, Any]) -> str:
@@ -385,13 +385,17 @@ class HerdrPiLaunchAdapter:
         worktree = Path(spec.worktree)
         if not worktree.is_absolute() or not worktree.is_dir() or worktree.is_symlink() or spec.callsign is None:
             raise LaunchAdapterError("invalid_launch_worktree")
-        verified_worktree_repository_root(worktree)
+        binding = exact_worktree_binding(worktree.resolve())
+        stored_binding = self.descriptor.get("worktree_binding")
+        if stored_binding is not None and stored_binding != binding:
+            raise LaunchAdapterError("launch_scope_invalid")
         self.descriptor.update(
             {
                 "callsign": str(spec.callsign),
                 "routing_name": str(spec.callsign).lower(),
                 "cwd": str(worktree.resolve()),
                 "assignment_id": spec.assignment_id,
+                "worktree_binding": binding,
             }
         )
         prepared = self.store.prepare_provider_launch(self.descriptor, self.at)
@@ -544,17 +548,11 @@ def resume_pi_after_restart(
         }
     )
     worktree = Path(str(descriptor["cwd"]))
-    if (
-        not worktree.is_absolute()
-        or not worktree.is_dir()
-        or worktree.is_symlink()
-        or worktree.resolve() != worktree
-    ):
+    if exact_worktree_binding(worktree) != descriptor.get("worktree_binding"):
         raise StorageRefusal(
-            "launch_scope_invalid",
-            "Pi restart cwd is no longer the exact authorized worktree",
+            "provider_restart_worktree_mismatch",
+            "Pi restart cwd is not the exact owner-authorized worktree",
         )
-    verified_worktree_repository_root(worktree)
     adapter = HerdrPiLaunchAdapter(
         store,
         descriptor,

@@ -23,6 +23,7 @@ from league.pi_session_migration import (  # noqa: E402
     _inventory_identity,
     migrate_pi_session,
 )
+from league.real_cleanup import HerdrHarnessAdapter  # noqa: E402
 from league.storage import StorageRefusal  # noqa: E402
 from league.request_services import AssignmentSpec  # noqa: E402
 from request_lifecycle_fixture import LUX_ID, create_context  # noqa: E402
@@ -258,6 +259,22 @@ class FakePiHerdr:
         raise AssertionError(f"unexpected Herdr command: {arguments}")
 
 
+class PiCleanupInspectionRunner:
+    def __init__(self, pi: FakePiHerdr) -> None:
+        self.pi = pi
+
+    def run(self, arguments, *, allow_failure=False):
+        exact = tuple(arguments)
+        if exact[1:3] != ("agent", "list"):
+            raise AssertionError(exact)
+        return subprocess.CompletedProcess(
+            list(exact),
+            0,
+            json.dumps({"result": {"agents": [self.pi._agent()]}}),
+            "",
+        )
+
+
 def _spec(worktree: Path) -> AssignmentSpec:
     return AssignmentSpec(
         assignment_id="assignment:pi-provider",
@@ -330,6 +347,22 @@ def test_fork_metadata_restart_and_duplicate_suppression(root: Path) -> None:
     assert receipt["thread_id"] == fake.session_path
     assert receipt["session_id"] == CHILD_ID
     assert receipt["session_path"] == fake.session_path
+    cleanup_action = {
+        "expected_identity": {
+            "agent_name": receipt["routing_name"],
+            "pane_id": receipt["endpoint"],
+            "session_id": receipt["thread_id"],
+        },
+        "intended_state": {"completed": True, "action": "session_exit"},
+    }
+    assert HerdrHarnessAdapter(
+        {
+            "agent_name": receipt["routing_name"],
+            "provider_kind": "pi",
+            "exit_prompt": "/quit",
+        },
+        PiCleanupInspectionRunner(fake),
+    ).inspect(cleanup_action) == cleanup_action["expected_identity"]
     assert fake.agent_get_count >= 3
     assert any(call[1:3] == ("tab", "create") for call in fake.calls)
     start = next(call for call in fake.calls if call[1:3] == ("agent", "start"))
@@ -382,7 +415,8 @@ def test_fork_metadata_restart_and_duplicate_suppression(root: Path) -> None:
     assert duplicate["idempotent"] is True and fake.start_count == 2
 
     fake.stop_for_restart()
-    (worktree / ".git").rmdir()
+    (worktree / ".git").rename(worktree / ".git.owner")
+    (worktree / ".git").mkdir()
     try:
         resume_pi_after_restart(
             store,
@@ -394,7 +428,7 @@ def test_fork_metadata_restart_and_duplicate_suppression(root: Path) -> None:
             environment={"HERDR_ENV": "1"},
         )
     except StorageRefusal as exc:
-        assert exc.code == "launch_scope_invalid"
+        assert exc.code == "provider_restart_worktree_mismatch"
     else:
         raise AssertionError("restart trusted a cwd that was no longer the bound worktree")
     assert fake.start_count == 2

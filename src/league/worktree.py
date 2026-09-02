@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import subprocess
 import tempfile
 import re
@@ -123,9 +125,50 @@ def verified_worktree_repository_root(worktree: Path) -> Path:
     return repository.resolve()
 
 
+def exact_worktree_binding(worktree: Path) -> str:
+    """Bind one authorized worktree to its current repository and Git marker."""
+
+    if (
+        not worktree.is_absolute()
+        or not worktree.is_dir()
+        or worktree.is_symlink()
+        or worktree.resolve() != worktree
+    ):
+        raise StorageRefusal(
+            "launch_scope_invalid", "visible launch worktree path is not exact"
+        )
+    repository = verified_worktree_repository_root(worktree)
+    marker = worktree / ".git"
+    try:
+        marker_info = marker.lstat()
+    except OSError as exc:
+        raise StorageRefusal(
+            "launch_scope_invalid", "visible launch Git identity is unavailable"
+        ) from exc
+    identity = {
+        "schema": "league.worktree-binding.v1",
+        "worktree": str(worktree),
+        "repository_root": str(repository),
+        "marker_kind": "directory" if marker.is_dir() else "file",
+        "marker_device": marker_info.st_dev,
+        "marker_inode": marker_info.st_ino,
+    }
+    if marker.is_file():
+        try:
+            identity["marker_sha256"] = hashlib.sha256(marker.read_bytes()).hexdigest()
+        except OSError as exc:
+            raise StorageRefusal(
+                "launch_scope_invalid", "visible launch Git identity could not be bound"
+            ) from exc
+    return hashlib.sha256(
+        json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
 __all__ = [
     "GitCommandRunner",
     "SubprocessGitRunner",
+    "exact_worktree_binding",
     "normalized_github_repository",
     "verified_worktree_repository_root",
 ]

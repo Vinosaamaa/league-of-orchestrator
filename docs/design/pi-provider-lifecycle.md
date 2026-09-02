@@ -8,10 +8,11 @@ resume.
 ## Durable descriptor
 
 Each launch records a checksummed descriptor before external effects. It binds
-the provider, model, effort, exact cwd, Shotcaller/Champion role, sibling-pane
-or new-tab placement, callsign, project code, two-word task label, routing
-name, release root, and create/fork/resume session inputs. Champions create one
-new tab. Shotcallers create one sibling pane from the exact creator pane.
+the provider, model, effort, exact cwd, machine-local Git worktree identity,
+Shotcaller/Champion role, sibling-pane or new-tab placement, callsign, project
+code, two-word task label, routing name, release root, and create/fork/resume
+session inputs. Champions create one new tab. Shotcallers create one sibling
+pane from the exact creator pane.
 
 Create uses a deterministic session ID. A project-bound fork uses the exact
 parent JSONL path and can occur once for a parent/cwd pair. Resume and restart
@@ -22,8 +23,11 @@ evidence; restart never forks again.
 
 Pi may otherwise stop at an interactive project-trust gate. The launcher first
 verifies that the assignment cwd is the exact issue worktree and repository
-root. Only that launch receives `pi --approve`; no parent directory, second
-worktree, or global trust entry is authorized.
+root and stores a digest of its canonical repository root plus exact `.git`
+marker filesystem identity. Restart must reproduce that binding before it can
+receive `pi --approve`; a different repository recreated at the same path is
+refused. No parent directory, second worktree, or global trust entry is
+authorized.
 
 Trust and startup are pre-activation. For fresh create/fork, the Pi extension
 waits for native `session_start`, reads the session manager's exact ID, absolute

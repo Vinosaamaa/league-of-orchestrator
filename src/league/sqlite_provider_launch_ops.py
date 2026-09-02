@@ -57,6 +57,7 @@ def _validate_descriptor(value: Mapping[str, Any]) -> dict[str, Any]:
         "model",
         "effort",
         "cwd",
+        "worktree_binding",
         "role",
         "placement",
         "callsign",
@@ -89,6 +90,7 @@ def _validate_descriptor(value: Mapping[str, Any]) -> dict[str, Any]:
         or not isinstance(descriptor["effort"], str)
         or not descriptor["effort"]
         or not all(_absolute(descriptor[key]) for key in ("cwd", "state_root", "release_root"))
+        or not re.fullmatch(r"[0-9a-f]{64}", str(descriptor["worktree_binding"]))
         or not isinstance(descriptor["callsign"], str)
         or not descriptor["callsign"]
         or not SAFE_NAME.fullmatch(str(descriptor["routing_name"]))

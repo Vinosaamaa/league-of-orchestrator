@@ -1977,7 +1977,7 @@ def reconcile_rollover_descendant(
                 or runtime_receipt.get("champion_agent_id") != champion_agent_id
                 or runtime_receipt.get("task_id") != task_id
                 or runtime_receipt.get("runtime_instance_id") != runtime_instance_id
-                or runtime_receipt.get("harness_kind") != "codex-thread"
+                or runtime_receipt.get("harness_kind") != champion["kind"]
                 or runtime_receipt.get("backend_kind") != "herdr"
                 or runtime_receipt.get("session_ref") != champion["thread_id"]
                 or runtime_receipt.get("endpoint") != champion["address"]

@@ -27,7 +27,7 @@ Nothing here installs files, changes hooks, or connects to live Roster state.
 - Synthetic examples, authoring schemas, and focused local regression tests.
 - One standard-library SQLite implementation behind a `Storage` protocol and
   stable `league` command facade.
-- Eighteen contiguous checksummed schema migrations, a loaded-runtime WAL gate,
+- Twenty-two contiguous checksummed schema migrations, a loaded-runtime WAL gate,
   verified backups, integrity checks, expected-version writes, and bounded contention.
 - A strict manifest importer covering every canonical issue-#18 artifact
   family, with dry-run digest confirmation before apply.
@@ -35,6 +35,18 @@ Nothing here installs files, changes hooks, or connects to live Roster state.
   machine-readable schemas.
 - Prompt-once intake, complete bounded triage, request claims and states,
   explicit direct/hidden/Champion dispatch, and unresolved reconciliation.
+- Exact Cursor direct delivery through verified Herdr pane, provider session,
+  process, and status evidence. Idle Cursor endpoints receive one literal prompt
+  plus one Enter; working endpoints receive literal text and only then two Enter
+  keys after a second unchanged observation. Schema 21 persists the intent and
+  effect receipt so a retry cannot repeat text or an interrupt.
+- First-class Pi runtime launch with an explicit Cursor or Codex provider,
+  exact model/effort/cwd/role/placement/naming inputs, project-bound one-time
+  fork lineage, and exact-path restart resume. Pi uses its single standard
+  session inventory; provider choice never selects a separate Pi home or
+  session pool. Existing isolated Cursor-backed JSONL sessions can be copied
+  byte-for-byte at a verified shell-only restart boundary, with duplicate-ID
+  refusal and durable schema-22 migration/bind receipts.
 - Recoverable visible-Champion assignment with exact acceptance receipts,
   settled post-context callsign/task title restoration bound to the exact
   metadata source and sequence, deterministic two-word display-task defaults,
@@ -253,6 +265,19 @@ add [project catalog](schema/league-project-catalog.schema.json) and
 The grouped request-lifecycle command and transaction map is documented in
 [request lifecycle](docs/REQUEST_LIFECYCLE.md). Its implementation is inert
 until issue #23 separately proves installation and cutover.
+Cursor's provider-faithful direct-delivery contract, refusal states, and
+rollback boundary are documented in
+[Cursor CLI steering](docs/design/cursor-cli-steering.md). A routed Cursor
+recipient receives a structured action containing the complete stable
+`league request accept-routed` command. An authorized dispatcher invokes the
+same state-aware adapter through `league delivery dispatch`; neither command
+requires a Cursor agent to derive claim timestamps or tokens.
+Pi's provider/runtime split, unified-inventory migration, trust-gate handling,
+placement, metadata, and once-only restart contract are documented in
+[Pi provider lifecycle](docs/design/pi-provider-lifecycle.md). The launcher
+passes `--approve` only after the assigned worktree has been verified as the
+exact repository root, then waits for native `session_start`, exact session
+ID/path, canonical metadata, and two stable readbacks before activation.
 Issue #66's inline-triage, candidate-inventory, persistent-supervision, and
 measured source-only boundaries are in the
 [issue #66 benchmark report](docs/research/issue-66-inline-triage-supervision-benchmark.md).
@@ -425,6 +450,8 @@ fake adapters.
 - [Research-backed orchestration and model routing policy](docs/research/orchestration-model-routing-policy-evidence.md)
 - [Terminal-first Project Ledger design](docs/design/terminal-roster-ui.md)
 - [Scoped autonomous delivery and issue-first delegation](docs/design/scoped-autonomous-delivery.md)
+- [Cursor CLI steering and routed-delivery contract](docs/design/cursor-cli-steering.md)
+- [Pi runtime and Cursor/Codex provider lifecycle](docs/design/pi-provider-lifecycle.md)
 - [Baseline versus planned issues](docs/ROADMAP.md)
 
 ## Non-goals for this implementation PR

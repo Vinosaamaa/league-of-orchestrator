@@ -192,12 +192,22 @@ def builtin_harness_contracts() -> tuple[DeclaredHarnessAdapter, ...]:
         ),
         DeclaredHarnessAdapter(
             AdapterContract(
+                "cursor",
+                "harness",
+                frozenset(HARNESS_CAPABILITIES),
+                "inherited-contract",
+                "available",
+                "Operational visible Cursor lifecycle through the production Herdr driver.",
+            )
+        ),
+        DeclaredHarnessAdapter(
+            AdapterContract(
                 "pi",
                 "harness",
                 frozenset(HARNESS_CAPABILITIES),
-                "unverified",
+                "inherited-contract",
                 "available",
-                "Non-Codex contract exercised only through deterministic isolated doubles until issue #23.",
+                "Operational visible Pi lifecycle through the scoped League integration and Herdr driver.",
             )
         ),
     )
@@ -265,3 +275,27 @@ def builtin_registry(backends: tuple[BackendAdapter, ...]) -> AdapterRegistry:
 
 def builtin_contract_registry() -> AdapterRegistry:
     return builtin_registry(tuple(builtin_backend_contracts()))
+
+
+def production_capability_matrix() -> dict[str, Any]:
+    """Report the real visible driver separately from the generic contract-only core.
+
+    `assign run` and production cleanup own the Herdr process effects.  Keeping
+    this projection separate prevents the generic RuntimeLifecycle registry from
+    pretending that it can allocate a live terminal without assignment context.
+    """
+
+    pairs = builtin_contract_registry().capability_matrix()["pairs"]
+    for pair in pairs:
+        if pair["backend"] != "herdr":
+            continue
+        pair["availability"] = "operational"
+        pair["evidence"] = "inherited-contract"
+        for capability, status in tuple(pair["operations"].items()):
+            if status == "driver_unavailable":
+                pair["operations"][capability] = "supported"
+    return {
+        "schema": "league.adapter-matrix.v1",
+        "driver": "visible-assignment+production-cleanup",
+        "pairs": pairs,
+    }

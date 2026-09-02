@@ -598,6 +598,15 @@ class SupervisorServiceInstaller:
                 "supervisor_service_recovery_required",
                 "service start requires one exact active install manifest",
             )
+        _, watcher_digest, template_digest = self._source()
+        if (
+            watcher_digest != manifest["agent_watcher_sha256"]
+            or template_digest != manifest["template_sha256"]
+        ):
+            raise StorageRefusal(
+                "supervisor_service_source_mismatch",
+                "service source bytes no longer match the authorized manifest",
+            )
         installed = _read_owned_regular(self.plist_path, "installed plist")
         if _sha256(installed) != manifest["installed_plist_sha256"]:
             raise StorageRefusal(

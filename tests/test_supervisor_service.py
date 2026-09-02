@@ -21,7 +21,7 @@ sys.path[:0] = [str(ROOT / "src"), str(ROOT / "tests")]
 from league.persistent_supervisor import (  # noqa: E402
     PersistentSupervisor,
     attach_shotcaller,
-    send_supervisor_message,
+    stop_supervisor,
     supervisor_status,
 )
 from league.supervisor_service import (  # noqa: E402
@@ -89,7 +89,8 @@ class SyntheticLaunchd:
         runtime = self.runtime
         thread = self.thread
         if runtime is not None and thread is not None and thread.is_alive():
-            send_supervisor_message(f"unix:{runtime.socket_path}", {"kind": "stop"})
+            assert self.state_root is not None
+            stop_supervisor(self.state_root)
             thread.join(timeout=5)
             assert not thread.is_alive(), self.errors
         self.runtime = None
@@ -168,8 +169,15 @@ def test_launchd_environment_starts_the_canonical_watcher(root: Path) -> None:
 def test_install_restart_and_exact_rollback(root: Path) -> None:
     state, store = _multisquad_state(root, "state")
     store.close()
-    agent_watcher = (ROOT / "bin/agent-watcher").resolve()
-    template = (ROOT / "config/league-supervisor.launchd.plist.in").resolve()
+    source = root / "source"
+    source.mkdir(parents=True)
+    agent_watcher = (source / "agent-watcher").resolve()
+    watcher_source = (ROOT / "bin/agent-watcher").read_bytes()
+    agent_watcher.write_bytes(watcher_source)
+    agent_watcher.chmod(0o700)
+    template = (source / "league-supervisor.launchd.plist.in").resolve()
+    template_source = (ROOT / "config/league-supervisor.launchd.plist.in").read_bytes()
+    template.write_bytes(template_source)
     launch_agents = root / "Library" / "LaunchAgents"
     plist = (launch_agents / "io.league-of-orchestrator.supervisor.plist").resolve()
     backup = Path(f"{plist}.league-backup")
@@ -229,6 +237,25 @@ def test_install_restart_and_exact_rollback(root: Path) -> None:
         expected_template_sha256=sha256(template),
     )
     assert exact_retry["idempotent"] and launchd.starts == 1
+
+    agent_watcher.write_bytes(watcher_source + b"\n# synthetic source drift\n")
+    try:
+        installer.start()
+    except StorageRefusal as exc:
+        assert exc.code == "supervisor_service_source_mismatch"
+    else:
+        raise AssertionError("service start accepted changed executable source")
+    assert launchd.starts == 1 and supervisor_status(state)["live"]
+    agent_watcher.write_bytes(watcher_source)
+    template.write_bytes(template_source + b"\n")
+    try:
+        installer.start()
+    except StorageRefusal as exc:
+        assert exc.code == "supervisor_service_source_mismatch"
+    else:
+        raise AssertionError("service start accepted changed template source")
+    assert launchd.starts == 1 and supervisor_status(state)["live"]
+    template.write_bytes(template_source)
 
     restarted = installer.start()
     assert restarted["live"] and restarted["restarted"]
@@ -312,7 +339,7 @@ def test_install_refuses_unmanaged_live_process(root: Path) -> None:
             raise AssertionError("installer adopted a non-launchd service process")
         assert not plist.exists() and not launchd.loaded
     finally:
-        send_supervisor_message(f"unix:{runtime.socket_path}", {"kind": "stop"})
+        stop_supervisor(state)
         thread.join(timeout=5)
     assert not thread.is_alive() and not errors
 

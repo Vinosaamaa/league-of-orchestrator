@@ -262,6 +262,32 @@ def test_install_restart_and_exact_rollback(root: Path) -> None:
     assert launchd.starts == 1 and supervisor_status(state)["live"]
     template.write_bytes(template_source)
 
+    identical_source = root / "identical-source"
+    identical_source.mkdir()
+    identical_watcher = (identical_source / "agent-watcher").resolve()
+    identical_watcher.write_bytes(watcher_source)
+    identical_watcher.chmod(0o700)
+    identical_template = (
+        identical_source / "league-supervisor.launchd.plist.in"
+    ).resolve()
+    identical_template.write_bytes(template_source)
+    wrong_path_installer = SupervisorServiceInstaller(
+        state_root=state.resolve(),
+        agent_watcher=identical_watcher,
+        template_path=identical_template,
+        plist_path=plist,
+        backup_path=backup,
+        manifest_path=manifest,
+        service_manager=launchd,
+    )
+    try:
+        wrong_path_installer.start()
+    except StorageRefusal as exc:
+        assert exc.code == "supervisor_service_source_mismatch"
+    else:
+        raise AssertionError("service start accepted an identical wrapper at a stale path")
+    assert launchd.loaded and launchd.starts == 1
+
     restarted = installer.start()
     assert restarted["live"] and restarted["restarted"]
     assert launchd.starts == 2

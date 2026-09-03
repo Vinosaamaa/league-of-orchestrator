@@ -9,7 +9,9 @@ const messages = [];
 let identifiers = 0;
 let inputCalls = 0;
 let activationManaged =
-  scenario.startsWith("restored-") || scenario === "outage-managed";
+  scenario.startsWith("restored-") ||
+  scenario === "outage-managed" ||
+  scenario === "outage-stop";
 
 const pi = {
   on(event, handler) {
@@ -36,7 +38,12 @@ const ctx = {
 
 function runWatcher(command, payload) {
   calls.push({ command, payload });
-  if (scenario.startsWith("outage-")) return undefined;
+  if (scenario === "outage-managed" || scenario === "outage-ordinary") {
+    return undefined;
+  }
+  if (scenario === "outage-stop" && command === "pi-stop-hook") {
+    return undefined;
+  }
   if (scenario === "unbound") return { binding: "unbound" };
   if (scenario === "promoted" && command === "pi-input-hook" && inputCalls++ === 0) {
     return { binding: "unbound" };
@@ -76,7 +83,7 @@ let secondInput;
 let tool;
 let settled;
 let rearmed;
-if (scenario === "promoted") {
+if (scenario === "promoted" || scenario === "outage-stop") {
   tool = invoke("tool_call", { toolName: "write", input: { path: "file" } });
   settled = invoke("agent_settled", {});
   rearmed = invoke("agent_settled", {});

@@ -1789,3 +1789,13 @@ Squad-scoped reservation, while incomplete or mismatched successors still fail
 closed. This release delta changes only the version contract, deterministic
 release-staging expectations, and this provenance record beyond that merged
 tree.
+
+The post-0.2.68 restart exposed two recovery failures. Service validation
+hashed the watcher wrapper and template but did not bind the wrapper's exact
+release path, so byte-identical 0.2.68 inputs could restart a LaunchAgent still
+pinned to 0.2.53. Source-manifest validation now compares the complete rendered
+plist digest, which includes that path, before any restart. A managed Pi outage
+also used a synthetic follow-up prompt to report an unavailable Stop guard;
+each settlement generated another model turn. Pi now rejects unavailable input
+before submission and reports a later Stop outage once through its non-model UI
+notification. Healthy bound Stop feedback remains repeatable and unchanged.

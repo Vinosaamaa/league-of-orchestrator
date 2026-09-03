@@ -91,6 +91,10 @@ class AgentAdapterRegistry:
             or bootstrap.get("launch_enforcement") not in {"native", "separate"}
             or not callable(getattr(adapter, "hook_bootstrap_installer", None))
         )
+        invalid_hook_translation = any(
+            not callable(getattr(adapter, attribute, None))
+            for attribute in ("hook_input_translator", "hook_output_translator")
+        )
         if not invalid_bootstrap:
             target_relative = bootstrap["target_relative"]
             source_relative = bootstrap["source_relative"]
@@ -160,6 +164,7 @@ class AgentAdapterRegistry:
         if (
             unknown or missing_methods or unsupported or invalid_profiles
             or invalid_bootstrap
+            or invalid_hook_translation
             or invalid_launch or invalid_delivery or invalid_steering
             or invalid_providers
             or invalid_presentation or invalid_assignment or invalid_aliases
@@ -187,6 +192,14 @@ def builtin_agent_adapter_registry() -> AgentAdapterRegistry:
     for factory in (codex_adapter, pi_adapter, cursor_cli_adapter):
         registry.register(factory())
     return registry
+
+
+def builtin_agent_adapter_kinds() -> tuple[str, ...]:
+    """Return the built-in inventory from the registry bootstrap itself."""
+
+    return tuple(
+        adapter.contract.kind for adapter in builtin_agent_adapter_registry().adapters()
+    )
 
 
 def adapter_kind_from_runtime(value: str) -> str:

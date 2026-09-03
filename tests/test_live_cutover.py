@@ -297,7 +297,7 @@ def test_authority_bound_live_apply(root: Path) -> None:
     hook_receipts = {item["harness"]: item for item in applied["hooks"]}
     assert hook_receipts["codex"]["added"] == ["UserPromptSubmit", "PreToolUse", "Stop"]
     assert hook_receipts["cursor"]["added"] == [
-        "beforeSubmitPrompt", "beforeShellExecution", "stop"
+        "beforeSubmitPrompt", "preToolUse", "stop"
     ]
     assert hook_receipts["pi"]["added"] == ["profile_extension"]
     assert fixture["pi_hooks"].read_bytes() == (

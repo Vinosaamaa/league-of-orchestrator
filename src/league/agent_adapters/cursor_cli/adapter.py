@@ -8,7 +8,12 @@ from ..base import (
     no_replacement_descriptor_transactions,
 )
 from ..core import declared_lifecycle_operations
-from .hooks import BOOTSTRAP_PROFILE, install as install_hook_bootstrap
+from .hooks import (
+    BOOTSTRAP_PROFILE,
+    install as install_hook_bootstrap,
+    translate_input,
+    translate_output,
+)
 
 
 def _deliver(*, store, at, multiplexer, target, envelope, **_unused):
@@ -80,7 +85,7 @@ def adapter() -> DeclaredAgentAdapter:
     )
     native_events = {
         "beforeSubmitPrompt": "prompt_intake",
-        "beforeShellExecution": "pre_tool_authorization",
+        "preToolUse": "pre_tool_authorization",
         "stop": "stop_supervision",
     }
     return DeclaredAgentAdapter(
@@ -102,8 +107,8 @@ def adapter() -> DeclaredAgentAdapter:
                 "source_field": "generation_id",
             },
             "pre_tool_authorization": {
-                "command": "cursor-pre-tool-hook", "native_event": "beforeShellExecution",
-                "hook_event": "beforeShellExecution", "session_field": "conversation_id",
+                "command": "cursor-pre-tool-hook", "native_event": "preToolUse",
+                "hook_event": "preToolUse", "session_field": "conversation_id",
                 "source_field": "generation_id",
             },
             "stop_supervision": {
@@ -114,6 +119,8 @@ def adapter() -> DeclaredAgentAdapter:
         },
         BOOTSTRAP_PROFILE,
         install_hook_bootstrap,
+        translate_input,
+        translate_output,
         {
             "launch": frozenset({"visible_launch"}),
             "resume": frozenset({"visible_launch"}),

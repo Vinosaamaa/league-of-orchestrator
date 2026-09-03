@@ -1478,11 +1478,35 @@ profile hook JSON shapes; Cursor is now an explicit installed bootstrap rather
 than an implicit core branch. Pi declares
 `integrations/pi/league-hooks.mjs` as its profile-loaded asset. Its envelope
 asks the existing `pi-input-hook`, `pi-pre-tool-hook`, and `pi-stop-hook`
-commands to prove canonical binding atomically with the hook action. An exact
-unbound receipt performs no prompt, quarantine, watcher-generation, tool, or
-Stop mutation; a later bound event promotes the running session without a Pi
-relaunch. The launch extension retains only launch-scoped sandbox and
-presentation behavior, preventing duplicate lifecycle handlers.
+commands to prove canonical binding atomically with the hook action. A
+locally persisted receipt activates only the exact Pi session ID and absolute
+session path after that bound proof. Ordinary unregistered Pi remains usable
+and mutation-free when League is unavailable; once activated, the same outage
+fails prompt, mutation, and Stop safely. A later bound event promotes the
+running session without a Pi relaunch. The launch extension retains only
+launch-scoped sandbox and presentation behavior, preventing duplicate lifecycle
+handlers.
+
+Codex and Cursor commands validate their provider-native envelopes directly;
+callers never supply a fabricated authorization or bootstrap field. Codex
+`PreToolUse` produces Codex's native permission decision, while Cursor uses
+generic `preToolUse` and produces Cursor's native permission object so file,
+task, and MCP tools cannot bypass the shared policy. All three adapters resolve
+an unbound native session to an immediate provider-native allow/no-op before
+prompt quarantine or supervisor ownership. A focused real-socket regression
+keeps an aggregate supervisor live while unbound prompt, pre-tool, and Stop
+events for all three providers complete within the hook deadline with no
+canonical-table change.
+
+`league provider-hooks upgrade` is the supported one-time release-install step
+for an existing provider profile. It derives the complete target inventory from
+the adapter registry, validates candidate bytes before mutation, writes an
+exact prepared manifest and backups, installs all targets, verifies every
+result, and rolls the set back on failure. `provider-hooks rollback` restores
+that manifest exactly. Repeating either settled operation is effect-free;
+prepared crash recovery restores the prior profile before returning. Staged
+release acceptance runs upgrade, rollback, and a repeated active upgrade in a
+disposable profile.
 
 This follow-up consumes the stable Stop response only. Issue #66 remains the
 owner of canonical Stop, supervisor, and rearm semantics; changes in that issue
@@ -1494,6 +1518,14 @@ temporary name made a stale or concurrent installer block valid publication.
 The corrected installers shell-quote native command arguments, reject malformed
 groups without mutation, compare Pi targets with a bounded read, and use a
 unique same-directory atomic-write temporary file.
+The repair pass also found these acceptance failures before publication:
+
+| Failure | Resolution |
+| --- | --- |
+| Native Codex and Cursor hook payloads lacked the fabricated bootstrap and authorization fields expected by the first draft. | Adapter-owned translators now establish provenance from the installed command, validate exact native input, and render native allow or deny output. |
+| An ordinary unbound Codex prompt reached aggregate-supervisor ownership resolution and failed with `supervisor_ownership_uncertain`. | Unbound actor resolution now returns provider-native no-op before supervision ownership; the real aggregate-socket parity test covers prompt, pre-tool, and Stop for Codex, Cursor, and Pi. |
+| A globally loaded Pi extension could consume ordinary prompts during a watcher outage. | Only a durable exact-session activation receipt selects managed fail-closed behavior; unregistered sessions remain inert. |
+| Existing installations had no atomic way to add the full Codex, Cursor, and Pi hook set. | The registry-derived provider-hook upgrade/rollback command and disposable staged-install acceptance now cover that release step. |
 The candidate changes source, synthetic installers, and immutable release
 manifest bytes only. It does not edit the active Pi profile, install a release,
 restart Herdr, or mutate live League state.

@@ -42,9 +42,6 @@ from .persistent_supervisor import (
 
 STOP_BUSY_TIMEOUT_MS = 250
 PROMPT_BUSY_TIMEOUT_MS = 1000
-PROFILE_BOOTSTRAP_MARKER = "league.provider-hook-bootstrap.v1"
-
-
 def _emit(value: Any) -> None:
     print(json.dumps(value, sort_keys=True, separators=(",", ":")))
 
@@ -92,6 +89,42 @@ def _hook_profile(command: str, operation: str) -> tuple[Any, dict[str, Any]]:
     }
     adapter = builtin_agent_adapter_registry().adapter(routes[operation][command])
     return adapter, dict(adapter.hook_profile[operation])
+
+
+def _hook_operation(command: str) -> str:
+    if command in PROMPT_HOOK_ADAPTERS:
+        return "prompt_intake"
+    if command in PRE_TOOL_HOOK_ADAPTERS:
+        return "pre_tool_authorization"
+    if command in STOP_HOOK_ADAPTERS:
+        return "stop_supervision"
+    raise StorageRefusal("hook_command_invalid", "provider hook command is not registered")
+
+
+def _canonical_hook_payload(
+    command: str,
+    payload: dict[str, Any],
+    *,
+    explicit_shotcaller: str | None = None,
+) -> dict[str, Any]:
+    if (
+        command in STOP_HOOK_ADAPTERS
+        and explicit_shotcaller
+        and not payload
+    ):
+        return {}
+    adapter, _ = _hook_profile(command, _hook_operation(command))
+    return dict(adapter.translate_hook_input(_hook_operation(command), payload))
+
+
+def _native_hook_output(
+    command: str, output: dict[str, Any], *, bound: bool
+) -> dict[str, Any]:
+    adapter, _ = _hook_profile(command, _hook_operation(command))
+    canonical = dict(output)
+    if adapter.contract.kind == "pi":
+        canonical = {"binding": "bound" if bound else "unbound", **canonical}
+    return dict(adapter.translate_hook_output(_hook_operation(command), canonical))
 
 
 def _stop_output_mode(command: str) -> str:
@@ -228,27 +261,6 @@ def _adapter_kind_for_command(command: str) -> str | None:
         if command in routes:
             return routes[command]
     return None
-
-
-def _profile_bootstrap_request(payload: dict[str, Any]) -> bool:
-    marker = payload.get("league_profile_bootstrap")
-    if marker is None:
-        return False
-    if marker != PROFILE_BOOTSTRAP_MARKER:
-        raise StorageRefusal(
-            "hook_bootstrap_invalid", "provider hook bootstrap marker is invalid"
-        )
-    return True
-
-
-def _profile_bootstrap_output(
-    payload: dict[str, Any], actor: Any, output: dict[str, Any]
-) -> dict[str, Any]:
-    if not _profile_bootstrap_request(payload):
-        return output
-    if actor is None:
-        return {"binding": "unbound"}
-    return {"binding": "bound", **output}
 
 
 def _actor(
@@ -708,18 +720,16 @@ def _pre_tool_output(
     adapter, profile = _hook_profile(command, "pre_tool_authorization")
     session = payload.get(str(profile["session_field"]))
     source = payload.get(str(profile["source_field"]))
-    authorized = payload.get("authorized")
     if (
         payload.get("hook_event_name") != profile["hook_event"]
         or not isinstance(session, str)
         or not session
         or not isinstance(source, str)
         or not source
-        or not isinstance(authorized, bool)
     ):
         raise StorageRefusal(
             "pre_tool_hook_invalid",
-            "pre-tool hook requires exact provider event, session, generation, and authorization evidence",
+            "pre-tool hook requires exact provider event, session, and generation",
         )
     event = adapter.translate_event(
         str(profile["native_event"]),
@@ -727,7 +737,7 @@ def _pre_tool_output(
     )
     decision = SharedLifecyclePolicy().decide(
         event,
-        authorized=authorized,
+        authorized=True,
         exact_binding=exact_binding,
         actor_role=actor_role,
         delegated_by_shotcaller=delegated_by_shotcaller,
@@ -816,7 +826,9 @@ def brokered_hook_context(
         )
     ):
         raise StorageRefusal("prompt_hook_invalid", "brokered hook request is invalid")
-    _profile_bootstrap_request(payload)
+    payload = _canonical_hook_payload(
+        str(command), payload, explicit_shotcaller=shotcaller
+    )
     args = argparse.Namespace(shotcaller=shotcaller, session_id=session_id)
     actor = _actor(
         store, args, payload, adapter_kind=_adapter_kind_for_command(str(command))
@@ -856,17 +868,16 @@ def handle_brokered_hook(
     callsign = resolved.callsign
     actor_role = resolved.actor_role
     scope = resolved.scope
-    if _profile_bootstrap_request(payload) and actor is None:
+    if actor is None:
         return {
-            "hook_output": {"binding": "unbound"},
+            "hook_output": _native_hook_output(command, {}, bound=False),
             "capture": None,
             "actor_agent_id": None,
         }
     if command in PRE_TOOL_HOOK_ADAPTERS:
         return {
-            "hook_output": _profile_bootstrap_output(
-                payload,
-                actor,
+            "hook_output": _native_hook_output(
+                command,
                 _pre_tool_output(
                     command,
                     payload,
@@ -880,6 +891,7 @@ def handle_brokered_hook(
                         and runtime_replacement_mutation_fenced(store, actor_id)
                     ),
                 ),
+                bound=True,
             ),
             "capture": None,
             "actor_agent_id": actor_id,
@@ -887,7 +899,7 @@ def handle_brokered_hook(
     if command in STOP_HOOK_ADAPTERS:
         if actor is None:
             return {
-                "hook_output": {},
+                "hook_output": _native_hook_output(command, {}, bound=False),
                 "capture": None,
                 "actor_agent_id": None,
             }
@@ -900,8 +912,8 @@ def handle_brokered_hook(
                 datetime.now().astimezone().isoformat(timespec="seconds"),
             )
             return {
-                "hook_output": _profile_bootstrap_output(
-                    payload, actor, _champion_stop_output(command, result)
+                "hook_output": _native_hook_output(
+                    command, _champion_stop_output(command, result), bound=True
                 ),
                 "capture": None,
                 "actor_agent_id": actor_id,
@@ -927,7 +939,7 @@ def handle_brokered_hook(
                 ),
             }
         return {
-            "hook_output": _profile_bootstrap_output(payload, actor, output),
+            "hook_output": _native_hook_output(command, output, bound=True),
             "capture": None,
             "actor_agent_id": actor_id,
             "supervision_handoff": result.get("supervision_handoff") is True,
@@ -943,7 +955,7 @@ def handle_brokered_hook(
     )
     priority_eligible = _priority_eligible_capture(actor_id, actor_role, captured)
     return {
-        "hook_output": _profile_bootstrap_output(payload, actor, {}),
+        "hook_output": _native_hook_output(command, {}, bound=True),
         "actor_agent_id": actor_id,
         "capture": {
             "prompt_id": captured.get("prompt_id"),
@@ -1342,6 +1354,10 @@ def main(argv: list[str] | None = None) -> int:
         _emit(pause_supervisor(_state_root(), args.shotcaller))
         return 0
     payload = _payload() if args.command.endswith("-hook") else {}
+    if args.command in BROKERED_HOOK_COMMANDS:
+        payload = _canonical_hook_payload(
+            args.command, payload, explicit_shotcaller=args.shotcaller
+        )
     capture_event_id = (
         _codex_prompt_invocation_id()
         if args.command in PROMPT_HOOK_ADAPTERS
@@ -1358,29 +1374,38 @@ def main(argv: list[str] | None = None) -> int:
             raise
         except SupervisorUnavailable:
             persistent_required = False
-            if args.command in STOP_HOOK_ADAPTERS:
-                try:
-                    with SQLiteStorage(
-                        _state_root(), busy_timeout_ms=STOP_BUSY_TIMEOUT_MS
-                    ) as observer:
-                        actor = _actor(
-                            observer,
-                            args,
-                            payload,
-                            adapter_kind=_adapter_kind_for_command(args.command),
-                        )
-                        if actor is None:
-                            _emit(_profile_bootstrap_output(payload, actor, {}))
-                            return 0
-                        persistent_required = bool(
-                            str(actor[2]) == "shotcaller"
-                            and observer.persistent_supervision_required(str(actor[0]))
-                        )
-                except StorageRefusal as exc:
-                    if exc.code == "busy":
-                        _emit(_busy_stop_result(args, payload))
+            try:
+                with SQLiteStorage(
+                    _state_root(),
+                    busy_timeout_ms=_hook_busy_timeout(args.command),
+                    request_wal=False,
+                ) as observer:
+                    actor = _actor(
+                        observer,
+                        args,
+                        payload,
+                        adapter_kind=_adapter_kind_for_command(args.command),
+                    )
+                    if actor is None:
+                        _emit(_native_hook_output(args.command, {}, bound=False))
                         return 0
-                    raise
+                    persistent_required = bool(
+                        args.command in STOP_HOOK_ADAPTERS
+                        and str(actor[2]) == "shotcaller"
+                        and observer.persistent_supervision_required(str(actor[0]))
+                    )
+            except StorageRefusal as exc:
+                if exc.code in {"invalid_root", "store_missing"}:
+                    _emit(_native_hook_output(args.command, {}, bound=False))
+                    return 0
+                if exc.code == "busy" and args.command in STOP_HOOK_ADAPTERS:
+                    _emit(
+                        _native_hook_output(
+                            args.command, _busy_stop_result(args, payload), bound=True
+                        )
+                    )
+                    return 0
+                raise
             if _persistent_service_lock_held(_state_root()):
                 try:
                     response = _broker_hook(
@@ -1396,10 +1421,10 @@ def main(argv: list[str] | None = None) -> int:
                     return 0
             if args.command in STOP_HOOK_ADAPTERS and persistent_required:
                 _emit(
-                    _profile_bootstrap_output(
-                        payload,
-                        actor,
+                    _native_hook_output(
+                        args.command,
                         _supervisor_unavailable_stop_output(args.command),
+                        bound=True,
                     )
                 )
                 return 0
@@ -1420,7 +1445,11 @@ def main(argv: list[str] | None = None) -> int:
     except StorageRefusal as exc:
         stack.close()
         if exc.code == "busy" and args.command in STOP_HOOK_ADAPTERS:
-            _emit(_busy_stop_result(args, payload))
+            _emit(
+                _native_hook_output(
+                    args.command, _busy_stop_result(args, payload), bound=True
+                )
+            )
             return 0
         raise
     with stack:
@@ -1434,8 +1463,8 @@ def main(argv: list[str] | None = None) -> int:
         callsign = None if actor is None else str(actor[1])
         actor_role = None if actor is None else str(actor[2])
         scope = None if actor is None else _scope(store, actor_id, callsign)
-        if _profile_bootstrap_request(payload) and actor is None:
-            _emit({"binding": "unbound"})
+        if args.command in BROKERED_HOOK_COMMANDS and actor is None:
+            _emit(_native_hook_output(args.command, {}, bound=False))
             return 0
         if args.command in PROMPT_HOOK_ADAPTERS:
             captured = _capture_prompt(
@@ -1448,13 +1477,12 @@ def main(argv: list[str] | None = None) -> int:
                 capture_event_id=capture_event_id,
             )
             _notify_direct_user_priority(store, actor_id, actor_role, captured)
-            _emit(_profile_bootstrap_output(payload, actor, {}))
+            _emit(_native_hook_output(args.command, {}, bound=True))
             return 0
         if args.command in PRE_TOOL_HOOK_ADAPTERS:
             _emit(
-                _profile_bootstrap_output(
-                    payload,
-                    actor,
+                _native_hook_output(
+                    args.command,
                     _pre_tool_output(
                         args.command,
                         payload,
@@ -1468,6 +1496,7 @@ def main(argv: list[str] | None = None) -> int:
                             and runtime_replacement_mutation_fenced(store, actor_id)
                         ),
                     ),
+                    bound=True,
                 )
             )
             return 0
@@ -1523,24 +1552,30 @@ def main(argv: list[str] | None = None) -> int:
             except StorageRefusal as exc:
                 if exc.code != "busy":
                     raise
-                _emit(_busy_stop_result(args, payload))
+                _emit(
+                    _native_hook_output(
+                        args.command, _busy_stop_result(args, payload), bound=True
+                    )
+                )
                 return 0
             if actor_role == "champion":
                 _emit(
-                    _profile_bootstrap_output(
-                        payload, actor, _champion_stop_output(args.command, result)
+                    _native_hook_output(
+                        args.command,
+                        _champion_stop_output(args.command, result),
+                        bound=True,
                     )
                 )
                 return 0
             blocked = result["decision"] == "block"
             if _stop_output_mode(args.command) != "decision":
                 _emit(
-                    _profile_bootstrap_output(
-                        payload,
-                        actor,
+                    _native_hook_output(
+                        args.command,
                         {"followup_message": "League has unresolved obligations."}
                         if blocked
                         else {},
+                        bound=True,
                     )
                 )
             else:
@@ -1550,12 +1585,12 @@ def main(argv: list[str] | None = None) -> int:
                     tuple(result.get("unresolved_summaries", ())),
                 )
                 _emit(
-                    _profile_bootstrap_output(
-                        payload,
-                        actor,
+                    _native_hook_output(
+                        args.command,
                         {"decision": "block", "reason": reason}
                         if blocked
                         else {},
+                        bound=True,
                     )
                 )
             return 0

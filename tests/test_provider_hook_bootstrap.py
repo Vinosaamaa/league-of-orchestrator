@@ -18,9 +18,14 @@ sys.path[:0] = [str(ROOT / "src")]
 from league.acceptance import _release_files  # noqa: E402
 from league.agent_adapters import (  # noqa: E402
     AgentAdapterRegistry,
+    builtin_agent_adapter_kinds,
     builtin_agent_adapter_registry,
 )
-from league.provider_hooks import install_provider_hook_bootstrap  # noqa: E402
+from league.provider_hooks import (  # noqa: E402
+    install_provider_hook_bootstrap,
+    rollback_provider_hooks,
+    upgrade_provider_hooks,
+)
 from league.storage import StorageRefusal  # noqa: E402
 
 
@@ -39,7 +44,7 @@ def test_registry_declares_provider_hook_bootstrap_parity() -> None:
         adapter.contract.kind: adapter.hook_bootstrap_profile
         for adapter in registry.adapters()
     }
-    assert set(profiles) == {"codex", "cursor", "pi"}
+    assert set(profiles) == set(builtin_agent_adapter_kinds())
     for kind, profile in profiles.items():
         assert profile["schema"] == "league.provider-hook-bootstrap.v1"
         assert profile["profile_loaded"] is True
@@ -56,6 +61,59 @@ def test_registry_declares_provider_hook_bootstrap_parity() -> None:
     assert profiles["pi"]["target_relative"] == ".pi/agent/extensions/league-hooks.mjs"
     assert profiles["pi"]["activation"] == "exact_canonical_binding"
     assert profiles["pi"]["launch_enforcement"] == "separate"
+    for adapter in registry.adapters():
+        assert callable(adapter.hook_input_translator)
+        assert callable(adapter.hook_output_translator)
+
+
+def test_native_pre_tool_translation_has_provider_refusal_schemas() -> None:
+    registry = builtin_agent_adapter_registry()
+    codex = registry.adapter("codex")
+    codex_input = codex.translate_hook_input(
+        "pre_tool_authorization",
+        {
+            "hook_event_name": "PreToolUse",
+            "session_id": "session-native-codex",
+            "turn_id": "turn-native-codex",
+            "tool_name": "Write",
+            "tool_use_id": "tool-native-codex",
+            "tool_input": {"path": "synthetic.txt"},
+        },
+    )
+    assert "authorized" not in codex_input
+    assert codex.translate_hook_output(
+        "pre_tool_authorization",
+        {"decision": "refuse", "reason_code": "shotcaller_delegation_unverified"},
+    ) == {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": "shotcaller_delegation_unverified",
+        }
+    }
+
+    cursor = registry.adapter("cursor")
+    for tool_name in ("Write", "Delete", "Task", "mcp__synthetic__call"):
+        translated = cursor.translate_hook_input(
+            "pre_tool_authorization",
+            {
+                "hook_event_name": "preToolUse",
+                "conversation_id": "session-native-cursor",
+                "generation_id": "generation-native-cursor",
+                "tool_name": tool_name,
+                "tool_use_id": f"tool-native-{tool_name}",
+                "tool_input": {},
+                "cwd": "/synthetic/worktree",
+            },
+        )
+        assert translated["tool_name"] == tool_name and "authorized" not in translated
+    assert cursor.translate_hook_output(
+        "pre_tool_authorization",
+        {"decision": "refuse", "reason_code": "runtime_replacement_fenced"},
+    ) == {
+        "permission": "deny",
+        "user_message": "runtime_replacement_fenced",
+    }
 
 
 def test_installs_are_idempotent_and_preserve_unrelated_handlers(root: Path) -> None:
@@ -111,6 +169,12 @@ def test_installs_are_idempotent_and_preserve_unrelated_handlers(root: Path) -> 
     ]
     assert cursor_commands.count("keep-cursor") == 1
     assert len([value for value in cursor_commands if str(watcher) in value]) == 3
+    assert cursor["hooks"]["preToolUse"] == [
+        {
+            "command": shlex.join((str(watcher), "cursor-pre-tool-hook")),
+            "failClosed": True,
+        }
+    ]
     for kind, commands in (("codex", codex_commands), ("cursor", cursor_commands)):
         expected = {
             shlex.join((str(watcher), str(profile["command"])))
@@ -197,12 +261,102 @@ def test_unsupported_adapter_refuses_without_target_mutation(root: Path) -> None
     )
 
 
-def run_pi_scenario(scenario: str) -> dict[str, object]:
+def _hook_targets(root: Path) -> dict[str, Path]:
+    return {
+        "codex": root / ".codex/hooks.json",
+        "cursor": root / ".cursor/hooks.json",
+        "pi": root / ".pi/agent/extensions/league-hooks.mjs",
+    }
+
+
+def test_registry_upgrade_is_idempotent_and_rollback_capable(root: Path) -> None:
+    profile = root / "profile"
+    profile.mkdir(parents=True)
+    watcher = root / "bin/agent-watcher"
+    watcher.parent.mkdir(parents=True)
+    watcher.write_text("synthetic watcher\n", encoding="utf-8")
+    targets = _hook_targets(profile)
+    targets["codex"].parent.mkdir(parents=True)
+    legacy = b'{"hooks":{"Stop":[{"hooks":[{"command":"legacy-stop","type":"command"}]}]}}\n'
+    targets["codex"].write_bytes(legacy)
+    manifest = root / "provider-hook-upgrade.json"
+
+    first = upgrade_provider_hooks(
+        builtin_agent_adapter_registry(),
+        source_root=ROOT,
+        profile_root=profile,
+        stable_watcher=watcher,
+        manifest_path=manifest,
+    )
+    assert first["state"] == "active" and first["adapter_count"] == 3
+    installed = {kind: target.read_bytes() for kind, target in targets.items()}
+    second = upgrade_provider_hooks(
+        builtin_agent_adapter_registry(),
+        source_root=ROOT,
+        profile_root=profile,
+        stable_watcher=watcher,
+        manifest_path=manifest,
+    )
+    assert second["state"] == "active" and second["idempotent"] is True
+    assert {kind: target.read_bytes() for kind, target in targets.items()} == installed
+
+    rolled_back = rollback_provider_hooks(
+        source_root=ROOT,
+        profile_root=profile,
+        stable_watcher=watcher,
+        manifest_path=manifest,
+    )
+    assert rolled_back["state"] == "rolled_back"
+    assert targets["codex"].read_bytes() == legacy
+    assert not targets["cursor"].exists() and not targets["pi"].exists()
+    repeated = rollback_provider_hooks(
+        source_root=ROOT,
+        profile_root=profile,
+        stable_watcher=watcher,
+        manifest_path=manifest,
+    )
+    assert repeated["idempotent"] is True
+
+
+def test_registry_upgrade_rolls_back_partial_failure(root: Path) -> None:
+    profile = root / "profile"
+    profile.mkdir(parents=True)
+    watcher = root / "bin/agent-watcher"
+    watcher.parent.mkdir(parents=True)
+    watcher.write_text("synthetic watcher\n", encoding="utf-8")
+    targets = _hook_targets(profile)
+    targets["cursor"].parent.mkdir(parents=True)
+    legacy = b'{"version":1,"hooks":{"sessionStart":[{"command":"keep"}]}}\n'
+    targets["cursor"].write_bytes(legacy)
+    manifest = root / "provider-hook-upgrade.json"
+
+    def fail(label: str) -> None:
+        if label == "provider_hook_upgraded:cursor":
+            raise RuntimeError("synthetic provider hook upgrade crash")
+
+    try:
+        upgrade_provider_hooks(
+            builtin_agent_adapter_registry(),
+            source_root=ROOT,
+            profile_root=profile,
+            stable_watcher=watcher,
+            manifest_path=manifest,
+            fault=fail,
+        )
+    except RuntimeError as exc:
+        assert "synthetic provider hook upgrade crash" in str(exc)
+    else:
+        raise AssertionError("fault-injected provider hook upgrade unexpectedly succeeded")
+    assert not targets["codex"].exists() and not targets["pi"].exists()
+    assert targets["cursor"].read_bytes() == legacy
+    receipt = json.loads(manifest.read_text(encoding="utf-8"))
+    assert receipt["state"] == "rolled_back"
+def run_pi_scenario(scenario: str, extension: Path | None = None) -> dict[str, object]:
     completed = subprocess.run(
         [
             "node",
             str(ROOT / "tests/fixtures/pi_hook_bootstrap_runner.mjs"),
-            str(ROOT / "integrations/pi/league-hooks.mjs"),
+            str(extension or ROOT / "integrations/pi/league-hooks.mjs"),
             scenario,
         ],
         check=False,
@@ -252,6 +406,131 @@ def test_league_launched_and_restored_pi_provider_parity() -> None:
             assert result["notifications"] == [] and result["messages"] == []
 
 
+def test_pi_outage_is_inert_when_unbound_and_closed_when_managed() -> None:
+    ordinary = run_pi_scenario("outage-ordinary")
+    assert ordinary["firstInput"] == {"action": "continue"}
+    assert ordinary["tool"] is None and ordinary["settled"] is None
+    assert ordinary["notifications"] == [] and ordinary["messages"] == []
+
+    managed = run_pi_scenario("outage-managed")
+    assert managed["firstInput"] == {"action": "handled"}
+    assert managed["tool"] == {
+        "block": True,
+        "reason": "League prompt binding is unavailable",
+        "terminate": True,
+    }
+    assert len(managed["notifications"]) == 1
+    assert len(managed["messages"]) == 1
+
+    activation_failure = run_pi_scenario("activation-write-failure")
+    assert activation_failure["firstInput"] == {"action": "handled"}
+    assert activation_failure["tool"] == {
+        "block": True,
+        "reason": "League prompt binding is unavailable",
+        "terminate": True,
+    }
+    assert len(activation_failure["notifications"]) == 1
+    assert len(activation_failure["messages"]) == 1
+
+
+def test_disposable_installed_profiles_accept_exact_native_payloads(root: Path) -> None:
+    profile = root / "profile"
+    profile.mkdir(parents=True)
+    watcher = ROOT / "bin/agent-watcher"
+    for kind, target in _hook_targets(profile).items():
+        install_provider_hook_bootstrap(
+            builtin_agent_adapter_registry(),
+            kind,
+            source_root=ROOT,
+            target=target,
+            stable_watcher=watcher,
+        )
+    installed_pi = run_pi_scenario("launched-codex", _hook_targets(profile)["pi"])
+    assert [item["command"] for item in installed_pi["calls"]] == [
+        "pi-input-hook", "pi-pre-tool-hook", "pi-stop-hook"
+    ]
+
+    env = {
+        **dict(__import__("os").environ),
+        "LEAGUE_STATE_ROOT": str(root / "absent-state"),
+        "PYTHONDONTWRITEBYTECODE": "1",
+    }
+    native = {
+        "codex": {
+            "command": "codex-pre-tool-hook",
+            "payload": {
+                "hook_event_name": "PreToolUse", "session_id": "unbound-codex",
+                "turn_id": "turn-unbound", "tool_name": "Write",
+                "tool_use_id": "tool-unbound", "tool_input": {"path": "synthetic.txt"},
+            },
+            "expected": {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow"}},
+        },
+        "cursor": {
+            "command": "cursor-pre-tool-hook",
+            "payload": {
+                "hook_event_name": "preToolUse", "conversation_id": "unbound-cursor",
+                "generation_id": "generation-unbound", "tool_name": "Write",
+                "tool_use_id": "tool-unbound", "tool_input": {"path": "synthetic.txt"},
+                "cwd": str(root.resolve()),
+            },
+            "expected": {"permission": "allow"},
+        },
+    }
+    for case in native.values():
+        completed = subprocess.run(
+            [str(watcher), str(case["command"])],
+            input=json.dumps(case["payload"]),
+            text=True,
+            capture_output=True,
+            check=False,
+            env=env,
+        )
+        assert completed.returncode == 0, completed.stderr
+        assert json.loads(completed.stdout) == case["expected"]
+    assert not (root / "absent-state").exists()
+
+
+def test_installed_pi_profile_restart_preserves_activation_and_exactly_once(root: Path) -> None:
+    profile = root / "profile"
+    profile.mkdir(parents=True)
+    watcher = root / "bin/agent-watcher"
+    watcher.parent.mkdir(parents=True)
+    watcher.write_text("synthetic watcher\n", encoding="utf-8")
+    target = _hook_targets(profile)["pi"]
+    install_provider_hook_bootstrap(
+        builtin_agent_adapter_registry(),
+        "pi",
+        source_root=ROOT,
+        target=target,
+        stable_watcher=watcher,
+    )
+    completed = subprocess.run(
+        [
+            "node",
+            str(ROOT / "tests/fixtures/pi_installed_profile_e2e.mjs"),
+            str(target),
+            str(profile),
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    receipt = json.loads(completed.stdout)
+    assert receipt["launchInput"] == {"action": "continue"}
+    assert receipt["launchTool"] is None
+    assert receipt["restartInput"] == {"action": "handled"}
+    assert len(receipt["restartNotifications"]) == 1
+    assert receipt["resumeInput"] == {"action": "continue"}
+    assert receipt["resumeTool"] is None
+    assert receipt["promptDeliveries"] == 1
+    assert receipt["toolAuthorizations"] == 2
+    assert receipt["stopCalls"] == 2
+    assert len(receipt["stopContinuations"]) == 1
+    activation = list((profile / "league-bindings").glob("*.json"))
+    assert len(activation) == 1
+
+
 def test_release_manifest_and_launch_extension_separation() -> None:
     manifest = {path.relative_to(ROOT) for path in _release_files(ROOT)}
     assert Path("integrations/pi/league-hooks.mjs") in manifest
@@ -270,9 +549,17 @@ def main() -> None:
         test_installs_are_idempotent_and_preserve_unrelated_handlers(root / "install")
         test_installers_refuse_malformed_groups_and_bound_existing_reads(root / "fail-closed")
         test_unsupported_adapter_refuses_without_target_mutation(root / "unsupported")
+        test_registry_upgrade_is_idempotent_and_rollback_capable(root / "upgrade")
+        test_registry_upgrade_rolls_back_partial_failure(root / "upgrade-failure")
+        test_disposable_installed_profiles_accept_exact_native_payloads(root / "native")
+        test_installed_pi_profile_restart_preserves_activation_and_exactly_once(
+            root / "installed-pi"
+        )
     test_registry_declares_provider_hook_bootstrap_parity()
+    test_native_pre_tool_translation_has_provider_refusal_schemas()
     test_unbound_pi_is_inert_and_promotes_without_relaunch()
     test_league_launched_and_restored_pi_provider_parity()
+    test_pi_outage_is_inert_when_unbound_and_closed_when_managed()
     test_release_manifest_and_launch_extension_separation()
     print("PASS: provider hook bootstrap declaration, install, activation, and parity")
 

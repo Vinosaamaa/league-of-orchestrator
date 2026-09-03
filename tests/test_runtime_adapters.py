@@ -271,7 +271,7 @@ def test_parameterized_provider_lifecycle_event_parity() -> None:
     pre_tool_cases = (
         ("codex", "PreToolUse", {"session_id": "session:codex", "turn_id": "turn:2"}),
         ("pi", "tool_call", {"session_path": "/tmp/session.jsonl", "input_id": "input:2"}),
-        ("cursor", "beforeShellExecution", {"conversation_id": "conversation:1", "generation_id": "generation:2"}),
+        ("cursor", "preToolUse", {"conversation_id": "conversation:1", "generation_id": "generation:2"}),
     )
     for kind, native_event, payload in pre_tool_cases:
         event = registry.adapter(kind).translate_event(native_event, payload)

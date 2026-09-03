@@ -118,9 +118,12 @@ def _stop_payload(
             "hook_event_name": "stop",
             "conversation_id": session_ref,
             "generation_id": generation,
+            "status": "completed",
+            "loop_count": 1,
         }
     return {
         "hook_event_name": "PiStop",
+        "session_id": f"pi:{generation}",
         "session_path": session_ref,
         "input_id": generation,
     }
@@ -160,13 +163,19 @@ def test_unbound_provider_stops_allow_without_mutation_when_broker_is_absent(
         _, state, _ = seeded_state(root, f"unbound-stop-{adapter_kind}")
         env = _environment(root / f"unbound-stop-{adapter_kind}", state)
         before = _stop_mutation_snapshot(state)
+        session_ref = (
+            str((root / f"unbound-{adapter_kind}.jsonl").resolve())
+            if adapter_kind == "pi"
+            else f"unbound:{adapter_kind}:session"
+        )
         payload = _stop_payload(
             adapter_kind,
-            f"unbound:{adapter_kind}:session",
+            session_ref,
             f"unbound:{adapter_kind}:generation",
         )
-        assert _watcher(env, command, payload=payload) == {}
-        assert _watcher(env, command, payload=payload) == {}
+        expected = {"binding": "unbound"} if adapter_kind == "pi" else {}
+        assert _watcher(env, command, payload=payload) == expected
+        assert _watcher(env, command, payload=payload) == expected
         assert _stop_mutation_snapshot(state) == before
 
 
@@ -180,7 +189,11 @@ def test_bound_shotcallers_fail_closed_and_champion_gate_survives_absent_broker(
     ):
         _, state, _ = seeded_state(root, f"bound-stop-{adapter_kind}")
         env = _environment(root / f"bound-stop-{adapter_kind}", state)
-        session_ref = f"bound:{adapter_kind}:shotcaller"
+        session_ref = (
+            str((root / f"bound-{adapter_kind}-shotcaller.jsonl").resolve())
+            if adapter_kind == "pi"
+            else f"bound:{adapter_kind}:shotcaller"
+        )
         _register_garen_runtime(
             state,
             adapter_kind,
@@ -237,7 +250,11 @@ def test_bound_shotcallers_fail_closed_and_champion_gate_survives_absent_broker(
     ):
         _, state, _ = seeded_state(root, f"bound-stop-champion-{adapter_kind}")
         env = _environment(root / f"bound-stop-champion-{adapter_kind}", state)
-        champion_session = f"bound:{adapter_kind}:champion"
+        champion_session = (
+            str((root / f"bound-{adapter_kind}-champion.jsonl").resolve())
+            if adapter_kind == "pi"
+            else f"bound:{adapter_kind}:champion"
+        )
         _register_champion_runtime(
             state,
             f"absent-broker-{adapter_kind}",
@@ -248,7 +265,9 @@ def test_bound_shotcallers_fail_closed_and_champion_gate_survives_absent_broker(
             adapter_kind, champion_session, "champion:generation"
         )
         assert _watcher(env, command, payload=payload)
-        assert _watcher(env, command, payload=payload) == {}
+        assert _watcher(env, command, payload=payload) == (
+            {"binding": "bound"} if adapter_kind == "pi" else {}
+        )
         with SQLiteStorage(state) as store:
             owner_scope = store.resolve_supervisor_scope(SHOTCALLER_ID)
             store.rearm_wait(
@@ -261,7 +280,9 @@ def test_bound_shotcallers_fail_closed_and_champion_gate_survives_absent_broker(
             adapter_kind, champion_session, "champion:generation:rearmed"
         )
         assert _watcher(env, command, payload=rearmed)
-        assert _watcher(env, command, payload=rearmed) == {}
+        assert _watcher(env, command, payload=rearmed) == (
+            {"binding": "bound"} if adapter_kind == "pi" else {}
+        )
 
 
 def test_stop_reason_uses_resolved_callsign_not_provider_turn_identity() -> None:
@@ -685,7 +706,7 @@ def test_provider_prompt_capture_identity_contracts(root: Path) -> None:
             "input_id",
             {
                 "session_id": "33333333-3333-4333-8333-333333333333",
-                "session_path": SHOTCALLER_ID,
+                "session_path": str((root / "pi-capture.jsonl").resolve()),
                 "input_id": "input:pi-capture",
                 "hook_event_name": "PiInput",
                 "prompt": "Complete local Pi prompt.\nSecond line.",
@@ -695,14 +716,26 @@ def test_provider_prompt_capture_identity_contracts(root: Path) -> None:
         _, state, _ = seeded_state(root, name)
         env = _environment(root / name, state)
         adapter_kind = command.split("-", 1)[0]
+        session_ref = (
+            str(payload["session_path"])
+            if adapter_kind == "pi"
+            else SHOTCALLER_ID
+        )
         _register_garen_runtime(
             state,
             name,
-            session_ref=SHOTCALLER_ID,
+            session_ref=session_ref,
             harness_kind=f"{adapter_kind}-thread",
         )
-        assert _watcher(env, command, payload=payload) == {}
-        assert _watcher(env, command, payload=payload) == {}
+        expected = (
+            {"continue": True}
+            if adapter_kind == "cursor"
+            else {"binding": "bound"}
+            if adapter_kind == "pi"
+            else {}
+        )
+        assert _watcher(env, command, payload=payload) == expected
+        assert _watcher(env, command, payload=payload) == expected
         _league(
             state,
             "storage",
@@ -722,7 +755,7 @@ def test_provider_prompt_capture_identity_contracts(root: Path) -> None:
             row
             for row in exported["tables"]["prompts"]
             if row["adapter_kind"] == adapter_kind
-            and row["session_ref"] == SHOTCALLER_ID
+            and row["session_ref"] == session_ref
             and row["prompt_id"] in payload_rows
         ]
         expected_count = 2 if adapter_kind == "codex" else 1
@@ -815,6 +848,8 @@ def test_provider_pre_tool_policy_and_pi_stop_are_shared_and_fail_closed(
             {
                 "session_id": "33333333-3333-4333-8333-333333333333",
                 "turn_id": "turn:provider-hooks", "hook_event_name": "PreToolUse",
+                "tool_name": "Write", "tool_use_id": "tool:codex:write",
+                "tool_input": {"path": "synthetic.txt"},
             },
             {
                 "session_id": "33333333-3333-4333-8333-333333333333",
@@ -828,21 +863,28 @@ def test_provider_pre_tool_policy_and_pi_stop_are_shared_and_fail_closed(
             {
                 "conversation_id": "44444444-4444-4444-8444-444444444444",
                 "generation_id": "generation:provider-hooks",
-                "hook_event_name": "beforeShellExecution",
+                "hook_event_name": "preToolUse", "tool_name": "Write",
+                "tool_use_id": "tool:cursor:write",
+                "tool_input": {"path": "synthetic.txt"},
+                "cwd": str(root.resolve()),
             },
             {
                 "conversation_id": "44444444-4444-4444-8444-444444444444",
                 "generation_id": "generation:provider-hooks", "hook_event_name": "stop",
+                "status": "completed", "loop_count": 1,
             },
         ),
         (
             "pi", "pi-pre-tool-hook", "pi-stop-hook",
             str(root / "provider-hooks-pi" / "session.jsonl"),
             {
+                "session_id": "session:provider-hooks-pi",
                 "session_path": str(root / "provider-hooks-pi" / "session.jsonl"),
                 "input_id": "input:provider-hooks", "hook_event_name": "PiToolCall",
+                "tool_name": "write", "tool_input": {"path": "synthetic.txt"},
             },
             {
+                "session_id": "session:provider-hooks-pi",
                 "session_path": str(root / "provider-hooks-pi" / "session.jsonl"),
                 "input_id": "input:provider-hooks", "hook_event_name": "PiStop",
             },
@@ -855,14 +897,23 @@ def test_provider_pre_tool_policy_and_pi_stop_are_shared_and_fail_closed(
         _register_garen_runtime(
             state, label, session_ref=session_ref, harness_kind=f"{kind}-thread"
         )
-        accepted = _watcher(
-            env, pretool_command, payload={**pretool, "authorized": True}
+        accepted = _watcher(env, pretool_command, payload=pretool)
+        assert accepted == (
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "allow",
+                }
+            }
+            if kind == "codex"
+            else {"permission": "allow"}
+            if kind == "cursor"
+            else {
+                "binding": "bound",
+                "decision": "accept",
+                "reason_code": "policy_accepted",
+            }
         )
-        refused = _watcher(
-            env, pretool_command, payload={**pretool, "authorized": False}
-        )
-        assert accepted == {"decision": "accept", "reason_code": "policy_accepted"}
-        assert refused == {"decision": "refuse", "reason_code": "tool_not_authorized"}
         stopped = _watcher(env, stop_command, payload=stop)
         if kind == "codex":
             assert stopped["decision"] == "block"
@@ -1088,7 +1139,7 @@ def test_queued_prompts_reusing_turn_id_are_unique_and_conflicts_quarantine(
     assert garen_runtime != champion_runtime
 
 
-def test_missing_identity_quarantines_then_binds_and_triages(root: Path) -> None:
+def test_missing_identity_is_inert_then_exact_binding_captures(root: Path) -> None:
     _, state, _ = seeded_state(root, "missing-identity")
     env = _environment(root / "missing-identity", state)
     session = "session:missing-identity"
@@ -1096,7 +1147,7 @@ def test_missing_identity_quarantines_then_binds_and_triages(root: Path) -> None
         "session_id": session,
         "turn_id": "turn:missing-identity",
         "hook_event_name": "UserPromptSubmit",
-        "prompt": "Complete prompt retained before runtime identity exists.",
+        "prompt": "Complete prompt submitted after runtime identity exists.",
     }
     started = time.monotonic()
     assert _watcher(env, "codex-user-prompt-hook", payload=payload) == {}
@@ -1118,38 +1169,29 @@ def test_missing_identity_quarantines_then_binds_and_triages(root: Path) -> None
         and row["session_ref"] == session
         and row["body"] == payload["prompt"]
     ]
-    assert len(quarantined) == 1
-    row = quarantined[0]
-    encoded = payload["prompt"].encode("utf-8")
-    assert row["state"] == "quarantined"
-    assert row["reason"] == "runtime_unverified"
-    assert row["body"] == payload["prompt"]
-    assert row["body_hash"] == hashlib.sha256(encoded).hexdigest()
-    assert row["byte_count"] == len(encoded)
+    assert quarantined == []
 
-    runtime_id = _register_garen_runtime(
+    _register_garen_runtime(
         state, "later-binding", session_ref=session
     )
-    bound = _league(
-        state,
-        "request",
-        "bind-prompt",
-        "--prompt-id",
-        row["prompt_id"],
-        "--intake-actor-id",
-        SHOTCALLER_ID,
-        "--runtime-instance-id",
-        runtime_id,
-        "--at",
-        AT2,
-    )["result"]
-    assert bound["triage_state"] == "untriaged" and not bound["idempotent"]
+    assert _watcher(env, "codex-user-prompt-hook", payload=payload) == {}
+    with SQLiteStorage(state, request_wal=False) as store:
+        rows = store.connection.execute(
+            """
+            SELECT p.prompt_id,p.triage_state
+              FROM prompts p JOIN prompt_payloads pp ON pp.prompt_id=p.prompt_id
+             WHERE p.adapter_kind='codex' AND p.session_ref=? AND pp.body=?
+            """,
+            (session, payload["prompt"]),
+        ).fetchall()
+    assert len(rows) == 1 and rows[0]["triage_state"] == "untriaged"
+    prompt_id = str(rows[0]["prompt_id"])
     triaged = _league(
         state,
         "request",
         "triage",
         "--prompt-id",
-        row["prompt_id"],
+        prompt_id,
         "--items-json",
         json.dumps(
             [{
@@ -1620,7 +1662,7 @@ def test_codex_stop_rejects_incomplete_real_payload(root: Path) -> None:
         check=False,
     )
     assert result.returncode == 2
-    assert "stop_hook_invalid" in result.stderr
+    assert "hook_native_input_invalid" in result.stderr
 
 
 def test_material_delivery_watcher_direct_dedup_and_unavailable(root: Path) -> None:
@@ -1864,10 +1906,9 @@ def test_watcher_readiness_timeout_terminates_exact_supervisor(root: Path) -> No
     assert waiter.poll() is not None
 
 
-def test_profile_bootstrap_is_inert_until_exact_binding_then_activates(
+def test_native_provider_hooks_are_inert_until_exact_binding_then_activate(
     root: Path,
 ) -> None:
-    marker = "league.provider-hook-bootstrap.v1"
     cases = (
         (
             "codex",
@@ -1894,7 +1935,7 @@ def test_profile_bootstrap_is_inert_until_exact_binding_then_activates(
                 "generation_id": "generation:bootstrap",
             },
             "beforeSubmitPrompt",
-            "beforeShellExecution",
+            "preToolUse",
             "stop",
         ),
         (
@@ -1928,26 +1969,57 @@ def test_profile_bootstrap_is_inert_until_exact_binding_then_activates(
                 )
 
         before = mutation_snapshot()
-        common = {**identity, "league_profile_bootstrap": marker}
+        common = dict(identity)
+        if kind == "codex":
+            pretool_detail = {
+                "tool_name": "Write",
+                "tool_use_id": "tool:codex:bootstrap",
+                "tool_input": {"path": "synthetic.txt"},
+            }
+            stop_detail = {"stop_hook_active": True}
+            prompt_allow: dict[str, object] = {}
+            pretool_allow = {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "allow",
+                }
+            }
+            stop_allow: dict[str, object] = {}
+        elif kind == "cursor":
+            pretool_detail = {
+                "tool_name": "Write",
+                "tool_use_id": "tool:cursor:bootstrap",
+                "tool_input": {"path": "synthetic.txt"},
+                "cwd": str(root.resolve()),
+            }
+            stop_detail = {"status": "completed", "loop_count": 1}
+            prompt_allow = {"continue": True}
+            pretool_allow = {"permission": "allow"}
+            stop_allow = {}
+        else:
+            pretool_detail = {
+                "tool_name": "write",
+                "tool_input": {"path": "synthetic.txt"},
+            }
+            stop_detail = {}
+            prompt_allow = {"binding": "unbound"}
+            pretool_allow = {"binding": "unbound"}
+            stop_allow = {"binding": "unbound"}
         assert _watcher(
             env,
             prompt_command,
             payload={**common, "hook_event_name": prompt_event, "prompt": "ordinary unbound prompt"},
-        ) == {"binding": "unbound"}
+        ) == prompt_allow
         assert _watcher(
             env,
             pretool_command,
-            payload={**common, "hook_event_name": pretool_event, "authorized": True},
-        ) == {"binding": "unbound"}
+            payload={**common, "hook_event_name": pretool_event, **pretool_detail},
+        ) == pretool_allow
         assert _watcher(
             env,
             stop_command,
-            payload={
-                **common,
-                "hook_event_name": stop_event,
-                **({"stop_hook_active": True} if kind == "codex" else {}),
-            },
-        ) == {"binding": "unbound"}
+            payload={**common, "hook_event_name": stop_event, **stop_detail},
+        ) == stop_allow
         assert mutation_snapshot() == before
 
         _register_garen_runtime(
@@ -1961,41 +2033,45 @@ def test_profile_bootstrap_is_inert_until_exact_binding_then_activates(
             prompt_command,
             payload={**common, "hook_event_name": prompt_event, "prompt": "promoted bound prompt"},
         )
-        assert captured == {"binding": "bound"}
+        assert captured == (
+            {"binding": "bound"}
+            if kind == "pi"
+            else {"continue": True}
+            if kind == "cursor"
+            else {}
+        )
         authorized = _watcher(
             env,
             pretool_command,
-            payload={**common, "hook_event_name": pretool_event, "authorized": True},
+            payload={**common, "hook_event_name": pretool_event, **pretool_detail},
         )
-        assert authorized == {
-            "binding": "bound",
-            "decision": "accept",
-            "reason_code": "policy_accepted",
-        }
+        assert authorized == (
+            {
+                "binding": "bound",
+                "decision": "accept",
+                "reason_code": "policy_accepted",
+            }
+            if kind == "pi"
+            else pretool_allow
+        )
         stopped = _watcher(
             env,
             stop_command,
-            payload={
-                **common,
-                "hook_event_name": stop_event,
-                **({"stop_hook_active": True} if kind == "codex" else {}),
-            },
+            payload={**common, "hook_event_name": stop_event, **stop_detail},
         )
-        assert stopped["binding"] == "bound"
+        if kind == "pi":
+            assert stopped["binding"] == "bound"
 
-        invalid = {**common, "league_profile_bootstrap": "wrong"}
         result = subprocess.run(
-            [env["TEST_INSTALLED_WATCHER"], prompt_command],
-            input=json.dumps(
-                {**invalid, "hook_event_name": prompt_event, "prompt": "invalid marker"}
-            ),
+            [env["TEST_INSTALLED_WATCHER"], pretool_command],
+            input=json.dumps({**common, "hook_event_name": pretool_event}),
             text=True,
             capture_output=True,
             env=env,
             check=False,
         )
         assert result.returncode == 2
-        assert "hook_bootstrap_invalid" in result.stderr
+        assert "hook_native_input_invalid" in result.stderr
 
 
 def main() -> None:
@@ -2012,7 +2088,7 @@ def main() -> None:
         test_provider_prompt_capture_identity_contracts(root)
         test_provider_pre_tool_policy_and_pi_stop_are_shared_and_fail_closed(root)
         test_queued_prompts_reusing_turn_id_are_unique_and_conflicts_quarantine(root)
-        test_missing_identity_quarantines_then_binds_and_triages(root)
+        test_missing_identity_is_inert_then_exact_binding_captures(root)
         test_unverified_champion_prompt_quarantines_without_shotcaller_wake(root)
         test_verified_champion_prompt_captures_without_shotcaller_wake(root)
         test_verified_runtime_session_routes_stop_and_pointer_state(root)
@@ -2023,7 +2099,7 @@ def main() -> None:
         test_material_delivery_watcher_direct_dedup_and_unavailable(root)
         test_task_transition_cli_dispatches_exact_watcher_receipt(root)
         test_watcher_readiness_timeout_terminates_exact_supervisor(root)
-        test_profile_bootstrap_is_inert_until_exact_binding_then_activates(root)
+        test_native_provider_hooks_are_inert_until_exact_binding_then_activate(root)
     print("PASS: installed SQLite Stop/supervise plus watcher/direct exact-once delivery and pending fallback")
 
 

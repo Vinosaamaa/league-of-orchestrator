@@ -204,6 +204,8 @@ class DeclaredAgentAdapter:
     hook_profile: Mapping[str, Mapping[str, Any]]
     hook_bootstrap_profile: Mapping[str, Any]
     hook_bootstrap_installer: Any
+    hook_input_translator: Any
+    hook_output_translator: Any
     multiplexer_requirements: Mapping[str, frozenset[str]]
     visible_launch_factory: Any
     delivery_handler: Any
@@ -232,6 +234,38 @@ class DeclaredAgentAdapter:
             target=target,
             stable_watcher=stable_watcher,
         )
+
+    def translate_hook_input(
+        self, operation: str, payload: Mapping[str, Any]
+    ) -> Mapping[str, Any]:
+        if not callable(self.hook_input_translator):
+            raise StorageRefusal(
+                "hook_translation_unsupported",
+                "agent adapter has no native hook input translator",
+            )
+        translated = self.hook_input_translator(operation, payload)
+        if not isinstance(translated, Mapping):
+            raise StorageRefusal(
+                "hook_translation_invalid",
+                "agent adapter returned a malformed canonical hook envelope",
+            )
+        return dict(translated)
+
+    def translate_hook_output(
+        self, operation: str, output: Mapping[str, Any]
+    ) -> Mapping[str, Any]:
+        if not callable(self.hook_output_translator):
+            raise StorageRefusal(
+                "hook_translation_unsupported",
+                "agent adapter has no native hook output translator",
+            )
+        translated = self.hook_output_translator(operation, output)
+        if not isinstance(translated, Mapping):
+            raise StorageRefusal(
+                "hook_translation_invalid",
+                "agent adapter returned a malformed native hook response",
+            )
+        return dict(translated)
 
     def accepts_provider(self, provider_kind: str) -> bool:
         return self.normalize_provider(provider_kind) in self.provider_kinds

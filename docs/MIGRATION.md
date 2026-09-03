@@ -36,8 +36,11 @@ A later issue may transfer installation ownership only after it:
 6. runs safe Herdr and tmux smoke checks where required; and
 7. prints and tests the exact rollback procedure.
 
-Until then, rollback and installation remain the toolkit's responsibility. This
-repository supplies no command that writes global state.
+Release cutover remains separately authorized. The repository now supplies the
+explicit `league provider-hooks upgrade` and `provider-hooks rollback` commands
+for an authorized source-managed release to update one caller-selected provider
+profile with verified backups and an exact manifest. No checkout, test, or
+ordinary League state command invokes them implicitly.
 
 ## Repository-local import contract
 
@@ -77,8 +80,10 @@ is normative; migration receipts report the loaded-runtime decision instead of
 restating a second policy here. Issue #23 must repeat that gate against exact
 staged/released bytes and owns the isolated sandbox, read-only live shadow,
 atomic pointer switch, rollback orchestration, and post-switch smoke. This
-repository still performs no global install, hook edit, live import, watcher
-replacement, or cutover.
+repository still performs no implicit global install, hook edit, live import,
+watcher replacement, or cutover. Provider-hook mutation occurs only when an
+authorized release operator names the exact release, profile, stable watcher,
+and rollback manifest to the dedicated command.
 
 The issue-#23 foundation is exercised through `league acceptance run`, and its
 complete no-apply continuation is exercised through `league acceptance

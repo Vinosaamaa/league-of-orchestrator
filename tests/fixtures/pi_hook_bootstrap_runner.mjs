@@ -8,6 +8,8 @@ const notifications = [];
 const messages = [];
 let identifiers = 0;
 let inputCalls = 0;
+let activationManaged =
+  scenario.startsWith("restored-") || scenario === "outage-managed";
 
 const pi = {
   on(event, handler) {
@@ -34,6 +36,7 @@ const ctx = {
 
 function runWatcher(command, payload) {
   calls.push({ command, payload });
+  if (scenario.startsWith("outage-")) return undefined;
   if (scenario === "unbound") return { binding: "unbound" };
   if (scenario === "promoted" && command === "pi-input-hook" && inputCalls++ === 0) {
     return { binding: "unbound" };
@@ -50,6 +53,15 @@ function runWatcher(command, payload) {
 extension.createLeagueHookBootstrap({
   runWatcher,
   randomUUID: () => `input-${++identifiers}`,
+  activationStore: {
+    isManaged: () => activationManaged,
+    markManaged: () => {
+      if (scenario === "activation-write-failure") {
+        throw new Error("synthetic activation write failure");
+      }
+      activationManaged = true;
+    },
+  },
 })(pi);
 
 for (const event of ["input", "tool_call", "agent_settled"]) {

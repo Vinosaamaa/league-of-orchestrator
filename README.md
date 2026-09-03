@@ -22,8 +22,9 @@ the watcher service installer runs only as an explicit, hash-authorized command.
 - Atomic Herdr launch preflight with routing/display identity verification and
   reservation rollback on a failed launch.
 - Registry-declared Codex, Pi, and Cursor CLI hook bootstraps. Ordinary unbound
-  Pi stays inert; canonical promotion activates hooks in the existing session,
-  while launch sandbox and presentation remain process-scoped.
+  sessions stay inert even with the aggregate supervisor live; exact Pi binding
+  activates outage-safe hooks in the existing session, while launch sandbox and
+  presentation remain process-scoped.
 - Current thin Herdr and tmux adapters, with their portability limits explicit.
 - Semantic model/effort routing with explicit user overrides preserved.
 - Fail-closed schema-2 teardown verification, including local-install byte
@@ -273,8 +274,31 @@ Inspect the stable command inventory without creating state:
 ```sh
 ./bin/league --help
 ./bin/league help inventory
+./bin/league provider-hooks --help
 ./bin/league --state-root /absolute/isolated/state-root storage --help
 ```
+
+An authorized source-managed release install upgrades every registry-declared
+provider hook through one rollback manifest:
+
+```sh
+./bin/league provider-hooks upgrade \
+  --source-root /absolute/release \
+  --profile-root /absolute/profile \
+  --stable-watcher /absolute/bin/agent-watcher \
+  --manifest /absolute/provider-hooks-upgrade.json
+
+./bin/league provider-hooks rollback \
+  --source-root /absolute/release \
+  --profile-root /absolute/profile \
+  --stable-watcher /absolute/bin/agent-watcher \
+  --manifest /absolute/provider-hooks-upgrade.json
+```
+
+Upgrade validates all candidate bytes before writing, preserves unrelated
+handlers, backs up every changed target, and either verifies the complete set or
+restores it. These commands never accept `--state-root`; checkout and tests do
+not invoke them against a real profile.
 
 Every state operation requires an explicit existing absolute state root;
 machine-readable help is read-only and needs no root. The database

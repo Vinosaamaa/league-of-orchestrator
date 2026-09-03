@@ -10,7 +10,12 @@ from ..base import (
     no_replacement_descriptor_transactions,
 )
 from ..core import declared_lifecycle_operations
-from .hooks import BOOTSTRAP_PROFILE, install as install_hook_bootstrap
+from .hooks import (
+    BOOTSTRAP_PROFILE,
+    install as install_hook_bootstrap,
+    translate_input,
+    translate_output,
+)
 
 
 def _launch_arguments(*, model, effort, state_root, **_unused):
@@ -110,6 +115,8 @@ def adapter() -> DeclaredAgentAdapter:
         },
         BOOTSTRAP_PROFILE,
         install_hook_bootstrap,
+        translate_input,
+        translate_output,
         {
             "launch": frozenset({"visible_launch"}),
             "resume": frozenset({"visible_launch"}),

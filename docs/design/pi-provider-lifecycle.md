@@ -78,11 +78,14 @@ The active Pi profile loads the source-managed `league-hooks.mjs` bootstrap.
 The bootstrap contains no launch descriptor, sandbox root, provider choice, or
 presentation policy. On every interactive input it supplies Pi's exact native
 session ID and JSONL path to the stable canonical input hook. The same bound
-input identity feeds pre-mutation and settled/Stop events. The canonical hook
-action returns `binding=unbound` without a write when no exact active agent or
-runtime owns that session, so ordinary Pi remains silent and unchanged. A
-later callsign/bootstrap publication activates the next event in place; no Pi
-process or provider session is relaunched.
+input identity feeds pre-mutation and settled/Stop events. The bootstrap stores
+an activation receipt only after the canonical action proves that exact session
+ID and absolute JSONL path are bound. An unregistered session receives a local
+allow/no-op if the watcher is absent, fails, times out, or responds incorrectly,
+so ordinary Pi remains usable without canonical writes. An activated managed
+session fails closed under the same outage. A later callsign/bootstrap
+publication activates the next successful event in place; no Pi process or
+provider session is relaunched.
 
 League-launched Pi separately loads `league-runtime.ts`. That launch-only
 extension restricts tools to the descriptor-bound worktree/state roots and

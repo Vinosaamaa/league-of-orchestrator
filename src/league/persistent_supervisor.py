@@ -856,7 +856,6 @@ class PersistentSupervisor:
             actor_agent_id = message["envelope"].get("recipient_agent_id")
         if kind == "hook":
             from .canonical_watcher import (
-                _profile_bootstrap_request,
                 brokered_hook_context,
                 handle_brokered_hook,
             )
@@ -866,10 +865,7 @@ class PersistentSupervisor:
                 raise SupervisorUnavailable("supervisor hook request is malformed")
             with self.store_factory(self.state_root) as store:
                 context = brokered_hook_context(store, hook)
-                if (
-                    context.actor_id is None
-                    and _profile_bootstrap_request(context.payload)
-                ):
+                if context.actor_id is None:
                     result = handle_brokered_hook(store, hook, context=context)
                     self._response(
                         connection,

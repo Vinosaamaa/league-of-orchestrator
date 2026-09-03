@@ -1850,3 +1850,11 @@ deduplicated Pi hook subprocesses, and replay-safe one-shot Stop consumption.
 This release delta changes only the version contract, deterministic
 release-staging expectations, and this provenance record beyond that merged
 tree.
+
+Release `0.2.72` assigns the next immutable install identity to merged PR #191
+at main commit `e3c68c36268def6d892f7258e8bd30d2ef1e6e8e` and exact
+reviewed head `d951bef8b91caa5c460a5cc5f15e2862c96ca052`. It prevents
+Cursor from launching League for native `Read` and `Grep` tools while all
+mutating and unknown tool categories remain fail-closed. This release delta
+changes only the version contract, deterministic release-staging expectations,
+and this provenance record beyond that merged tree.

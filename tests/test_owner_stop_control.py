@@ -6,6 +6,7 @@ from __future__ import annotations
 from io import BytesIO
 import json
 from pathlib import Path
+import subprocess
 import tempfile
 import threading
 import sys
@@ -16,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / "src"), str(ROOT / "tests")]
 
 from league.agent_adapters import builtin_agent_adapter_registry  # noqa: E402
+from league.canonical_delivery import InstalledDeliveryAdapter  # noqa: E402
 from league.canonical_watcher import handle_brokered_hook  # noqa: E402
 from league.cli import main as league_main  # noqa: E402
 from league.owner_stop import execute_owner_stop_controls  # noqa: E402
@@ -45,6 +47,8 @@ from test_multisquad_supervisor import (  # noqa: E402
 
 PI_WORKER_ID = "99999999-9999-4999-8999-999999999991"
 OTHER_WORKER_ID = "99999999-9999-4999-8999-999999999992"
+CODEX_LOSS_ID = "99999999-9999-4999-8999-999999999993"
+CURSOR_LOSS_ID = "99999999-9999-4999-8999-999999999994"
 
 
 class FakeControlMultiplexer:
@@ -82,6 +86,61 @@ class AmbiguousControlAdapter(ExactControlAdapter):
         assert channel == "direct"
         self.calls.append((channel, dict(target), dict(envelope)))
         raise RuntimeError("synthetic ambiguous post-effect failure")
+
+
+class ResponseLossHerdr:
+    """Apply one production prompt, then lose its process response."""
+
+    def __init__(self, *, pane: str, session: str, routing_name: str) -> None:
+        self.pane = pane
+        self.session = session
+        self.routing_name = routing_name
+        self.prompts = 0
+
+    def __call__(self, command, **_kwargs):
+        command = list(command)
+        if "agent" in command and "get" in command:
+            payload = {
+                "result": {
+                    "agent": {
+                        "agent": "cursor",
+                        "agent_session": {
+                            "agent": "cursor", "kind": "id",
+                            "source": "herdr:cursor", "value": self.session,
+                        },
+                        "agent_status": "idle",
+                        "interactive_ready": True,
+                        "name": self.routing_name,
+                        "pane_id": self.pane,
+                        "revision": 1,
+                        "state_change_seq": 1,
+                    }
+                }
+            }
+            return subprocess.CompletedProcess(
+                command, 0, stdout=json.dumps(payload) + "\n", stderr=""
+            )
+        if "process-info" in command:
+            payload = {
+                "result": {
+                    "process_info": {
+                        "foreground_process_group_id": 4200,
+                        "foreground_processes": [{
+                            "argv": ["cursor-agent"], "argv0": "cursor-agent",
+                            "name": "cursor-agent", "pid": 4201,
+                        }],
+                        "pane_id": self.pane,
+                        "shell_pid": 4199,
+                    }
+                }
+            }
+            return subprocess.CompletedProcess(
+                command, 0, stdout=json.dumps(payload) + "\n", stderr=""
+            )
+        if "agent" in command and "prompt" in command:
+            self.prompts += 1
+            raise subprocess.TimeoutExpired(command, 15)
+        raise AssertionError(f"unexpected Herdr command: {command!r}")
 
 
 def _configure_owner_provider(store: SQLiteStorage, kind: str) -> tuple[str, str]:
@@ -643,6 +702,84 @@ def test_persistent_supervisor_recovers_failed_owner_control(root: Path) -> None
         assert outbox["state"] == "awaiting_receipt"
 
 
+def test_production_adapters_fence_lost_responses_without_second_prompt(
+    root: Path,
+) -> None:
+    from lifecycle_fakes import FakeClock
+
+    cases = (
+        ("codex", CODEX_LOSS_ID, "Pyke", "codex-thread"),
+        ("pi", PI_WORKER_ID, "Sona", "pi-thread"),
+        ("cursor", CURSOR_LOSS_ID, "Ahri", "cursor-thread"),
+    )
+    for kind, delegate_id, callsign, harness_kind in cases:
+        state, store = _multisquad_state(root, f"production-response-loss-{kind}")
+        clock = FakeClock("2020-01-01T00:00:00Z")
+        with store._transaction():
+            store.connection.execute(
+                "UPDATE agent_instances SET status='completed' WHERE shotcaller_agent_id=?",
+                (SHOTCALLER_ID,),
+            )
+        _add_delegated_runtime(
+            store,
+            clock,
+            actor_id=delegate_id,
+            callsign=callsign,
+            owner_id=SHOTCALLER_ID,
+            harness_kind=harness_kind,
+        )
+        prompt = store.intake_prompt(
+            f"prompt:response-loss:{kind}",
+            SHOTCALLER_ID,
+            GAREN_RUNTIME,
+            "codex",
+            f"session:response-loss:{kind}",
+            f"source:response-loss:{kind}",
+            "Record an exact production response-loss control.",
+            clock.now(),
+        )
+        store.triage_prompt(
+            prompt["prompt_id"],
+            [{
+                "prompt_item_id": f"item:response-loss:{kind}",
+                "ordinal": 1,
+                "summary": "Production response loss",
+                "disposition": "acknowledgement",
+                "request_id": None,
+            }],
+            clock.now(),
+        )
+        prepared = store.prepare_owner_stop_control(
+            SHOTCALLER_ID,
+            f"owner-stop:response-loss:{kind}",
+            prompt["prompt_id"],
+            True,
+            clock.now(),
+        )
+        runner = ResponseLossHerdr(
+            pane=f"pane:{callsign}",
+            session=f"session:{callsign.lower()}",
+            routing_name=callsign.lower(),
+        )
+        installed = InstalledDeliveryAdapter(
+            runner=runner, store=store, at=clock.now()
+        )
+        first = execute_owner_stop_controls(
+            store, (prepared,), clock.now(), adapter=installed
+        )
+        second = execute_owner_stop_controls(
+            store, (prepared,), clock.now(), adapter=installed
+        )
+        assert first[0]["state"] == second[0]["state"] == "failed"
+        assert runner.prompts == 1
+        outbox = store.connection.execute(
+            "SELECT state FROM delivery_outbox WHERE outbox_id=?",
+            (prepared["targets"][0]["outbox_id"],),
+        ).fetchone()
+        assert outbox["state"] == "awaiting_receipt"
+        store.close()
+
+
 def test_owner_stop_control_rolls_back_with_turn_commit(root: Path) -> None:
     state, store, clock = create_context(root, "owner-stop-atomic-rollback")
     session, generation = _configure_owner_provider(store, "codex")
@@ -774,6 +911,7 @@ def main() -> None:
         test_codex_and_pi_require_semantic_control_and_consume_by_generation(root)
         test_live_watcher_owner_stop_interrupts_exact_codex_pi_delegates_only(root)
         test_persistent_supervisor_recovers_failed_owner_control(root)
+        test_production_adapters_fence_lost_responses_without_second_prompt(root)
         test_owner_stop_control_rolls_back_with_turn_commit(root)
         test_startup_scope_reconciliation_selects_one_or_refuses_actionably(root)
     print(

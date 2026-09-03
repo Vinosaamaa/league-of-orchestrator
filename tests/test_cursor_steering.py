@@ -292,7 +292,8 @@ def test_working_state_race_never_double_enters(root: Path) -> None:
         at=clock.now(),
         adapter=InstalledDeliveryAdapter(store=store, at=clock.now(), runner=herdr),
     )
-    assert result["state"] == "pending" and result["reason"] == "cursor_state_changed"
+    assert result["state"] == "awaiting_receipt"
+    assert result["reason"] == "cursor_state_changed"
     assert len([command for command in herdr.effects if "send-text" in command]) == 1
     assert not any("send-keys" in command for command in herdr.effects)
     durable = _effect(store, routed["outbox_id"])
@@ -371,7 +372,8 @@ def test_ambiguous_process_unavailable_input_and_missing_ack_refuse(root: Path) 
             at=clock.now(),
             adapter=InstalledDeliveryAdapter(store=store, at=clock.now(), runner=runner),
         )
-        assert result["state"] == "pending" and result["reason"] == reason
+        expected_state = "awaiting_receipt" if suffix == "ack" else "pending"
+        assert result["state"] == expected_state and result["reason"] == reason
         if suffix == "ack":
             assert len(runner.effects) == 2
             assert _effect(store, routed["outbox_id"])["state"] == "refused"

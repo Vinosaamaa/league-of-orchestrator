@@ -181,7 +181,11 @@ class DeliveryAdapter(Protocol):
 
 
 class DeliveryUnavailable(RuntimeError):
-    pass
+    """The transport proved no external effect occurred and retry is safe."""
+
+
+class DeliveryAmbiguous(RuntimeError):
+    """An external effect may have occurred; retry requires reconciliation."""
 
 
 class DeliveryService:
@@ -253,6 +257,16 @@ class DeliveryService:
                 self.clock.now(),
             )
             raise
+        except DeliveryAmbiguous as exc:
+            reason = str(exc) or "receipt_ambiguous"
+            self.store.await_outbox_receipt(
+                identity,
+                claim["fence"],
+                target["channel"],
+                reason,
+                self.clock.now(),
+            )
+            raise
         except Exception as exc:
             reason = getattr(exc, "code", None) or str(exc) or "receipt_ambiguous"
             self.store.await_outbox_receipt(
@@ -309,7 +323,7 @@ class DeliveryService:
                         item["outbox_id"], item["event_id"], item["recipient_agent_id"]
                     )
                 )
-            except (DeliveryUnavailable, StorageRefusal) as exc:
+            except (DeliveryAmbiguous, DeliveryUnavailable, StorageRefusal) as exc:
                 outcomes.append(
                     {
                         "outbox_id": item["outbox_id"],

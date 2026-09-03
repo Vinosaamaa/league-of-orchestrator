@@ -10,6 +10,7 @@ from typing import Any, Callable
 
 from .request_services import (
     DeliveryAdapter,
+    DeliveryAmbiguous,
     DeliveryReceipt,
     DeliveryService,
     DeliveryUnavailable,
@@ -95,10 +96,10 @@ class InstalledDeliveryAdapter:
                     at=self.at,
                     runner=self.runner,
                 )
-            except DeliveryUnavailable:
+            except (DeliveryAmbiguous, DeliveryUnavailable):
                 raise
             except Exception as exc:
-                raise DeliveryUnavailable("receiver_unavailable") from exc
+                raise DeliveryAmbiguous("receiver_outcome_ambiguous") from exc
             if isinstance(delivered, DeliveryReceipt):
                 return delivered
         elif channel == "watcher":
@@ -168,6 +169,14 @@ def dispatch_event(
     )
     try:
         return service.dispatch_source(outbox_id, event_id, recipient_agent_id)
+    except DeliveryAmbiguous as exc:
+        return {
+            "outbox_id": outbox_id,
+            "event_id": event_id,
+            "recipient_agent_id": recipient_agent_id,
+            "state": "awaiting_receipt",
+            "reason": str(exc) or "receiver_outcome_ambiguous",
+        }
     except DeliveryUnavailable as exc:
         return {
             "outbox_id": outbox_id,

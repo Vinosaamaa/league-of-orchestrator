@@ -1752,3 +1752,11 @@ the fresh League metadata-source sequence correction without any additional
 hook, watcher, provider, multiplexer, or storage-contract change. This release
 delta changes only the version contract, deterministic release-staging
 expectations, and this provenance record beyond that merged tree.
+
+Release `0.2.65` assigns the next immutable install identity to merged PR #176
+at main commit `215c2b5b2b0dbad73628279d06080ae271cde1ba` and exact
+reviewed/merged tree `cea3cfc5454e354f8c1c006d3f63e24341028542`. It packages
+exact adoption of already named Pi Shotcaller sessions, including queue-front
+callsign fencing and rollback to the original route and presentation. This
+release delta changes only the version contract, deterministic release-staging
+expectations, and this provenance record beyond that merged tree.

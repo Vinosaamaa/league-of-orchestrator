@@ -235,6 +235,7 @@ class FakeHerdrRunner:
             "terminal_id": "term_test_99",
             "terminal_title": self.title,
             "terminal_title_stripped": self.title,
+            "title": "◇ " + str(self.tokens.get("identity_title") or self.title),
             "tokens": dict(self.tokens),
             "workspace_id": "w1",
         }
@@ -368,7 +369,8 @@ class FakeHerdrRunner:
             prior_title = self.title
             prior_tokens = dict(self.tokens)
             self.metadata_source = source
-            self.title = command[command.index("--title") + 1]
+            if "--title" in command:
+                self.title = command[command.index("--title") + 1]
             for index, value in enumerate(command):
                 if value == "--token":
                     key, token_value = command[index + 1].split("=", 1)
@@ -383,6 +385,8 @@ class FakeHerdrRunner:
                     dict(self.tokens),
                 )
             return subprocess.CompletedProcess(command, 0, "", "")
+        elif command[:4] == ("herdr", "plugin", "action", "invoke"):
+            result = {"invoked": command[4]}
         elif command[:3] == ("herdr", "agent", "prompt"):
             prompt = command[4]
             if prompt == "/exit":
@@ -1181,7 +1185,7 @@ def test_legacy_display_reconciliation_records_one_exact_worktree_transition(
             "provider_label": "codex",
         }
     )
-    source_less.active_metadata_source = "local.tab-status"
+    source_less.active_metadata_source = "herdr:codex"
     source_less.metadata_reports_change_state_sequence = False
     source_less.state_change_seq = runner.state_change_seq
     runner = source_less
@@ -1242,9 +1246,22 @@ def test_legacy_display_reconciliation_records_one_exact_worktree_transition(
         call
         for call in runner.calls
         if call[:3] == ("herdr", "pane", "report-metadata")
-        and "--title" in call
+        and any(
+            value.startswith("legacy_display_assignment=") for value in call
+        )
     )
-    assert report[report.index("--applies-to-source") + 1] == "local.tab-status"
+    assert report[report.index("--applies-to-source") + 1] == "herdr:codex"
+    assert "--clear-title" in report
+    assert "--title" not in report
+    assert "identity_title=Codex | Lux · Broker Repair" in report
+    assert "identity_title_mode=tokens-only" in report
+    assert (
+        "herdr",
+        "plugin",
+        "action",
+        "invoke",
+        "local.tab-status.sync",
+    ) in runner.calls
     agent = store.connection.execute(
         "SELECT worktree,branch,version FROM agent_instances WHERE agent_id=?", (LUX_ID,)
     ).fetchone()
@@ -1313,7 +1330,7 @@ def test_legacy_display_reconciliation_records_generation_only_transition(
             "provider_label": "codex",
         }
     )
-    source_less.active_metadata_source = "local.tab-status"
+    source_less.active_metadata_source = "herdr:codex"
     source_less.metadata_reports_change_state_sequence = False
     source_less.state_change_seq = runner.state_change_seq
     restored_terminal = "term_test_restored_same_worktree"

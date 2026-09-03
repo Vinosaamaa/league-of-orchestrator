@@ -1587,6 +1587,14 @@ owner only from that plugin's complete identity-token tuple and uses
 conflicting tuples fall back to the native source and remain fail-closed. The
 owned overlay records its exact authority for retry and verification.
 
+Release `0.2.58` assigns the next immutable install identity to merged PR #162
+at main commit `1052e4d1649aa0362ca901138fcec8422a212dbf` and exact
+reviewed/merged tree `21d065c0e096bee538fcbff88b4deabc4258d5e0`. It packages
+the Herdr presentation-authority correction without any additional hook,
+watcher, provider, multiplexer, or storage-contract change. This release delta
+changes only the version contract, deterministic release-staging expectations,
+and this provenance record beyond that merged tree.
+
 The issue-#84 legacy-restart follow-up handles the exact retained-session shape
 found during the first installed reconciliation. One verified Vi pane and
 immutable Codex thread remained live in a clean follow-up worktree after its

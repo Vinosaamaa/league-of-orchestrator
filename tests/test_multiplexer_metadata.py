@@ -34,9 +34,21 @@ AT = "2026-01-01T00:00:00Z"
 REPOSITORY = "https://example.invalid/league-84.git"
 SESSIONS = {
     "Ashe": "11111111-1111-4111-8111-111111111111",
+    "Azir": "66666666-6666-4666-8666-666666666666",
+    "Qiyana": "77777777-7777-4777-8777-777777777777",
     "Ambessa": "22222222-2222-4222-8222-222222222222",
     "Heimerdinger": "33333333-3333-4333-8333-333333333333",
     "KaiSa": "44444444-4444-4444-8444-444444444444",
+}
+SHOTCALLER_PRESENTATION = {
+    "Ashe": {"project_code": "Projects", "worktree_name": "Projects"},
+    "Azir": {"project_code": "IA", "worktree_name": "interview-arc"},
+    "Qiyana": {"project_code": "JJ", "worktree_name": "job-journey"},
+}
+SHOTCALLER_SQUADS = {
+    "Ashe": "squad:Garen",
+    "Azir": "squad:Azir",
+    "Qiyana": "squad:Qiyana",
 }
 
 
@@ -243,7 +255,14 @@ class FailingCASStore:
         return self.store.reconcile_restored_runtime(*args, **kwargs)
 
 
-def _project_and_agents(store: SQLiteStorage, root: Path) -> dict[str, Path]:
+def _project_and_agents(
+    store: SQLiteStorage,
+    root: Path,
+    *,
+    shotcaller_callsign: str = "Ashe",
+    include_champions: bool = True,
+) -> dict[str, Path]:
+    shotcaller_squad_id = SHOTCALLER_SQUADS[shotcaller_callsign]
     project_root = root / "project"
     project_root.mkdir(parents=True)
     store.put_project(
@@ -259,14 +278,43 @@ def _project_and_agents(store: SQLiteStorage, root: Path) -> dict[str, Path]:
         export_policy="deny",
         at=AT,
     )
+    shotcaller_presentation = SHOTCALLER_PRESENTATION[shotcaller_callsign]
+    shotcaller_root = root / str(shotcaller_presentation["worktree_name"])
+    shotcaller_root.mkdir(parents=True)
+    if shotcaller_callsign != "Ashe":
+        store.put_project(
+            f"project:shotcaller-{shotcaller_callsign.lower()}",
+            expected_version=0,
+            summary=f"{shotcaller_callsign} synthetic project",
+            repository=(
+                f"https://example.invalid/{shotcaller_callsign.lower()}.git"
+            ),
+            root=str(shotcaller_root),
+            code=str(shotcaller_presentation["project_code"]),
+            aliases=(),
+            state="active",
+            repository_visibility="private",
+            export_policy="deny",
+            at=AT,
+        )
     worktrees: dict[str, Path] = {}
-    for callsign in SESSIONS:
-        worktree = root / "worktrees" / callsign.lower()
-        worktree.mkdir(parents=True)
+    champions = ("Ambessa", "Heimerdinger", "KaiSa") if include_champions else ()
+    callsigns = (shotcaller_callsign, *champions)
+    for callsign in callsigns:
+        role = "shotcaller" if callsign == shotcaller_callsign else "champion"
+        worktree = (
+            shotcaller_root
+            if role == "shotcaller"
+            else root / "worktrees" / callsign.lower()
+        )
+        worktree.mkdir(parents=True, exist_ok=True)
         worktrees[callsign] = worktree
-        role = "shotcaller" if callsign == "Ashe" else "champion"
         kind = "codex-thread" if role == "shotcaller" else "pi-thread"
-        provider = "codex" if callsign in {"Ashe", "Heimerdinger"} else "cursor"
+        provider = (
+            "codex"
+            if role == "shotcaller" or callsign == "Heimerdinger"
+            else "cursor"
+        )
         task_id = None if role == "shotcaller" else f"task:{callsign.lower()}"
         store.connection.execute(
             "INSERT INTO callsigns(callsign,pool_role,enabled,pool_position) VALUES(?,?,1,?)",
@@ -293,31 +341,32 @@ def _project_and_agents(store: SQLiteStorage, root: Path) -> dict[str, Path]:
                 "title": "League",
                 "presentation_source": "herdr:codex",
             }
-            assignment_id = "callsign-assignment:ashe"
+            slug = callsign.lower()
+            assignment_id = f"callsign-assignment:{slug}"
             publication = {
                 "schema": "league.shotcaller-bootstrap-publication.v1",
                 "assignment_id": assignment_id,
-                "agent_id": "agent:ashe",
-                "callsign": "Ashe",
-                "routing_name": "ashe",
+                "agent_id": f"agent:{slug}",
+                "callsign": callsign,
+                "routing_name": slug,
                 "terminal_id": "terminal:before-restart",
                 "endpoint_generation": "herdr:before-restart",
                 "session_identity": SESSIONS[callsign],
                 "worktree": str(worktree),
                 "presentation_source": "herdr:codex",
-                "title": "Ashe",
-                "sidebar_name": "Ashe",
-                "thread_title": "Ashe",
+                "title": callsign,
+                "sidebar_name": callsign,
+                "thread_title": callsign,
                 "baseline_digest": hashlib.sha256(stable(baseline).encode()).hexdigest(),
                 "observed_state_change_seq": 10,
             }
             metadata = stable(
                 {
                     "scope_kind": "shotcaller",
-                    "scope_id": "agent:ashe",
+                    "scope_id": f"agent:{slug}",
                     "shotcaller_bootstrap_baseline": baseline,
                     "shotcaller_bootstrap_publication": publication,
-                    "shotcaller_bootstrap_runtime_id": "runtime:ashe",
+                    "shotcaller_bootstrap_runtime_id": f"runtime:{slug}",
                 }
             )
         store.connection.execute(
@@ -331,7 +380,10 @@ def _project_and_agents(store: SQLiteStorage, root: Path) -> dict[str, Path]:
             (
                 f"agent:{callsign.lower()}", callsign, role, task_id, kind,
                 SESSIONS[callsign], "herdr", callsign.lower(), provider,
-                f"before:{callsign.lower()}", REPOSITORY, str(worktree), "working", AT,
+                f"before:{callsign.lower()}",
+                None if role == "shotcaller" else REPOSITORY,
+                None if role == "shotcaller" else str(worktree),
+                "working", AT,
                 metadata,
             ),
         )
@@ -359,12 +411,55 @@ def _project_and_agents(store: SQLiteStorage, root: Path) -> dict[str, Path]:
           (callsign_assignment_id,callsign,subject_id,agent_id,runtime_instance_id,
            role,scope_kind,scope_id,state,queue_version,requirements_json,
            acceptance_digest,version,reserved_at,activated_at)
-        VALUES('callsign-assignment:ashe','Ashe','agent:ashe','agent:ashe',
-               'runtime:ashe','shotcaller','shotcaller','agent:ashe','active',1,
+        VALUES(?,?,?,?,?,'shotcaller',?,?,'active',1,
                '[]','synthetic-acceptance',2,?,?)
         """,
-        (AT, AT),
+        (
+            f"callsign-assignment:{shotcaller_callsign.lower()}",
+            shotcaller_callsign,
+            f"agent:{shotcaller_callsign.lower()}",
+            f"agent:{shotcaller_callsign.lower()}",
+            f"runtime:{shotcaller_callsign.lower()}",
+            (
+                "squad"
+                if shotcaller_callsign in {"Ashe", "Qiyana"}
+                else "shotcaller"
+            ),
+            (
+                shotcaller_squad_id
+                if shotcaller_callsign in {"Ashe", "Qiyana"}
+                else f"agent:{shotcaller_callsign.lower()}"
+            ),
+            AT,
+            AT,
+        ),
     )
+    store.connection.execute(
+        """
+        INSERT INTO squads
+          (squad_id,shotcaller_agent_id,state,version,updated_at,owner_fence)
+        VALUES(?,?,'active',1,?,1)
+        """,
+        (
+            shotcaller_squad_id,
+            f"agent:{shotcaller_callsign.lower()}",
+            AT,
+        ),
+    )
+    if shotcaller_callsign != "Ashe":
+        store.connection.execute(
+            """
+            INSERT INTO project_squad_suggestions
+              (project_id,squad_id,position,created_at,updated_at)
+            VALUES(?,?,0,?,?)
+            """,
+            (
+                f"project:shotcaller-{shotcaller_callsign.lower()}",
+                shotcaller_squad_id,
+                AT,
+                AT,
+            ),
+        )
     return worktrees
 
 
@@ -429,12 +524,23 @@ def _pi_descriptors(store: SQLiteStorage, root: Path, worktrees: dict[str, Path]
         )
 
 
-def canonical_state(root: Path) -> Path:
+def canonical_state(
+    root: Path,
+    *,
+    shotcaller_callsign: str = "Ashe",
+    include_champions: bool = True,
+) -> Path:
     root.mkdir(parents=True)
     state, _ = migrated_state(root, "state")
     with SQLiteStorage(state) as store:
-        worktrees = _project_and_agents(store, root)
-        _pi_descriptors(store, root, worktrees)
+        worktrees = _project_and_agents(
+            store,
+            root,
+            shotcaller_callsign=shotcaller_callsign,
+            include_champions=include_champions,
+        )
+        if include_champions:
+            _pi_descriptors(store, root, worktrees)
     return state
 
 
@@ -562,7 +668,11 @@ def test_async_restart_converges_without_duplicate_processes(root: Path) -> None
             assert agent["tokens"] == presentation["tokens"]
             assert agent["terminal_id"].startswith("terminal:restart:")
             assert agent["tokens"]["orchestrator_role"] in {"shotcaller", "champion"}
-            assert agent["tokens"]["project_code"] == "LOO"
+            assert agent["tokens"]["project_code"] == (
+                "Projects"
+                if agent["tokens"]["orchestrator_role"] == "shotcaller"
+                else "LOO"
+            )
             assert len(agent["tokens"]["task_label"].split()) == 2
             assert agent["tokens"]["status_token"] == "working"
 
@@ -578,6 +688,245 @@ def test_async_restart_converges_without_duplicate_processes(root: Path) -> None
             }
             for call in herdr.calls
         )
+
+
+def test_shotcallers_use_publication_cwd_and_optional_exact_project_without_process_effects(
+    root: Path,
+) -> None:
+    for callsign in ("Ashe", "Azir", "Qiyana"):
+        case = root / callsign.lower()
+        state = canonical_state(case, shotcaller_callsign=callsign)
+        with SQLiteStorage(state) as store:
+            store.connection.execute(
+                "UPDATE agent_instances SET repository=NULL WHERE role='champion'"
+            )
+            row = store.connection.execute(
+                "SELECT repository,worktree FROM agent_instances WHERE agent_id=?",
+                (f"agent:{callsign.lower()}",),
+            ).fetchone()
+            assert tuple(row) == (None, None)
+            assignment_scope = store.connection.execute(
+                """
+                SELECT scope_kind,scope_id FROM callsign_assignments
+                 WHERE callsign_assignment_id=?
+                """,
+                (f"callsign-assignment:{callsign.lower()}",),
+            ).fetchone()
+            assert tuple(assignment_scope) == (
+                ("squad", SHOTCALLER_SQUADS[callsign])
+                if callsign in {"Ashe", "Qiyana"}
+                else ("shotcaller", f"agent:{callsign.lower()}")
+            )
+            expected = canonical_presentations(store)
+            shotcaller = next(
+                item
+                for item in expected
+                if item["agent_id"] == f"agent:{callsign.lower()}"
+            )
+            presentation = SHOTCALLER_PRESENTATION[callsign]
+            project_code = str(presentation["project_code"])
+            assert shotcaller["tokens"]["project_code"] == project_code
+            assert shotcaller["title"] == f"{callsign} · {project_code}"
+            assert shotcaller["cwd"] == str(
+                case / str(presentation["worktree_name"])
+            )
+            champions = [item for item in expected if item["role"] == "champion"]
+            assert {item["agent_id"] for item in champions} == {
+                "agent:ambessa",
+                "agent:heimerdinger",
+                "agent:kaisa",
+            }
+            assert all(item["tokens"]["project_code"] == "LOO" for item in champions)
+            assert all("|Adapter Restart" in item["title"] for item in champions)
+            herdr = RestoredHerdr(expected)
+            before_processes = json.loads(json.dumps(herdr.processes))
+            receipt = replay_restored_display(
+                store,
+                herdr_runner=herdr,
+                timeout_ms=1_000,
+                sleeper=lambda _: None,
+            )
+            assert receipt["created_processes"] == receipt["resumed_sessions"] == 0
+            assert herdr.processes == before_processes
+            assert not any(
+                call[1:3]
+                in {
+                    ("agent", "start"),
+                    ("agent", "prompt"),
+                    ("tab", "create"),
+                    ("pane", "split"),
+                    ("pane", "send-text"),
+                    ("pane", "send-keys"),
+                }
+                for call in herdr.calls
+            )
+
+
+def test_shotcaller_publication_cwd_accepts_absent_or_matching_and_refuses_conflict(
+    root: Path,
+) -> None:
+    for case in ("absent", "matching", "conflicting"):
+        case_root = root / case
+        state = canonical_state(case_root, include_champions=False)
+        expected_cwd = str(case_root / "Projects")
+        with SQLiteStorage(state) as store:
+            if case == "matching":
+                store.connection.execute(
+                    "UPDATE agent_instances SET worktree=? WHERE agent_id='agent:ashe'",
+                    (expected_cwd,),
+                )
+            elif case == "conflicting":
+                conflicting_cwd = case_root / "different-project"
+                conflicting_cwd.mkdir()
+                store.connection.execute(
+                    "UPDATE agent_instances SET worktree=? WHERE agent_id='agent:ashe'",
+                    (str(conflicting_cwd),),
+                )
+            if case == "conflicting":
+                try:
+                    canonical_presentations(store)
+                except StorageRefusal as exc:
+                    assert exc.code == "display_replay_project_unproven"
+                    assert "agent:ashe" in str(exc)
+                    assert "runtime:ashe" in str(exc)
+                    assert len(str(exc).encode("utf-8")) <= 320
+                else:
+                    raise AssertionError("conflicting Shotcaller cwd was accepted")
+                continue
+            expected = canonical_presentations(store)
+            assert len(expected) == 1 and expected[0]["cwd"] == expected_cwd
+            herdr = RestoredHerdr(expected)
+            before_processes = json.loads(json.dumps(herdr.processes))
+            receipt = replay_restored_display(
+                store,
+                herdr_runner=herdr,
+                timeout_ms=1_000,
+                sleeper=lambda _: None,
+            )
+            assert receipt["created_processes"] == receipt["resumed_sessions"] == 0
+            assert herdr.processes == before_processes
+
+
+def test_shotcaller_project_binding_refuses_ambiguous_or_malformed_sources(
+    root: Path,
+) -> None:
+    for case in (
+        "multiple",
+        "uncoded",
+        "inactive",
+        "malformed-publication",
+        "identity-mismatch",
+    ):
+        case_root = root / case
+        callsign = "Azir" if case in {"multiple", "uncoded", "inactive"} else "Ashe"
+        state = canonical_state(
+            case_root,
+            shotcaller_callsign=callsign,
+            include_champions=False,
+        )
+        with SQLiteStorage(state) as store:
+            slug = callsign.lower()
+            if case == "multiple":
+                second_root = case_root / "second-project"
+                second_root.mkdir()
+                store.put_project(
+                    "project:second",
+                    expected_version=0,
+                    summary="Second synthetic project",
+                    repository="https://example.invalid/second.git",
+                    root=str(second_root),
+                    code="SECOND",
+                    aliases=(),
+                    state="active",
+                    repository_visibility="private",
+                    export_policy="deny",
+                    at=AT,
+                )
+                store.connection.execute(
+                    """
+                    INSERT INTO project_squad_suggestions
+                      (project_id,squad_id,position,created_at,updated_at)
+                    VALUES('project:second',?,0,?,?)
+                    """,
+                    (SHOTCALLER_SQUADS[callsign], AT, AT),
+                )
+            elif case == "uncoded":
+                store.connection.execute(
+                    "UPDATE projects SET code=NULL WHERE project_id=?",
+                    (f"project:shotcaller-{slug}",),
+                )
+            elif case == "inactive":
+                store.connection.execute(
+                    "UPDATE projects SET state='retired' WHERE project_id=?",
+                    (f"project:shotcaller-{slug}",),
+                )
+            else:
+                row = store.connection.execute(
+                    "SELECT metadata_json FROM agent_instances WHERE agent_id=?",
+                    (f"agent:{slug}",),
+                ).fetchone()
+                metadata = json.loads(row["metadata_json"])
+                publication = metadata["shotcaller_bootstrap_publication"]
+                if case == "malformed-publication":
+                    publication["worktree"] = "relative/Projects"
+                else:
+                    publication["session_identity"] = SESSIONS["Qiyana"]
+                store.connection.execute(
+                    "UPDATE agent_instances SET metadata_json=? WHERE agent_id=?",
+                    (stable(metadata), f"agent:{slug}"),
+                )
+            try:
+                canonical_presentations(store)
+            except StorageRefusal as exc:
+                assert exc.code == "display_replay_project_unproven"
+                assert f"agent:{slug}" in str(exc)
+                assert f"runtime:{slug}" in str(exc)
+                assert len(str(exc).encode("utf-8")) <= 320
+            else:
+                raise AssertionError(f"Shotcaller {case} source was accepted")
+
+
+def test_shotcaller_assignment_refuses_unproven_legacy_squad_ownership(
+    root: Path,
+) -> None:
+    for case in ("missing", "mismatched", "multiple-assignments"):
+        case_root = root / case
+        state = canonical_state(case_root)
+        with SQLiteStorage(state) as store:
+            if case == "missing":
+                store.connection.execute(
+                    "UPDATE squads SET state='retired' WHERE squad_id='squad:Garen'"
+                )
+            elif case == "mismatched":
+                store.connection.execute(
+                    """
+                    UPDATE squads SET shotcaller_agent_id='agent:ambessa'
+                     WHERE squad_id='squad:Garen'
+                    """
+                )
+            else:
+                store.connection.execute(
+                    """
+                    INSERT INTO callsign_assignments
+                      (callsign_assignment_id,callsign,subject_id,agent_id,
+                       runtime_instance_id,role,scope_kind,scope_id,state,
+                       queue_version,requirements_json,acceptance_digest,version,
+                       reserved_at,activated_at)
+                    VALUES('callsign-assignment:ashe:duplicate','Ashe',
+                           'agent:ashe:duplicate','agent:ashe','runtime:ashe',
+                           'shotcaller','squad','squad:Garen','active',1,'[]',
+                           'synthetic-acceptance',1,?,?)
+                    """,
+                    (AT, AT),
+                )
+            try:
+                canonical_presentations(store)
+            except StorageRefusal as exc:
+                assert exc.code == "display_replay_assignment_unproven"
+            else:
+                raise AssertionError(
+                    f"Shotcaller {case} assignment ownership was accepted"
+                )
 
 
 def test_replaced_session_fails_closed_before_metadata(root: Path) -> None:
@@ -907,6 +1256,18 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="league-async-restore-") as temporary:
         root = Path(temporary)
         test_async_restart_converges_without_duplicate_processes(root / "success")
+        test_shotcallers_use_publication_cwd_and_optional_exact_project_without_process_effects(
+            root / "named-shotcallers"
+        )
+        test_shotcaller_publication_cwd_accepts_absent_or_matching_and_refuses_conflict(
+            root / "shotcaller-cwd-evidence"
+        )
+        test_shotcaller_project_binding_refuses_ambiguous_or_malformed_sources(
+            root / "shotcaller-project-refusals"
+        )
+        test_shotcaller_assignment_refuses_unproven_legacy_squad_ownership(
+            root / "shotcaller-assignment-refusals"
+        )
         test_replaced_session_fails_closed_before_metadata(root / "replaced")
         test_full_restored_agent_reconciliation_is_once_only(root / "reconcile")
         test_standalone_cursor_cli_restart_preserves_exact_session_without_process_effects(

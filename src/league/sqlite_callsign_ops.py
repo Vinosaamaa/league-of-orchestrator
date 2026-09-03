@@ -1483,10 +1483,24 @@ def shotcaller_bootstrap_publication(
     ).fetchone()
     if assignment is None:
         return None
+    current_scope = (
+        assignment["scope_kind"] == "shotcaller"
+        and assignment["scope_id"] == assignment["agent_id"]
+    )
+    legacy_scope = assignment["scope_kind"] == "squad"
+    if legacy_scope:
+        squad_rows = store.connection.execute(
+            """
+            SELECT squad_id FROM squads
+             WHERE squad_id=? AND shotcaller_agent_id=? AND state='active'
+             ORDER BY squad_id LIMIT 2
+            """,
+            (assignment["scope_id"], assignment["agent_id"]),
+        ).fetchall()
+        legacy_scope = len(squad_rows) == 1
     if (
         assignment["role"] != "shotcaller"
-        or assignment["scope_kind"] != "shotcaller"
-        or assignment["scope_id"] != assignment["agent_id"]
+        or (not current_scope and not legacy_scope)
     ):
         raise StorageRefusal(
             "assignment_conflict", "Shotcaller publication assignment is not exact"

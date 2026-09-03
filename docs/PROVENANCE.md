@@ -1377,3 +1377,21 @@ tree `db5463ffe123a5644e51a1d6794eeda7c9644929`. The release preserves the
 schema-24 stopped-agent retirement behavior exactly; its delta changes only the
 version contract, deterministic release-staging expectations, and this
 provenance record.
+
+Installed 0.2.51 restart acceptance then refused before display replay because
+legacy Shotcaller agent rows do not carry repository or worktree coordinates,
+while replay tried to derive their project code from `agent.repository`.
+Shotcaller presentation now uses the existing verified bootstrap publication as
+its canonical restart cwd and presentation source when the durable agent cwd is
+absent. An existing non-empty durable cwd must match the publication exactly or
+replay fails closed. One exact active Squad project supplies the project label
+when present; a global Shotcaller with no project association uses the
+publication worktree basename. Multiple or uncoded project links and missing,
+malformed, or identity-mismatched publications fail closed with bounded
+agent/runtime diagnostics. Replay accepts
+both the current agent-scoped Shotcaller assignment and the legacy Squad-scoped
+shape only when that Squad is active and owned by the same exact agent. Champion
+presentation remains task-to-project plus exact launch worktree based.
+Synthetic Ashe, Azir, and Qiyana restart regressions cover the global, IA, and
+JJ labels and both assignment shapes with zero process creation or session
+resume.

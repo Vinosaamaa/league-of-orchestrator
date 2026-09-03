@@ -1543,3 +1543,16 @@ The repair pass also found these acceptance failures before publication:
 The candidate changes source, synthetic installers, and immutable release
 manifest bytes only. It does not edit the active Pi profile, install a release,
 restart Herdr, or mutate live League state.
+
+Release `0.2.54` assigns the next immutable install identity to merged PR #153
+at main commit `dbffad2b8ef3b2d9b75a7d3ad0d18b628b338ec0` and exact
+reviewed/merged tree `9de3c1fb5ce24c09f9960c33351abeb642be54fb`. It packages
+provider-native Codex, Cursor CLI, and Pi hook bootstraps behind the shared
+adapter registry. Unbound or non-League prompt, pre-mutation, and Stop events
+return provider-native allow/no-op output before supervisor ownership checks
+and make zero canonical mutations; exact canonical binding activates the same
+installed hooks. The release also packages bounded, symlink-safe hook upgrades
+with exact rollback, unlimited Cursor Stop continuation, and real ordinary-Pi
+exact-session resume acceptance. This release delta changes only the version
+contract, deterministic release-staging expectations, and this provenance
+record beyond the reviewed merged tree.

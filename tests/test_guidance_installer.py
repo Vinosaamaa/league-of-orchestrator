@@ -137,6 +137,59 @@ def test_rollback_size_bounds(root: Path, source: Path) -> None:
 
 def source_contract(source: Path) -> bytes:
     original = source.read_bytes()
+    triage = " ".join(
+        original.decode("utf-8")
+        .split("## Durable prompt and request triage\n", 1)[1]
+        .split("\n## ", 1)[0]
+        .split()
+    )
+    for required_clause in (
+        "Only `UserPromptSubmit` and `beforeSubmitPrompt` from an exactly bound "
+        "canonical League runtime capture its exact local prompt bytes once and wake "
+        "its verified Shotcaller.",
+        "An unbound, non-League, or otherwise unverifiable runtime is left untouched "
+        "and unrecorded.",
+        "Prompt intake activates only after exact canonical binding; it never "
+        "backfills pre-binding prompts or mines transcripts.",
+    ):
+        assert required_clause in triage, required_clause
+    for contradictory_clause in (
+        b"UserPromptSubmit and beforeSubmitPrompt capture exact local prompt bytes once",
+        b"Missing runtime identity quarantines and deduplicates the exact prompt",
+        b"It binds later only to one verified runtime",
+        b"Every prompt item is classified",
+    ):
+        assert contradictory_clause not in original, contradictory_clause
+    delivery = " ".join(
+        original.decode("utf-8")
+        .split("## Delivery and supervision\n", 1)[1]
+        .split("\n## ", 1)[0]
+        .split()
+    )
+    for required_clause in (
+        "Hooks first verify an exact canonical runtime binding and role.",
+        "If a Codex, Pi, or Cursor CLI runtime is unbound or non-League, "
+        "`UserPrompt`, pre-mutation, and `Stop` allow/no-op immediately with zero "
+        "canonical mutation.",
+        "An attached Shotcaller with any owner or delegated obligation blocks every "
+        "`Stop` attempt; neither wait-generation deduplication, a repeated `Stop`, "
+        "nor retired `allow-stop-once` may turn that block into allow.",
+        "`attach-shotcaller` requires the exact live supervisor binding and makes the "
+        "Shotcaller terminal-attached.",
+        "`detach-shotcaller` requests token-saving terminal detachment without "
+        "pausing supervision.",
+        "Detachment may let the Shotcaller end only when no owner-actionable work "
+        "remains and the persistent watcher lease, runtime generation, locator, fence, and "
+        "wake/delivery path exactly match its durable detachment receipt.",
+        "The watcher remains live and later wakes and delivers exactly once.",
+        "`service-pause` and `service-resume` are deprecated aliases for "
+        "`detach-shotcaller` and `attach-shotcaller`, respectively.",
+        "For a bound Shotcaller, a missing, stale, or ambiguous watcher, fence, "
+        "binding, or wake path refuses detachment and keeps `Stop` blocked.",
+        "Codex, Pi regardless of model provider, and Cursor CLI share this "
+        "provider-neutral contract.",
+    ):
+        assert required_clause in delivery, required_clause
     assert b"Read the universal `~/.agents/AGENTS.md` first" in original
     assert b"request turn" in original
     assert b"exact repository issue" in original

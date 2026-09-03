@@ -157,6 +157,67 @@ class HerdrLegacyDisplayAdapter:
         )
         return _agent_object(result)
 
+    def _wait_for_plugin_action(self, action: Mapping[str, Any]) -> None:
+        log = action.get("log")
+        if not isinstance(log, Mapping):
+            raise StorageRefusal(
+                "legacy_display_unverified",
+                "legacy Champion status refresh returned no exact log",
+            )
+        log_id = log.get("log_id")
+        status = log.get("status")
+        if not isinstance(log_id, str) or not log_id:
+            raise StorageRefusal(
+                "legacy_display_unverified",
+                "legacy Champion status refresh returned no exact log identity",
+            )
+        for attempt in range(51):
+            if status == "succeeded":
+                return
+            if status not in {"queued", "running"}:
+                raise StorageRefusal(
+                    "legacy_display_unverified",
+                    "legacy Champion status refresh did not succeed",
+                )
+            if attempt == 50:
+                break
+            time.sleep(0.1)
+            result = self._run(
+                (
+                    "herdr",
+                    "plugin",
+                    "log",
+                    "list",
+                    "--plugin",
+                    "local.tab-status",
+                    "--limit",
+                    "50",
+                ),
+                "legacy Champion status refresh log inspection",
+            )
+            logs = result.get("logs")
+            matches = (
+                [
+                    item
+                    for item in logs
+                    if isinstance(item, Mapping) and item.get("log_id") == log_id
+                ]
+                if isinstance(logs, list)
+                else []
+            )
+            if not matches:
+                continue
+            if len(matches) != 1:
+                raise StorageRefusal(
+                    "legacy_display_unverified",
+                    "legacy Champion status refresh log is ambiguous",
+                )
+            status = matches[0].get("status")
+        raise StorageRefusal(
+            "legacy_display_unverified",
+            "legacy Champion status refresh did not finish in time",
+        )
+
     def _observe(
         self, spec: LegacyDisplayReconciliationSpec
     ) -> tuple[dict[str, Any], dict[str, str]]:
@@ -482,7 +543,7 @@ class HerdrLegacyDisplayAdapter:
             ) from exc
         if token_only_status:
             try:
-                self._run(
+                action = self._run(
                     (
                         "herdr",
                         "plugin",
@@ -493,6 +554,7 @@ class HerdrLegacyDisplayAdapter:
                     "legacy Champion status presentation refresh",
                     silent=True,
                 )
+                self._wait_for_plugin_action(action)
             except StorageRefusal as exc:
                 observed, tokens = self._observe(spec)
                 if self._owns_overlay(

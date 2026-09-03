@@ -386,7 +386,9 @@ class FakeHerdrRunner:
                 )
             return subprocess.CompletedProcess(command, 0, "", "")
         elif command[:4] == ("herdr", "plugin", "action", "invoke"):
-            result = {"invoked": command[4]}
+            result = {
+                "log": {"log_id": "plugin-log-test", "status": "succeeded"}
+            }
         elif command[:3] == ("herdr", "agent", "prompt"):
             prompt = command[4]
             if prompt == "/exit":
@@ -416,6 +418,45 @@ class SourceLessLegacyRunner(FakeHerdrRunner):
         agent = super()._agent()
         agent.pop("metadata_source", None)
         return agent
+
+
+class DelayedPluginActionRunner(SourceLessLegacyRunner):
+    def __init__(self, worktree: Path) -> None:
+        super().__init__(worktree)
+        self.plugin_log_reads = 0
+
+    def run(
+        self, arguments, *, timeout_seconds: int = 30
+    ) -> subprocess.CompletedProcess[str]:
+        command = tuple(arguments)
+        if command[:4] == ("herdr", "plugin", "action", "invoke"):
+            self.calls.append(command)
+            result = {
+                "log": {"log_id": "plugin-log-delayed", "status": "running"}
+            }
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                json.dumps({"id": "test", "result": result}) + "\n",
+                "",
+            )
+        if command[:4] == ("herdr", "plugin", "log", "list"):
+            self.calls.append(command)
+            self.plugin_log_reads += 1
+            status = "succeeded" if self.plugin_log_reads >= 2 else "running"
+            result = {
+                "logs": [
+                    {"log_id": "unrelated", "status": "succeeded"},
+                    {"log_id": "plugin-log-delayed", "status": status},
+                ]
+            }
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                json.dumps({"id": "test", "result": result}) + "\n",
+                "",
+            )
+        return super().run(arguments, timeout_seconds=timeout_seconds)
 
 
 class FakeIssueVerifier:
@@ -1318,7 +1359,7 @@ def test_legacy_display_reconciliation_records_generation_only_transition(
     store, clock, worktree, launch, receipt, runner = _prepared_legacy_display(
         root, "legacy-generation-only-transition"
     )
-    source_less = SourceLessLegacyRunner(worktree)
+    source_less = DelayedPluginActionRunner(worktree)
     source_less.started = True
     source_less.title = runner.title
     source_less.tokens = dict(runner.tokens)
@@ -1384,6 +1425,7 @@ def test_legacy_display_reconciliation_records_generation_only_transition(
     )
     retry = service.reconcile(spec)
     assert retry["idempotent"] is True
+    assert source_less.plugin_log_reads == 2
     store.close()
 
 

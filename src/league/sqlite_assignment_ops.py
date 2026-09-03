@@ -1683,7 +1683,7 @@ def assignment_launch_context(store: Any, assignment_id: str) -> dict[str, Any]:
             reconciliation_id = f"legacy-display:{intent_digest[:24]}"
             expected_source = f"league-legacy-{intent_digest[:24]}"
             expected_sequence = legacy_intent.get("expected_state_change_seq")
-            intent_keys = {
+            intent_keys_v1 = {
                 "schema",
                 "assignment_id",
                 "expected_version",
@@ -1702,10 +1702,30 @@ def assignment_launch_context(store: Any, assignment_id: str) -> dict[str, Any]:
                 "target_title",
                 "owner_authorized",
             }
+            intent_keys_v2 = intent_keys_v1 | {
+                "previous_worktree",
+                "previous_branch",
+                "branch",
+            }
+            intent_shape_exact = bool(
+                (
+                    legacy_intent.get("schema")
+                    == "league.legacy-display-reconciliation-intent.v1"
+                    and set(legacy_intent) == intent_keys_v1
+                )
+                or (
+                    legacy_intent.get("schema")
+                    == "league.legacy-display-reconciliation-intent.v2"
+                    and set(legacy_intent) == intent_keys_v2
+                    and all(
+                        isinstance(legacy_intent.get(key), str)
+                        and bool(legacy_intent[key])
+                        for key in ("previous_worktree", "previous_branch", "branch")
+                    )
+                )
+            )
             exact_result = bool(
-                set(legacy_intent) == intent_keys
-                and legacy_intent.get("schema")
-                == "league.legacy-display-reconciliation-intent.v1"
+                intent_shape_exact
                 and legacy_intent.get("owner_authorized") is True
                 and type(legacy_intent.get("expected_version")) is int
                 and legacy_intent["expected_version"] >= 1
@@ -1754,7 +1774,7 @@ def assignment_launch_context(store: Any, assignment_id: str) -> dict[str, Any]:
 def _legacy_display_detail(
     command: LegacyDisplayReconciliationCommand,
 ) -> dict[str, Any]:
-    return {
+    detail = {
         "schema": "league.legacy-display-reconciliation-intent.v1",
         "assignment_id": command.assignment_id,
         "expected_version": command.expected_version,
@@ -1773,6 +1793,16 @@ def _legacy_display_detail(
         "target_title": f"{command.callsign} · {command.target_task_label}",
         "owner_authorized": command.owner_authorized,
     }
+    if command.previous_worktree is not None:
+        detail.update(
+            {
+                "schema": "league.legacy-display-reconciliation-intent.v2",
+                "previous_worktree": command.previous_worktree,
+                "previous_branch": command.previous_branch,
+                "branch": command.branch,
+            }
+        )
+    return detail
 
 
 def _validate_legacy_display_command(
@@ -1787,6 +1817,22 @@ def _validate_legacy_display_command(
             isinstance(command.expected_state_change_seq, int)
             and not isinstance(command.expected_state_change_seq, bool)
             and command.expected_state_change_seq >= 0,
+        )
+    )
+    transition_values = (
+        command.previous_worktree,
+        command.previous_branch,
+        command.branch,
+    )
+    transition_requested = any(value is not None for value in transition_values)
+    transition_valid = bool(
+        not transition_requested
+        or (
+            all(isinstance(value, str) and bool(value) for value in transition_values)
+            and _physical_worktree_exact(
+                command.previous_worktree, command.previous_worktree
+            )
+            and command.previous_worktree != command.worktree
         )
     )
     identity = (
@@ -1806,6 +1852,7 @@ def _validate_legacy_display_command(
         or not _physical_worktree_exact(command.worktree, command.worktree)
         or command.expected_version < 1
         or not tuple_supplied
+        or not transition_valid
         or len(command.target_task_label.split()) != 2
         or " ".join(command.target_task_label.split()) != command.target_task_label
         or len(command.target_task_label) > 48
@@ -1857,6 +1904,27 @@ def _validate_legacy_display_command(
         f"{command.terminal_id}\0{command.thread_id}".encode("utf-8")
     ).hexdigest()[:24]
     runtime = runtime_rows[0] if len(runtime_rows) == 1 else None
+    agent_on_target = bool(
+        _physical_worktree_exact(agent["worktree"], command.worktree)
+        and (
+            not transition_requested
+            or agent["branch"] == command.branch
+        )
+    ) if agent is not None else False
+    agent_on_previous = bool(
+        transition_requested
+        and _physical_worktree_exact(
+            agent["worktree"], command.previous_worktree
+        )
+        and agent["branch"] == command.previous_branch
+    ) if agent is not None else False
+    receipt_worktree = (
+        command.previous_worktree if transition_requested else command.worktree
+    )
+    receipt_branch_exact = bool(
+        not transition_requested
+        or receipt.get("branch") == command.previous_branch
+    ) if isinstance(receipt, dict) else False
     exact = bool(
         agent is not None
         and runtime is not None
@@ -1865,7 +1933,7 @@ def _validate_legacy_display_command(
         and agent["callsign"] == command.callsign
         and agent["address"] == command.pane_id
         and agent["thread_id"] == command.thread_id
-        and _physical_worktree_exact(agent["worktree"], command.worktree)
+        and (agent_on_target or agent_on_previous)
         and agent["routing_name"] == command.routing_name
         and agent["backend"] == "herdr"
         and runtime["runtime_instance_id"] == command.runtime_instance_id
@@ -1878,7 +1946,8 @@ def _validate_legacy_display_command(
         and receipt.get("callsign") == command.callsign
         and receipt.get("endpoint") == command.pane_id
         and receipt.get("thread_id") == command.thread_id
-        and _physical_worktree_exact(receipt.get("worktree"), command.worktree)
+        and _physical_worktree_exact(receipt.get("worktree"), receipt_worktree)
+        and receipt_branch_exact
         and receipt.get("routing_name") == command.routing_name
         and receipt.get("runtime_generation") == expected_generation
         and receipt.get("backend_kind") == "herdr"
@@ -2103,6 +2172,28 @@ def finalize_legacy_display_reconciliation(
                         "legacy display reconciliation final receipt conflicts with history",
                     )
             else:
+                if command.previous_worktree is not None:
+                    changed = store.connection.execute(
+                        """
+                        UPDATE agent_instances
+                           SET worktree=?,branch=?,version=version+1,updated_at=?
+                         WHERE agent_id=? AND retired_at IS NULL
+                           AND worktree=? AND branch=?
+                        """,
+                        (
+                            command.worktree,
+                            command.branch,
+                            at,
+                            command.champion_agent_id,
+                            command.previous_worktree,
+                            command.previous_branch,
+                        ),
+                    ).rowcount
+                    if changed != 1:
+                        raise StorageRefusal(
+                            "legacy_display_conflict",
+                            "legacy Champion worktree changed before final reconciliation",
+                        )
                 store.connection.execute(
                     """
                     INSERT INTO events

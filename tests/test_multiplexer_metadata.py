@@ -59,8 +59,9 @@ def stable(value) -> str:
 class RestoredHerdr:
     """Synthetic post-restart Herdr: same sessions/processes, new terminals."""
 
-    def __init__(self, presentations: list[dict]) -> None:
+    def __init__(self, presentations: list[dict], *, source_less: bool = False) -> None:
         self.calls: list[tuple[str, ...]] = []
+        self.source_less = source_less
         self.unavailable_reads = 1
         self.agents: list[dict] = []
         self.processes: dict[str, dict] = {}
@@ -68,11 +69,9 @@ class RestoredHerdr:
             kind = presentation["agent_adapter_kind"]
             pane_id = f"restart:p{index}"
             terminal_id = f"terminal:restart:{index}"
-            self.agents.append(
-                {
+            agent = {
                     "name": f"native-{index}",
                     "agent": kind,
-                    "display_agent": kind,
                     "agent_status": "idle",
                     "agent_session": {
                         "source": presentation["applies_to_source"],
@@ -85,13 +84,15 @@ class RestoredHerdr:
                     "terminal_id": terminal_id,
                     "cwd": presentation["cwd"],
                     "foreground_cwd": presentation["cwd"],
-                    "metadata_source": presentation["applies_to_source"],
                     "state_change_seq": 40 + index,
                     "terminal_title": f"native-{kind}",
                     "terminal_title_stripped": f"native-{kind}",
                     "tokens": {},
                 }
-            )
+            if not source_less:
+                agent["display_agent"] = kind
+                agent["metadata_source"] = presentation["applies_to_source"]
+            self.agents.append(agent)
             self.processes[pane_id] = {
                 "pid": 7000 + index,
                 "process_start": f"synthetic-start-{index}",
@@ -150,8 +151,9 @@ class RestoredHerdr:
                 if item == "--token":
                     key, value = command[index + 1].split("=", 1)
                     agent["tokens"][key] = value
-            agent["metadata_source"] = command[command.index("--source") + 1]
-            agent["display_agent"] = command[command.index("--display-agent") + 1]
+            if not self.source_less:
+                agent["metadata_source"] = command[command.index("--source") + 1]
+                agent["display_agent"] = command[command.index("--display-agent") + 1]
             agent["terminal_title"] = command[command.index("--title") + 1]
             agent["terminal_title_stripped"] = agent["terminal_title"]
             agent["state_change_seq"] = int(command[command.index("--seq") + 1])
@@ -1020,6 +1022,42 @@ def test_full_restored_agent_reconciliation_is_once_only(root: Path) -> None:
             }
             for call in herdr.calls
         )
+
+
+def test_source_less_herdr_inventory_reconciles_from_exact_owned_tokens(
+    root: Path,
+) -> None:
+    state = canonical_state(root)
+    watcher = RestoredWatcher()
+    with SQLiteStorage(state) as store:
+        expected = canonical_presentations(store)
+        herdr = RestoredHerdr(expected, source_less=True)
+        herdr.unavailable_reads = 0
+        first = reconcile_restored_agents(
+            store,
+            multiplexer_kind="herdr",
+            at=AT,
+            timeout_ms=0,
+            herdr_runner=herdr,
+            watcher_adapter=watcher,
+        )
+        assert first["candidate_count"] == first["reconciled_count"] == 4
+        assert all("metadata_source" not in agent for agent in herdr.agents)
+        assert all("display_agent" not in agent for agent in herdr.agents)
+        assert all(agent["tokens"]["display_provider"] for agent in herdr.agents)
+        reports = len(report_calls(herdr))
+
+        second = reconcile_restored_agents(
+            store,
+            multiplexer_kind="herdr",
+            at=AT,
+            timeout_ms=0,
+            herdr_runner=herdr,
+            watcher_adapter=watcher,
+        )
+        assert second["reconciled_count"] == 0
+        assert second["idempotent_count"] == 4
+        assert len(report_calls(herdr)) == reports
 
 
 def test_standalone_cursor_cli_restart_preserves_exact_session_without_process_effects(

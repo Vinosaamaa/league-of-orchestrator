@@ -43,6 +43,7 @@ from league.legacy_display_reconciliation import (  # noqa: E402
     LegacyDisplayReconciliationService,
     LegacyDisplayReconciliationSpec,
 )
+from league.display_replay import canonical_presentations  # noqa: E402
 from league.worktree import verified_worktree_repository_root  # noqa: E402
 from lifecycle_fakes import FakeLaunchAdapter  # noqa: E402
 from request_lifecycle_fixture import (  # noqa: E402
@@ -146,6 +147,9 @@ def test_legacy_display_command_exposes_exact_owner_cas_inputs() -> None:
         "--terminal-id",
         "--thread-id",
         "--worktree",
+        "--previous-worktree",
+        "--previous-branch",
+        "--branch",
         "--routing-name",
         "--expected-presentation-json",
         "--target-task-label",
@@ -394,6 +398,13 @@ class FakeHerdrRunner:
             raise AssertionError(f"unexpected Herdr command: {command}")
         stdout = json.dumps({"id": "test", "result": result}) + "\n"
         return subprocess.CompletedProcess(command, 0, stdout, "")
+
+
+class SourceLessLegacyRunner(FakeHerdrRunner):
+    def _agent(self) -> dict[str, object]:
+        agent = super()._agent()
+        agent.pop("metadata_source", None)
+        return agent
 
 
 class FakeIssueVerifier:
@@ -1131,6 +1142,101 @@ def test_legacy_active_champion_display_is_reconciled_once_with_exact_receipt(
     store.close()
 
 
+def test_legacy_display_reconciliation_records_one_exact_worktree_transition(
+    root: Path,
+) -> None:
+    store, clock, previous_worktree, launch, receipt, runner = _prepared_legacy_display(
+        root, "legacy-worktree-transition"
+    )
+    current_worktree = root / "legacy-worktree-transition" / "current-worktree"
+    current_worktree.mkdir()
+    (current_worktree / ".git").mkdir()
+    source_less = SourceLessLegacyRunner(current_worktree)
+    source_less.started = True
+    source_less.title = runner.title
+    source_less.tokens = dict(runner.tokens)
+    source_less.state_change_seq = runner.state_change_seq
+    runner = source_less
+    previous_branch = "agent/synthetic/legacy-worktree-transition"
+    current_branch = "agent/synthetic/legacy-worktree-followup"
+    before = store.connection.execute(
+        "SELECT version FROM agent_instances WHERE agent_id=?", (LUX_ID,)
+    ).fetchone()
+    spec = LegacyDisplayReconciliationSpec(
+        **{
+            **vars(_legacy_reconciliation_spec(launch, receipt, current_worktree, runner)),
+            "previous_worktree": str(previous_worktree.resolve()),
+            "previous_branch": previous_branch,
+            "branch": current_branch,
+        }
+    )
+    service = LegacyDisplayReconciliationService(
+        store,
+        HerdrLegacyDisplayAdapter(
+            runner,
+            environment={"HERDR_ENV": "1", "HERDR_WORKSPACE_ID": "w1"},
+        ),
+        clock,
+    )
+
+    for invalid in (
+        LegacyDisplayReconciliationSpec(
+            **{
+                **vars(spec),
+                "previous_branch": None,
+                "branch": None,
+            }
+        ),
+        LegacyDisplayReconciliationSpec(
+            **{
+                **vars(spec),
+                "previous_branch": "agent/synthetic/wrong-predecessor",
+            }
+        ),
+    ):
+        try:
+            service.reconcile(invalid)
+        except StorageRefusal as exc:
+            assert exc.code in {"legacy_display_invalid", "legacy_display_conflict"}
+        else:
+            raise AssertionError("legacy worktree transition accepted incomplete identity")
+    assert runner.calls == []
+
+    result = service.reconcile(spec)
+    assert result["state"] == "reconciled"
+    agent = store.connection.execute(
+        "SELECT worktree,branch,version FROM agent_instances WHERE agent_id=?", (LUX_ID,)
+    ).fetchone()
+    assert agent["worktree"] == str(current_worktree.resolve())
+    assert agent["branch"] == current_branch
+    assert int(agent["version"]) == int(before["version"]) + 1
+    durable = store.assignment_launch_context(str(launch["assignment_id"]))
+    assert durable["acceptance_receipt"]["worktree"] == str(previous_worktree.resolve())
+    assert durable["acceptance_receipt"]["branch"] == previous_branch
+    assert durable["legacy_display_reconciliation"]["intent"] == {
+        **durable["legacy_display_reconciliation"]["intent"],
+        "schema": "league.legacy-display-reconciliation-intent.v2",
+        "previous_worktree": str(previous_worktree.resolve()),
+        "previous_branch": previous_branch,
+        "branch": current_branch,
+    }
+    restored = canonical_presentations(store)
+    matched = [
+        item for item in restored if item["runtime_instance_id"] == launch["runtime_instance_id"]
+    ]
+    assert len(matched) == 1
+    assert matched[0]["cwd"] == str(current_worktree.resolve())
+    assert matched[0]["title"] == "Lux · Broker Repair"
+
+    retry = service.reconcile(spec)
+    assert retry["idempotent"] is True
+    retried = store.connection.execute(
+        "SELECT worktree,branch,version FROM agent_instances WHERE agent_id=?", (LUX_ID,)
+    ).fetchone()
+    assert dict(retried) == dict(agent)
+    store.close()
+
+
 class UserTitleRaceLegacyRunner(FakeHerdrRunner):
     def __init__(self, worktree: Path) -> None:
         super().__init__(worktree)
@@ -1509,7 +1615,7 @@ def test_legacy_display_reconciliation_requires_present_owned_presentation_sourc
     original_agent = runner._agent
     for mutate in (
         lambda agent: agent.update(agent_status="stopped"),
-        lambda agent: agent.pop("metadata_source"),
+        lambda agent: agent.update(metadata_source=""),
     ):
         runner._agent = lambda mutate=mutate: (  # type: ignore[method-assign]
             lambda agent: (mutate(agent), agent)[1]
@@ -1519,7 +1625,7 @@ def test_legacy_display_reconciliation_requires_present_owned_presentation_sourc
         except StorageRefusal as exc:
             assert exc.code == "legacy_display_identity_unverified"
         else:
-            raise AssertionError("absent or source-less legacy display was mutated")
+            raise AssertionError("absent or explicitly invalid legacy display was mutated")
         assert not any(
             call[:3] == ("herdr", "pane", "report-metadata") for call in runner.calls
         )

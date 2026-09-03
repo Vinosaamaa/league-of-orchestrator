@@ -21,6 +21,9 @@ the watcher service installer runs only as an explicit, hash-authorized command.
   runtime reconciliation.
 - Atomic Herdr launch preflight with routing/display identity verification and
   reservation rollback on a failed launch.
+- Registry-declared Codex, Pi, and Cursor CLI hook bootstraps. Ordinary unbound
+  Pi stays inert; canonical promotion activates hooks in the existing session,
+  while launch sandbox and presentation remain process-scoped.
 - Current thin Herdr and tmux adapters, with their portability limits explicit.
 - Semantic model/effort routing with explicit user overrides preserved.
 - Fail-closed schema-2 teardown verification, including local-install byte

@@ -1,4 +1,5 @@
-// League's per-process Pi lifecycle bridge. It never rewrites global Pi config.
+// League's per-process Pi launch sandbox and presentation bridge. Provider
+// hook intake is profile-loaded from league-hooks.mjs.
 // @ts-nocheck
 
 import crypto from "node:crypto";
@@ -7,7 +8,6 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 
 let stateRoot = process.env.LEAGUE_STATE_ROOT;
-let watcher = process.env.LEAGUE_WATCHER_COMMAND;
 let worktree = process.env.LEAGUE_WORKTREE;
 let sandboxProfile = process.env.LEAGUE_PI_SANDBOX_PROFILE;
 let paneId = process.env.HERDR_PANE_ID;
@@ -52,27 +52,6 @@ function canonicalMutationPath(candidate: string): string | undefined {
     } catch {
       return undefined;
     }
-  }
-}
-
-function runWatcher(
-  command: string,
-  payload: Record<string, unknown>,
-): Record<string, unknown> | undefined {
-  if (!watcher || !exactStateRoot || !path.isAbsolute(watcher)) return undefined;
-  const completed = spawnSync(watcher, [command], {
-    encoding: "utf8",
-    input: `${JSON.stringify(payload)}\n`,
-    env: { ...process.env, LEAGUE_STATE_ROOT: exactStateRoot },
-    timeout: 5000,
-    maxBuffer: 1024 * 1024,
-  });
-  if (completed.status !== 0 || completed.error || !completed.stdout) return undefined;
-  try {
-    const value = JSON.parse(completed.stdout);
-    return value && typeof value === "object" ? value : {};
-  } catch {
-    return undefined;
   }
 }
 
@@ -180,7 +159,6 @@ export default function (pi) {
   };
   stateRoot = supplied("state-root", stateRoot);
   paneId = supplied("pane-id", paneId);
-  watcher = supplied("watcher-command", watcher);
   worktree = supplied("worktree", worktree);
   sandboxProfile = supplied("sandbox-profile", sandboxProfile);
   runtimeKind = supplied("runtime-kind", runtimeKind);
@@ -197,7 +175,6 @@ export default function (pi) {
   exactStateRoot = exactRoot(stateRoot);
   exactWorktree = exactRoot(worktree);
   let sessionIdentity: SessionIdentity | undefined;
-  let inputId: string | undefined;
 
   function refreshSession(ctx): SessionIdentity | undefined {
     const id = ctx?.sessionManager?.getSessionId?.();
@@ -240,54 +217,10 @@ export default function (pi) {
     refreshSession(ctx);
   });
 
-  pi.on("input", (event, ctx) => {
-    if (event.source === "extension") return { action: "continue" };
-    const exactSession = refreshSession(ctx);
-    if (!exactSession || typeof event.text !== "string" || !event.text) {
-      return { action: "continue" };
-    }
-    inputId = crypto.randomUUID();
-    const captured = runWatcher("pi-input-hook", {
-      hook_event_name: "PiInput",
-      session_id: exactSession.id,
-      session_path: exactSession.file,
-      input_id: inputId,
-      prompt: event.text,
-    });
-    if (!captured) {
-      ctx.ui.notify("League prompt capture is unavailable; input was not submitted.", "error");
-      return { action: "handled" };
-    }
-    return { action: "continue" };
-  });
-
-  pi.on("agent_settled", (_event, ctx) => {
-    const exactSession = refreshSession(ctx);
-    if (!exactSession || !inputId) return;
-    const result = runWatcher("pi-stop-hook", {
-      hook_event_name: "PiStop",
-      session_id: exactSession.id,
-      session_path: exactSession.file,
-      input_id: inputId,
-    });
-    if (!result) {
-      inputId = undefined;
-      pi.sendUserMessage(
-        "League canonical Stop guard is unavailable. Preserve this session and wait for recovery.",
-        { deliverAs: "followUp" },
-      );
-      return;
-    }
-    const followup = result.followup_message;
-    if (typeof followup === "string" && followup) {
-      pi.sendUserMessage(followup, { deliverAs: "followUp" });
-    }
-  });
-
   pi.on("tool_call", (event, ctx) => {
     const exactSession = refreshSession(ctx);
     let authorized = Boolean(
-      exactSession && inputId && exactWorktree && exactStateRoot && sandboxProfile,
+      exactSession && exactWorktree && exactStateRoot && sandboxProfile,
     );
     let reason = "League Pi sandbox identity is incomplete";
     let shellCommand: string | undefined;
@@ -329,20 +262,10 @@ export default function (pi) {
       authorized = false;
       reason = "League blocked an undeclared Pi tool";
     }
-    const shared = exactSession && inputId
-      ? runWatcher("pi-pre-tool-hook", {
-          hook_event_name: "PiToolCall",
-          session_id: exactSession.id,
-          session_path: exactSession.file,
-          input_id: inputId,
-          tool_name: event.toolName,
-          authorized,
-        })
-      : undefined;
-    if (!shared || shared.decision !== "accept") {
+    if (!authorized) {
       return {
         block: true,
-        reason: typeof shared?.reason_code === "string" ? shared.reason_code : reason,
+        reason,
         terminate: true,
       };
     }

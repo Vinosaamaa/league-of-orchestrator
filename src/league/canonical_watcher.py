@@ -42,6 +42,7 @@ from .persistent_supervisor import (
 
 STOP_BUSY_TIMEOUT_MS = 250
 PROMPT_BUSY_TIMEOUT_MS = 1000
+PROFILE_BOOTSTRAP_MARKER = "league.provider-hook-bootstrap.v1"
 
 
 def _emit(value: Any) -> None:
@@ -227,6 +228,27 @@ def _adapter_kind_for_command(command: str) -> str | None:
         if command in routes:
             return routes[command]
     return None
+
+
+def _profile_bootstrap_request(payload: dict[str, Any]) -> bool:
+    marker = payload.get("league_profile_bootstrap")
+    if marker is None:
+        return False
+    if marker != PROFILE_BOOTSTRAP_MARKER:
+        raise StorageRefusal(
+            "hook_bootstrap_invalid", "provider hook bootstrap marker is invalid"
+        )
+    return True
+
+
+def _profile_bootstrap_output(
+    payload: dict[str, Any], actor: Any, output: dict[str, Any]
+) -> dict[str, Any]:
+    if not _profile_bootstrap_request(payload):
+        return output
+    if actor is None:
+        return {"binding": "unbound"}
+    return {"binding": "bound", **output}
 
 
 def _actor(
@@ -794,6 +816,7 @@ def brokered_hook_context(
         )
     ):
         raise StorageRefusal("prompt_hook_invalid", "brokered hook request is invalid")
+    _profile_bootstrap_request(payload)
     args = argparse.Namespace(shotcaller=shotcaller, session_id=session_id)
     actor = _actor(
         store, args, payload, adapter_kind=_adapter_kind_for_command(str(command))
@@ -833,19 +856,29 @@ def handle_brokered_hook(
     callsign = resolved.callsign
     actor_role = resolved.actor_role
     scope = resolved.scope
+    if _profile_bootstrap_request(payload) and actor is None:
+        return {
+            "hook_output": {"binding": "unbound"},
+            "capture": None,
+            "actor_agent_id": None,
+        }
     if command in PRE_TOOL_HOOK_ADAPTERS:
         return {
-            "hook_output": _pre_tool_output(
-                command,
+            "hook_output": _profile_bootstrap_output(
                 payload,
-                exact_binding=actor is not None,
-                actor_role=actor_role,
-                delegated_by_shotcaller=_delegation_verified(
-                    store, actor_id, actor_role
-                ),
-                mutation_fenced=bool(
-                    actor_id
-                    and runtime_replacement_mutation_fenced(store, actor_id)
+                actor,
+                _pre_tool_output(
+                    command,
+                    payload,
+                    exact_binding=actor is not None,
+                    actor_role=actor_role,
+                    delegated_by_shotcaller=_delegation_verified(
+                        store, actor_id, actor_role
+                    ),
+                    mutation_fenced=bool(
+                        actor_id
+                        and runtime_replacement_mutation_fenced(store, actor_id)
+                    ),
                 ),
             ),
             "capture": None,
@@ -867,7 +900,9 @@ def handle_brokered_hook(
                 datetime.now().astimezone().isoformat(timespec="seconds"),
             )
             return {
-                "hook_output": _champion_stop_output(command, result),
+                "hook_output": _profile_bootstrap_output(
+                    payload, actor, _champion_stop_output(command, result)
+                ),
                 "capture": None,
                 "actor_agent_id": actor_id,
             }
@@ -892,7 +927,7 @@ def handle_brokered_hook(
                 ),
             }
         return {
-            "hook_output": output,
+            "hook_output": _profile_bootstrap_output(payload, actor, output),
             "capture": None,
             "actor_agent_id": actor_id,
             "supervision_handoff": result.get("supervision_handoff") is True,
@@ -908,7 +943,7 @@ def handle_brokered_hook(
     )
     priority_eligible = _priority_eligible_capture(actor_id, actor_role, captured)
     return {
-        "hook_output": {},
+        "hook_output": _profile_bootstrap_output(payload, actor, {}),
         "actor_agent_id": actor_id,
         "capture": {
             "prompt_id": captured.get("prompt_id"),
@@ -1335,7 +1370,7 @@ def main(argv: list[str] | None = None) -> int:
                             adapter_kind=_adapter_kind_for_command(args.command),
                         )
                         if actor is None:
-                            _emit({})
+                            _emit(_profile_bootstrap_output(payload, actor, {}))
                             return 0
                         persistent_required = bool(
                             str(actor[2]) == "shotcaller"
@@ -1360,7 +1395,13 @@ def main(argv: list[str] | None = None) -> int:
                     _emit(response["hook_output"])
                     return 0
             if args.command in STOP_HOOK_ADAPTERS and persistent_required:
-                _emit(_supervisor_unavailable_stop_output(args.command))
+                _emit(
+                    _profile_bootstrap_output(
+                        payload,
+                        actor,
+                        _supervisor_unavailable_stop_output(args.command),
+                    )
+                )
                 return 0
             fallback_store = _direct_hook_fallback_store(args, payload)
         else:
@@ -1393,6 +1434,9 @@ def main(argv: list[str] | None = None) -> int:
         callsign = None if actor is None else str(actor[1])
         actor_role = None if actor is None else str(actor[2])
         scope = None if actor is None else _scope(store, actor_id, callsign)
+        if _profile_bootstrap_request(payload) and actor is None:
+            _emit({"binding": "unbound"})
+            return 0
         if args.command in PROMPT_HOOK_ADAPTERS:
             captured = _capture_prompt(
                 store,
@@ -1404,21 +1448,25 @@ def main(argv: list[str] | None = None) -> int:
                 capture_event_id=capture_event_id,
             )
             _notify_direct_user_priority(store, actor_id, actor_role, captured)
-            _emit({})
+            _emit(_profile_bootstrap_output(payload, actor, {}))
             return 0
         if args.command in PRE_TOOL_HOOK_ADAPTERS:
             _emit(
-                _pre_tool_output(
-                    args.command,
+                _profile_bootstrap_output(
                     payload,
-                    exact_binding=actor is not None,
-                    actor_role=actor_role,
-                    delegated_by_shotcaller=_delegation_verified(
-                        store, actor_id, actor_role
-                    ),
-                    mutation_fenced=bool(
-                        actor_id
-                        and runtime_replacement_mutation_fenced(store, actor_id)
+                    actor,
+                    _pre_tool_output(
+                        args.command,
+                        payload,
+                        exact_binding=actor is not None,
+                        actor_role=actor_role,
+                        delegated_by_shotcaller=_delegation_verified(
+                            store, actor_id, actor_role
+                        ),
+                        mutation_fenced=bool(
+                            actor_id
+                            and runtime_replacement_mutation_fenced(store, actor_id)
+                        ),
                     ),
                 )
             )
@@ -1478,11 +1526,23 @@ def main(argv: list[str] | None = None) -> int:
                 _emit(_busy_stop_result(args, payload))
                 return 0
             if actor_role == "champion":
-                _emit(_champion_stop_output(args.command, result))
+                _emit(
+                    _profile_bootstrap_output(
+                        payload, actor, _champion_stop_output(args.command, result)
+                    )
+                )
                 return 0
             blocked = result["decision"] == "block"
             if _stop_output_mode(args.command) != "decision":
-                _emit({"followup_message": "League has unresolved obligations."} if blocked else {})
+                _emit(
+                    _profile_bootstrap_output(
+                        payload,
+                        actor,
+                        {"followup_message": "League has unresolved obligations."}
+                        if blocked
+                        else {},
+                    )
+                )
             else:
                 reason = _codex_stop_reason(
                     callsign,
@@ -1490,9 +1550,13 @@ def main(argv: list[str] | None = None) -> int:
                     tuple(result.get("unresolved_summaries", ())),
                 )
                 _emit(
-                    {"decision": "block", "reason": reason}
-                    if blocked
-                    else {}
+                    _profile_bootstrap_output(
+                        payload,
+                        actor,
+                        {"decision": "block", "reason": reason}
+                        if blocked
+                        else {},
+                    )
                 )
             return 0
         _emit({"writer": "sqlite", "shotcaller": callsign})

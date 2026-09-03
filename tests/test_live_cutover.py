@@ -74,6 +74,7 @@ def prepare_authority(
     *,
     include_league_supplement: bool = False,
     include_cursor: bool = False,
+    include_pi: bool = False,
 ) -> dict[str, Any]:
     fixture = fixture_plan(root / "fixture")
     write_json(fixture["hook"], {"hooks": {}})
@@ -110,6 +111,20 @@ def prepare_authority(
         fixture["plan"]["proposed"]["hooks"].append(
             {"harness": "cursor", "target": str(cursor_hooks)}
         )
+    pi_hooks = None
+    if include_pi:
+        pi_hooks = fixture["live"] / "config/pi/extensions/league-hooks.mjs"
+        fixture["plan"]["current_targets"].append(
+            {
+                "target_id": "pi-hooks",
+                "kind": "hook_config",
+                "path": str(pi_hooks),
+                "required": False,
+            }
+        )
+        fixture["plan"]["proposed"]["hooks"].append(
+            {"harness": "pi", "target": str(pi_hooks)}
+        )
     write_json(fixture["plan_path"], fixture["plan"])
     acceptance = root / "acceptance"
     acceptance.mkdir()
@@ -133,6 +148,7 @@ def prepare_authority(
         "universal": universal,
         "league_supplement": league_supplement,
         "cursor_hooks": cursor_hooks,
+        "pi_hooks": pi_hooks,
         "sentinel": sentinel,
         "config": config,
     }
@@ -248,6 +264,7 @@ def test_authority_bound_live_apply(root: Path) -> None:
         namespace,
         include_league_supplement=True,
         include_cursor=True,
+        include_pi=True,
     )
     universal_before = node_fingerprint(fixture["universal"])
     supplement_before = node_fingerprint(fixture["league_supplement"])
@@ -282,6 +299,10 @@ def test_authority_bound_live_apply(root: Path) -> None:
     assert hook_receipts["cursor"]["added"] == [
         "beforeSubmitPrompt", "beforeShellExecution", "stop"
     ]
+    assert hook_receipts["pi"]["added"] == ["profile_extension"]
+    assert fixture["pi_hooks"].read_bytes() == (
+        ROOT / "integrations/pi/league-hooks.mjs"
+    ).read_bytes()
     assert json.loads(fixture["cursor_hooks"].read_text())["hooks"][
         "sessionStart"
     ] == [{"command": "keep-me"}]
@@ -300,6 +321,7 @@ def test_authority_bound_live_apply(root: Path) -> None:
     assert {
         "hooks",
         "cursor-hooks",
+        "pi-hooks",
         "installed",
         "legacy",
         "watcher-launcher",

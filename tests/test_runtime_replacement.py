@@ -333,6 +333,15 @@ class FakeAgentAdapter:
                 ("stop_supervision", "synthetic-stop"),
             )
         }
+        self.hook_bootstrap_profile = {
+            "schema": "league.provider-hook-bootstrap.v1",
+            "profile_loaded": True,
+            "activation": "native_hook_payload",
+            "target_relative": f".synthetic/{kind}/hooks.json",
+            "source_relative": None,
+            "launch_enforcement": "native",
+        }
+        self.hook_bootstrap_installer = self._install_hook_bootstrap
         self.visible_launch_factory = self.visible_launch
         self.delivery_handler = lambda **_inputs: None
         self.presentation_factory = lambda **inputs: inputs
@@ -353,6 +362,23 @@ class FakeAgentAdapter:
 
     def normalize_provider(self, provider_kind: str) -> str:
         return self.provider_aliases.get(provider_kind, provider_kind)
+
+    def _install_hook_bootstrap(
+        self,
+        *,
+        adapter_kind: str,
+        hook_profile: Mapping[str, Mapping[str, Any]],
+        bootstrap_profile: Mapping[str, Any],
+        source_root: Path,
+        target: Path,
+        stable_watcher: Path,
+    ) -> Mapping[str, Any]:
+        assert adapter_kind == self.kind
+        assert hook_profile == self.hook_profile
+        assert bootstrap_profile == self.hook_bootstrap_profile
+        assert source_root.is_absolute() and target.is_absolute()
+        assert stable_watcher.is_absolute()
+        return {"adapter_kind": adapter_kind, "target": str(target), "added": []}
 
     def visible_launch(self, **inputs: Any) -> ReplacementDriver:
         return ReplacementDriver(self, inputs["launch"], inputs["store"])

@@ -72,6 +72,30 @@ and state root, League removes only its redundant legacy runtime/session tokens.
 This keeps the combined pane metadata beneath Herdr's fixed token limit without
 clearing native Pi or toolkit-owned identity and presentation fields.
 
+## Profile-loaded lifecycle hooks
+
+The active Pi profile loads the source-managed `league-hooks.mjs` bootstrap.
+The bootstrap contains no launch descriptor, sandbox root, provider choice, or
+presentation policy. On every interactive input it supplies Pi's exact native
+session ID and JSONL path to the stable canonical input hook. The same bound
+input identity feeds pre-mutation and settled/Stop events. The canonical hook
+action returns `binding=unbound` without a write when no exact active agent or
+runtime owns that session, so ordinary Pi remains silent and unchanged. A
+later callsign/bootstrap publication activates the next event in place; no Pi
+process or provider session is relaunched.
+
+League-launched Pi separately loads `league-runtime.ts`. That launch-only
+extension restricts tools to the descriptor-bound worktree/state roots and
+publishes exact presentation metadata, but does not register prompt or Stop
+handlers. Cursor and Codex configured inside Pi therefore receive the same Pi
+runtime hooks without becoming separate session pools. Direct Codex and Cursor
+CLI keep their provider-native profile hook configurations through the same
+agent-adapter installation registry.
+
+Issue #66 owns the canonical Stop, supervision, and rearm decision. This layer
+only transports its stable hook request and response and fails closed after a
+session has been proven bound if that decision is unavailable.
+
 League reads only the first JSONL record for identity/cwd/parent validation,
 and the first parent record when lineage exists. It hashes the complete source,
 rejects a duplicate session ID at any other unified path or digest, copies with

@@ -181,6 +181,38 @@ def main() -> None:
         thread, errors = _start(runtime)
         first = supervisor_status(state, "Garen")
         assert first["live"] and first["event_driven"] and first["lease_valid"], first
+        with SQLiteStorage(state) as observer:
+            unbound_before = (
+                observer.connection.execute("SELECT COUNT(*) FROM prompts").fetchone()[0],
+                observer.connection.execute(
+                    "SELECT COUNT(*) FROM prompt_quarantine"
+                ).fetchone()[0],
+            )
+        unbound = send_supervisor_message(
+            f"unix:{runtime.socket_path}",
+            {
+                "kind": "hook",
+                "hook": {
+                    "command": "pi-input-hook",
+                    "payload": {
+                        "league_profile_bootstrap": "league.provider-hook-bootstrap.v1",
+                        "hook_event_name": "PiInput",
+                        "session_id": "synthetic-unbound-pi",
+                        "session_path": "/synthetic/unbound/session.jsonl",
+                        "input_id": "input:unbound",
+                        "prompt": "ordinary unbound Pi prompt",
+                    },
+                },
+            },
+        )
+        assert unbound["hook_output"] == {"binding": "unbound"}
+        with SQLiteStorage(state) as observer:
+            assert (
+                observer.connection.execute("SELECT COUNT(*) FROM prompts").fetchone()[0],
+                observer.connection.execute(
+                    "SELECT COUNT(*) FROM prompt_quarantine"
+                ).fetchone()[0],
+            ) == unbound_before
         runtime.wake_adapter = ExplodingWakeAdapter()
         try:
             send_supervisor_message(

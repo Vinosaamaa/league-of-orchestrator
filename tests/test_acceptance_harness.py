@@ -601,6 +601,7 @@ def test_version_staging_is_regular_and_exact(root: Path) -> None:
         assert candidate.read_bytes() == source_version.read_bytes()
     for relative in (
         Path("integrations/pi/league-runtime.ts"),
+        Path("integrations/pi/league-hooks.mjs"),
         Path("integrations/pi/league-bash.sb"),
         Path("config/league-model-routing.example.json"),
         Path("config/league-supervisor.launchd.plist.in"),

@@ -294,12 +294,14 @@ Codex+Herdr and Codex+tmux were the original named adapter contracts. Issue #84
 deliberately adds Cursor+Herdr and Pi+Herdr to the production visible-assignment
 and cleanup driver while leaving the generic `RuntimeLifecycle` backend
 contract-only. Provider session values remain opaque to core storage; the
-provider boundary owns exact validation and resume arguments. Pi prompt/Stop
-capture and shell confinement are a release-local, per-process extension and
-sandbox profile, not a global Pi configuration rewrite. Focused fake-adapter
-tests cover Codex, Cursor, and Pi; they are not live-provider evidence. Merge,
-installation, live provider canaries, cutover, rollback, and teardown remain
-separate gates.
+provider boundary owns exact validation and resume arguments. Pi shell
+confinement and presentation are a release-local, per-process extension and
+sandbox profile. Prompt intake, pre-mutation authorization, and Stop/rearm are
+now a separate source-managed profile extension. It is inert for an unbound
+ordinary Pi session and activates only when the existing canonical hook command
+proves that exact Pi session. Focused fake-adapter tests cover Codex, Cursor,
+and Pi; they are not live-provider evidence. Merge, installation, live provider
+canaries, cutover, rollback, and teardown remain separate gates.
 
 ## Skill-contract implementation provenance
 
@@ -1469,3 +1471,29 @@ tree `5731a4ec4231f8136743030eef8911de75477480`. It packages the corrected
 restored Shotcaller publication-cwd and project-label behavior without another
 behavior change; this release delta changes only the version contract,
 deterministic release-staging expectations, and this provenance record.
+
+The issue-#84 provider-hook follow-up adds one registry-declared installation
+contract for Codex, Pi, and Cursor CLI. Codex and Cursor retain their native
+profile hook JSON shapes; Cursor is now an explicit installed bootstrap rather
+than an implicit core branch. Pi declares
+`integrations/pi/league-hooks.mjs` as its profile-loaded asset. Its envelope
+asks the existing `pi-input-hook`, `pi-pre-tool-hook`, and `pi-stop-hook`
+commands to prove canonical binding atomically with the hook action. An exact
+unbound receipt performs no prompt, quarantine, watcher-generation, tool, or
+Stop mutation; a later bound event promotes the running session without a Pi
+relaunch. The launch extension retains only launch-scoped sandbox and
+presentation behavior, preventing duplicate lifecycle handlers.
+
+This follow-up consumes the stable Stop response only. Issue #66 remains the
+owner of canonical Stop, supervisor, and rearm semantics; changes in that issue
+must preserve the adapter hook output contract rather than be duplicated here.
+Exact-head review found that native hook commands did not quote an absolute
+watcher path, malformed Codex hook groups could escape the canonical refusal,
+the Pi idempotence check could read an unbounded existing target, and one fixed
+temporary name made a stale or concurrent installer block valid publication.
+The corrected installers shell-quote native command arguments, reject malformed
+groups without mutation, compare Pi targets with a bounded read, and use a
+unique same-directory atomic-write temporary file.
+The candidate changes source, synthetic installers, and immutable release
+manifest bytes only. It does not edit the active Pi profile, install a release,
+restart Herdr, or mutate live League state.

@@ -1864,6 +1864,140 @@ def test_watcher_readiness_timeout_terminates_exact_supervisor(root: Path) -> No
     assert waiter.poll() is not None
 
 
+def test_profile_bootstrap_is_inert_until_exact_binding_then_activates(
+    root: Path,
+) -> None:
+    marker = "league.provider-hook-bootstrap.v1"
+    cases = (
+        (
+            "codex",
+            "codex-user-prompt-hook",
+            "codex-pre-tool-hook",
+            "codex-stop-hook",
+            "session:bootstrap-codex",
+            {
+                "session_id": "session:bootstrap-codex",
+                "turn_id": "turn:bootstrap",
+            },
+            "UserPromptSubmit",
+            "PreToolUse",
+            "Stop",
+        ),
+        (
+            "cursor",
+            "cursor-before-submit-hook",
+            "cursor-pre-tool-hook",
+            "cursor-stop-hook",
+            "session:bootstrap-cursor",
+            {
+                "conversation_id": "session:bootstrap-cursor",
+                "generation_id": "generation:bootstrap",
+            },
+            "beforeSubmitPrompt",
+            "beforeShellExecution",
+            "stop",
+        ),
+        (
+            "pi",
+            "pi-input-hook",
+            "pi-pre-tool-hook",
+            "pi-stop-hook",
+            str(root / "pi/session.jsonl"),
+            {
+                "session_id": "session-pi-bootstrap",
+                "session_path": str(root / "pi/session.jsonl"),
+                "input_id": "input:bootstrap",
+            },
+            "PiInput",
+            "PiToolCall",
+            "PiStop",
+        ),
+    )
+    for kind, prompt_command, pretool_command, stop_command, session, identity, prompt_event, pretool_event, stop_event in cases:
+        label = f"profile-bootstrap-{kind}"
+        _, state, _ = seeded_state(root, label)
+        env = _environment(root / label, state)
+
+        def mutation_snapshot() -> tuple[int, int, int, int]:
+            with SQLiteStorage(state, request_wal=False) as store:
+                return (
+                    int(store.connection.execute("SELECT COUNT(*) FROM prompts").fetchone()[0]),
+                    int(store.connection.execute("SELECT COUNT(*) FROM prompt_quarantine").fetchone()[0]),
+                    int(store.connection.execute("SELECT COALESCE(SUM(user_message_generation),0) FROM watcher_scopes").fetchone()[0]),
+                    int(store.connection.execute("SELECT COALESCE(SUM(wait_generation),0) FROM watcher_scopes").fetchone()[0]),
+                )
+
+        before = mutation_snapshot()
+        common = {**identity, "league_profile_bootstrap": marker}
+        assert _watcher(
+            env,
+            prompt_command,
+            payload={**common, "hook_event_name": prompt_event, "prompt": "ordinary unbound prompt"},
+        ) == {"binding": "unbound"}
+        assert _watcher(
+            env,
+            pretool_command,
+            payload={**common, "hook_event_name": pretool_event, "authorized": True},
+        ) == {"binding": "unbound"}
+        assert _watcher(
+            env,
+            stop_command,
+            payload={
+                **common,
+                "hook_event_name": stop_event,
+                **({"stop_hook_active": True} if kind == "codex" else {}),
+            },
+        ) == {"binding": "unbound"}
+        assert mutation_snapshot() == before
+
+        _register_garen_runtime(
+            state,
+            label,
+            session_ref=session,
+            harness_kind=f"{kind}-thread",
+        )
+        captured = _watcher(
+            env,
+            prompt_command,
+            payload={**common, "hook_event_name": prompt_event, "prompt": "promoted bound prompt"},
+        )
+        assert captured == {"binding": "bound"}
+        authorized = _watcher(
+            env,
+            pretool_command,
+            payload={**common, "hook_event_name": pretool_event, "authorized": True},
+        )
+        assert authorized == {
+            "binding": "bound",
+            "decision": "accept",
+            "reason_code": "policy_accepted",
+        }
+        stopped = _watcher(
+            env,
+            stop_command,
+            payload={
+                **common,
+                "hook_event_name": stop_event,
+                **({"stop_hook_active": True} if kind == "codex" else {}),
+            },
+        )
+        assert stopped["binding"] == "bound"
+
+        invalid = {**common, "league_profile_bootstrap": "wrong"}
+        result = subprocess.run(
+            [env["TEST_INSTALLED_WATCHER"], prompt_command],
+            input=json.dumps(
+                {**invalid, "hook_event_name": prompt_event, "prompt": "invalid marker"}
+            ),
+            text=True,
+            capture_output=True,
+            env=env,
+            check=False,
+        )
+        assert result.returncode == 2
+        assert "hook_bootstrap_invalid" in result.stderr
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="league-canonical-watcher-") as temporary:
         root = Path(temporary)
@@ -1889,6 +2023,7 @@ def main() -> None:
         test_material_delivery_watcher_direct_dedup_and_unavailable(root)
         test_task_transition_cli_dispatches_exact_watcher_receipt(root)
         test_watcher_readiness_timeout_terminates_exact_supervisor(root)
+        test_profile_bootstrap_is_inert_until_exact_binding_then_activates(root)
     print("PASS: installed SQLite Stop/supervise plus watcher/direct exact-once delivery and pending fallback")
 
 

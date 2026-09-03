@@ -42,6 +42,12 @@ canonical quarantine with a `runtime_unverified` obligation and returns success
 so the local prompt proceeds. `league request bind-prompt` later requires one
 exact actor/runtime/session match, promotes the same prompt without changing its
 identity or bytes, and wakes the bound Shotcaller for model-authored triage.
+The Pi profile bootstrap uses an explicit binding-aware envelope instead: an
+unbound ordinary Pi session receives a read-only `binding=unbound` result and
+does not enter quarantine. After canonical promotion, the same running Pi
+process receives `binding=bound` and uses the ordinary prompt, pre-mutation, and
+Stop policies. Direct Codex/Cursor hook compatibility retains the quarantine
+contract for unmarked native payloads.
 When the hook session already identifies one canonical Shotcaller but its exact
 runtime is unavailable, the quarantine insert and that Shotcaller's
 `user_message_generation` and `wait_generation` increments are one transaction.
@@ -486,8 +492,11 @@ rewrite a skill. Release-to-installed parity and a real runtime remain #23
 gates.
 
 The staged release manifest also proves exact source/release/staged parity for
-the portable report HTML template, League report skill, and League-specific
-`global-agent-instructions/league/AGENTS.md` source. The isolated package test
+the portable report HTML template, League report skill, League-specific
+`global-agent-instructions/league/AGENTS.md` source, and every adapter-declared
+provider bootstrap asset. The synthetic cutover installer dispatches Codex,
+Pi, and Cursor CLI through their registered installers, preserves unrelated
+native handlers, and makes exact retry byte-inert. The isolated package test
 installs only `league/AGENTS.md`, restores its prior synthetic bytes, and proves
 the synthetic universal `AGENTS.md` hash is identical before install, after
 install, and after rollback. A manifest naming the universal target refuses

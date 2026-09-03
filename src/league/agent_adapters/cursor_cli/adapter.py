@@ -8,6 +8,7 @@ from ..base import (
     no_replacement_descriptor_transactions,
 )
 from ..core import declared_lifecycle_operations
+from .hooks import BOOTSTRAP_PROFILE, install as install_hook_bootstrap
 
 
 def _deliver(*, store, at, multiplexer, target, envelope, **_unused):
@@ -111,6 +112,8 @@ def adapter() -> DeclaredAgentAdapter:
                 "source_field": "generation_id", "output_mode": "followup",
             },
         },
+        BOOTSTRAP_PROFILE,
+        install_hook_bootstrap,
         {
             "launch": frozenset({"visible_launch"}),
             "resume": frozenset({"visible_launch"}),

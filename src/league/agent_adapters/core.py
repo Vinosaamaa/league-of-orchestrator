@@ -7,6 +7,7 @@ decide ownership, authorization, retry, supervision, or cleanup policy.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Mapping, Protocol
 
 from ..adapter_types import AdapterContract, AdapterInstruction, OpaqueIdentity, RuntimeObservation
@@ -131,6 +132,8 @@ class AgentLifecycleAdapter(Protocol):
     contract: AdapterContract
     lifecycle_operations: frozenset[str]
     hook_profile: Mapping[str, Mapping[str, Any]]
+    hook_bootstrap_profile: Mapping[str, Any]
+    hook_bootstrap_installer: Any
     visible_launch_factory: Any
     multiplexer_requirements: Mapping[str, frozenset[str]]
     process_names: frozenset[str]
@@ -146,6 +149,13 @@ class AgentLifecycleAdapter(Protocol):
     def replacement_descriptor_transactions(self, **inputs: Any) -> tuple[Any, ...]: ...
 
     def translate_event(self, native_event: str, payload: Mapping[str, Any]) -> LifecycleEvent: ...
+    def install_hook_bootstrap(
+        self,
+        *,
+        source_root: Path,
+        target: Path,
+        stable_watcher: Path,
+    ) -> Mapping[str, Any]: ...
     def visible_launch(self, **inputs: Any) -> Any: ...
     def restored_presentation(
         self, descriptor: Mapping[str, Any], observation: Mapping[str, Any]

@@ -34,6 +34,8 @@ from .importer import build_import_plan
 from .sqlite_store import CURRENT_SCHEMA_VERSION, SQLiteStorage
 from .storage import StorageRefusal
 from .storage_types import FaultInjector
+from .agent_adapters import builtin_agent_adapter_registry
+from .provider_hooks import release_hook_bootstrap_sources
 
 
 RECEIPT_SCHEMA = "league.acceptance-receipt.v1"
@@ -439,6 +441,11 @@ def _release_files(source_root: Path) -> list[Path]:
         source_root / "config/league-model-routing.example.json",
         source_root / "config/league-supervisor.launchd.plist.in",
     ]
+    files.extend(
+        release_hook_bootstrap_sources(
+            builtin_agent_adapter_registry(), source_root
+        )
+    )
     files.extend(_release_directory_files(source_root, Path("src/league"), ".py"))
     for package in (
         Path("src/league/agent_adapters"),

@@ -43,6 +43,7 @@ BENCHMARK_TESTS := \
 	tests/test_inline_triage_prompt_shapes.py
 
 RUNTIME_LIFECYCLE_TESTS := \
+	tests/test_provider_hook_bootstrap.py \
 	tests/test_runtime_adapters.py \
 	tests/test_multiplexer_metadata.py \
 	tests/test_runtime_replacement.py \

@@ -1779,3 +1779,13 @@ endpoint, route, session, source, title, or ownership mismatch still fail
 closed. This release delta changes only the version contract, deterministic
 release-staging expectations, and this provenance record beyond that merged
 tree.
+
+Release `0.2.68` assigns the next immutable install identity to merged PR #182
+at main commit `86cdb5fe846035580e0d9e80f2bb8d4938893737` and exact
+reviewed/merged tree `8cd47044e605f7d5a9faadb741b8f1b61f9ef00e`. It packages
+the owner-rollover compatibility repair for modern bootstrapped Shotcallers:
+the exact active Shotcaller-scoped assignment is accepted alongside the legacy
+Squad-scoped reservation, while incomplete or mismatched successors still fail
+closed. This release delta changes only the version contract, deterministic
+release-staging expectations, and this provenance record beyond that merged
+tree.

@@ -1599,3 +1599,12 @@ source token and the exact `display_provider` token match the canonical
 presentation. Explicitly present but empty or conflicting fields remain a hard
 failure. Focused tests cover source-less Codex, Cursor, and Pi reconciliation,
 stable idempotent retry, and the predecessor-to-current worktree transition.
+
+Release `0.2.56` assigns the next immutable install identity to merged PR #158
+at main commit `8bbf3105244813cc436034b42c41671218715cdd` and exact
+reviewed/merged tree `5fea15065dec14b1c192fc5620084a945f3fc9fd`. It packages
+the atomic legacy Champion worktree reconciliation and source-less Herdr
+presentation verification correction without any additional hook, watcher,
+provider, multiplexer, or storage-contract change. This release delta changes
+only the version contract, deterministic release-staging expectations, and
+this provenance record beyond that merged tree.

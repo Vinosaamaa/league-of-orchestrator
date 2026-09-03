@@ -32,11 +32,13 @@ $HOME/.local/bin/league --state-root "$HOME/.local/state/league"
 
 ## Durable prompt and request triage
 
-- UserPromptSubmit and beforeSubmitPrompt capture exact local prompt bytes once
-  and wake the verified Shotcaller. They never rewrite bodies, inject control
-  text, mine transcripts, infer semantic splits, or fabricate missed prompts.
-- Missing runtime identity quarantines and deduplicates the exact prompt. It
-  binds later only to one verified runtime and does not block ordinary input.
+- Only `UserPromptSubmit` and `beforeSubmitPrompt` from an exactly bound
+  canonical League runtime capture its exact local prompt bytes once and wake
+  its verified Shotcaller. An unbound, non-League, or otherwise unverifiable
+  runtime is left untouched and unrecorded.
+- Prompt intake activates only after exact canonical binding; it never backfills
+  pre-binding prompts or mines transcripts. It never rewrites bodies, injects
+  control text, infers semantic splits, or fabricates missed prompts.
 - At the start of a Shotcaller turn, start exactly one bounded process and keep
   it through commit:
 
@@ -52,11 +54,12 @@ $HOME/.local/bin/league --state-root "$HOME/.local/state/league" request turn \
   League holds no transaction while the model reasons between them.
 - Exact retries are idempotent. Missing, reordered, duplicated, conflicting,
   stale-version, cross-owner, or partial batches refuse without partial commit.
-- Every prompt item is classified as a new request, follow-up, context,
-  acknowledgement, duplicate, or deferred item; no text disappears silently.
+- Every captured bound prompt item is classified as a new request, follow-up,
+  context, acknowledgement, duplicate, or deferred item; no text disappears
+  silently.
 - Before reply, wait, handoff, or end, the turn's final boundary accounts for
-  every request, untriaged prompt, delivery, assignment, task, Champion, and
-  cleanup obligation.
+  every bound request, captured untriaged prompt, delivery, assignment, task,
+  Champion, and cleanup obligation.
 - Stop is an omission backstop, not the normal triage mechanism. Genuine user
   steering rearms it and outranks material-event waits.
 
@@ -113,6 +116,25 @@ $HOME/.local/bin/league --state-root "$HOME/.local/state/league" request turn \
 
 ## Delivery and supervision
 
+- Hooks first verify an exact canonical runtime binding and role. If a Codex,
+  Pi, or Cursor CLI runtime is unbound or non-League, `UserPrompt`,
+  pre-mutation, and `Stop` allow/no-op immediately with zero canonical mutation.
+- An attached Shotcaller with any owner or delegated obligation blocks every
+  `Stop` attempt; neither wait-generation deduplication, a repeated `Stop`, nor
+  retired `allow-stop-once` may turn that block into allow.
+- `attach-shotcaller` requires the exact live supervisor binding and makes the
+  Shotcaller terminal-attached. `detach-shotcaller` requests token-saving
+  terminal detachment without pausing supervision.
+- Detachment may let the Shotcaller end only when no owner-actionable work
+  remains and the persistent watcher lease, runtime generation, locator, fence,
+  and wake/delivery path exactly match its durable detachment receipt. The
+  watcher remains live and later wakes and delivers exactly once.
+- `service-pause` and `service-resume` are deprecated aliases for
+  `detach-shotcaller` and `attach-shotcaller`, respectively.
+- For a bound Shotcaller, a missing, stale, or ambiguous watcher, fence,
+  binding, or wake path refuses detachment and keeps `Stop` blocked.
+- Codex, Pi regardless of model provider, and Cursor CLI share this
+  provider-neutral contract.
 - Material task transitions use the exact task, runtime, expected version,
   transition identity, event, outbox, recipient Shotcaller, update, next
   action, blocker, and time.

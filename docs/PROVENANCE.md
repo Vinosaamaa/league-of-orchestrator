@@ -1472,6 +1472,19 @@ restored Shotcaller publication-cwd and project-label behavior without another
 behavior change; this release delta changes only the version contract,
 deterministic release-staging expectations, and this provenance record.
 
+Release `0.2.53` assigns the next immutable install identity to merged PR #150
+at main commit `5ade2ee432a707981764c3951ce6862adb4c14df` and exact reviewed/merged
+tree `32fbdf9ad6eb9373dec85a794f81ee588d153dfc`. It packages the
+provider-neutral semantic owner-Stop control, retired generic one-shot bypass,
+and ambiguity-fenced delegated steering without another runtime behavior
+change. This release continuation aligns the source-managed installed League
+supplement with that merged contract: prompt intake activates only after exact
+canonical binding and never backfills, unbound or unverifiable runtimes remain
+untouched and unrecorded, attached obligations always block Stop, and detached
+handoff requires an exact durable watcher receipt. The release delta is limited
+to that normative source policy, its semantic regression, the version contract,
+deterministic release-staging expectations, and this provenance record.
+
 The issue-#84 provider-hook follow-up adds one registry-declared installation
 contract for Codex, Pi, and Cursor CLI. Codex and Cursor retain their native
 profile hook JSON shapes; Cursor is now an explicit installed bootstrap rather

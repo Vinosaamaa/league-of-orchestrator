@@ -203,7 +203,7 @@ def test_universal_target_refuses_without_any_filesystem_change(root: Path) -> N
 def test_release_identity_collisions_refuse_before_any_filesystem_change(
     root: Path,
 ) -> None:
-    assert __version__ == "0.2.52"
+    assert __version__ == "0.2.53"
     for collision_kind in ("release", "bundle"):
         case = root / collision_kind
         namespace = f"{collision_kind}-collision"

@@ -8,17 +8,19 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 
 export const ACTIVATION_SCHEMA = "league.pi-hook-activation.v1";
+export const INSTALLED_WATCHER = "__LEAGUE_STABLE_WATCHER__";
 
 function exactRoot(value) {
   if (!value || !path.isAbsolute(value) || value === "/") return undefined;
   return path.resolve(value);
 }
 
-function installedPaths() {
+export function installedPaths() {
   const home = process.env.HOME || os.homedir();
   return {
     watcher:
-      process.env.LEAGUE_WATCHER_COMMAND ||
+      exactRoot(INSTALLED_WATCHER) ||
+      exactRoot(process.env.LEAGUE_WATCHER_COMMAND) ||
       (home ? path.join(home, ".local", "bin", "agent-watcher") : undefined),
     stateRoot: exactRoot(
       process.env.LEAGUE_STATE_ROOT ||

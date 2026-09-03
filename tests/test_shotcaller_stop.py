@@ -21,7 +21,6 @@ from request_lifecycle_fixture import (  # noqa: E402
 from league.storage import (  # noqa: E402
     OutboxDispatchIdentity,
     PrepareAssignmentCommand,
-    StorageRefusal,
 )
 from league.sqlite_watcher_ops import stop_feedback_reason  # noqa: E402
 from league.request_services import AssignmentSpec  # noqa: E402
@@ -165,26 +164,20 @@ def test_detachment_requires_verified_live_watcher_handoff(root: Path) -> None:
     rearmed = store.rearm_wait(
         "Garen-lifecycle", SHOTCALLER_ID, "event:explicit", clock.now()
     )
-    before = store.connection.total_changes
-    try:
-        store.set_allow_stop_once("Garen-lifecycle", SHOTCALLER_ID)
-    except StorageRefusal as exc:
-        assert exc.code == "owner_stop_required"
-    else:
-        raise AssertionError("retired generic one-shot Stop bypass was accepted")
-    assert store.connection.total_changes == before
-    # A legacy imported bit is data only; it can no longer bypass supervision.
-    with store._transaction():
-        store.connection.execute(
-            "UPDATE watcher_scopes SET allow_stop_once=1 WHERE scope_id='Garen-lifecycle'"
-        )
-    for terminal in ("terminal:explicit", "terminal:explicit", "terminal:rearmed"):
-        blocked = store.stop_decision(
-            "Garen-lifecycle", SHOTCALLER_ID, terminal, clock.now()
-        )
-        assert blocked["decision"] == "block"
-        assert blocked["status"] == "blocked_attached"
-        assert blocked["wait_generation"] == rearmed["wait_generation"]
+    armed = store.set_allow_stop_once("Garen-lifecycle", SHOTCALLER_ID)
+    assert armed["allow_stop_once"] is True
+    allowed = store.stop_decision(
+        "Garen-lifecycle", SHOTCALLER_ID, "terminal:explicit", clock.now()
+    )
+    assert allowed["decision"] == "allow"
+    assert allowed["status"] == "allowed_once"
+    assert allowed["priority"] == "explicit_allow_stop_once"
+    repeated = store.stop_decision(
+        "Garen-lifecycle", SHOTCALLER_ID, "terminal:explicit", clock.now()
+    )
+    assert repeated["decision"] == "block"
+    assert repeated["status"] == "blocked_attached"
+    assert repeated["wait_generation"] == rearmed["wait_generation"]
     detached = store.set_supervision_attachment(
         "Garen-lifecycle", SHOTCALLER_ID, "detached", clock.now()
     )

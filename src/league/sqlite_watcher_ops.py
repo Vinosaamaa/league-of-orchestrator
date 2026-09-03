@@ -2027,12 +2027,69 @@ def rearm_wait(store: Any, scope_id: str, actor_agent_id: str, event_id: str, at
 
 
 def set_allow_stop_once(store: Any, scope_id: str, actor_agent_id: str) -> dict[str, Any]:
-    """Refuse the retired generic bypass without mutating canonical state."""
+    """Authorize exactly one subsequent Stop for one exact active Shotcaller."""
 
-    raise StorageRefusal(
-        "owner_stop_required",
-        "generic one-shot Stop authorization is retired; use a semantic owner stop or verified detach handoff",
-    )
+    try:
+        with store._transaction():
+            actor = store.connection.execute(
+                """
+                SELECT callsign FROM agent_instances
+                 WHERE agent_id=? AND role='shotcaller' AND retired_at IS NULL
+                """,
+                (actor_agent_id,),
+            ).fetchone()
+            if actor is None:
+                raise StorageRefusal(
+                    "allow_stop_invalid",
+                    "one-shot Stop authorization requires an active Shotcaller",
+                )
+            selected = resolve_supervisor_scope(
+                store, actor_agent_id, str(actor["callsign"])
+            )
+            if selected["scope_id"] != scope_id:
+                raise StorageRefusal(
+                    "allow_stop_scope_mismatch",
+                    "one-shot Stop authorization requires the exact current watcher scope",
+                )
+            ensure_watcher_scope(
+                store, scope_id, actor_agent_id, block_on_obligations=None
+            )
+            store.connection.execute(
+                """
+                UPDATE watcher_scopes
+                   SET allow_stop_once=1,stop_blocked=0,wait_active=0,
+                       pending_stop_feedback_digest=NULL,
+                       pending_stop_terminal_generation=NULL,
+                       pending_stop_wait_generation=NULL
+                 WHERE scope_id=? AND actor_agent_id=?
+                """,
+                (scope_id, actor_agent_id),
+            )
+            row = store.connection.execute(
+                """
+                SELECT wait_generation,user_message_generation
+                  FROM watcher_scopes WHERE scope_id=? AND actor_agent_id=?
+                """,
+                (scope_id, actor_agent_id),
+            ).fetchone()
+    except StorageRefusal:
+        raise
+    except sqlite3.DatabaseError as exc:
+        raise store._translate_database_error(
+            exc, "one-shot Stop authorization conflicted with canonical state"
+        ) from exc
+    if row is None:
+        raise StorageRefusal(
+            "allow_stop_scope_mismatch",
+            "one-shot Stop authorization requires the exact current watcher scope",
+        )
+    return {
+        "scope_id": scope_id,
+        "actor_agent_id": actor_agent_id,
+        "allow_stop_once": True,
+        "wait_generation": int(row["wait_generation"]),
+        "user_message_generation": int(row["user_message_generation"]),
+    }
 
 
 def _owner_stop_metadata(metadata: dict[str, Any]) -> dict[str, Any] | None:
@@ -2859,6 +2916,24 @@ def stop_decision(
                     """,
                     (scope_id,),
                 )
+            if scope["allow_stop_once"]:
+                store.connection.execute(
+                    """
+                    UPDATE watcher_scopes
+                       SET allow_stop_once=0,stop_blocked=0,wait_active=0,
+                           pending_stop_feedback_digest=NULL,
+                           pending_stop_terminal_generation=NULL,
+                           pending_stop_wait_generation=NULL
+                     WHERE scope_id=?
+                    """,
+                    (scope_id,),
+                )
+                return {
+                    **common,
+                    "status": "allowed_once",
+                    "decision": "allow",
+                    "priority": "explicit_allow_stop_once",
+                }
             owner_stop_current = bool(
                 owner_stop is not None
                 and owner_stop.get("user_message_generation")

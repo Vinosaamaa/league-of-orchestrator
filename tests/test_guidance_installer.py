@@ -172,8 +172,14 @@ def source_contract(source: Path) -> bytes:
         "`UserPrompt`, pre-mutation, and `Stop` allow/no-op immediately with zero "
         "canonical mutation.",
         "An attached Shotcaller with any owner or delegated obligation blocks every "
-        "`Stop` attempt; neither wait-generation deduplication, a repeated `Stop`, "
-        "nor retired `allow-stop-once` may turn that block into allow.",
+        "`Stop` attempt unless the Summoner explicitly requested a final stop and the "
+        "Shotcaller armed the exact one-shot allowance after pausing work.",
+        "When the Summoner requests all work paused, the Shotcaller reaches a safe "
+        "boundary for its own work, sends a pause-and-preserve instruction to every "
+        "owned active Champion, then runs `$HOME/.local/bin/agent-watcher "
+        "--shotcaller <callsign> allow-stop --once` immediately before `Stop`.",
+        "An attached Shotcaller waits for material League work with one "
+        "`$HOME/.local/bin/agent-watcher --shotcaller <callsign> wait` invocation.",
         "`attach-shotcaller` requires the exact live supervisor binding and makes the "
         "Shotcaller terminal-attached.",
         "`detach-shotcaller` requests token-saving terminal detachment without "

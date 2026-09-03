@@ -464,6 +464,122 @@ def test_codex_stop_reason_uses_resolved_callsign_not_turn_uuid() -> None:
     assert turn_id not in reason
 
 
+def test_allow_stop_once_is_provider_neutral_and_consumed(root: Path) -> None:
+    for adapter_kind, command, harness_kind in (
+        ("codex", "codex-stop-hook", "codex-thread"),
+        ("pi", "pi-stop-hook", "pi-thread"),
+    ):
+        name = f"allow-stop-once-{adapter_kind}"
+        _, state, _ = seeded_state(root, name)
+        env = _environment(root / name, state)
+        session_ref = (
+            f"session:{name}"
+            if adapter_kind == "codex"
+            else f"/synthetic/pi/{name}.jsonl"
+        )
+        _register_garen_runtime(
+            state,
+            name,
+            session_ref=session_ref,
+            harness_kind=harness_kind,
+        )
+        missing_once = subprocess.run(
+            [
+                env["TEST_INSTALLED_WATCHER"],
+                "--shotcaller",
+                "Garen",
+                "allow-stop",
+            ],
+            text=True,
+            capture_output=True,
+            env=env,
+            check=False,
+        )
+        assert missing_once.returncode != 0
+        armed = _watcher(
+            env, "--shotcaller", "Garen", "allow-stop", "--once"
+        )
+        assert armed["allow_stop_once"] is True
+        payload = _stop_payload(adapter_kind, session_ref, f"generation:{name}")
+        allowed = _watcher(env, command, payload=payload)
+        assert allowed == ({"binding": "bound"} if adapter_kind == "pi" else {})
+        blocked = _watcher(env, command, payload=payload)
+        if adapter_kind == "pi":
+            assert blocked["binding"] == "bound"
+            assert "followup_message" in blocked
+        else:
+            assert blocked["decision"] == "block"
+
+
+def test_wait_preserves_persistent_watcher_registration(root: Path) -> None:
+    _, state, _ = seeded_state(root, "foreground-wait")
+    env = _environment(root / "foreground-wait", state)
+    runtime_id = _register_garen_runtime(
+        state, "foreground-wait", session_ref="session:foreground-wait"
+    )
+    with SQLiteStorage(state) as store:
+        scope = store.resolve_supervisor_scope(SHOTCALLER_ID)
+        store.register_watcher(
+            str(scope["scope_id"]),
+            "watcher:persistent:foreground-wait",
+            SHOTCALLER_ID,
+            runtime_id,
+            "unix:/synthetic/foreground-wait.sock",
+            "2099-01-01T00:00:00+00:00",
+            7,
+            AT2,
+        )
+        starting_wait_generation = int(
+            store.connection.execute(
+                "SELECT wait_generation FROM watcher_scopes WHERE scope_id=?",
+                (scope["scope_id"],),
+            ).fetchone()[0]
+        )
+    waiter = subprocess.Popen(
+        [
+            env["TEST_INSTALLED_WATCHER"],
+            "--shotcaller",
+            "Garen",
+            "wait",
+            "--poll-seconds",
+            "0.05",
+        ],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+    )
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline:
+        with SQLiteStorage(state, busy_timeout_ms=100, request_wal=False) as store:
+            row = store.connection.execute(
+                "SELECT wait_generation FROM watcher_scopes WHERE actor_agent_id=?",
+                (SHOTCALLER_ID,),
+            ).fetchone()
+            if (
+                row is not None
+                and int(row["wait_generation"]) > starting_wait_generation
+            ):
+                store.note_user_message(
+                    str(store.resolve_supervisor_scope(SHOTCALLER_ID)["scope_id"]),
+                    SHOTCALLER_ID,
+                    AT2,
+                )
+                break
+        time.sleep(0.02)
+    else:
+        waiter.terminate()
+        raise AssertionError("foreground wait did not become active")
+    output, error = waiter.communicate(timeout=5)
+    assert not error, error
+    assert json.loads(output)["event"] == "user-message"
+    with SQLiteStorage(state) as store:
+        registration = store.watcher_registration(SHOTCALLER_ID)
+    assert registration is not None
+    assert registration["watcher_id"] == "watcher:persistent:foreground-wait"
+    assert registration["fence"] == 7
+
+
 def test_supervise_wakes_and_stop_allows_after_settlement(root: Path) -> None:
     _, state, _ = seeded_state(root, "supervise")
     env = _environment(root / "supervise", state)
@@ -2061,6 +2177,10 @@ def test_native_provider_hooks_are_inert_until_exact_binding_then_activate(
         )
         if kind == "pi":
             assert stopped["binding"] == "bound"
+        if kind in {"cursor", "pi"}:
+            assert stopped["followup_message"].startswith(
+                "League has unresolved obligations for Garen at wait generation "
+            )
 
         result = subprocess.run(
             [env["TEST_INSTALLED_WATCHER"], pretool_command],
@@ -2081,6 +2201,8 @@ def main() -> None:
         test_bound_shotcallers_fail_closed_and_champion_gate_survives_absent_broker(root)
         test_stop_reason_uses_resolved_callsign_not_provider_turn_identity()
         test_explicit_and_session_stop_dispatch(root)
+        test_allow_stop_once_is_provider_neutral_and_consumed(root)
+        test_wait_preserves_persistent_watcher_registration(root)
         test_supervise_wakes_and_stop_allows_after_settlement(root)
         test_working_and_progress_tasks_remain_supervised(root)
         test_supervise_user_priority(root)

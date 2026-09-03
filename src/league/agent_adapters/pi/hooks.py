@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -17,6 +18,7 @@ BOOTSTRAP_PROFILE = {
     "source_relative": "integrations/pi/league-hooks.mjs",
     "launch_enforcement": "separate",
 }
+WATCHER_PLACEHOLDER = b'"__LEAGUE_STABLE_WATCHER__"'
 
 
 def _required_text(payload: Mapping[str, Any], name: str) -> str:
@@ -73,15 +75,21 @@ def install(
     target: Path,
     stable_watcher: Path,
 ) -> Mapping[str, Any]:
-    del hook_profile, stable_watcher
+    del hook_profile
     if bootstrap_profile != BOOTSTRAP_PROFILE or adapter_kind != "pi":
         raise StorageRefusal("hook_bootstrap_invalid", "Pi bootstrap declaration changed")
     source = source_root / str(bootstrap_profile["source_relative"])
     if not source.is_file() or source.is_symlink() or target.is_symlink():
         raise StorageRefusal("hook_bootstrap_invalid", "Pi bootstrap asset is unavailable")
-    payload = source.read_bytes()
-    if not payload or len(payload) > 1024 * 1024:
+    source_payload = source.read_bytes()
+    if not source_payload or len(source_payload) > 1024 * 1024:
         raise StorageRefusal("hook_bootstrap_invalid", "Pi bootstrap asset size is invalid")
+    if source_payload.count(WATCHER_PLACEHOLDER) != 1:
+        raise StorageRefusal("hook_bootstrap_invalid", "Pi watcher placeholder changed")
+    payload = source_payload.replace(
+        WATCHER_PLACEHOLDER,
+        json.dumps(str(stable_watcher)).encode("utf-8"),
+    )
     if target.exists() and not target.is_file():
         raise StorageRefusal("hook_bootstrap_invalid", "Pi bootstrap target is not a file")
     changed = True

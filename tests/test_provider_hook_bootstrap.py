@@ -48,6 +48,13 @@ def refused(operation, code: str) -> None:
     raise AssertionError(f"expected refusal {code}")
 
 
+def installed_pi_payload(watcher: Path) -> bytes:
+    source = (ROOT / "integrations/pi/league-hooks.mjs").read_bytes()
+    placeholder = b'"__LEAGUE_STABLE_WATCHER__"'
+    assert source.count(placeholder) == 1
+    return source.replace(placeholder, json.dumps(str(watcher)).encode("utf-8"))
+
+
 def test_registry_declares_provider_hook_bootstrap_parity() -> None:
     registry = builtin_agent_adapter_registry()
     profiles = {
@@ -221,7 +228,29 @@ def test_installs_are_idempotent_and_preserve_unrelated_handlers(root: Path) -> 
             for profile in registry.adapter(kind).hook_profile.values()
         }
         assert expected.issubset(commands)
-    assert targets["pi"].read_bytes() == (ROOT / "integrations/pi/league-hooks.mjs").read_bytes()
+    assert targets["pi"].read_bytes() == installed_pi_payload(watcher)
+    stale_watcher = root / "stale-release/bin/agent-watcher"
+    probe = subprocess.run(
+        [
+            "node",
+            "--input-type=module",
+            "-e",
+            (
+                f'import {{ installedPaths }} from {json.dumps(targets["pi"].as_uri())}; '
+                "process.stdout.write(JSON.stringify(installedPaths()));"
+            ),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "LEAGUE_WATCHER_COMMAND": str(stale_watcher),
+            "LEAGUE_STATE_ROOT": str(root / "state"),
+        },
+    )
+    assert probe.returncode == 0, probe.stderr
+    assert json.loads(probe.stdout)["watcher"] == str(watcher)
 
 
 def test_installers_refuse_malformed_groups_and_bound_existing_reads(root: Path) -> None:
@@ -258,7 +287,7 @@ def test_installers_refuse_malformed_groups_and_bound_existing_reads(root: Path)
         target=pi_target,
         stable_watcher=watcher,
     )
-    assert pi_target.read_bytes() == (ROOT / "integrations/pi/league-hooks.mjs").read_bytes()
+    assert pi_target.read_bytes() == installed_pi_payload(watcher)
 
     codex_target = root / ".codex/hooks.json"
     codex_target.parent.mkdir(parents=True)

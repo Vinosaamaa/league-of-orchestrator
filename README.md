@@ -403,10 +403,15 @@ failed-exit restart throttle.
 
 While a Shotcaller owns an active `request turn`, attention events remain
 durable but do not start a second model turn. An attached Shotcaller blocks every
-unchanged Stop while any owner or delegated obligation remains; there is no
-universal second-Stop allowance. A detached Shotcaller blocks owner-actionable
-work and may end only delegated work after the exact persistent watcher lease,
+unchanged Stop while any owner or delegated obligation remains. An explicit
+`agent-watcher --shotcaller <callsign> allow-stop --once` arms only the next
+Stop after the Shotcaller has paused its own work and directed its owned active
+Champions to pause; that Stop consumes the allowance without disabling hooks or
+changing supervision mode. A detached Shotcaller blocks owner-actionable work
+and may end only delegated work after the exact persistent watcher lease,
 runtime generation, locator, and fence match its durable detachment receipt.
+Attached foreground waiting uses one provider-neutral `agent-watcher wait`
+invocation and preserves the OS-managed persistent watcher registration.
 
 An explicit owner stop is not inferred from prompt text. The active Shotcaller
 may attach the exact structured `owner_control` object to its semantic decision.

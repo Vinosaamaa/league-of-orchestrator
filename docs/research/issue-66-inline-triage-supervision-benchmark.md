@@ -6,7 +6,7 @@
 **Implementation tree:** `48a9e13efc33416a51735d2416c20296eba6e71d`
 **Source version:** League 0.2.24
 **Historical installed benchmark reference observed read-only:** League 0.2.27
-**Status:** source candidate only; open, unmerged, uninstalled, and not live
+**Status:** historical benchmark plus a source-only semantic owner-stop follow-up; this follow-up is unmerged and performs no install or live mutation
 
 ## Decision
 
@@ -287,6 +287,33 @@ Champion wake p50/p95 against the exact installed head after service status is
 live; the target is sub-second p95 with one recipient receipt and no cross-Squad
 wake.
 
+### Semantic owner-stop follow-up benchmark
+
+The launch-critical follow-up extends the same owner-machine command rather
+than adding a second harness. While its one temporary three-Squad service is
+live, each sample captures and triages a synthetic exact prompt, then measures
+the canonical structured owner-stop record plus first Stop consumption and an
+identical terminal-generation replay. Delegated effects remain covered by the
+focused fake-adapter E2E because a timing run must not prompt any real runtime.
+The plan retains 500 samples, zero model processes, temporary SQLite state, and
+supported aggregate service teardown.
+
+The 2026-09-03 owner-machine run was based on exact `origin/main`
+`a0f19cff697b24891bbfcece33f4912fe8d92828`; output SHA-256 was
+`4d6b33decb8a6949560024081fba0f6d3b7b8f5eca9340dbdb0291d67b58124e`:
+
+| Operation | p50 ms | p95 ms | min / max ms |
+| --- | ---: | ---: | ---: |
+| Aggregate `service-ping`, three isolated bindings | 3.489 | 3.898 | 2.879 / 9.920 |
+| Targeted exact-actor `ping` | 0.101 | 0.168 | 0.074 / 0.513 |
+| Semantic owner-stop record + consume + identical replay | 0.277 | 0.452 | 0.230 / 0.726 |
+
+The first run failed only at teardown because this older benchmark still sent an
+unscoped `{kind: stop}` message after aggregate Stop identity was hardened. The
+script now calls the supported `stop_supervisor(state)` helper, which supplies
+the exact complete binding snapshot. The successful rerun created no provider
+or model process, contacted no live multiplexer, and mutated no live state.
+
 ## What is proved and what remains
 
 ### Source-proved
@@ -313,6 +340,10 @@ wake.
   reconciliation event after two exact observations and the configured grace.
 - Stop alone changes no request semantics; explicit reconciliation closes only
   B, preserves provenance, is idempotent, and removes B from unfinished work.
+- Structured semantic owner stop is prompt/generation scoped, atomically rolls
+  back with final turn commit, optionally targets only exact same-Squad Codex/Pi
+  delegated runtimes, records recipient receipts exactly once, consumes once,
+  allows its identical terminal retry, and reblocks after a newer prompt.
 - Schema 19 migration, backup, rollback, foreign keys, integrity, command
   schemas, deterministic export, and import/export parity pass focused tests.
 

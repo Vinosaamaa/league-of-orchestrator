@@ -85,6 +85,7 @@ from .sqlite_outbox_ops import pending_backlog as pending_backlog_operation
 from .sqlite_watcher_ops import release_watcher as release_watcher_operation
 from .sqlite_watcher_ops import supervisor_binding as supervisor_binding_operation
 from .sqlite_watcher_ops import supervisor_bindings as supervisor_bindings_operation
+from .sqlite_watcher_ops import resolve_supervisor_scope as resolve_supervisor_scope_operation
 from .sqlite_watcher_ops import supervision_owner as supervision_owner_operation
 from .sqlite_watcher_ops import begin_shotcaller_turn as begin_shotcaller_turn_operation
 from .sqlite_watcher_ops import commit_shotcaller_turn as commit_shotcaller_turn_operation
@@ -156,6 +157,9 @@ from .sqlite_watcher_ops import rearm_wait as rearm_wait_operation
 from .sqlite_watcher_ops import register_runtime as register_runtime_operation
 from .sqlite_watcher_ops import register_watcher as register_watcher_operation
 from .sqlite_watcher_ops import set_allow_stop_once as set_allow_stop_once_operation
+from .sqlite_watcher_ops import prepare_owner_stop_control as prepare_owner_stop_control_operation
+from .sqlite_watcher_ops import finalize_owner_stop_control as finalize_owner_stop_control_operation
+from .sqlite_watcher_ops import fail_owner_stop_control as fail_owner_stop_control_operation
 from .sqlite_watcher_ops import stop_decision as stop_decision_operation
 from .storage import ConnectionPolicy, FaultInjector, ImportPlan, StorageRefusal
 from .storage_assignment import (
@@ -3116,11 +3120,18 @@ class SQLiteStorage(SQLiteTransactionCore):
         turn_token: str,
         actions: tuple[Any, ...],
         at: str,
+        *,
+        owner_controls: tuple[dict[str, Any], ...] = (),
     ) -> dict[str, Any]:
         from .sqlite_request_ops import commit_interactive_request_turn
 
         return commit_interactive_request_turn(
-            self, owner_agent_id, turn_token, actions, at
+            self,
+            owner_agent_id,
+            turn_token,
+            actions,
+            at,
+            owner_controls=owner_controls,
         )
 
     def request_turn_boundary(self, owner_agent_id: str) -> dict[str, Any]:
@@ -3552,6 +3563,11 @@ class SQLiteStorage(SQLiteTransactionCore):
     ) -> tuple[dict[str, Any], ...]:
         return supervisor_bindings_operation(self, limit=limit)
 
+    def resolve_supervisor_scope(
+        self, actor_agent_id: str, callsign: Optional[str] = None
+    ) -> dict[str, Any]:
+        return resolve_supervisor_scope_operation(self, actor_agent_id, callsign)
+
     def supervision_owner(self, actor_agent_id: str) -> Optional[str]:
         return supervision_owner_operation(self, actor_agent_id)
 
@@ -3770,6 +3786,37 @@ class SQLiteStorage(SQLiteTransactionCore):
         self, scope_id: str, actor_agent_id: str
     ) -> dict[str, Any]:
         return set_allow_stop_once_operation(self, scope_id, actor_agent_id)
+
+    def prepare_owner_stop_control(
+        self,
+        actor_agent_id: str,
+        control_id: str,
+        prompt_id: str,
+        interrupt_delegates: bool,
+        at: str,
+    ) -> dict[str, Any]:
+        return prepare_owner_stop_control_operation(
+            self,
+            actor_agent_id,
+            control_id,
+            prompt_id,
+            interrupt_delegates,
+            at,
+        )
+
+    def finalize_owner_stop_control(
+        self, actor_agent_id: str, control_id: str, at: str
+    ) -> dict[str, Any]:
+        return finalize_owner_stop_control_operation(
+            self, actor_agent_id, control_id, at
+        )
+
+    def fail_owner_stop_control(
+        self, actor_agent_id: str, control_id: str, reason: str, at: str
+    ) -> dict[str, Any]:
+        return fail_owner_stop_control_operation(
+            self, actor_agent_id, control_id, reason, at
+        )
 
     def stop_decision(
         self,

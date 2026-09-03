@@ -20,8 +20,12 @@ sys.path[:0] = [str(ROOT / "src"), str(ROOT / "tests")]
 from league.persistent_supervisor import (  # noqa: E402
     PersistentSupervisor,
     send_supervisor_message,
+    stop_supervisor,
 )
+from league.sqlite_store import SQLiteStorage  # noqa: E402
 from lifecycle_fakes import FakeDeliveryAdapter  # noqa: E402
+from request_lifecycle_fixture import GAREN_RUNTIME  # noqa: E402
+from storage_fixture import SHOTCALLER_ID  # noqa: E402
 from test_multisquad_supervisor import (  # noqa: E402
     CountingRuntimeObserver,
     FakeWakeAdapter,
@@ -56,6 +60,65 @@ def _measure(locator: str, message: dict[str, Any], samples: int) -> list[float]
         if response.get("ok") is not True:
             raise RuntimeError("watcher benchmark received a refused response")
         values.append(elapsed)
+    return values
+
+
+def _measure_owner_stop(state: Path, samples: int) -> list[float]:
+    values: list[float] = []
+    at = "2026-09-03T00:00:00Z"
+    with SQLiteStorage(state) as store:
+        for ordinal in range(samples):
+            prompt_id = f"benchmark-owner-stop-prompt:{ordinal}"
+            store.intake_prompt(
+                prompt_id,
+                SHOTCALLER_ID,
+                GAREN_RUNTIME,
+                "codex",
+                f"benchmark-session:{ordinal}",
+                f"benchmark-source:{ordinal}",
+                "Synthetic structured owner-stop benchmark prompt.",
+                at,
+            )
+            store.triage_prompt(
+                prompt_id,
+                [
+                    {
+                        "prompt_item_id": f"benchmark-owner-stop-item:{ordinal}",
+                        "ordinal": 1,
+                        "summary": "Synthetic owner stop",
+                        "disposition": "acknowledgement",
+                        "request_id": None,
+                    }
+                ],
+                at,
+            )
+            started = time.perf_counter_ns()
+            prepared = store.prepare_owner_stop_control(
+                SHOTCALLER_ID,
+                f"benchmark-owner-stop-control:{ordinal}",
+                prompt_id,
+                False,
+                at,
+            )
+            first = store.stop_decision(
+                str(prepared["scope_id"]),
+                SHOTCALLER_ID,
+                f"benchmark-terminal:{ordinal}",
+                at,
+            )
+            replay = store.stop_decision(
+                str(prepared["scope_id"]),
+                SHOTCALLER_ID,
+                f"benchmark-terminal:{ordinal}",
+                at,
+            )
+            elapsed = (time.perf_counter_ns() - started) / 1_000_000
+            if (
+                first.get("status") != "semantic_owner_stop"
+                or replay.get("status") != "semantic_owner_stop_replay"
+            ):
+                raise RuntimeError("owner-stop benchmark lost scoped authorization")
+            values.append(elapsed)
     return values
 
 
@@ -98,17 +161,19 @@ def run(samples: int) -> dict[str, Any]:
             send_supervisor_message(locator, targeted_message)
             service = _measure(locator, service_message, samples)
             targeted = _measure(locator, targeted_message, samples)
+            owner_stop = _measure_owner_stop(state, samples)
         finally:
-            send_supervisor_message(locator, {"kind": "stop"})
+            stop_supervisor(state)
             thread.join(timeout=5)
         if thread.is_alive() or errors:
             raise RuntimeError(f"watcher benchmark service did not stop cleanly: {errors!r}")
     return {
-        "schema": "league.watcher-service-benchmark.v1",
+        "schema": "league.watcher-service-benchmark.v2",
         "samples_per_operation": samples,
         "active_squad_count": 3,
         "service_ping": _summary(service),
         "targeted_ping": _summary(targeted),
+        "semantic_owner_stop_record_and_two_stop_decisions": _summary(owner_stop),
         "service_processes": 1,
         "model_processes": 0,
         "synthetic": True,

@@ -69,14 +69,25 @@ class InstalledDeliveryAdapter:
                 raise
             except Exception as exc:
                 raise DeliveryUnavailable("receiver_unavailable") from exc
-            if "delivery" not in agent.lifecycle_operations:
+            owner_control = envelope.get("event_type") == "owner_stop_control"
+            if "delivery" not in agent.lifecycle_operations or (
+                owner_control and "steer" not in agent.lifecycle_operations
+            ):
                 raise DeliveryUnavailable("receiver_unavailable")
+            if owner_control and (
+                target.get("runtime_instance_id")
+                != envelope.get("target_runtime_instance_id")
+                or target.get("generation")
+                != envelope.get("target_runtime_generation")
+            ):
+                raise DeliveryUnavailable("owner_stop_target_changed")
             try:
                 multiplexer = builtin_multiplexer_adapter_registry(
                     herdr_runner=CallableMultiplexerRunner(self.runner),
                     herdr_binary="herdr",
                 ).adapter(str(target.get("backend_kind", "")))
-                delivered = agent.deliver(
+                operation = agent.control_delegated if owner_control else agent.deliver
+                delivered = operation(
                     target=target,
                     envelope=envelope,
                     multiplexer=multiplexer,

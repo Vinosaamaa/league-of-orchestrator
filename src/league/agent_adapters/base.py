@@ -25,13 +25,16 @@ def deliver_via_multiplexer(
             "selected multiplexer has no delivery transport",
         )
     summary = " ".join(str(envelope.get("summary", "")).split())
-    multiplexer.delivery(
-        routing_target,
-        (
+    body = (
+        f"LEAGUE OWNER CONTROL [{envelope['event_id']}] Pause delegated work now, "
+        "preserve durable progress, and await a new explicit owner instruction."
+        if envelope.get("event_type") == "owner_stop_control"
+        else (
             f"CHAMPION TRANSITION [{envelope['event_id']}] "
             f"{envelope.get('status')}: {summary}"
-        ),
+        )
     )
+    multiplexer.delivery(routing_target, body)
 
 
 def _one(rows: list[Any], code: str, message: str) -> Any:
@@ -404,6 +407,18 @@ class DeclaredAgentAdapter:
             raise StorageRefusal(
                 "delivery_harness_unsupported",
                 "agent adapter does not provide a delivery driver",
+            )
+        return self.delivery_handler(**inputs)
+
+    def control_delegated(self, **inputs: Any) -> Any:
+        """Apply a canonical owner control through the adapter's steer surface."""
+
+        if "steer" not in self.lifecycle_operations or not callable(
+            self.delivery_handler
+        ):
+            raise StorageRefusal(
+                "owner_stop_adapter_unsupported",
+                "agent adapter cannot steer delegated work",
             )
         return self.delivery_handler(**inputs)
 

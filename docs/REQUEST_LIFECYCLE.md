@@ -67,11 +67,24 @@ fair per-recipient backlog. An active watcher owns delivery; verified direct
 fallback is eligible only when no active watcher registration exists.
 
 `league hook stop` combines active Champion tasks, pending assignments,
-unresolved requests, pending deliveries, and cleanup obligations. It yields to
-fresh ordinary user messages, blocks at most once for one fresh wait
-generation, reports stale terminal generations without reusing their output,
-honors explicit allow-stop-once, and otherwise allows the turn to end. It does
-not create a polling model loop.
+unresolved requests, pending deliveries, and cleanup obligations. Attached
+owners block every unchanged Stop while those obligations remain; the legacy
+operator `allow-stop-once` remains an exact one-shot override. Stop does not
+parse prompt text or create a polling model loop.
+
+For a semantic owner stop, the sole prompt decision may contain
+`{"owner_control":{"action":"stop","interrupt_delegates":BOOLEAN}}` alongside
+one complete acknowledgement. The final request-turn transaction binds the
+control to that exact latest prompt and user-message generation. If interruption
+is requested, it also records one deterministic event/outbox for each active
+Champion or hidden worker owned by that Shotcaller and requires exactly one
+verified runtime per recipient. Provider adapters apply the generated pause
+instruction through their declared steering capability; canonical target
+identity prevents another runtime or Squad from receiving it. All requested
+outboxes must have exact receipts before authorization. The first matching Stop
+consumes it, the same terminal-generation retry is idempotently allowed, and a
+new owner prompt cannot reuse it. Failed or pending delegated control remains an
+actionable Stop refusal.
 
 `league help inventory` emits the versioned command, state, lease, and schema
 inventory without opening a state root.

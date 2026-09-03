@@ -807,6 +807,33 @@ watcher fence, verifies it again, then replays metadata for restored Codex and P
 sessions (including Pi with Codex or Cursor provider). It never creates, resumes,
 prompts, or closes a process.
 
+### Semantic owner-stop follow-up
+
+Ashe's post-release live exercise proved a remaining control gap: an explicit
+owner stop required repeated manual `allow-stop-once`, a new prompt generation
+blocked again, and delegated work continued. This issue-#66 follow-up is original
+League code based on exact `origin/main`
+`a0f19cff697b24891bbfcece33f4912fe8d92828`. It does not interpret natural
+language in hooks. The active Shotcaller alone emits a structured semantic
+`owner_control`; the final request-turn transaction records its exact prompt,
+owner, scope, and user-message generation together with deterministic delegated
+control outboxes. A requested interruption targets only active Champion/hidden-
+worker agents owned by that Shotcaller and only when each has one exact verified
+runtime. Codex and Pi use their declared provider-native steering/prompt surface,
+Cursor retains state-aware steering, and the multiplexer remains registry-
+selected.
+
+Authorization is withheld until every requested outbox has an exact recipient
+receipt. Stop consumes it for the matching user generation, permits an identical
+terminal-generation retry without a loop, and refuses reuse by another terminal
+or owner prompt. Pending/failed delivery remains a visible refusal. Existing
+manual one-shot compatibility, notification mode, attachment mode, and detached
+watcher handoff are unchanged. Startup and hook paths now use the same bounded
+scope resolver: one valid scope wins, a sole persistent-service owner reconciles
+multiple historical candidates, and all other ambiguity fails with Shotcaller
+and candidate-count repair evidence rather than generic
+`supervisor_binding_invalid`.
+
 ### Current-main reconciliation and encountered failures
 
 This successor reconciles reviewed PR-#126 head
@@ -841,9 +868,16 @@ failure evidence:
 | The same inline review found Stop held the in-process fence lock across SQLite validation, allowing a delayed reader to starve lease renewal. | Stop snapshots local identity under the lock, validates one batched canonical read without that lock or a write transaction, then reacquires the lock and rejects any local rebind before setting the stop event. A delayed-validation regression proves renewal advances during the delay. |
 | The same inline review found source hashes were checked before launchd consumed their paths. | Install and start/restart now revalidate executable and template bytes after verified service liveness; detected check/use drift stops the launched job (and restores an in-progress install) before success. The supported release writer creates immutable versioned paths, and non-cooperating same-user mutation cannot be made an OS security boundary because that user can already control the process; the operation therefore promises exact successful receipts and fail-closed drift cleanup, not hostile-same-user execution isolation. |
 | Independent review of follow-up PR #144 found the active-manifest idempotent install branch still omitted that post-liveness source check. | Fresh install retains its rollback wrapper, while start/restart and idempotent install now share one post-liveness validator that unloads a launched job before refusing drift. The executable/template × start/idempotent-install matrix proves no operation reports success or leaves launchd loaded after check/use drift. |
+| Ashe's released live path needed repeated manual `allow-stop-once`; a newer prompt reblocked and delegated work continued. | Added a semantic, generation-scoped canonical owner control. It is never inferred from text, is transactionally durable, optionally emits exact owner-only delegated controls, authorizes only after receipts, and allows only its consumed terminal retry. |
+| The owner-stop red test initially lacked the new module, then exposed that a committed request-turn marker rejected the next prompt generation as `shotcaller_turn_active`. | Added the provider-neutral executor and permits replacement of a committed turn only after durable `user_message_generation` advances; same-generation concurrency still refuses. |
+| The first multi-Squad owner-stop fixture collided with an occupied callsign, then violated the callsign foreign key, and also retained an unrelated active hidden worker without a verified runtime. | The test now uses unoccupied catalog identities and terminalizes only that unrelated fixture worker. Production correctly retains `owner_stop_target_invalid` when an active delegated runtime is absent or ambiguous. |
+| The first owner-stop teardown called a nonexistent in-process supervisor method. | The regression now stops its temporary service through the supported exact aggregate `stop_supervisor` IPC contract. |
+| Initial scope reconciliation excluded imported watcher schema v2 and changed one malformed-policy assertion from `supervision_policy_invalid` to a generic scope code. | Valid historical scopes explicitly include initialized schema v2/v3; a sole malformed policy preserves its precise refusal, while multi-candidate invalidity/ambiguity returns bounded repair evidence. |
+| The first affected request-lifecycle gate reached the expected malformed Calm policy but the resolver hid its precise refusal. | The resolver now replays `_policy_from_scope` for a sole invalid candidate; the failing test and remaining affected request tests pass. |
+| The owner-machine benchmark's stale unscoped teardown was rejected by the hardened aggregate Stop protocol. | The benchmark now uses `stop_supervisor(state)`, which snapshots and validates the complete synthetic binding set. No production relaxation was made. |
 
-No row above involved a live install, Herdr restart, canonical-state mutation,
-real multiplexer effect, or provider call.
+No row above involved a live install, Herdr restart, live canonical-state
+mutation, real multiplexer effect, or provider call.
 
 The 3×3 prompt-size/intent-count matrix measures exact capture, JSON sideband,
 candidate linking, SQLite commit, and one-process completion on synthetic

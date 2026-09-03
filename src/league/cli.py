@@ -2619,7 +2619,7 @@ def _turn_mechanical_id(kind: str, *parts: str) -> str:
 
 def _mechanize_turn_decisions(
     intake: dict[str, Any], value: Any, at: str
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     prompts = intake["prompts"]
     candidate_inventory = intake.get("candidate_inventory", {})
     candidates = {
@@ -2633,10 +2633,16 @@ def _mechanize_turn_decisions(
         )
     decisions: list[dict[str, Any]] = []
     new_requests: list[dict[str, Any]] = []
+    owner_controls: list[dict[str, Any]] = []
     for prompt_index, (prompt, raw_decision) in enumerate(zip(prompts, value), start=1):
-        if not isinstance(raw_decision, dict) or set(raw_decision) != {"items"}:
+        if (
+            not isinstance(raw_decision, dict)
+            or "items" not in raw_decision
+            or set(raw_decision) - {"items", "owner_control"}
+        ):
             raise StorageRefusal(
-                "invalid_triage_batch", "each semantic decision must contain only items"
+                "invalid_triage_batch",
+                "each semantic decision may contain only items and one structured owner control",
             )
         raw_items = raw_decision["items"]
         if not isinstance(raw_items, list):
@@ -2722,8 +2728,32 @@ def _mechanize_turn_decisions(
                         "runtime_instance_id": prompt["owner_runtime_instance_id"],
                     }
                 )
+        raw_control = raw_decision.get("owner_control")
+        if raw_control is not None:
+            if (
+                len(prompts) != 1
+                or len(items) != 1
+                or items[0]["disposition"] != "acknowledgement"
+                or not isinstance(raw_control, dict)
+                or set(raw_control) != {"action", "interrupt_delegates"}
+                or raw_control.get("action") != "stop"
+                or type(raw_control.get("interrupt_delegates")) is not bool
+            ):
+                raise StorageRefusal(
+                    "owner_stop_invalid",
+                    "owner stop requires one fully acknowledged prompt and an exact structured control",
+                )
+            owner_controls.append(
+                {
+                    "control_id": _turn_mechanical_id(
+                        "owner-stop", str(prompt["prompt_id"])
+                    ),
+                    "prompt_id": str(prompt["prompt_id"]),
+                    "interrupt_delegates": raw_control["interrupt_delegates"],
+                }
+            )
         decisions.append({"prompt_id": prompt["prompt_id"], "items": items})
-    return decisions, new_requests
+    return decisions, new_requests, owner_controls
 
 
 def _turn_dispatch_plans(
@@ -4245,7 +4275,7 @@ def _run_interactive_request_turn(
         sink.flush()
         expected_prompt_ids = tuple(prompt["prompt_id"] for prompt in intake["prompts"])
         begin_payload = _turn_begin_payload(source, intake, expected_prompt_ids)
-        decisions, new_requests = _mechanize_turn_decisions(
+        decisions, new_requests, owner_controls = _mechanize_turn_decisions(
             intake, begin_payload["decisions"], begin_at
         )
         begun = store.begin_request_turn(
@@ -4288,8 +4318,16 @@ def _run_interactive_request_turn(
                 commit_payload["actions"], commit_at, new_requests, begun
             ),
             commit_at,
+            owner_controls=tuple(owner_controls),
         )
         request_state_committed = True
+        from .owner_stop import execute_owner_stop_controls
+
+        committed["owner_stop_controls"] = execute_owner_stop_controls(
+            store,
+            tuple(committed["owner_stop_controls"]),
+            commit_at,
+        )
         return (
             {
                 "phase": "committed",

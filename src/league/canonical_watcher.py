@@ -19,7 +19,11 @@ from typing import Any, Iterator
 from .agent_adapters import SharedLifecyclePolicy, builtin_agent_adapter_registry
 from .multiplexer_adapters import builtin_multiplexer_adapter_registry
 from .sqlite_store import DEFAULT_BUSY_TIMEOUT_MS, SQLiteStorage
-from .sqlite_watcher_ops import _obligation_counts, stop_feedback_reason
+from .sqlite_watcher_ops import (
+    _obligation_counts,
+    resolve_supervisor_scope,
+    stop_feedback_reason,
+)
 from .sqlite_runtime_replacement_ops import runtime_replacement_mutation_fenced
 from .storage import RuntimeRegistrationCommand, StorageRefusal
 from .persistent_supervisor import (
@@ -295,11 +299,7 @@ def _actor(
 
 
 def _scope(store: SQLiteStorage, actor_id: str, callsign: str) -> str:
-    row = store.connection.execute(
-        "SELECT scope_id FROM watcher_scopes WHERE actor_agent_id=? ORDER BY scope_id LIMIT 1",
-        (actor_id,),
-    ).fetchone()
-    return str(row[0]) if row is not None else f"watcher:{callsign}"
+    return str(resolve_supervisor_scope(store, actor_id, callsign)["scope_id"])
 
 
 def _codex_turn_generation(session_ref: str, turn_id: str) -> str:

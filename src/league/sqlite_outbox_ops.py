@@ -449,7 +449,9 @@ def outbox_envelope(
                e.aggregate_kind,e.aggregate_id,e.entity_version,e.status,e.update_text,
                e.request_id,e.task_id,COALESCE(e.agent_id,t.champion_agent_id) source_agent_id,
                json_extract(e.detail_json,'$.runtime_instance_id') source_runtime_instance_id,
-               json_extract(e.detail_json,'$.runtime_generation') source_runtime_generation
+               json_extract(e.detail_json,'$.runtime_generation') source_runtime_generation,
+               json_extract(e.detail_json,'$.target_runtime_instance_id') target_runtime_instance_id,
+               json_extract(e.detail_json,'$.target_runtime_generation') target_runtime_generation
           FROM delivery_outbox o JOIN events e ON e.event_id=o.event_id
           LEFT JOIN tasks t ON t.task_id=e.task_id
          WHERE o.outbox_id=?
@@ -469,6 +471,8 @@ def outbox_envelope(
         "source_agent_id": row["source_agent_id"],
         "source_runtime_instance_id": row["source_runtime_instance_id"],
         "source_runtime_generation": row["source_runtime_generation"],
+        "target_runtime_instance_id": row["target_runtime_instance_id"],
+        "target_runtime_generation": row["target_runtime_generation"],
         "event_type": row["event_type"],
         "aggregate_kind": row["aggregate_kind"],
         "aggregate_id": row["aggregate_id"],

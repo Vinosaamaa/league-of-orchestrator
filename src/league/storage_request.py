@@ -167,6 +167,8 @@ class RequestStorage(Protocol):
         turn_token: str,
         actions: tuple[AnswerRequestCommand | RequestResultCommand, ...],
         at: str,
+        *,
+        owner_controls: tuple[dict[str, Any], ...] = (),
     ) -> dict[str, Any]: ...
 
     def request_turn_boundary(self, owner_agent_id: str) -> dict[str, Any]: ...

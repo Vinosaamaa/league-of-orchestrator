@@ -327,19 +327,11 @@ def intake_prompt(
                 (prompt_id, body, body_hash, len(encoded)),
             )
             if wake and wake_scope_id is None:
-                scope_row = store.connection.execute(
-                    "SELECT scope_id FROM watcher_scopes WHERE actor_agent_id=? ORDER BY scope_id LIMIT 1",
-                    (intake_actor_id,),
-                ).fetchone()
-                if scope_row is not None:
-                    wake_scope_id = str(scope_row["scope_id"])
-                else:
-                    actor = store.connection.execute(
-                        "SELECT callsign FROM agent_instances WHERE agent_id=? AND retired_at IS NULL",
-                        (intake_actor_id,),
-                    ).fetchone()
-                    if actor is not None:
-                        wake_scope_id = f"watcher:{actor['callsign']}"
+                from .sqlite_watcher_ops import resolve_supervisor_scope
+
+                wake_scope_id = str(
+                    resolve_supervisor_scope(store, intake_actor_id)["scope_id"]
+                )
             if wake_scope_id is not None:
                 from .sqlite_watcher_ops import ensure_watcher_scope
 
@@ -554,19 +546,11 @@ def bind_quarantined_prompt(
             if row["wake_committed"]:
                 wake_scope_id = None
             elif wake and wake_scope_id is None:
-                scope_row = store.connection.execute(
-                    "SELECT scope_id FROM watcher_scopes WHERE actor_agent_id=? ORDER BY scope_id LIMIT 1",
-                    (intake_actor_id,),
-                ).fetchone()
-                if scope_row is not None:
-                    wake_scope_id = str(scope_row["scope_id"])
-                else:
-                    actor = store.connection.execute(
-                        "SELECT callsign FROM agent_instances WHERE agent_id=? AND retired_at IS NULL",
-                        (intake_actor_id,),
-                    ).fetchone()
-                    if actor is not None:
-                        wake_scope_id = f"watcher:{actor['callsign']}"
+                from .sqlite_watcher_ops import resolve_supervisor_scope
+
+                wake_scope_id = str(
+                    resolve_supervisor_scope(store, intake_actor_id)["scope_id"]
+                )
             if wake_scope_id is not None:
                 from .sqlite_watcher_ops import ensure_watcher_scope
 
@@ -1059,14 +1043,33 @@ def commit_interactive_request_turn(
     turn_token: str,
     actions: tuple[AnswerRequestCommand | RequestResultCommand, ...],
     at: str,
+    *,
+    owner_controls: tuple[dict[str, Any], ...] = (),
 ) -> dict[str, Any]:
-    """Commit request effects and the matching supervisor turn atomically."""
+    """Commit request effects, semantic controls, and the supervisor turn atomically."""
 
-    from .sqlite_watcher_ops import commit_shotcaller_turn
+    from .sqlite_watcher_ops import commit_shotcaller_turn, prepare_owner_stop_control
 
+    if len(owner_controls) > 1 or any(
+        not isinstance(control, dict) for control in owner_controls
+    ):
+        raise StorageRefusal(
+            "owner_stop_invalid", "one request turn can record at most one owner stop"
+        )
     try:
         with store._transaction():
             committed = commit_request_turn(store, owner_agent_id, actions, at)
+            prepared_controls = [
+                prepare_owner_stop_control(
+                    store,
+                    owner_agent_id,
+                    str(control.get("control_id", "")),
+                    str(control.get("prompt_id", "")),
+                    control.get("interrupt_delegates"),
+                    at,
+                )
+                for control in owner_controls
+            ]
             supervision = commit_shotcaller_turn(
                 store, owner_agent_id, turn_token, at
             )
@@ -1076,7 +1079,11 @@ def commit_interactive_request_turn(
         raise store._translate_database_error(
             exc, "interactive request turn commit conflicted with canonical state"
         ) from exc
-    return {**committed, "supervision": supervision}
+    return {
+        **committed,
+        "supervision": supervision,
+        "owner_stop_controls": prepared_controls,
+    }
 
 
 def request_turn_boundary(store: Any, owner_agent_id: str) -> dict[str, Any]:

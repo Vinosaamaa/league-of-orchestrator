@@ -1673,3 +1673,12 @@ stored path in its SQL compare-and-set, so macOS `/var` and `/private/var`
 aliases cannot create a false conflict. The combined transition-and-replay test
 is registered in the focused suite and verifies immutable predecessor evidence,
 the restored runtime generation, idempotent retry, and canonical replay.
+
+Release `0.2.60` assigns the next immutable install identity to merged PR #166
+at main commit `768089227a36583f052f62c45f777eac7feb7d6d` and exact
+reviewed/merged tree `6d3b91176a25c24965b32ccbffe74b236a9805e5`. It packages
+the restored legacy Champion receipt replay and physical-worktree CAS repair
+without any additional hook, watcher, provider, multiplexer, or storage-contract
+change. This release delta changes only the version contract, deterministic
+release-staging expectations, and this provenance record beyond that merged
+tree.

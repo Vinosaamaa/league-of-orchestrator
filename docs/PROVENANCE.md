@@ -1725,3 +1725,12 @@ reconciliation now waits only for that returned `local.tab-status` log to reach
 finalizing its receipt. Missing, ambiguous, failed, or timed-out log evidence
 clears only League's owned overlay and refuses; unrelated plugin completion can
 never satisfy the gate.
+
+Release `0.2.63` assigns the next immutable install identity to merged PR #172
+at main commit `d63155235ecda8383c2871582a74556950747e65` and exact
+reviewed/merged tree `210fafd41702fc1c36770ade2474ce86704b2c5b`. It packages
+the exact asynchronous Herdr status-action completion gate without any
+additional hook, watcher, provider, multiplexer, or storage-contract change.
+This release delta changes only the version contract, deterministic
+release-staging expectations, and this provenance record beyond that merged
+tree.

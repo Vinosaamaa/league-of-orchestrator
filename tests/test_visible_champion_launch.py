@@ -459,6 +459,31 @@ class DelayedPluginActionRunner(SourceLessLegacyRunner):
         return super().run(arguments, timeout_seconds=timeout_seconds)
 
 
+class FailFirstPluginActionRunner(SourceLessLegacyRunner):
+    def __init__(self, worktree: Path) -> None:
+        super().__init__(worktree)
+        self.plugin_actions = 0
+
+    def run(
+        self, arguments, *, timeout_seconds: int = 30
+    ) -> subprocess.CompletedProcess[str]:
+        command = tuple(arguments)
+        if command[:4] == ("herdr", "plugin", "action", "invoke"):
+            self.calls.append(command)
+            self.plugin_actions += 1
+            status = "failed" if self.plugin_actions == 1 else "succeeded"
+            result = {
+                "log": {"log_id": f"plugin-log-{self.plugin_actions}", "status": status}
+            }
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                json.dumps({"id": "test", "result": result}) + "\n",
+                "",
+            )
+        return super().run(arguments, timeout_seconds=timeout_seconds)
+
+
 class FakeIssueVerifier:
     def __init__(
         self,
@@ -1426,6 +1451,60 @@ def test_legacy_display_reconciliation_records_generation_only_transition(
     retry = service.reconcile(spec)
     assert retry["idempotent"] is True
     assert source_less.plugin_log_reads == 2
+    store.close()
+
+
+def test_legacy_display_retry_after_failed_refresh_uses_new_source_sequence(
+    root: Path,
+) -> None:
+    store, clock, worktree, launch, receipt, prepared = _prepared_legacy_display(
+        root, "legacy-refresh-retry-sequence"
+    )
+    runner = FailFirstPluginActionRunner(worktree)
+    runner.started = True
+    runner.title = prepared.title
+    runner.tokens = {
+        **prepared.tokens,
+        "harness": "codex",
+        "identity_thread_id": THREAD_ID,
+        "identity_title_mode": "tokens-only",
+        "provider_label": "codex",
+    }
+    runner.active_metadata_source = "herdr:codex"
+    runner.metadata_reports_change_state_sequence = False
+    runner.state_change_seq = prepared.state_change_seq
+    spec = _legacy_reconciliation_spec(launch, receipt, worktree, runner)
+    service = LegacyDisplayReconciliationService(
+        store,
+        HerdrLegacyDisplayAdapter(
+            runner,
+            environment={"HERDR_ENV": "1", "HERDR_WORKSPACE_ID": "w1"},
+        ),
+        clock,
+    )
+
+    try:
+        service.reconcile(spec)
+    except StorageRefusal as exc:
+        assert exc.code == "legacy_display_unverified"
+    else:
+        raise AssertionError("failed status refresh was accepted")
+    assert store.assignment_launch_context(str(launch["assignment_id"]))[
+        "legacy_display_reconciliation"
+    ]["receipt"] is None
+
+    result = service.reconcile(spec)
+    assert result["state"] == "reconciled"
+    reports = [
+        call
+        for call in runner.calls
+        if call[:3] == ("herdr", "pane", "report-metadata")
+        and call[call.index("--source") + 1].startswith("league-legacy-")
+    ]
+    assert len(reports) == 3
+    sequences = [int(call[call.index("--seq") + 1]) for call in reports]
+    assert sequences == sorted(sequences)
+    assert len(set(sequences)) == len(sequences)
     store.close()
 
 
@@ -2550,6 +2629,7 @@ def main() -> None:
         test_legacy_active_champion_display_is_reconciled_once_with_exact_receipt(root)
         test_legacy_display_reconciliation_records_one_exact_worktree_transition(root)
         test_legacy_display_reconciliation_records_generation_only_transition(root)
+        test_legacy_display_retry_after_failed_refresh_uses_new_source_sequence(root)
         test_legacy_display_reconciliation_refuses_user_title_race_before_write(root)
         test_legacy_display_compare_and_set_does_not_overwrite_last_window_user_title(root)
         test_legacy_display_reconciliation_refuses_modern_receipt_before_live_write(root)

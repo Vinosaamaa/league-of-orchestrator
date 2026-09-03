@@ -1734,3 +1734,13 @@ additional hook, watcher, provider, multiplexer, or storage-contract change.
 This release delta changes only the version contract, deterministic
 release-staging expectations, and this provenance record beyond that merged
 tree.
+
+Herdr metadata sequences are local to each reporting source and survive the
+removal of that source's visible overlay. A failed reconciliation followed by
+rollback therefore cannot derive its next League-source sequence from the
+unchanged native agent state sequence. Legacy reconciliation now emits fresh
+process-monotonic metadata sequences for both the owned effect and rollback,
+while retaining the native state sequence as the independent presentation-race
+guard. The focused retry test fails one status refresh, proves exact rollback,
+and then succeeds through the same durable intent without reusing a source
+sequence.

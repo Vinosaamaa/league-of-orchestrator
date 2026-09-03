@@ -1604,6 +1604,15 @@ projection. In both cases the dedicated League source, complete ownership
 tokens, exact title, exact underlying presentation authority, and two stable
 readbacks remain mandatory; any other sequence still refuses.
 
+Release `0.2.59` assigns the next immutable install identity to merged PR #164
+at main commit `4053a7b01ba22f880b2ea9514979f483633a19e8` and exact
+reviewed/merged tree `6d44d6010c7d6dccaf3c9b4bc13d69ca2e1ee12f`. It packages
+the current-Herdr display-only sequence projection correction without any
+additional hook, watcher, provider, multiplexer, or storage-contract change.
+This release delta changes only the version contract, deterministic
+release-staging expectations, and this provenance record beyond that merged
+tree.
+
 The issue-#84 legacy-restart follow-up handles the exact retained-session shape
 found during the first installed reconciliation. One verified Vi pane and
 immutable Codex thread remained live in a clean follow-up worktree after its

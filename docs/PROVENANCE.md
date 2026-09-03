@@ -1769,3 +1769,13 @@ survive a newer global state sequence, while older sequence and all identity,
 route, source, or ownership mismatches still fail closed. This release delta
 changes only the version contract, deterministic release-staging expectations,
 and this provenance record beyond that merged tree.
+
+Release `0.2.67` assigns the next immutable install identity to merged PR #180
+at main commit `172112cca27b235ea189a12789ece1b6074896f1` and exact
+reviewed/merged tree `a050c0bdbe88950c37a959c1bc545558e3935051`. It packages
+the live Herdr Pi publication correction: exact bootstrap-owned metadata may
+retain the baseline agent lifecycle sequence, while older sequences and every
+endpoint, route, session, source, title, or ownership mismatch still fail
+closed. This release delta changes only the version contract, deterministic
+release-staging expectations, and this provenance record beyond that merged
+tree.

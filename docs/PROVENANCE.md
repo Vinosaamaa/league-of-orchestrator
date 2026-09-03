@@ -1867,3 +1867,12 @@ references, and adds a focused fast-path execution contract for League
 Champions. This release delta changes only the version contract, deterministic
 release-staging expectations, and this provenance record beyond that merged
 tree.
+
+Release `0.2.74` assigns the next immutable install identity to merged PR #197
+at main commit `866f033f43ea332e62deeee7ae9dab6159e26d8e` and exact
+reviewed head `1b54ace041c4c195452feb380f0b0200b20231b2`. It prevents
+provider-neutral operational wake and Stop-feedback messages from becoming
+Summoner prompt intake while preserving model-visible wake delivery for Pi,
+Codex, and Cursor. This release delta changes only the version contract,
+deterministic release-staging expectations, and this provenance record beyond
+that merged tree.

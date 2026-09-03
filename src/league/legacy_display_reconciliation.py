@@ -39,6 +39,7 @@ OWNERSHIP_TOKENS = {
 LEGACY_OWNERSHIP_TOKENS = {
     key for key in OWNERSHIP_TOKENS if key.startswith("legacy_display_")
 }
+TAB_STATUS_SOURCE = "local.tab-status"
 
 
 def _stable_json(value: Any) -> str:
@@ -53,6 +54,28 @@ def _canonical_title(agent: Mapping[str, Any]) -> str:
     title = agent.get("terminal_title_stripped", agent.get("terminal_title", ""))
     value = str(title) if isinstance(title, str) else ""
     return value.removesuffix(" | codex")
+
+
+def _presentation_authority(
+    agent: Mapping[str, Any], tokens: Mapping[str, Any], session_source: str | None
+) -> str | None:
+    for key in ("legacy_display_applies_to", "launch_title_applies_to"):
+        owned_authority = tokens.get(key)
+        if isinstance(owned_authority, str) and owned_authority:
+            return owned_authority
+    if (
+        tokens.get("identity_title_mode") == "tokens-only"
+        and tokens.get("identity_thread_id") == _session_id(agent)
+        and tokens.get("harness") == agent.get("agent")
+        and isinstance(tokens.get("provider_label"), str)
+        and bool(tokens.get("provider_label"))
+        and isinstance(tokens.get("sidebar_name"), str)
+        and bool(tokens.get("sidebar_name"))
+        and isinstance(tokens.get("thread_title"), str)
+        and bool(tokens.get("thread_title"))
+    ):
+        return TAB_STATUS_SOURCE
+    return session_source
 
 
 @dataclass(frozen=True)
@@ -118,7 +141,7 @@ class HerdrLegacyDisplayAdapter:
     ) -> tuple[dict[str, Any], dict[str, str]]:
         agent = self._agent(spec.routing_name)
         tokens = agent.get("tokens")
-        authority = _session_source(agent)
+        session_source = _session_source(agent)
         explicit_source = agent.get("metadata_source")
         source = (
             explicit_source
@@ -128,8 +151,13 @@ class HerdrLegacyDisplayAdapter:
                 if isinstance(tokens, Mapping)
                 and isinstance(tokens.get("legacy_display_source"), str)
                 and tokens.get("legacy_display_source")
-                else authority
+                else session_source
             )
+        )
+        authority = (
+            _presentation_authority(agent, tokens, session_source)
+            if isinstance(tokens, Mapping)
+            else session_source
         )
         sequence = agent.get("state_change_seq")
         worktree = str(Path(spec.worktree).resolve())

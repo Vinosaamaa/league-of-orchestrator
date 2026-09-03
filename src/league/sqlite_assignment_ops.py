@@ -2195,7 +2195,10 @@ def finalize_legacy_display_reconciliation(
                 and bool(re.fullmatch(r"[0-9a-f]{64}", receipt["observation_digest"]))
                 and receipt.get("source") == expected_source
                 and int(receipt["state_change_seq"])
-                == int(command.expected_state_change_seq) + 1
+                in {
+                    int(command.expected_state_change_seq),
+                    int(command.expected_state_change_seq) + 1,
+                }
             )
             if not valid:
                 raise StorageRefusal(

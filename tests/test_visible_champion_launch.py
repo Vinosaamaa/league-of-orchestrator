@@ -209,6 +209,7 @@ class FakeHerdrRunner:
         self.tokens: dict[str, str] = {}
         self.metadata_source = f"herdr:{harness_kind}"
         self.active_metadata_source = self.metadata_source
+        self.metadata_reports_change_state_sequence = True
         self.source_sequences: dict[str, int] = {}
         self.overlay_baselines: dict[
             str, tuple[str | None, str, dict[str, str], str, dict[str, str]]
@@ -275,6 +276,9 @@ class FakeHerdrRunner:
         copied.tokens = dict(self.tokens)
         copied.metadata_source = self.metadata_source
         copied.active_metadata_source = self.active_metadata_source
+        copied.metadata_reports_change_state_sequence = (
+            self.metadata_reports_change_state_sequence
+        )
         copied.source_sequences = dict(self.source_sequences)
         copied.overlay_baselines = {
             source: (
@@ -337,7 +341,8 @@ class FakeHerdrRunner:
                     command, 1, "", "metadata sequence conflict"
                 )
             self.source_sequences[source] = sequence
-            self.state_change_seq += 1
+            if self.metadata_reports_change_state_sequence:
+                self.state_change_seq += 1
             if "--clear-title" in command and source in self.overlay_baselines:
                 (
                     baseline_source,
@@ -1166,6 +1171,7 @@ def test_legacy_display_reconciliation_records_one_exact_worktree_transition(
         }
     )
     source_less.active_metadata_source = "local.tab-status"
+    source_less.metadata_reports_change_state_sequence = False
     source_less.state_change_seq = runner.state_change_seq
     runner = source_less
     restored_terminal = "term_test_restored_100"

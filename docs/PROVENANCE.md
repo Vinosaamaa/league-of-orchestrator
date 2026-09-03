@@ -1568,3 +1568,12 @@ checks used for other present states. A genuinely stopped endpoint remains
 ineligible. The focused regression proves a retained `done` Champion receives
 one durable display receipt while a stopped or source-less presentation still
 fails before mutation.
+
+Release `0.2.55` assigns the next immutable install identity to merged PR #156
+at main commit `e1f8d58868d588bb60bb3272d10d34889656ef46` and exact
+reviewed/merged tree `ad563e6c7492245ff2e0129a3f9754b65c221cc2`. It packages
+the retained completed-Champion display reconciliation correction without any
+additional runtime, hook, watcher, provider, multiplexer, or storage-contract
+change. This release delta changes only the version contract, deterministic
+release-staging expectations, and this provenance record beyond that merged
+tree.

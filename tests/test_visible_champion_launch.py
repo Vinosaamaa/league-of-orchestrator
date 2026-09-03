@@ -1295,6 +1295,81 @@ def test_legacy_display_reconciliation_records_one_exact_worktree_transition(
     store.close()
 
 
+def test_legacy_display_reconciliation_records_generation_only_transition(
+    root: Path,
+) -> None:
+    store, clock, worktree, launch, receipt, runner = _prepared_legacy_display(
+        root, "legacy-generation-only-transition"
+    )
+    source_less = SourceLessLegacyRunner(worktree)
+    source_less.started = True
+    source_less.title = runner.title
+    source_less.tokens = dict(runner.tokens)
+    source_less.tokens.update(
+        {
+            "harness": "codex",
+            "identity_thread_id": THREAD_ID,
+            "identity_title_mode": "tokens-only",
+            "provider_label": "codex",
+        }
+    )
+    source_less.active_metadata_source = "local.tab-status"
+    source_less.metadata_reports_change_state_sequence = False
+    source_less.state_change_seq = runner.state_change_seq
+    restored_terminal = "term_test_restored_same_worktree"
+    original_agent = source_less._agent
+    source_less._agent = lambda: (  # type: ignore[method-assign]
+        lambda agent: (agent.update(terminal_id=restored_terminal), agent)[1]
+    )(original_agent())
+    spec = LegacyDisplayReconciliationSpec(
+        **{
+            **vars(_legacy_reconciliation_spec(launch, receipt, worktree, source_less)),
+            "terminal_id": restored_terminal,
+        }
+    )
+    agent_before = store.connection.execute(
+        "SELECT worktree,branch,version FROM agent_instances WHERE agent_id=?",
+        (LUX_ID,),
+    ).fetchone()
+
+    service = LegacyDisplayReconciliationService(
+        store,
+        HerdrLegacyDisplayAdapter(
+            source_less,
+            environment={"HERDR_ENV": "1", "HERDR_WORKSPACE_ID": "w1"},
+        ),
+        clock,
+    )
+    result = service.reconcile(spec)
+    assert result["state"] == "reconciled"
+    restored_generation = "herdr:" + hashlib.sha256(
+        f"{restored_terminal}\0{receipt['thread_id']}".encode("utf-8")
+    ).hexdigest()[:24]
+    runtime = store.connection.execute(
+        "SELECT runtime_generation FROM runtime_instances WHERE runtime_instance_id=?",
+        (launch["runtime_instance_id"],),
+    ).fetchone()
+    assert runtime["runtime_generation"] == restored_generation
+    agent_after = store.connection.execute(
+        "SELECT worktree,branch,version FROM agent_instances WHERE agent_id=?",
+        (LUX_ID,),
+    ).fetchone()
+    assert dict(agent_after) == dict(agent_before)
+    durable = store.assignment_launch_context(str(launch["assignment_id"]))
+    intent = durable["legacy_display_reconciliation"]["intent"]
+    assert intent["schema"] == "league.legacy-display-reconciliation-intent.v4"
+    assert intent["previous_runtime_generation"] == receipt["runtime_generation"]
+    assert intent["runtime_generation"] == restored_generation
+    assert "previous_worktree" not in intent and "branch" not in intent
+    assert (
+        durable["legacy_display_reconciliation"]["receipt"]["state_change_seq"]
+        == spec.expected_state_change_seq
+    )
+    retry = service.reconcile(spec)
+    assert retry["idempotent"] is True
+    store.close()
+
+
 class UserTitleRaceLegacyRunner(FakeHerdrRunner):
     def __init__(self, worktree: Path) -> None:
         super().__init__(worktree)
@@ -2415,6 +2490,7 @@ def main() -> None:
         test_active_retry_refuses_changed_owner_issue_before_title_read(root)
         test_legacy_active_champion_display_is_reconciled_once_with_exact_receipt(root)
         test_legacy_display_reconciliation_records_one_exact_worktree_transition(root)
+        test_legacy_display_reconciliation_records_generation_only_transition(root)
         test_legacy_display_reconciliation_refuses_user_title_race_before_write(root)
         test_legacy_display_compare_and_set_does_not_overwrite_last_window_user_title(root)
         test_legacy_display_reconciliation_refuses_modern_receipt_before_live_write(root)

@@ -1711,6 +1711,10 @@ def assignment_launch_context(store: Any, assignment_id: str) -> dict[str, Any]:
                 "previous_runtime_generation",
                 "runtime_generation",
             }
+            intent_keys_v4 = intent_keys_v1 | {
+                "previous_runtime_generation",
+                "runtime_generation",
+            }
             intent_shape_exact = bool(
                 (
                     legacy_intent.get("schema")
@@ -1738,6 +1742,21 @@ def assignment_launch_context(store: Any, assignment_id: str) -> dict[str, Any]:
                             "previous_worktree",
                             "previous_branch",
                             "branch",
+                            "previous_runtime_generation",
+                            "runtime_generation",
+                        )
+                    )
+                    and legacy_intent["previous_runtime_generation"]
+                    != legacy_intent["runtime_generation"]
+                )
+                or (
+                    legacy_intent.get("schema")
+                    == "league.legacy-display-reconciliation-intent.v4"
+                    and set(legacy_intent) == intent_keys_v4
+                    and all(
+                        isinstance(legacy_intent.get(key), str)
+                        and bool(legacy_intent[key])
+                        for key in (
                             "previous_runtime_generation",
                             "runtime_generation",
                         )
@@ -1961,7 +1980,7 @@ def _validate_legacy_display_command(
         and (
             runtime["runtime_generation"] == expected_generation
             or (
-                transition_requested
+                generation_transition
                 and runtime["runtime_generation"] == receipt_generation
             )
         )
@@ -1992,7 +2011,6 @@ def _validate_legacy_display_command(
         and receipt.get("routing_name") == command.routing_name
         and isinstance(receipt_generation, str)
         and bool(receipt_generation)
-        and (not generation_transition or transition_requested)
         and receipt.get("backend_kind") == "herdr"
     )
     if not exact:
@@ -2054,7 +2072,11 @@ def _validate_legacy_display_command(
     if generation_transition:
         detail.update(
             {
-                "schema": "league.legacy-display-reconciliation-intent.v3",
+                "schema": (
+                    "league.legacy-display-reconciliation-intent.v3"
+                    if transition_requested
+                    else "league.legacy-display-reconciliation-intent.v4"
+                ),
                 "previous_runtime_generation": receipt_generation,
                 "runtime_generation": expected_generation,
             }
@@ -2226,7 +2248,10 @@ def finalize_legacy_display_reconciliation(
                         "legacy display reconciliation final receipt conflicts with history",
                     )
             else:
-                if detail["schema"] == "league.legacy-display-reconciliation-intent.v3":
+                if detail["schema"] in {
+                    "league.legacy-display-reconciliation-intent.v3",
+                    "league.legacy-display-reconciliation-intent.v4",
+                }:
                     collision = store.connection.execute(
                         """
                         SELECT runtime_instance_id FROM runtime_instances

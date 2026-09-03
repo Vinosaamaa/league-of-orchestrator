@@ -1744,3 +1744,11 @@ while retaining the native state sequence as the independent presentation-race
 guard. The focused retry test fails one status refresh, proves exact rollback,
 and then succeeds through the same durable intent without reusing a source
 sequence.
+
+Release `0.2.64` assigns the next immutable install identity to merged PR #174
+at main commit `f189f2998b5390984bee3d9136191a9f5529299c` and exact
+reviewed/merged tree `87014bdc912fddc971d2603d5f0f1d4243279939`. It packages
+the fresh League metadata-source sequence correction without any additional
+hook, watcher, provider, multiplexer, or storage-contract change. This release
+delta changes only the version contract, deterministic release-staging
+expectations, and this provenance record beyond that merged tree.

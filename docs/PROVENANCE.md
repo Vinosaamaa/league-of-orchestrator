@@ -1608,3 +1608,13 @@ presentation verification correction without any additional hook, watcher,
 provider, multiplexer, or storage-contract change. This release delta changes
 only the version contract, deterministic release-staging expectations, and
 this provenance record beyond that merged tree.
+
+The issue-#84 live legacy repair also treats a restored Herdr terminal
+generation as part of the same owner-authorized transition. The immutable
+assignment acceptance receipt continues to identify the predecessor runtime
+generation. A v3 reconciliation intent binds that exact predecessor to the
+generation derived from the verified live terminal and immutable provider
+thread. Final presentation acceptance updates the runtime generation and the
+current Champion worktree/branch in one SQLite transaction; collisions,
+partial tuples, stale generations, and endpoint races still fail closed, and
+an exact retry is effect-free.

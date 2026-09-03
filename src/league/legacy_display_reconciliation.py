@@ -39,9 +39,6 @@ OWNERSHIP_TOKENS = {
 LEGACY_OWNERSHIP_TOKENS = {
     key for key in OWNERSHIP_TOKENS if key.startswith("legacy_display_")
 }
-TAB_STATUS_SOURCE = "local.tab-status"
-
-
 def _stable_json(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
 
@@ -51,6 +48,19 @@ def _digest(value: Any) -> str:
 
 
 def _canonical_title(agent: Mapping[str, Any]) -> str:
+    tokens = agent.get("tokens")
+    if (
+        isinstance(tokens, Mapping)
+        and isinstance(tokens.get("legacy_display_source"), str)
+        and str(tokens.get("legacy_display_source")).startswith("league-legacy-")
+        and isinstance(tokens.get("thread_title"), str)
+    ):
+        target = str(tokens["thread_title"])
+        rendered = str(agent.get("title") or "")
+        marker = "Codex | "
+        if marker in rendered and rendered.split(marker, 1)[1].strip() == target:
+            return target
+        return ""
     title = agent.get("terminal_title_stripped", agent.get("terminal_title", ""))
     value = str(title) if isinstance(title, str) else ""
     return value.removesuffix(" | codex")
@@ -85,7 +95,7 @@ def _presentation_authority(
         and isinstance(tokens.get("thread_title"), str)
         and bool(tokens.get("thread_title"))
     ):
-        return TAB_STATUS_SOURCE
+        return session_source
     return session_source
 
 
@@ -261,6 +271,8 @@ class HerdrLegacyDisplayAdapter:
             "sidebar_name": spec.callsign,
             "task_label": spec.target_task_label,
             "thread_title": target,
+            "identity_title": f"Codex | {target}",
+            "identity_title_mode": "tokens-only",
             "legacy_display_owner": owner,
             "legacy_display_assignment": reconciliation_id,
             "legacy_display_source": source,
@@ -427,6 +439,7 @@ class HerdrLegacyDisplayAdapter:
         reconciliation_tokens = self._reconciliation_tokens(
             spec, reconciliation_id, source, authority
         )
+        token_only_status = current_tokens.get("identity_title_mode") == "tokens-only"
         token_arguments = tuple(
             part
             for key, value in reconciliation_tokens.items()
@@ -445,8 +458,7 @@ class HerdrLegacyDisplayAdapter:
             "codex",
             "--display-agent",
             "codex",
-            "--title",
-            target,
+            *(("--clear-title",) if token_only_status else ("--title", target)),
             *token_arguments,
             "--seq",
             str(sequence),
@@ -468,6 +480,34 @@ class HerdrLegacyDisplayAdapter:
                 "legacy_display_unverified",
                 "legacy Champion compare-and-set metadata write was refused",
             ) from exc
+        if token_only_status:
+            try:
+                self._run(
+                    (
+                        "herdr",
+                        "plugin",
+                        "action",
+                        "invoke",
+                        "local.tab-status.sync",
+                    ),
+                    "legacy Champion status presentation refresh",
+                    silent=True,
+                )
+            except StorageRefusal as exc:
+                observed, tokens = self._observe(spec)
+                if self._owns_overlay(
+                    spec, reconciliation_id, observed, tokens
+                ):
+                    self._clear_owned_overlay(
+                        spec,
+                        reconciliation_id,
+                        authority,
+                        max(sequence + 1, int(observed["state_change_seq"]) + 1),
+                    )
+                raise StorageRefusal(
+                    "legacy_display_unverified",
+                    "legacy Champion status presentation refresh failed",
+                ) from exc
         expected_tokens = {
             **baseline_tokens,
             **reconciliation_tokens,

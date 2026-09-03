@@ -1698,3 +1698,13 @@ additional hook, watcher, provider, multiplexer, or storage-contract change.
 This release delta changes only the version contract, deterministic
 release-staging expectations, and this provenance record beyond that merged
 tree.
+
+The final issue-#84 live pass found that `local.tab-status` is intentionally a
+volatile presentation writer: status-icon refreshes advance that metadata
+source even when the native Codex session is unchanged. Legacy reconciliation
+therefore anchors its ownership tokens to the immutable `herdr:codex` session
+source, publishes no pane title of its own, and asks the installed status plugin
+to render the exact identity tokens. The adapter accepts the target only when
+the rendered pane title and the complete owned token tuple agree. This
+supersedes the earlier `local.tab-status` authority choice without changing
+already-finalized receipts, which retain and verify their recorded authority.

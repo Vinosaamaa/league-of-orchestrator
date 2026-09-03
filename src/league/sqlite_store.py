@@ -77,6 +77,7 @@ from .sqlite_project_ops import put_project as put_project_operation
 from .sqlite_project_ops import resolve_project as resolve_project_operation
 from .sqlite_project_ops import set_project_suggestions as set_project_suggestions_operation
 from .sqlite_outbox_ops import acknowledge_outbox as acknowledge_outbox_operation
+from .sqlite_outbox_ops import await_outbox_receipt as await_outbox_receipt_operation
 from .sqlite_outbox_ops import claim_outbox as claim_outbox_operation
 from .sqlite_outbox_ops import delivery_target as delivery_target_operation
 from .sqlite_outbox_ops import direct_delivery_target as direct_delivery_target_operation
@@ -3456,6 +3457,18 @@ class SQLiteStorage(SQLiteTransactionCore):
             effect_kind,
             effect_id,
             at,
+        )
+
+    def await_outbox_receipt(
+        self,
+        identity: OutboxDispatchIdentity,
+        fence: int,
+        adapter_kind: str,
+        reason: str,
+        at: str,
+    ) -> dict[str, Any]:
+        return await_outbox_receipt_operation(
+            self, identity, fence, adapter_kind, reason, at
         )
 
     def fail_outbox(

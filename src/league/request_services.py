@@ -223,6 +223,11 @@ class DeliveryService:
         )
         if claim["state"] == "delivered":
             return claim
+        if claim["state"] == "awaiting_receipt":
+            raise StorageRefusal(
+                "delivery_receipt_ambiguous",
+                "delivery requires exact receipt reconciliation before retry",
+            )
         target = self.target_resolver(recipient_agent_id, at)
         if target is None:
             self.store.fail_outbox(
@@ -237,14 +242,24 @@ class DeliveryService:
         envelope = self.store.outbox_envelope(outbox_id, event_id, recipient_agent_id)
         try:
             receipt = self.adapter.send(target["channel"], target, envelope)
-        except Exception as exc:
-            reason = getattr(exc, "code", None) or str(exc) or "receiver_unavailable"
+        except DeliveryUnavailable as exc:
+            reason = str(exc) or "receiver_unavailable"
             self.store.fail_outbox(
                 identity,
                 claim["fence"],
                 target["channel"],
                 reason,
                 self.clock.after(30),
+                self.clock.now(),
+            )
+            raise
+        except Exception as exc:
+            reason = getattr(exc, "code", None) or str(exc) or "receipt_ambiguous"
+            self.store.await_outbox_receipt(
+                identity,
+                claim["fence"],
+                target["channel"],
+                reason,
                 self.clock.now(),
             )
             raise

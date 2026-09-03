@@ -88,8 +88,9 @@ Semantic owner-stop invariants:
   exactly one verified runtime per recipient.
 - **Asynchronous effect:** external provider steering occurs only after the
   request transaction commits. The persistent supervisor recovers pending or
-  failed controls from their exact active scopes; exact outbox receipts prevent
-  repeated provider effects after a crash.
+  failed controls from their exact active scopes. Pending pre-dispatch work is
+  retried; once external steering starts, a missing receipt becomes
+  `awaiting_receipt` and cannot be resent until exact reconciliation.
 - **Exact routing:** provider adapters use their declared steering capability.
   Owner control bypasses an attached watcher and targets only the delegated
   runtime identity captured by the owner decision, preventing cross-runtime or

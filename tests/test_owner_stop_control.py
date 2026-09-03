@@ -24,7 +24,7 @@ from league.persistent_supervisor import (  # noqa: E402
     stop_supervisor,
     supervisor_status,
 )
-from league.request_services import DeliveryReceipt  # noqa: E402
+from league.request_services import DeliveryReceipt, DeliveryUnavailable  # noqa: E402
 from league.sqlite_store import SQLiteStorage  # noqa: E402
 from league.storage import RuntimeRegistrationCommand, StorageRefusal  # noqa: E402
 from lifecycle_fakes import FakeDeliveryAdapter  # noqa: E402
@@ -67,7 +67,7 @@ class ExactControlAdapter:
         self.calls.append((channel, dict(target), dict(envelope)))
         if self.fail_first:
             self.fail_first = False
-            raise RuntimeError("synthetic unexpected owner-stop steering failure")
+            raise DeliveryUnavailable("synthetic owner-stop steering failure")
         return DeliveryReceipt(
             outbox_id=str(envelope["outbox_id"]),
             event_id=str(envelope["event_id"]),
@@ -75,6 +75,13 @@ class ExactControlAdapter:
             effect_kind="synthetic_owner_stop",
             effect_id=f"effect:{envelope['event_id']}",
         )
+
+
+class AmbiguousControlAdapter(ExactControlAdapter):
+    def send(self, channel, target, envelope):
+        assert channel == "direct"
+        self.calls.append((channel, dict(target), dict(envelope)))
+        raise RuntimeError("synthetic ambiguous post-effect failure")
 
 
 def _configure_owner_provider(store: SQLiteStorage, kind: str) -> tuple[str, str]:
@@ -573,7 +580,67 @@ def test_persistent_supervisor_recovers_failed_owner_control(root: Path) -> None
         ).fetchone()
         owner_stop = json.loads(row["metadata_json"])["owner_stop"]
         assert owner_stop["state"] == "authorized", owner_stop
+        prompt = observer.intake_prompt(
+            "prompt:owner-stop:ambiguous",
+            SHOTCALLER_ID,
+            GAREN_RUNTIME,
+            "codex",
+            "session:owner-stop:ambiguous",
+            "source:owner-stop:ambiguous",
+            "Record an ambiguity-fenced owner control.",
+            clock.now(),
+        )
+        observer.triage_prompt(
+            prompt["prompt_id"],
+            [{
+                "prompt_item_id": "item:owner-stop:ambiguous",
+                "ordinal": 1,
+                "summary": "Ambiguous delegated pause",
+                "disposition": "acknowledgement",
+                "request_id": None,
+            }],
+            clock.now(),
+        )
+        ambiguous = observer.prepare_owner_stop_control(
+            SHOTCALLER_ID,
+            "owner-stop:ambiguous",
+            prompt["prompt_id"],
+            True,
+            clock.now(),
+        )
     assert len(adapter.calls) == 2
+
+    ambiguous_adapter = AmbiguousControlAdapter()
+    runtime.delivery_adapter = ambiguous_adapter
+    runtime._recover_owner_stops()
+    runtime._recover_owner_stops()
+    assert len(ambiguous_adapter.calls) == 1
+    with SQLiteStorage(state) as observer:
+        outbox = observer.connection.execute(
+            "SELECT state FROM delivery_outbox WHERE outbox_id=?",
+            (ambiguous["targets"][0]["outbox_id"],),
+        ).fetchone()
+        assert outbox["state"] == "awaiting_receipt"
+        pending = observer.pending_owner_stop_controls((str(ambiguous["scope_id"]),))
+        assert pending[0]["state"] == "failed"
+        assert pending[0]["last_error"] == "delivery_receipt_ambiguous"
+        with observer._transaction():
+            observer.connection.execute(
+                "UPDATE delivery_outbox SET state='in_flight' WHERE outbox_id=?",
+                (ambiguous["targets"][0]["outbox_id"],),
+            )
+            observer.connection.execute(
+                "DELETE FROM outbox_dispatch_leases WHERE outbox_id=?",
+                (ambiguous["targets"][0]["outbox_id"],),
+            )
+    runtime._recover_owner_stops()
+    assert len(ambiguous_adapter.calls) == 1
+    with SQLiteStorage(state) as observer:
+        outbox = observer.connection.execute(
+            "SELECT state FROM delivery_outbox WHERE outbox_id=?",
+            (ambiguous["targets"][0]["outbox_id"],),
+        ).fetchone()
+        assert outbox["state"] == "awaiting_receipt"
 
 
 def test_owner_stop_control_rolls_back_with_turn_commit(root: Path) -> None:

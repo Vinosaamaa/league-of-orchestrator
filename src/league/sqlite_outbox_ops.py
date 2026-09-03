@@ -66,6 +66,11 @@ def claim_outbox(
                 }
             if outbox["state"] == "cancelled":
                 raise StorageRefusal("delivery_conflict", "cancelled outbox cannot be dispatched")
+            if outbox["state"] == "awaiting_receipt":
+                raise StorageRefusal(
+                    "delivery_receipt_ambiguous",
+                    "delivery effect is ambiguous and requires exact receipt reconciliation",
+                )
             if _time(str(outbox["available_at"]), "outbox availability") > now:
                 raise StorageRefusal("delivery_not_due", "outbox row is not yet due", retryable=True)
             lease = store.connection.execute(
@@ -73,6 +78,26 @@ def claim_outbox(
             ).fetchone()
             if lease is not None and _time(str(lease["leased_until"]), "stored dispatch lease") > now:
                 raise StorageRefusal("delivery_claimed", "outbox has an unexpired dispatch lease")
+            if outbox["state"] == "in_flight":
+                event = store.connection.execute(
+                    "SELECT event_type FROM events WHERE event_id=?", (event_id,)
+                ).fetchone()
+                if event is not None and event["event_type"] == "owner_stop_control":
+                    store.connection.execute(
+                        "UPDATE delivery_outbox SET state='awaiting_receipt',last_outcome='dispatch_interrupted' WHERE outbox_id=?",
+                        (outbox_id,),
+                    )
+                    store.connection.execute(
+                        "DELETE FROM outbox_dispatch_leases WHERE outbox_id=?", (outbox_id,)
+                    )
+                    return {
+                        "outbox_id": outbox_id,
+                        "event_id": event_id,
+                        "recipient_agent_id": recipient_agent_id,
+                        "state": "awaiting_receipt",
+                        "fence": None,
+                        "idempotent": False,
+                    }
             fence = 1 if lease is None else int(lease["fence"]) + 1
             store.connection.execute(
                 """
@@ -259,6 +284,59 @@ def acknowledge_outbox(
         "effect_kind": effect_kind,
         "effect_id": effect_id,
         "idempotent": False,
+    }
+
+
+def await_outbox_receipt(
+    store: Any,
+    identity: OutboxDispatchIdentity,
+    fence: int,
+    adapter_kind: str,
+    reason: str,
+    at: str,
+) -> dict[str, Any]:
+    """Fence an ambiguous external effect until an exact receipt is reconciled."""
+
+    _time(at, "ambiguous delivery time")
+    bounded_reason = " ".join(str(reason).split())[:160] or "receipt_ambiguous"
+    try:
+        with store._transaction():
+            lease = store.connection.execute(
+                "SELECT dispatcher_id,fence FROM outbox_dispatch_leases WHERE outbox_id=?",
+                (identity.outbox_id,),
+            ).fetchone()
+            if (
+                lease is None
+                or lease["dispatcher_id"] != identity.dispatcher_id
+                or int(lease["fence"]) != fence
+            ):
+                raise StorageRefusal(
+                    "delivery_fenced", "ambiguous delivery uses a stale dispatch fence"
+                )
+            store.connection.execute(
+                "UPDATE delivery_outbox SET state='awaiting_receipt',last_outcome=? WHERE outbox_id=?",
+                (bounded_reason, identity.outbox_id),
+            )
+            store.connection.execute(
+                "UPDATE delivery_attempts SET adapter_kind=?,finished_at=?,outcome='awaiting_receipt' WHERE attempt_id=?",
+                (adapter_kind, at, identity.attempt_id),
+            )
+            store.connection.execute(
+                "DELETE FROM outbox_dispatch_leases WHERE outbox_id=?",
+                (identity.outbox_id,),
+            )
+    except StorageRefusal:
+        raise
+    except sqlite3.DatabaseError as exc:
+        raise store._translate_database_error(
+            exc, "ambiguous delivery recording conflicted"
+        ) from exc
+    return {
+        "outbox_id": identity.outbox_id,
+        "event_id": identity.event_id,
+        "recipient_agent_id": identity.recipient_agent_id,
+        "state": "awaiting_receipt",
+        "reason": bounded_reason,
     }
 
 

@@ -29,6 +29,15 @@ class OutboxStorage(Protocol):
         at: str,
     ) -> dict[str, Any]: ...
 
+    def await_outbox_receipt(
+        self,
+        identity: OutboxDispatchIdentity,
+        fence: int,
+        adapter_kind: str,
+        reason: str,
+        at: str,
+    ) -> dict[str, Any]: ...
+
     def fail_outbox(
         self,
         identity: OutboxDispatchIdentity,

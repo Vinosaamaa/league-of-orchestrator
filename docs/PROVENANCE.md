@@ -1618,3 +1618,12 @@ thread. Final presentation acceptance updates the runtime generation and the
 current Champion worktree/branch in one SQLite transaction; collisions,
 partial tuples, stale generations, and endpoint races still fail closed, and
 an exact retry is effect-free.
+
+Release `0.2.57` assigns the next immutable install identity to merged PR #160
+at main commit `bade8dae760ca841fe2bfd022cacbd9498e0e93a` and exact
+reviewed/merged tree `210d07ab837f23579cdd6cc0aff48e839645121e`. It packages
+the restored-terminal runtime-generation reconciliation correction without any
+additional hook, watcher, provider, multiplexer, or storage-contract change.
+This release delta changes only the version contract, deterministic
+release-staging expectations, and this provenance record beyond that merged
+tree.

@@ -1395,3 +1395,10 @@ presentation remains task-to-project plus exact launch worktree based.
 Synthetic Ashe, Azir, and Qiyana restart regressions cover the global, IA, and
 JJ labels and both assignment shapes with zero process creation or session
 resume.
+
+Release `0.2.52` assigns the next immutable install identity to merged PR #148
+at main commit `6b660c08d0d5975d72ee7ba2ce334b9bfbdd4f79` and reviewed source
+tree `5731a4ec4231f8136743030eef8911de75477480`. It packages the corrected
+restored Shotcaller publication-cwd and project-label behavior without another
+behavior change; this release delta changes only the version contract,
+deterministic release-staging expectations, and this provenance record.

@@ -72,6 +72,9 @@ class LegacyDisplayReconciliationSpec:
     expected_state_change_seq: int | None
     target_task_label: str
     owner_authorized: bool
+    previous_worktree: str | None = None
+    previous_branch: str | None = None
+    branch: str | None = None
 
 
 class HerdrLegacyDisplayAdapter:
@@ -115,8 +118,19 @@ class HerdrLegacyDisplayAdapter:
     ) -> tuple[dict[str, Any], dict[str, str]]:
         agent = self._agent(spec.routing_name)
         tokens = agent.get("tokens")
-        source = agent.get("metadata_source")
         authority = _session_source(agent)
+        explicit_source = agent.get("metadata_source")
+        source = (
+            explicit_source
+            if "metadata_source" in agent
+            else (
+                tokens.get("legacy_display_source")
+                if isinstance(tokens, Mapping)
+                and isinstance(tokens.get("legacy_display_source"), str)
+                and tokens.get("legacy_display_source")
+                else authority
+            )
+        )
         sequence = agent.get("state_change_seq")
         worktree = str(Path(spec.worktree).resolve())
         exact = bool(

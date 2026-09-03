@@ -1351,6 +1351,9 @@ def _add_assignment_commands(groups: argparse._SubParsersAction) -> None:
         reconcile_display.add_argument(f"--{name}", required=True)
     reconcile_display.add_argument("--expected-version", type=int, required=True)
     reconcile_display.add_argument("--expected-presentation-json", required=True)
+    reconcile_display.add_argument("--previous-worktree")
+    reconcile_display.add_argument("--previous-branch")
+    reconcile_display.add_argument("--branch")
     reconcile_display.add_argument("--owner-authorized", action="store_true")
     _add_mode_gate_options(reconcile_display)
     block = commands.add_parser("block", help="Record a blocked or cleanup-pending failed launch.")
@@ -3656,6 +3659,13 @@ def _assign_reconcile_legacy_display(
         expected_state_change_seq=expected_sequence,
         target_task_label=args.target_task_label,
         owner_authorized=args.owner_authorized or args.mode_action is not None,
+        previous_worktree=(
+            str(Path(args.previous_worktree).resolve())
+            if args.previous_worktree is not None
+            else None
+        ),
+        previous_branch=args.previous_branch,
+        branch=args.branch,
     )
     return LegacyDisplayReconciliationService(
         store, HerdrLegacyDisplayAdapter(), _ProvidedClock(args.at)

@@ -1577,3 +1577,25 @@ additional runtime, hook, watcher, provider, multiplexer, or storage-contract
 change. This release delta changes only the version contract, deterministic
 release-staging expectations, and this provenance record beyond that merged
 tree.
+
+The issue-#84 legacy-restart follow-up handles the exact retained-session shape
+found during the first installed reconciliation. One verified Vi pane and
+immutable Codex thread remained live in a clean follow-up worktree after its
+original acceptance worktree had been preserved. The existing owner-authorized
+display repair now accepts an optional, all-or-nothing predecessor worktree and
+branch tuple. Its durable v2 intent preserves that predecessor identity; final
+display acceptance and the current `agent_instances` worktree/branch update
+commit in one transaction and increment the agent CAS version exactly once.
+Incomplete tuples, a wrong predecessor, an endpoint race, and repeated effects
+still fail closed. The original assignment acceptance receipt remains immutable.
+
+Current Herdr agent inventory can also omit the derived `metadata_source` and
+`display_agent` fields while retaining the exact native session source and
+League-owned presentation tokens. Legacy repair derives only its pre-effect
+source from that immutable native session, then derives its owned post-effect
+source from the exact reconciliation token. General restored presentation
+verification accepts an omitted derived field only when one unambiguous owned
+source token and the exact `display_provider` token match the canonical
+presentation. Explicitly present but empty or conflicting fields remain a hard
+failure. Focused tests cover source-less Codex, Cursor, and Pi reconciliation,
+stable idempotent retry, and the predecessor-to-current worktree transition.

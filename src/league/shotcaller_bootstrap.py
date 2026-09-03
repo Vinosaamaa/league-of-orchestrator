@@ -823,7 +823,7 @@ class HerdrShotcallerBootstrapAdapter:
                 "same-pane Shotcaller metadata authority is incomplete",
             )
         self._published_source = self._title_source(spec)
-        self._expected_published_sequence = sequence + 1
+        self._expected_published_sequence = sequence
         self._run(
             (
                 "herdr",

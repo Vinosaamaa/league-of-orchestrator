@@ -51,6 +51,7 @@ SHOTCALLER_BASELINE_V1_KEYS = {
     "title",
 }
 SHOTCALLER_BASELINE_V2_KEYS = SHOTCALLER_BASELINE_V1_KEYS | {"presentation_source"}
+SHOTCALLER_BASELINE_V3_KEYS = SHOTCALLER_BASELINE_V2_KEYS
 SHOTCALLER_PUBLICATION_V1_KEYS = {
     "schema",
     "assignment_id",
@@ -111,18 +112,30 @@ def _shotcaller_baseline(value: Mapping[str, Any]) -> dict[str, Any]:
         if schema == "league.shotcaller-bootstrap-baseline.v1"
         else SHOTCALLER_BASELINE_V2_KEYS
         if schema == "league.shotcaller-bootstrap-baseline.v2"
+        else SHOTCALLER_BASELINE_V3_KEYS
+        if schema == "league.shotcaller-bootstrap-baseline.v3"
         else set()
+    )
+    routing_name = value.get("routing_name") if isinstance(value, Mapping) else None
+    route_valid = (
+        routing_name is None
+        if schema in {
+            "league.shotcaller-bootstrap-baseline.v1",
+            "league.shotcaller-bootstrap-baseline.v2",
+        }
+        else isinstance(routing_name, str)
+        and bool(re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", routing_name))
     )
     if (
         not isinstance(value, Mapping)
         or set(value) != keys
-        or value.get("routing_name") is not None
+        or not route_valid
         or type(value.get("state_change_seq")) is not int
         or value["state_change_seq"] < 0
     ):
         raise StorageRefusal(
             "bootstrap_baseline_unverified",
-            "Shotcaller bootstrap baseline is not an exact unbound identity",
+            "Shotcaller bootstrap baseline is not an exact endpoint identity",
         )
     for key in ("terminal_id", "endpoint_generation", "sidebar_name", "thread_title", "title"):
         item = value.get(key)
@@ -136,7 +149,10 @@ def _shotcaller_baseline(value: Mapping[str, Any]) -> dict[str, Any]:
             "bootstrap_baseline_unverified",
             "Shotcaller bootstrap baseline endpoint is incomplete",
         )
-    if schema == "league.shotcaller-bootstrap-baseline.v2" and (
+    if schema in {
+        "league.shotcaller-bootstrap-baseline.v2",
+        "league.shotcaller-bootstrap-baseline.v3",
+    } and (
         not isinstance(value.get("presentation_source"), str)
         or not value["presentation_source"]
         or len(value["presentation_source"].encode("utf-8")) > 1024
@@ -680,7 +696,10 @@ def _recover_retired_shotcaller_in_transaction(
         presentation_source = observed_baseline.get("presentation_source")
         if (
             observed_baseline.get("schema")
-            != "league.shotcaller-bootstrap-baseline.v2"
+            not in {
+                "league.shotcaller-bootstrap-baseline.v2",
+                "league.shotcaller-bootstrap-baseline.v3",
+            }
             or str(presentation_source).startswith("league-shotcaller-")
             or any(
                 callsign.casefold() in str(observed_baseline[key]).casefold()
@@ -905,6 +924,7 @@ def _reserve_in_transaction(
     recovery_baseline: Optional[Mapping[str, Any]] = None,
     recovery_thread_id: Optional[str] = None,
     excluded_callsigns: tuple[str, ...] = (),
+    expected_callsign: Optional[str] = None,
 ) -> dict[str, Any]:
     existing = store.connection.execute(
         "SELECT * FROM callsign_assignments WHERE callsign_assignment_id=?",
@@ -925,11 +945,30 @@ def _reserve_in_transaction(
         )
         if not exact:
             raise StorageRefusal("assignment_conflict", "callsign allocation retry changed identity")
+        if (
+            expected_callsign is not None
+            and existing["callsign"].casefold() != expected_callsign.casefold()
+        ):
+            raise StorageRefusal(
+                "callsign_expectation_mismatch",
+                "existing callsign does not match the exact expected callsign",
+            )
         return _assignment_value(existing, idempotent=True)
     agent = store.connection.execute(
         "SELECT * FROM agent_instances WHERE agent_id=?", (agent_id,)
     ).fetchone()
     if agent is not None:
+        if (
+            expected_callsign is not None
+            and (
+                not isinstance(agent["callsign"], str)
+                or agent["callsign"].casefold() != expected_callsign.casefold()
+            )
+        ):
+            raise StorageRefusal(
+                "callsign_expectation_mismatch",
+                "recoverable callsign does not match the exact expected callsign",
+            )
         return _recover_retired_shotcaller_in_transaction(
             store,
             assignment_id,
@@ -949,6 +988,14 @@ def _reserve_in_transaction(
         raise StorageRefusal(
             "callsign_unavailable",
             "no compatible callsign is available: " + stable_json(refusal),
+        )
+    if (
+        expected_callsign is not None
+        and selected["callsign"].casefold() != expected_callsign.casefold()
+    ):
+        raise StorageRefusal(
+            "callsign_expectation_mismatch",
+            "queue-front callsign does not match the exact expected callsign",
         )
     queue_version = int(meta["queue_version"]) + 1
     store.connection.execute(
@@ -1050,6 +1097,7 @@ def allocate_callsign(
     fault: Optional[FaultInjector] = None,
     recovery_baseline: Optional[Mapping[str, Any]] = None,
     recovery_thread_id: Optional[str] = None,
+    expected_callsign: Optional[str] = None,
 ) -> dict[str, Any]:
     timestamp(at, "callsign allocation time")
     if (
@@ -1073,6 +1121,7 @@ def allocate_callsign(
                 fault,
                 recovery_baseline,
                 recovery_thread_id,
+                expected_callsign=expected_callsign,
             )
     except StorageRefusal:
         raise

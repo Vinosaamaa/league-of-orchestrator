@@ -122,7 +122,12 @@ def plan(*, page_bound: int = 2, unsafe: bool = False) -> dict:
     return value
 
 
-def seed_rollover(store: SQLiteStorage, *, champion_count: int = 3) -> dict:
+def seed_rollover(
+    store: SQLiteStorage,
+    *,
+    champion_count: int = 3,
+    bootstrap_successor: bool = False,
+) -> dict:
     store.reconcile_callsign_pool(
         "shotcaller",
         1,
@@ -230,12 +235,49 @@ def seed_rollover(store: SQLiteStorage, *, champion_count: int = 3) -> dict:
         NEW_ASSIGNMENT,
         NEW_ID,
         "shotcaller",
-        "squad",
-        SQUAD_ID,
+        "shotcaller" if bootstrap_successor else "squad",
+        NEW_ID if bootstrap_successor else SQUAD_ID,
         ["rollover.accept"],
         AT2,
     )
     return {"old": old, "successor": successor, "champion_ids": champion_ids}
+
+
+def test_prepare_accepts_an_active_bootstrapped_shotcaller_successor(
+    root: Path,
+) -> None:
+    state, _ = migrated_state(root, "bootstrap-successor")
+    with SQLiteStorage(state) as store:
+        context = seed_rollover(
+            store, champion_count=0, bootstrap_successor=True
+        )
+        store.activate_callsign(
+            context["successor"]["assignment_id"],
+            1,
+            runtime_receipt(
+                context["successor"], "new-shotcaller", ["rollover.accept"]
+            ),
+            AT2,
+        )
+        prepared = prepare(store, context["successor"])
+        assert prepared["state"] == "prepared"
+        assert prepared["successor_agent_id"] == NEW_ID
+
+
+def test_prepare_refuses_an_incomplete_bootstrapped_shotcaller_successor(
+    root: Path,
+) -> None:
+    state, _ = migrated_state(root, "incomplete-bootstrap-successor")
+    with SQLiteStorage(state) as store:
+        context = seed_rollover(
+            store, champion_count=0, bootstrap_successor=True
+        )
+        try:
+            prepare(store, context["successor"])
+        except StorageRefusal as exc:
+            assert exc.code == "successor_identity_mismatch"
+        else:
+            raise AssertionError("rollover accepted an unactivated bootstrap successor")
 
 
 def mark_exact_imported_legacy_partial(
@@ -4935,6 +4977,8 @@ def test_retired_squad_refuses_stale_accepting_intake(root: Path) -> None:
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="league-shotcaller-rollover-") as temporary:
         root = Path(temporary)
+        test_prepare_accepts_an_active_bootstrapped_shotcaller_successor(root)
+        test_prepare_refuses_an_incomplete_bootstrapped_shotcaller_successor(root)
         test_snapshot_refresh_cli_requires_the_exact_switched_identity()
         test_snapshot_refresh_cli_runs_two_stable_herdr_inventories(root)
         test_snapshot_refresh_adopts_eight_exact_imported_null_routes(root)

@@ -2,7 +2,7 @@
 
 from .storage import ConnectionPolicy, Storage, StorageRefusal
 
-__version__ = "0.2.62"
+__version__ = "0.2.63"
 MAX_ACCEPTANCE_SENTINEL_PATHS = 16
 
 __all__ = [

@@ -1858,3 +1858,12 @@ Cursor from launching League for native `Read` and `Grep` tools while all
 mutating and unknown tool categories remain fail-closed. This release delta
 changes only the version contract, deterministic release-staging expectations,
 and this provenance record beyond that merged tree.
+
+Release `0.2.73` assigns the next immutable install identity to merged PR #194
+at main commit `1294f1737a47930d1cbbda2882c8ea4ed3789785` and exact
+reviewed head `7202a4f2b9f910d8ee358579b94c69a393239b70`. It corrects
+the source-managed League supplement's native prompt-event names and ownership
+references, and adds a focused fast-path execution contract for League
+Champions. This release delta changes only the version contract, deterministic
+release-staging expectations, and this provenance record beyond that merged
+tree.

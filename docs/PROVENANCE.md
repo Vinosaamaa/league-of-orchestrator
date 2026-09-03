@@ -1578,6 +1578,15 @@ change. This release delta changes only the version contract, deterministic
 release-staging expectations, and this provenance record beyond that merged
 tree.
 
+The final issue-#84 live acceptance exposed one Herdr projection boundary:
+`agent get` can omit `metadata_source` while the installed tab-status plugin is
+the active display owner. The legacy adapter keeps the immutable native session
+source as its baseline presentation identity, but recognizes the tab-status
+owner only from that plugin's complete identity-token tuple and uses
+`local.tab-status` for the guarded `applies-to-source` write. Partial or
+conflicting tuples fall back to the native source and remain fail-closed. The
+owned overlay records its exact authority for retry and verification.
+
 The issue-#84 legacy-restart follow-up handles the exact retained-session shape
 found during the first installed reconciliation. One verified Vi pane and
 immutable Codex thread remained live in a clean follow-up worktree after its

@@ -208,6 +208,7 @@ class FakeHerdrRunner:
         self.title = ""
         self.tokens: dict[str, str] = {}
         self.metadata_source = f"herdr:{harness_kind}"
+        self.active_metadata_source = self.metadata_source
         self.source_sequences: dict[str, int] = {}
         self.overlay_baselines: dict[
             str, tuple[str | None, str, dict[str, str], str, dict[str, str]]
@@ -273,6 +274,7 @@ class FakeHerdrRunner:
         copied.title = self.title
         copied.tokens = dict(self.tokens)
         copied.metadata_source = self.metadata_source
+        copied.active_metadata_source = self.active_metadata_source
         copied.source_sequences = dict(self.source_sequences)
         copied.overlay_baselines = {
             source: (
@@ -325,7 +327,7 @@ class FakeHerdrRunner:
             source = command[command.index("--source") + 1]
             if "--applies-to-source" in command:
                 applies_to = command[command.index("--applies-to-source") + 1]
-                if applies_to != f"herdr:{self.harness_kind}":
+                if applies_to != self.active_metadata_source:
                     return subprocess.CompletedProcess(
                         command, 1, "", "metadata source mismatch"
                     )
@@ -1155,6 +1157,15 @@ def test_legacy_display_reconciliation_records_one_exact_worktree_transition(
     source_less.started = True
     source_less.title = runner.title
     source_less.tokens = dict(runner.tokens)
+    source_less.tokens.update(
+        {
+            "harness": "codex",
+            "identity_thread_id": THREAD_ID,
+            "identity_title_mode": "tokens-only",
+            "provider_label": "codex",
+        }
+    )
+    source_less.active_metadata_source = "local.tab-status"
     source_less.state_change_seq = runner.state_change_seq
     runner = source_less
     restored_terminal = "term_test_restored_100"
@@ -1210,6 +1221,13 @@ def test_legacy_display_reconciliation_records_one_exact_worktree_transition(
 
     result = service.reconcile(spec)
     assert result["state"] == "reconciled"
+    report = next(
+        call
+        for call in runner.calls
+        if call[:3] == ("herdr", "pane", "report-metadata")
+        and "--title" in call
+    )
+    assert report[report.index("--applies-to-source") + 1] == "local.tab-status"
     agent = store.connection.execute(
         "SELECT worktree,branch,version FROM agent_instances WHERE agent_id=?", (LUX_ID,)
     ).fetchone()

@@ -578,7 +578,7 @@ residue. Candidate receipt SHA-256:
 | `league request triage`, `claim`, `dispatch`, `answer`, `result`, `unresolved`, `untriaged` | Recovery, inspection, compatibility, or non-model automation | Supported but deferred from normal active turns because separate invocations recreate chatty overhead. |
 | `league request route`, `awaiting-user`, `block`, `defer`, `cancel` | Explicit non-ordinary owner decision with claim/version evidence | Dedicated commands remain; they are not silently inferred by the adapter. |
 | `league assign run` | One visible Champion reservation-through-context launch | Preferred launcher. Manual `prepare`/`launching`/`activate` remain lower-level recovery surfaces. |
-| `league shotcaller create` | In-place creation from the exact calling unnamed Codex/Herdr pane | Allocates a callsign internally; creates no Squad, layout, or process. |
+| `league shotcaller create` | In-place creation from the exact calling Codex, Cursor, or Pi pane; an existing route must match the next eligible callsign | Allocates a callsign internally; creates no Squad, layout, or process. |
 | `league task transition` | One material Champion transition plus event/outbox commit | One command per material transition; routine heartbeat polling is not added. |
 | `league delivery claim-outbox`, `ack-outbox`, `fail-outbox`, `backlog` | Event-driven watcher/direct fallback delivery accounting | Internal/stable adapter surface; duplicate receipt is idempotent. |
 | `league cleanup plan`, `execute`, `status`, `reconcile` | Proof-gated cleanup and crash resume | `reconcile` is limited to exact disposable-canary policy. |

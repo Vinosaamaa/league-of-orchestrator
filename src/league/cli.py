@@ -327,7 +327,10 @@ def _add_shotcaller_commands(groups: argparse._SubParsersAction) -> None:
     commands = shotcaller.add_subparsers(dest="action", required=True)
     create = commands.add_parser(
         "create",
-        help="Allocate and bind the calling unnamed agent session without creating Herdr layout.",
+        help=(
+            "Allocate and bind the exact calling agent session without creating Herdr layout; "
+            "an existing route must match the next eligible callsign."
+        ),
     )
     for name in (
         "callsign-assignment-id",

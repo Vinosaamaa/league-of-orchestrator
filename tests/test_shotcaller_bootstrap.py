@@ -875,6 +875,185 @@ def test_in_place_bootstrap_is_provider_neutral_and_never_creates_layout(
         assert not any(call[:3] in forbidden for call in runner.calls)
 
 
+def _tet_pi_projection(
+    runner: RecordingHerdr, *, name: str | None, sidebar_name: str
+) -> None:
+    runner.expose_metadata_source = False
+    runner.name = name
+    runner.title = f"π - {sidebar_name} - Project"
+    thread_title = f"{sidebar_name} · Project"
+    runner.tokens = {
+        "callsign": sidebar_name,
+        "harness": "pi",
+        "identity_thread_id": "sha256:"
+        + hashlib.sha256(runner.thread_id.encode("utf-8")).hexdigest(),
+        "identity_title": f"Pi | {thread_title}",
+        "provider_label": "piCodex",
+        "sidebar_name": sidebar_name,
+        "thread_title": thread_title,
+    }
+    if name is not None:
+        runner.tokens.update(
+            {
+                "orchestrator_identity": f"pi · {name}",
+                "routing_alias": name,
+            }
+        )
+
+
+def test_in_place_bootstrap_adopts_exact_named_tet_pi_session(root: Path) -> None:
+    state, _ = migrated_state(root, "named-tet-pi")
+    worktree = root / "named-tet-pi" / "worktree"
+    worktree.mkdir()
+    clock = FakeClock()
+    session = "/synthetic/pi/sessions/shotcaller.jsonl"
+    runner = RecordingHerdr(
+        worktree, thread_id=session, agent_kind="pi", provider_kind="codex"
+    )
+    _tet_pi_projection(runner, name="ashe", sidebar_name="Ashe")
+    spec = ShotcallerBootstrapSpec(
+        assignment_id="callsign-assignment:bootstrap:named-tet-pi",
+        agent_id="agent:shotcaller:named-tet-pi",
+        runtime_instance_id="runtime:shotcaller:named-tet-pi",
+        thread_id=session,
+        capabilities=("request.triage", "rollover.accept"),
+    )
+    options = ShotcallerBootstrapOptions(
+        workspace_id="w1",
+        tab_id="w1:t1",
+        pane_id="w1:p1",
+        worktree=str(worktree.resolve()),
+        runtime_kind="pi",
+        provider_kind="codex",
+    )
+    with SQLiteStorage(state) as store:
+        _seed_available_ashe(store, clock)
+        created = ShotcallerBootstrapService(
+            store,
+            HerdrShotcallerBootstrapAdapter(
+                options,
+                runner,
+                environment={
+                    "HERDR_ENV": "1",
+                    "HERDR_WORKSPACE_ID": "w1",
+                    "HERDR_TAB_ID": "w1:t1",
+                    "HERDR_PANE_ID": "w1:p1",
+                },
+            ),
+            clock,
+        ).bootstrap(spec)
+        assert created["state"] == "active"
+        assert created["callsign"] == "Ashe"
+        assert runner.name == "ashe"
+        assert not any(
+            call[:3] == ("herdr", "agent", "rename") for call in runner.calls
+        )
+
+
+def test_in_place_bootstrap_refuses_named_tet_pi_callsign_mismatch(root: Path) -> None:
+    state, _ = migrated_state(root, "named-tet-pi-mismatch")
+    worktree = root / "named-tet-pi-mismatch" / "worktree"
+    worktree.mkdir()
+    clock = FakeClock()
+    session = "/synthetic/pi/sessions/shotcaller.jsonl"
+    runner = RecordingHerdr(
+        worktree, thread_id=session, agent_kind="pi", provider_kind="codex"
+    )
+    _tet_pi_projection(runner, name="ambessa", sidebar_name="Ambessa")
+    options = ShotcallerBootstrapOptions(
+        workspace_id="w1",
+        tab_id="w1:t1",
+        pane_id="w1:p1",
+        worktree=str(worktree.resolve()),
+        runtime_kind="pi",
+        provider_kind="codex",
+    )
+    spec = ShotcallerBootstrapSpec(
+        assignment_id="callsign-assignment:bootstrap:named-tet-pi-mismatch",
+        agent_id="agent:shotcaller:named-tet-pi-mismatch",
+        runtime_instance_id="runtime:shotcaller:named-tet-pi-mismatch",
+        thread_id=session,
+        capabilities=("request.triage", "rollover.accept"),
+    )
+    with SQLiteStorage(state) as store:
+        _seed_available_ashe(store, clock)
+        service = ShotcallerBootstrapService(
+            store,
+            HerdrShotcallerBootstrapAdapter(
+                options,
+                runner,
+                environment={
+                    "HERDR_ENV": "1",
+                    "HERDR_WORKSPACE_ID": "w1",
+                    "HERDR_TAB_ID": "w1:t1",
+                    "HERDR_PANE_ID": "w1:p1",
+                },
+            ),
+            clock,
+        )
+        try:
+            service.bootstrap(spec)
+        except StorageRefusal as exc:
+            assert exc.code == "shotcaller_identity_unverified"
+        else:
+            raise AssertionError("named Pi route replaced a different queue-front callsign")
+        assignment = store.callsign_assignment_status(spec.assignment_id)
+        assert assignment is None
+        assert runner.name == "ambessa"
+        assert not any(
+            call[:3] in {
+                ("herdr", "agent", "rename"),
+                ("herdr", "pane", "report-metadata"),
+            }
+            for call in runner.calls
+        )
+
+
+def test_named_tet_pi_publication_rollback_preserves_original_route(root: Path) -> None:
+    worktree = root / "named-tet-pi-rollback" / "worktree"
+    worktree.mkdir(parents=True)
+    session = "/synthetic/pi/sessions/shotcaller.jsonl"
+    runner = RecordingHerdr(
+        worktree, thread_id=session, agent_kind="pi", provider_kind="codex"
+    )
+    _tet_pi_projection(runner, name="ashe", sidebar_name="Ashe")
+    spec = ShotcallerBootstrapSpec(
+        assignment_id="callsign-assignment:bootstrap:named-tet-pi-rollback",
+        agent_id="agent:shotcaller:named-tet-pi-rollback",
+        runtime_instance_id="runtime:shotcaller:named-tet-pi-rollback",
+        thread_id=session,
+        capabilities=("request.triage", "rollover.accept"),
+    )
+    adapter = HerdrShotcallerBootstrapAdapter(
+        ShotcallerBootstrapOptions(
+            workspace_id="w1",
+            tab_id="w1:t1",
+            pane_id="w1:p1",
+            worktree=str(worktree.resolve()),
+            runtime_kind="pi",
+            provider_kind="codex",
+        ),
+        runner,
+        environment={
+            "HERDR_ENV": "1",
+            "HERDR_WORKSPACE_ID": "w1",
+            "HERDR_TAB_ID": "w1:t1",
+            "HERDR_PANE_ID": "w1:p1",
+        },
+    )
+    adapter.inspect(spec)
+    baseline = adapter.recovery_baseline()
+    assert baseline["schema"] == "league.shotcaller-bootstrap-baseline.v3"
+    adapter.use_restoration_baseline(baseline)
+    adapter.publish(spec, "Ashe")
+    assert adapter.restore() is True
+    assert runner.name == "ashe"
+    assert runner.tokens["sidebar_name"] == baseline["sidebar_name"]
+    assert runner.tokens["thread_title"] == baseline["thread_title"]
+    assert "shotcaller_title_owner" not in runner.tokens
+    assert "shotcaller_title_source" not in runner.tokens
+
+
 def test_in_place_bootstrap_retries_transient_malformed_identity_read_without_layout(
     root: Path,
 ) -> None:
@@ -4081,6 +4260,9 @@ def main() -> None:
         root = Path(temporary)
         test_in_place_bootstrap_creates_shotcaller_without_layout_or_squad_registration(root)
         test_in_place_bootstrap_is_provider_neutral_and_never_creates_layout(root)
+        test_in_place_bootstrap_adopts_exact_named_tet_pi_session(root)
+        test_in_place_bootstrap_refuses_named_tet_pi_callsign_mismatch(root)
+        test_named_tet_pi_publication_rollback_preserves_original_route(root)
         test_in_place_bootstrap_retries_transient_malformed_identity_read_without_layout(root)
         test_in_place_bootstrap_refuses_persistently_malformed_identity_without_mutation(root)
         test_bootstrap_refuses_later_provider_title_without_overwriting_it(root)

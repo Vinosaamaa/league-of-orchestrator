@@ -1760,3 +1760,12 @@ exact adoption of already named Pi Shotcaller sessions, including queue-front
 callsign fencing and rollback to the original route and presentation. This
 release delta changes only the version contract, deterministic release-staging
 expectations, and this provenance record beyond that merged tree.
+
+Release `0.2.66` assigns the next immutable install identity to merged PR #178
+at main commit `0f6520285c1d0853a0944afd4914983667d286db` and exact
+reviewed/merged tree `55f21a03f9bc1bd55636cfdd197c51f4b0a075b5`. It packages
+the Pi Shotcaller publication-sequence correction: exact owned presentation may
+survive a newer global state sequence, while older sequence and all identity,
+route, source, or ownership mismatches still fail closed. This release delta
+changes only the version contract, deterministic release-staging expectations,
+and this provenance record beyond that merged tree.

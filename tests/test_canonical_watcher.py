@@ -149,7 +149,67 @@ def _stop_mutation_snapshot(state: Path) -> str:
                 f'SELECT * FROM "{table}" ORDER BY rowid'
             ).fetchall():
                 digest.update(repr(tuple(row)).encode("utf-8"))
-        return digest.hexdigest()
+    return digest.hexdigest()
+
+
+def test_read_only_pre_tool_fast_path_needs_no_state_or_supervisor(root: Path) -> None:
+    missing_state = root / "missing-read-only-state"
+    fixture_root = root / "read-only-fast-path"
+    fixture_root.mkdir()
+    env = _environment(fixture_root, missing_state)
+    cases = (
+        (
+            "codex-pre-tool-hook",
+            {
+                "hook_event_name": "PreToolUse",
+                "session_id": "session:read-only-codex",
+                "turn_id": "turn:read-only-codex",
+                "tool_name": "Read",
+                "tool_use_id": "tool:read-only-codex",
+                "tool_input": {"path": "synthetic.txt"},
+            },
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "allow",
+                }
+            },
+        ),
+        (
+            "cursor-pre-tool-hook",
+            {
+                "hook_event_name": "preToolUse",
+                "conversation_id": "session:read-only-cursor",
+                "generation_id": "generation:read-only-cursor",
+                "tool_name": "Grep",
+                "tool_use_id": "tool:read-only-cursor",
+                "tool_input": {"query": "needle"},
+                "cwd": str(root.resolve()),
+            },
+            {"permission": "allow"},
+        ),
+        (
+            "pi-pre-tool-hook",
+            {
+                "hook_event_name": "PiToolCall",
+                "session_id": "session:read-only-pi",
+                "session_path": str((root / "read-only-pi.jsonl").resolve()),
+                "input_id": "input:read-only-pi",
+                "tool_name": "find",
+                "tool_input": {"pattern": "*.py"},
+            },
+            {
+                "binding": "unbound",
+                "decision": "accept",
+                "reason_code": "read_only_fast_path",
+            },
+        ),
+    )
+    for command, payload, expected in cases:
+        started = time.monotonic()
+        assert _watcher(env, command, payload=payload) == expected
+        assert time.monotonic() - started < MAX_HOOK_LAUNCH_SECONDS
+    assert not missing_state.exists()
 
 
 def test_unbound_provider_stops_allow_without_mutation_when_broker_is_absent(
@@ -503,7 +563,12 @@ def test_allow_stop_once_is_provider_neutral_and_consumed(root: Path) -> None:
         payload = _stop_payload(adapter_kind, session_ref, f"generation:{name}")
         allowed = _watcher(env, command, payload=payload)
         assert allowed == ({"binding": "bound"} if adapter_kind == "pi" else {})
-        blocked = _watcher(env, command, payload=payload)
+        replayed = _watcher(env, command, payload=payload)
+        assert replayed == ({"binding": "bound"} if adapter_kind == "pi" else {})
+        next_payload = _stop_payload(
+            adapter_kind, session_ref, f"generation:{name}:next-input"
+        )
+        blocked = _watcher(env, command, payload=next_payload)
         if adapter_kind == "pi":
             assert blocked["binding"] == "bound"
             assert "followup_message" in blocked
@@ -2197,6 +2262,7 @@ def test_native_provider_hooks_are_inert_until_exact_binding_then_activate(
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="league-canonical-watcher-") as temporary:
         root = Path(temporary)
+        test_read_only_pre_tool_fast_path_needs_no_state_or_supervisor(root)
         test_unbound_provider_stops_allow_without_mutation_when_broker_is_absent(root)
         test_bound_shotcallers_fail_closed_and_champion_gate_survives_absent_broker(root)
         test_stop_reason_uses_resolved_callsign_not_provider_turn_identity()

@@ -1830,3 +1830,14 @@ explicit one-shot Stop control, and non-disruptive attached foreground waiting.
 This release delta changes only the version contract, deterministic
 release-staging expectations, and this provenance record beyond that merged
 tree.
+
+The continuing issue-#84 acceptance pass found two provider hot-path defects.
+Pi synchronously launched watcher and Herdr subprocesses during prompt, tool,
+Stop, session-start, and agent-start callbacks, including one redundant metadata
+publication on every tool call. Those subprocesses are now asynchronous;
+metadata publication is deduplicated per exact session and explicit read-only Pi
+tools bypass pre-tool authorization entirely. Codex and Cursor apply the same
+read-only predicate before supervisor or SQLite access while shell and every
+potentially mutating tool remain fail-closed. A consumed one-shot Stop also
+records its exact actor, input, and terminal generation so the same provider
+settlement can replay safely without authorizing a later generation.

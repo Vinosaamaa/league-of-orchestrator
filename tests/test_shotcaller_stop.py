@@ -175,9 +175,14 @@ def test_detachment_requires_verified_live_watcher_handoff(root: Path) -> None:
     repeated = store.stop_decision(
         "Garen-lifecycle", SHOTCALLER_ID, "terminal:explicit", clock.now()
     )
-    assert repeated["decision"] == "block"
-    assert repeated["status"] == "blocked_attached"
+    assert repeated["decision"] == "allow"
+    assert repeated["status"] == "allowed_once_replay"
     assert repeated["wait_generation"] == rearmed["wait_generation"]
+    next_generation = store.stop_decision(
+        "Garen-lifecycle", SHOTCALLER_ID, "terminal:next-input", clock.now()
+    )
+    assert next_generation["decision"] == "block"
+    assert next_generation["status"] == "blocked_attached"
     detached = store.set_supervision_attachment(
         "Garen-lifecycle", SHOTCALLER_ID, "detached", clock.now()
     )

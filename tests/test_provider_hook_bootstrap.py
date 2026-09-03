@@ -546,11 +546,39 @@ def test_unbound_pi_is_inert_and_promotes_without_relaunch() -> None:
         "pi-input-hook",
         "pi-pre-tool-hook",
         "pi-stop-hook",
-        "pi-stop-hook",
     ]
     assert promoted["tool"] is None
     assert len(promoted["messages"]) == 1
     assert promoted["notifications"] == []
+
+    recursive = run_pi_scenario("recursive-followup")
+    assert [item["command"] for item in recursive["calls"]] == [
+        "pi-input-hook",
+        "pi-pre-tool-hook",
+        "pi-stop-hook",
+    ]
+    assert len(recursive["messages"]) == 1
+    assert recursive["notifications"] == []
+
+    async_pretool = run_pi_scenario("async-pretool")
+    assert async_pretool["eventLoopTicks"] == ["pretool"]
+    assert [item["command"] for item in async_pretool["calls"]] == [
+        "pi-input-hook",
+        "pi-pre-tool-hook",
+        "pi-stop-hook",
+    ]
+
+    async_input = run_pi_scenario("async-input")
+    assert async_input["eventLoopTicks"] == ["input"]
+    assert [item["command"] for item in async_input["calls"]] == [
+        "pi-input-hook", "pi-pre-tool-hook", "pi-stop-hook"
+    ]
+
+    read_only = run_pi_scenario("read-only")
+    assert [item["command"] for item in read_only["calls"]] == [
+        "pi-input-hook",
+        "pi-stop-hook",
+    ]
 
 
 def test_league_launched_and_restored_pi_provider_parity() -> None:
@@ -1084,6 +1112,10 @@ def test_release_manifest_and_launch_extension_separation() -> None:
         assert command in bootstrap
     assert 'pi.on("tool_call"' in runtime
     assert "reportLeagueMetadata" in runtime
+    assert "spawnSync" not in runtime
+    assert "spawnSync" not in bootstrap
+    assert "if (sessionIdentity) reportLeagueMetadata" not in runtime
+    assert "if (session) await publishLeagueMetadata(session);" in runtime
 
 
 def main() -> None:

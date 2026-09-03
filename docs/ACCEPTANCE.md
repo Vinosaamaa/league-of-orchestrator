@@ -36,18 +36,12 @@ An active SQLite supervisor owns delivery; without one, the dispatcher uses one
 verified Herdr endpoint. Receipt uniqueness makes a duplicate retry inert, and
 an unavailable endpoint leaves the row pending.
 
-Prompt submission is availability-critical. When a valid hook payload has no
-exact verified runtime identity, the hook stores its complete bytes once in the
-canonical quarantine with a `runtime_unverified` obligation and returns success
-so the local prompt proceeds. `league request bind-prompt` later requires one
-exact actor/runtime/session match, promotes the same prompt without changing its
-identity or bytes, and wakes the bound Shotcaller for model-authored triage.
-The Pi profile bootstrap uses an explicit binding-aware envelope instead: an
-unbound ordinary Pi session receives a read-only `binding=unbound` result and
-does not enter quarantine. After canonical promotion, the same running Pi
-process receives `binding=bound` and uses the ordinary prompt, pre-mutation, and
-Stop policies. Direct Codex/Cursor hook compatibility retains the quarantine
-contract for unmarked native payloads.
+Prompt submission is availability-critical. Exact native Codex, Cursor, and Pi
+prompt, pre-mutation, and Stop hook envelopes without a canonical League runtime
+binding return their provider-native allow/no-op result immediately. They write
+no prompt, quarantine, watcher, or Stop state. After canonical promotion, the
+same running provider process uses the ordinary prompt, pre-mutation, and Stop
+policies; a managed binding whose watcher is unavailable still fails closed.
 When the hook session already identifies one canonical Shotcaller but its exact
 runtime is unavailable, the quarantine insert and that Shotcaller's
 `user_message_generation` and `wait_generation` increments are one transaction.

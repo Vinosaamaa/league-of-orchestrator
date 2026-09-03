@@ -13,7 +13,7 @@ BOOTSTRAP_PROFILE = {
     "schema": "league.provider-hook-bootstrap.v1",
     "profile_loaded": True,
     "activation": "exact_canonical_binding",
-    "target_relative": ".pi/agent/extensions/league-hooks.mjs",
+    "target_relative": ".pi/agent/extensions/league-hooks.ts",
     "source_relative": "integrations/pi/league-hooks.mjs",
     "launch_enforcement": "separate",
 }

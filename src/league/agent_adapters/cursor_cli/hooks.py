@@ -131,11 +131,12 @@ def install(
         ]
         if len(matches) > 1:
             raise StorageRefusal("hook_bootstrap_ambiguous", "Cursor League hook is duplicated")
-        required_handler = (
-            {"command": command, "failClosed": True}
-            if profile["native_event"] == "preToolUse"
-            else {"command": command}
-        )
+        if profile["native_event"] == "preToolUse":
+            required_handler = {"command": command, "failClosed": True}
+        elif profile["native_event"] == "stop":
+            required_handler = {"command": command, "loop_limit": None}
+        else:
+            required_handler = {"command": command}
         if not matches:
             handlers.append(required_handler)
             added.append(event)

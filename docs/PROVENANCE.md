@@ -1488,8 +1488,9 @@ deterministic release-staging expectations, and this provenance record.
 The issue-#84 provider-hook follow-up adds one registry-declared installation
 contract for Codex, Pi, and Cursor CLI. Codex and Cursor retain their native
 profile hook JSON shapes; Cursor is now an explicit installed bootstrap rather
-than an implicit core branch. Pi declares
-`integrations/pi/league-hooks.mjs` as its profile-loaded asset. Its envelope
+than an implicit core branch. Pi declares `integrations/pi/league-hooks.mjs` as
+its release asset and installs those bytes as the discoverable profile entry
+`league-hooks.ts`; Pi does not auto-discover `.mjs` profile entries. Its envelope
 asks the existing `pi-input-hook`, `pi-pre-tool-hook`, and `pi-stop-hook`
 commands to prove canonical binding atomically with the hook action. A
 locally persisted receipt activates only the exact Pi session ID and absolute

@@ -113,7 +113,7 @@ def prepare_authority(
         )
     pi_hooks = None
     if include_pi:
-        pi_hooks = fixture["live"] / "config/pi/extensions/league-hooks.mjs"
+        pi_hooks = fixture["live"] / "config/pi/extensions/league-hooks.ts"
         fixture["plan"]["current_targets"].append(
             {
                 "target_id": "pi-hooks",

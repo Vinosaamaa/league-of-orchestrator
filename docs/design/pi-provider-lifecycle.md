@@ -74,7 +74,9 @@ clearing native Pi or toolkit-owned identity and presentation fields.
 
 ## Profile-loaded lifecycle hooks
 
-The active Pi profile loads the source-managed `league-hooks.mjs` bootstrap.
+The active Pi profile loads `league-hooks.ts`, installed byte-for-byte from the
+source-managed `integrations/pi/league-hooks.mjs` bootstrap because Pi's global
+extension discovery accepts `.ts` entries rather than `.mjs` entries.
 The bootstrap contains no launch descriptor, sandbox root, provider choice, or
 presentation policy. On every interactive input it supplies Pi's exact native
 session ID and JSONL path to the stable canonical input hook. The same bound

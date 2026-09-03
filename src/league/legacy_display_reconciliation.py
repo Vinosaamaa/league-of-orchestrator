@@ -56,6 +56,17 @@ def _canonical_title(agent: Mapping[str, Any]) -> str:
     return value.removesuffix(" | codex")
 
 
+def _effect_sequence_exact(
+    spec: "LegacyDisplayReconciliationSpec", observed: Any
+) -> bool:
+    expected = spec.expected_state_change_seq
+    return bool(
+        type(expected) is int
+        and type(observed) is int
+        and observed in {expected, expected + 1}
+    )
+
+
 def _presentation_authority(
     agent: Mapping[str, Any], tokens: Mapping[str, Any], session_source: str | None
 ) -> str | None:
@@ -363,8 +374,7 @@ class HerdrLegacyDisplayAdapter:
         return bool(
             observation.get("presentation_source") == source
             and observation.get("title") == target
-            and observation.get("state_change_seq")
-            == int(spec.expected_state_change_seq) + 1
+            and _effect_sequence_exact(spec, observation.get("state_change_seq"))
             and all(tokens.get(key) == value for key, value in expected.items())
             and not (OWNERSHIP_TOKENS - set(expected)).intersection(tokens)
         )
@@ -477,7 +487,7 @@ class HerdrLegacyDisplayAdapter:
                 observed["presentation_source"] == source
                 and observed["authority_source"] == authority
                 and observed["title"] == target
-                and observed["state_change_seq"] == sequence
+                and _effect_sequence_exact(spec, observed["state_change_seq"])
                 and tokens == expected_tokens
             )
             if not exact:

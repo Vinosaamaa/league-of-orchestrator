@@ -1595,6 +1595,15 @@ watcher, provider, multiplexer, or storage-contract change. This release delta
 changes only the version contract, deterministic release-staging expectations,
 and this provenance record beyond that merged tree.
 
+The installed Herdr projection keeps an agent's global `state_change_seq`
+unchanged for display-only `report-metadata` updates and advances pane
+`revision` instead. Legacy display acceptance therefore permits exactly two
+stable sequence projections: the owner-authorized baseline value used by
+current Herdr, or baseline plus one used by the compatible synthetic/legacy
+projection. In both cases the dedicated League source, complete ownership
+tokens, exact title, exact underlying presentation authority, and two stable
+readbacks remain mandatory; any other sequence still refuses.
+
 The issue-#84 legacy-restart follow-up handles the exact retained-session shape
 found during the first installed reconciliation. One verified Vi pane and
 immutable Codex thread remained live in a clean follow-up worktree after its

@@ -1157,6 +1157,11 @@ def test_legacy_display_reconciliation_records_one_exact_worktree_transition(
     source_less.tokens = dict(runner.tokens)
     source_less.state_change_seq = runner.state_change_seq
     runner = source_less
+    restored_terminal = "term_test_restored_100"
+    original_agent = runner._agent
+    runner._agent = lambda: (  # type: ignore[method-assign]
+        lambda agent: (agent.update(terminal_id=restored_terminal), agent)[1]
+    )(original_agent())
     previous_branch = "agent/synthetic/legacy-worktree-transition"
     current_branch = "agent/synthetic/legacy-worktree-followup"
     before = store.connection.execute(
@@ -1165,6 +1170,7 @@ def test_legacy_display_reconciliation_records_one_exact_worktree_transition(
     spec = LegacyDisplayReconciliationSpec(
         **{
             **vars(_legacy_reconciliation_spec(launch, receipt, current_worktree, runner)),
+            "terminal_id": restored_terminal,
             "previous_worktree": str(previous_worktree.resolve()),
             "previous_branch": previous_branch,
             "branch": current_branch,
@@ -1210,15 +1216,28 @@ def test_legacy_display_reconciliation_records_one_exact_worktree_transition(
     assert agent["worktree"] == str(current_worktree.resolve())
     assert agent["branch"] == current_branch
     assert int(agent["version"]) == int(before["version"]) + 1
+    runtime = store.connection.execute(
+        "SELECT runtime_generation FROM runtime_instances WHERE runtime_instance_id=?",
+        (launch["runtime_instance_id"],),
+    ).fetchone()
+    restored_generation = "herdr:" + hashlib.sha256(
+        f"{restored_terminal}\0{receipt['thread_id']}".encode("utf-8")
+    ).hexdigest()[:24]
+    assert runtime["runtime_generation"] == restored_generation
     durable = store.assignment_launch_context(str(launch["assignment_id"]))
     assert durable["acceptance_receipt"]["worktree"] == str(previous_worktree.resolve())
     assert durable["acceptance_receipt"]["branch"] == previous_branch
+    assert durable["acceptance_receipt"]["runtime_generation"] != restored_generation
     assert durable["legacy_display_reconciliation"]["intent"] == {
         **durable["legacy_display_reconciliation"]["intent"],
-        "schema": "league.legacy-display-reconciliation-intent.v2",
+        "schema": "league.legacy-display-reconciliation-intent.v3",
         "previous_worktree": str(previous_worktree.resolve()),
         "previous_branch": previous_branch,
         "branch": current_branch,
+        "previous_runtime_generation": durable["acceptance_receipt"][
+            "runtime_generation"
+        ],
+        "runtime_generation": restored_generation,
     }
     restored = canonical_presentations(store)
     matched = [

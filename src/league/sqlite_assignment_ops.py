@@ -1707,6 +1707,10 @@ def assignment_launch_context(store: Any, assignment_id: str) -> dict[str, Any]:
                 "previous_branch",
                 "branch",
             }
+            intent_keys_v3 = intent_keys_v2 | {
+                "previous_runtime_generation",
+                "runtime_generation",
+            }
             intent_shape_exact = bool(
                 (
                     legacy_intent.get("schema")
@@ -1722,6 +1726,24 @@ def assignment_launch_context(store: Any, assignment_id: str) -> dict[str, Any]:
                         and bool(legacy_intent[key])
                         for key in ("previous_worktree", "previous_branch", "branch")
                     )
+                )
+                or (
+                    legacy_intent.get("schema")
+                    == "league.legacy-display-reconciliation-intent.v3"
+                    and set(legacy_intent) == intent_keys_v3
+                    and all(
+                        isinstance(legacy_intent.get(key), str)
+                        and bool(legacy_intent[key])
+                        for key in (
+                            "previous_worktree",
+                            "previous_branch",
+                            "branch",
+                            "previous_runtime_generation",
+                            "runtime_generation",
+                        )
+                    )
+                    and legacy_intent["previous_runtime_generation"]
+                    != legacy_intent["runtime_generation"]
                 )
             )
             exact_result = bool(
@@ -1925,6 +1947,24 @@ def _validate_legacy_display_command(
         not transition_requested
         or receipt.get("branch") == command.previous_branch
     ) if isinstance(receipt, dict) else False
+    receipt_generation = (
+        receipt.get("runtime_generation") if isinstance(receipt, dict) else None
+    )
+    generation_transition = bool(
+        isinstance(receipt_generation, str)
+        and receipt_generation
+        and receipt_generation != expected_generation
+    )
+    runtime_generation_exact = bool(
+        runtime is not None
+        and (
+            runtime["runtime_generation"] == expected_generation
+            or (
+                transition_requested
+                and runtime["runtime_generation"] == receipt_generation
+            )
+        )
+    )
     exact = bool(
         agent is not None
         and runtime is not None
@@ -1939,7 +1979,7 @@ def _validate_legacy_display_command(
         and runtime["runtime_instance_id"] == command.runtime_instance_id
         and runtime["session_ref"] == command.thread_id
         and runtime["endpoint"] == command.pane_id
-        and runtime["runtime_generation"] == expected_generation
+        and runtime_generation_exact
         and bool(runtime["verified"])
         and receipt.get("champion_agent_id") == command.champion_agent_id
         and receipt.get("runtime_instance_id") == command.runtime_instance_id
@@ -1949,7 +1989,9 @@ def _validate_legacy_display_command(
         and _physical_worktree_exact(receipt.get("worktree"), receipt_worktree)
         and receipt_branch_exact
         and receipt.get("routing_name") == command.routing_name
-        and receipt.get("runtime_generation") == expected_generation
+        and isinstance(receipt_generation, str)
+        and bool(receipt_generation)
+        and (not generation_transition or transition_requested)
         and receipt.get("backend_kind") == "herdr"
     )
     if not exact:
@@ -2008,6 +2050,14 @@ def _validate_legacy_display_command(
             "legacy display reconciliation context has malformed display ownership evidence",
         )
     detail = _legacy_display_detail(command)
+    if generation_transition:
+        detail.update(
+            {
+                "schema": "league.legacy-display-reconciliation-intent.v3",
+                "previous_runtime_generation": receipt_generation,
+                "runtime_generation": expected_generation,
+            }
+        )
     reconciliation_id = "legacy-display:" + hashlib.sha256(
         _json(detail).encode("utf-8")
     ).hexdigest()[:24]
@@ -2172,6 +2222,68 @@ def finalize_legacy_display_reconciliation(
                         "legacy display reconciliation final receipt conflicts with history",
                     )
             else:
+                if detail["schema"] == "league.legacy-display-reconciliation-intent.v3":
+                    collision = store.connection.execute(
+                        """
+                        SELECT runtime_instance_id FROM runtime_instances
+                         WHERE actor_agent_id=? AND runtime_generation=?
+                           AND runtime_instance_id<>?
+                         LIMIT 1
+                        """,
+                        (
+                            command.champion_agent_id,
+                            detail["runtime_generation"],
+                            command.runtime_instance_id,
+                        ),
+                    ).fetchone()
+                    if collision is not None:
+                        raise StorageRefusal(
+                            "legacy_display_conflict",
+                            "restored runtime generation belongs to another runtime",
+                        )
+                    runtime_changed = store.connection.execute(
+                        """
+                        UPDATE runtime_instances
+                           SET runtime_generation=?,last_seen_at=?
+                         WHERE runtime_instance_id=? AND actor_agent_id=?
+                           AND session_ref=? AND endpoint=?
+                           AND runtime_generation=?
+                           AND status IN ('active','idle') AND verified=1
+                        """,
+                        (
+                            detail["runtime_generation"],
+                            at,
+                            command.runtime_instance_id,
+                            command.champion_agent_id,
+                            command.thread_id,
+                            command.pane_id,
+                            detail["previous_runtime_generation"],
+                        ),
+                    ).rowcount
+                    if runtime_changed != 1:
+                        current_runtime = store.connection.execute(
+                            """
+                            SELECT runtime_generation FROM runtime_instances
+                             WHERE runtime_instance_id=? AND actor_agent_id=?
+                               AND session_ref=? AND endpoint=?
+                               AND status IN ('active','idle') AND verified=1
+                            """,
+                            (
+                                command.runtime_instance_id,
+                                command.champion_agent_id,
+                                command.thread_id,
+                                command.pane_id,
+                            ),
+                        ).fetchone()
+                        if (
+                            current_runtime is None
+                            or current_runtime["runtime_generation"]
+                            != detail["runtime_generation"]
+                        ):
+                            raise StorageRefusal(
+                                "legacy_display_conflict",
+                                "legacy Champion runtime changed before final reconciliation",
+                            )
                 if command.previous_worktree is not None:
                     changed = store.connection.execute(
                         """

@@ -26,7 +26,7 @@ from .visible_launch import (
 THREAD_UUID = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
 )
-LIVE_STATUSES = {"active", "blocked", "idle", "waiting", "working"}
+PRESENT_STATUSES = {"active", "blocked", "done", "idle", "waiting", "working"}
 OWNERSHIP_TOKENS = {
     "launch_title_owner",
     "launch_title_source",
@@ -121,7 +121,7 @@ class HerdrLegacyDisplayAdapter:
         worktree = str(Path(spec.worktree).resolve())
         exact = bool(
             agent.get("agent") == "codex"
-            and agent.get("agent_status") in LIVE_STATUSES
+            and agent.get("agent_status") in PRESENT_STATUSES
             and agent.get("name") == spec.routing_name
             and agent.get("pane_id") == spec.pane_id
             and agent.get("terminal_id") == spec.terminal_id

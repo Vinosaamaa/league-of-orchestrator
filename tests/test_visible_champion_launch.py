@@ -1464,7 +1464,33 @@ def _prepared_legacy_display(
     return store, clock, worktree, launch, receipt, runner
 
 
-def test_legacy_display_reconciliation_requires_live_owned_presentation_source(
+def test_legacy_display_reconciliation_accepts_present_done_champion(
+    root: Path,
+) -> None:
+    store, clock, worktree, launch, receipt, runner = _prepared_legacy_display(
+        root, "legacy-done-provider"
+    )
+    spec = _legacy_reconciliation_spec(launch, receipt, worktree, runner)
+    original_agent = runner._agent
+    runner._agent = lambda: (  # type: ignore[method-assign]
+        lambda agent: (agent.update(agent_status="done"), agent)[1]
+    )(original_agent())
+
+    result = LegacyDisplayReconciliationService(
+        store,
+        HerdrLegacyDisplayAdapter(
+            runner,
+            environment={"HERDR_ENV": "1", "HERDR_WORKSPACE_ID": "w1"},
+        ),
+        clock,
+    ).reconcile(spec)
+
+    assert result["state"] == "reconciled"
+    assert result["receipt"]["terminal_title"] == "Lux · Broker Repair"
+    store.close()
+
+
+def test_legacy_display_reconciliation_requires_present_owned_presentation_source(
     root: Path,
 ) -> None:
     store, clock, worktree, launch, receipt, runner = _prepared_legacy_display(
@@ -1482,7 +1508,7 @@ def test_legacy_display_reconciliation_requires_live_owned_presentation_source(
 
     original_agent = runner._agent
     for mutate in (
-        lambda agent: agent.update(agent_status="done"),
+        lambda agent: agent.update(agent_status="stopped"),
         lambda agent: agent.pop("metadata_source"),
     ):
         runner._agent = lambda mutate=mutate: (  # type: ignore[method-assign]
@@ -1493,7 +1519,7 @@ def test_legacy_display_reconciliation_requires_live_owned_presentation_source(
         except StorageRefusal as exc:
             assert exc.code == "legacy_display_identity_unverified"
         else:
-            raise AssertionError("non-live or source-less legacy display was mutated")
+            raise AssertionError("absent or source-less legacy display was mutated")
         assert not any(
             call[:3] == ("herdr", "pane", "report-metadata") for call in runner.calls
         )
@@ -2228,7 +2254,8 @@ def main() -> None:
         test_legacy_display_compare_and_set_does_not_overwrite_last_window_user_title(root)
         test_legacy_display_reconciliation_refuses_modern_receipt_before_live_write(root)
         test_legacy_display_reconciliation_refuses_ambiguous_runtime_and_wrong_route(root)
-        test_legacy_display_reconciliation_requires_live_owned_presentation_source(root)
+        test_legacy_display_reconciliation_accepts_present_done_champion(root)
+        test_legacy_display_reconciliation_requires_present_owned_presentation_source(root)
         test_legacy_display_reconciliation_refuses_boolean_sequence(root)
         test_legacy_display_reconciliation_refuses_orphaned_final_receipt(root)
         test_legacy_display_readback_refuses_expected_plus_two_receipt(root)

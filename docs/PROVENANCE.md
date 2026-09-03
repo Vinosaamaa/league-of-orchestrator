@@ -1556,3 +1556,15 @@ with exact rollback, unlimited Cursor Stop continuation, and real ordinary-Pi
 exact-session resume acceptance. This release delta changes only the version
 contract, deterministic release-staging expectations, and this provenance
 record beyond the reviewed merged tree.
+
+The issue-#84 completed-display follow-up corrects one retained-session status
+boundary discovered during installed restart reconciliation. Herdr reports an
+interactive, still-present Codex session as `done` after its model turn ends;
+that state does not mean the pane, terminal, thread, worktree, or provider
+session is absent. Owner-authorized legacy display reconciliation therefore
+accepts `done` only after the same exact endpoint, thread, worktree, route,
+source, sequence, active assignment, verified runtime, and acceptance-receipt
+checks used for other present states. A genuinely stopped endpoint remains
+ineligible. The focused regression proves a retained `done` Champion receives
+one durable display receipt while a stopped or source-less presentation still
+fails before mutation.

@@ -1138,6 +1138,26 @@ class PersistentSupervisor:
         except (StorageRefusal, SupervisorUnavailable):
             return
 
+    def _recover_owner_stops(self) -> None:
+        """Resume post-commit owner controls for exact currently bound scopes."""
+
+        from .owner_stop import execute_owner_stop_controls
+
+        try:
+            with self._fence_lock:
+                scope_ids = tuple(
+                    str(state["scope_id"])
+                    for state in self._bindings.values()
+                )
+            with self.store_factory(self.state_root) as store:
+                controls = store.pending_owner_stop_controls(scope_ids)
+                if controls:
+                    execute_owner_stop_controls(
+                        store, controls, _at(), adapter=self.delivery_adapter
+                    )
+        except (StorageRefusal, SupervisorUnavailable):
+            return
+
     def _recover_outbox(
         self, outbox_id: str, event_id: str, recipient_agent_id: str
     ) -> None:
@@ -1493,6 +1513,7 @@ class PersistentSupervisor:
                     flush=True,
                 )
             self._submit(self._recover_pending)
+            self._submit(self._recover_owner_stops)
             self._submit(self._recover_semantic_backlog)
             self._schedule_runtime_observation(force=True)
             next_renewal = time.monotonic() + self.renew_seconds
@@ -1508,6 +1529,7 @@ class PersistentSupervisor:
                 self._schedule_runtime_observation()
                 if time.monotonic() >= next_recovery:
                     self._submit(self._recover_pending)
+                    self._submit(self._recover_owner_stops)
                     self._submit(self._recover_semantic_backlog)
                     next_recovery = time.monotonic() + self.recovery_seconds
                 try:

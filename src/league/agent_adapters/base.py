@@ -34,6 +34,32 @@ def deliver_via_multiplexer(
     )
 
 
+def steer_via_multiplexer(
+    *, target: Mapping[str, Any], envelope: Mapping[str, Any], multiplexer: Any,
+    **_unused: Any,
+) -> None:
+    """Transport one canonical delegated pause through provider steering."""
+
+    routing_target = target.get("routing_name") or target.get("locator")
+    if not isinstance(routing_target, str) or not routing_target:
+        raise StorageRefusal("delivery_target_unavailable", "receiver routing is unavailable")
+    if (
+        envelope.get("event_type") != "owner_stop_control"
+        or "delivery" not in multiplexer.capabilities
+    ):
+        raise StorageRefusal(
+            "multiplexer_steering_unsupported",
+            "selected multiplexer cannot transport delegated steering",
+        )
+    multiplexer.delivery(
+        routing_target,
+        (
+            f"LEAGUE OWNER CONTROL [{envelope['event_id']}] Pause delegated work now, "
+            "preserve durable progress, and await a new explicit owner instruction."
+        ),
+    )
+
+
 def _one(rows: list[Any], code: str, message: str) -> Any:
     if len(rows) != 1:
         raise StorageRefusal(code, message)
@@ -179,6 +205,7 @@ class DeclaredAgentAdapter:
     multiplexer_requirements: Mapping[str, frozenset[str]]
     visible_launch_factory: Any
     delivery_handler: Any
+    steering_handler: Any
     presentation_factory: Any
     assignment_factory: Any
     replacement_descriptor_factory: Any
@@ -406,6 +433,18 @@ class DeclaredAgentAdapter:
                 "agent adapter does not provide a delivery driver",
             )
         return self.delivery_handler(**inputs)
+
+    def control_delegated(self, **inputs: Any) -> Any:
+        """Apply a canonical owner control through the adapter's steer surface."""
+
+        if "steer" not in self.lifecycle_operations or not callable(
+            self.steering_handler
+        ):
+            raise StorageRefusal(
+                "owner_stop_adapter_unsupported",
+                "agent adapter cannot steer delegated work",
+            )
+        return self.steering_handler(**inputs)
 
     def restored_presentation(
         self, descriptor: Mapping[str, Any], observation: Mapping[str, Any]

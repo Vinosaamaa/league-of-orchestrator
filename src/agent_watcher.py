@@ -1047,9 +1047,6 @@ def wait_for_event(
         if not state.get("enabled", True):
             _emit({"event": "disabled"})
             return 0
-        if state.get("allow_stop_once"):
-            _emit({"event": "allow-stop"})
-            return 0
         if initial_event is not None:
             if _claim_watcher_event(store, initial_event, records_root, shotcaller):
                 if event_handler is not None:
@@ -1077,9 +1074,6 @@ def wait_for_event(
             state = store.read()
             if not state.get("enabled", True):
                 _emit({"event": "disabled"})
-                return 0
-            if state.get("allow_stop_once"):
-                _emit({"event": "allow-stop"})
                 return 0
             if int(state.get("user_message_generation", 0)) != user_generation:
                 _emit({"event": "user-message", "priority": "user", "shotcaller": shotcaller})
@@ -1155,6 +1149,11 @@ def wait_for_event(
 
 
 def _control(store: Store, action: str) -> Dict[str, Any]:
+    if action == "allow-stop":
+        raise WatcherError(
+            "generic one-shot Stop authorization is retired; use semantic owner control or verified detach handoff"
+        )
+
     def mutate(state: Dict[str, Any]) -> Dict[str, Any]:
         state["generation"] = int(state.get("generation", 0)) + 1
         if action == "enable":
@@ -1163,9 +1162,6 @@ def _control(store: Store, action: str) -> Dict[str, Any]:
         elif action == "disable":
             state["enabled"] = False
             state["allow_stop_once"] = False
-            state["stop_blocked"] = False
-        elif action == "allow-stop":
-            state["allow_stop_once"] = True
             state["stop_blocked"] = False
         elif action == "user-message":
             state["user_message_generation"] = int(state.get("user_message_generation", 0)) + 1
@@ -1190,14 +1186,6 @@ def codex_stop_hook(records_root: Path, store: Store, shotcaller: Optional[str])
     if not state.get("enabled", True) or not active:
         _emit({})
         return 0
-    if state.get("allow_stop_once"):
-        def consume(value: Dict[str, Any]) -> None:
-            value["allow_stop_once"] = False
-            value["stop_blocked"] = False
-
-        store.mutate(consume)
-        _emit({})
-        return 0
     def block(value: Dict[str, Any]) -> None:
         value["stop_blocked"] = True
 
@@ -1205,7 +1193,7 @@ def codex_stop_hook(records_root: Path, store: Store, shotcaller: Optional[str])
     _emit(
         {
             "decision": "block",
-            "reason": f"Delegates for attached Shotcaller {shotcaller or 'current'} remain active. Every unchanged Stop remains blocked until obligations settle or the explicit allow-stop --once override is used. A ready_to_land Champion remains intact until the Shotcaller supplies exact landing/release proof to teardown.",
+            "reason": f"Delegates for attached Shotcaller {shotcaller or 'current'} remain active. Every unchanged Stop remains blocked until obligations settle or a supported semantic owner control or verified detach handoff authorizes Stop. A ready_to_land Champion remains intact until the Shotcaller supplies exact landing/release proof to teardown.",
         }
     )
     return 0
@@ -2772,8 +2760,13 @@ def _base_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("enable", help="Persistently enable watching.")
     subparsers.add_parser("disable", help="Persistently disable watching and cancel waits.")
-    allow_stop = subparsers.add_parser("allow-stop", help="Atomically allow the next Stop and cancel the current wait.")
-    allow_stop.add_argument("--once", action="store_true", required=True, help="Require the explicit one-shot permission form.")
+    allow_stop = subparsers.add_parser(
+        "allow-stop", help="Retired compatibility command; always refuses without mutation."
+    )
+    allow_stop.add_argument(
+        "--once", action="store_true", required=True,
+        help="Retained only to return the actionable retirement refusal.",
+    )
     subparsers.add_parser("status", help="Read watcher state without changing it.")
     wait = subparsers.add_parser("wait", help="Block silently until a material event or control action.")
     wait.add_argument("--poll-seconds", type=float, default=1.0, help="Internal poll interval; no output is produced by polling.")

@@ -29,6 +29,15 @@ class OutboxStorage(Protocol):
         at: str,
     ) -> dict[str, Any]: ...
 
+    def await_outbox_receipt(
+        self,
+        identity: OutboxDispatchIdentity,
+        fence: int,
+        adapter_kind: str,
+        reason: str,
+        at: str,
+    ) -> dict[str, Any]: ...
+
     def fail_outbox(
         self,
         identity: OutboxDispatchIdentity,
@@ -49,6 +58,10 @@ class OutboxStorage(Protocol):
     ) -> list[dict[str, Any]]: ...
 
     def delivery_target(self, recipient_agent_id: str, at: str) -> Optional[dict[str, Any]]: ...
+
+    def direct_delivery_target(
+        self, recipient_agent_id: str, at: str
+    ) -> Optional[dict[str, Any]]: ...
 
     def outbox_envelope(
         self, outbox_id: str, event_id: str, recipient_agent_id: str

@@ -6,7 +6,7 @@
 **Implementation tree:** `48a9e13efc33416a51735d2416c20296eba6e71d`
 **Source version:** League 0.2.24
 **Historical installed benchmark reference observed read-only:** League 0.2.27
-**Status:** source candidate only; open, unmerged, uninstalled, and not live
+**Status:** historical benchmark plus a source-only semantic owner-stop follow-up; this follow-up is unmerged and performs no install or live mutation
 
 ## Decision
 
@@ -270,7 +270,7 @@ uses no live multiplexer, and removes its temporary state after the one service
 process stops cleanly. Reproduce it with:
 
 ```sh
-python3 scripts/benchmark_watcher_service.py --samples 500
+PYTHONDONTWRITEBYTECODE=1 python3 scripts/benchmark_watcher_service.py --samples 500
 ```
 
 The 2026-09-02 owner-machine run produced output SHA-256
@@ -286,6 +286,41 @@ acceptance, not installed/live Herdr proof. Ashe's cutover must repeat prompt an
 Champion wake p50/p95 against the exact installed head after service status is
 live; the target is sub-second p95 with one recipient receipt and no cross-Squad
 wake.
+
+### Semantic owner-stop follow-up benchmark
+
+The launch-critical follow-up uses the repository-owned
+`scripts/benchmark_watcher_service.py` with an explicit opt-in:
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 python3 scripts/benchmark_watcher_service.py --samples 500 --include-owner-stop
+```
+
+Its one temporary three-Squad service remains live while each sample captures
+and triages a synthetic exact prompt, then measures
+the canonical structured owner-stop record plus first Stop consumption and an
+identical terminal-generation replay. Delegated effects remain covered by the
+focused fake-adapter E2E because a timing run must not prompt any real runtime.
+The plan retains 500 samples, zero model processes, temporary SQLite state, and
+supported aggregate service teardown.
+
+The 2026-09-03 owner-machine run was based on exact `origin/main`
+`8f8051b697fe5d4a7a618611c1c9c2498d882d4e`; output SHA-256 was
+`cb7c492d49974437c14ab68daffa76650437b99687e4079bc4e17a9370269369`:
+
+| Operation | p50 ms | p95 ms | min / max ms |
+| --- | ---: | ---: | ---: |
+| Aggregate `service-ping`, three isolated bindings | 3.597 | 4.099 | 3.076 / 5.771 |
+| Targeted exact-actor `ping` | 0.102 | 0.175 | 0.073 / 0.778 |
+| Semantic owner-stop record + consume + identical replay | 0.275 | 0.404 | 0.232 / 0.872 |
+
+The first run failed only at teardown because this older benchmark still sent an
+unscoped `{kind: stop}` message after aggregate Stop identity was hardened. The
+script now calls the supported `stop_supervisor(state)` helper, which supplies
+the exact complete binding snapshot. Its default invocation remains the
+schema-v1 ping-only contract; only `--include-owner-stop` emits schema v2. The
+successful rerun created no provider or model process, contacted no live
+multiplexer, and mutated no live state.
 
 ## What is proved and what remains
 
@@ -313,6 +348,10 @@ wake.
   reconciliation event after two exact observations and the configured grace.
 - Stop alone changes no request semantics; explicit reconciliation closes only
   B, preserves provenance, is idempotent, and removes B from unfinished work.
+- Structured semantic owner stop is prompt/generation scoped, atomically rolls
+  back with final turn commit, optionally targets only exact same-Squad Codex/Pi
+  delegated runtimes, records recipient receipts exactly once, consumes once,
+  allows its identical terminal retry, and reblocks after a newer prompt.
 - Schema 19 migration, backup, rollback, foreign keys, integrity, command
   schemas, deterministic export, and import/export parity pass focused tests.
 

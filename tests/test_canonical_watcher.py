@@ -30,7 +30,7 @@ from request_lifecycle_fixture import (  # noqa: E402
 )
 from league.request_services import AssignmentService, AssignmentSpec  # noqa: E402
 from league.sqlite_store import SQLiteStorage  # noqa: E402
-from league.sqlite_watcher_ops import _obligation_counts  # noqa: E402
+from league.sqlite_watcher_ops import obligation_counts  # noqa: E402
 from league.storage import RuntimeRegistrationCommand  # noqa: E402
 from league.canonical_watcher import (  # noqa: E402
     _capture_prompt,
@@ -75,7 +75,7 @@ def _pointer_environment(root: Path) -> dict[str, str]:
 
 
 def _watcher(
-    env: dict[str, str], *arguments: str, payload: dict[str, str] | None = None
+    env: dict[str, str], *arguments: str, payload: dict[str, object] | None = None
 ) -> dict[str, object]:
     result = subprocess.run(
         [env["TEST_INSTALLED_WATCHER"], *arguments],
@@ -101,6 +101,167 @@ def _hook_source_event_key(adapter_kind: str, payload: dict[str, str]) -> str:
         f"{adapter_kind}\0{session_ref}\0{raw_key}\0{body_hash}".encode("utf-8")
     ).hexdigest()
     return f"hook:{digest}"
+
+
+def _stop_payload(
+    adapter_kind: str, session_ref: str, generation: str
+) -> dict[str, object]:
+    if adapter_kind == "codex":
+        return {
+            "hook_event_name": "Stop",
+            "session_id": session_ref,
+            "turn_id": generation,
+            "stop_hook_active": True,
+        }
+    if adapter_kind == "cursor":
+        return {
+            "hook_event_name": "stop",
+            "conversation_id": session_ref,
+            "generation_id": generation,
+        }
+    return {
+        "hook_event_name": "PiStop",
+        "session_path": session_ref,
+        "input_id": generation,
+    }
+
+
+def _stop_mutation_snapshot(state: Path) -> str:
+    """Digest every canonical row so an unbound hook cannot hide a mutation."""
+
+    with SQLiteStorage(state) as store:
+        tables = [
+            str(row["name"])
+            for row in store.connection.execute(
+                """
+                SELECT name FROM sqlite_master
+                 WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name
+                """
+            ).fetchall()
+        ]
+        digest = hashlib.sha256()
+        for table in tables:
+            digest.update(table.encode("utf-8"))
+            for row in store.connection.execute(
+                f'SELECT * FROM "{table}" ORDER BY rowid'
+            ).fetchall():
+                digest.update(repr(tuple(row)).encode("utf-8"))
+        return digest.hexdigest()
+
+
+def test_unbound_provider_stops_allow_without_mutation_when_broker_is_absent(
+    root: Path,
+) -> None:
+    for adapter_kind, command in (
+        ("codex", "codex-stop-hook"),
+        ("cursor", "cursor-stop-hook"),
+        ("pi", "pi-stop-hook"),
+    ):
+        _, state, _ = seeded_state(root, f"unbound-stop-{adapter_kind}")
+        env = _environment(root / f"unbound-stop-{adapter_kind}", state)
+        before = _stop_mutation_snapshot(state)
+        payload = _stop_payload(
+            adapter_kind,
+            f"unbound:{adapter_kind}:session",
+            f"unbound:{adapter_kind}:generation",
+        )
+        assert _watcher(env, command, payload=payload) == {}
+        assert _watcher(env, command, payload=payload) == {}
+        assert _stop_mutation_snapshot(state) == before
+
+
+def test_bound_shotcallers_fail_closed_and_champion_gate_survives_absent_broker(
+    root: Path,
+) -> None:
+    for adapter_kind, command in (
+        ("codex", "codex-stop-hook"),
+        ("cursor", "cursor-stop-hook"),
+        ("pi", "pi-stop-hook"),
+    ):
+        _, state, _ = seeded_state(root, f"bound-stop-{adapter_kind}")
+        env = _environment(root / f"bound-stop-{adapter_kind}", state)
+        session_ref = f"bound:{adapter_kind}:shotcaller"
+        _register_garen_runtime(
+            state,
+            adapter_kind,
+            session_ref=session_ref,
+            harness_kind=f"{adapter_kind}-thread",
+        )
+        with SQLiteStorage(state) as store, store._transaction():
+            from league.sqlite_watcher_ops import ensure_watcher_scope
+
+            ensure_watcher_scope(
+                store, "watcher:Garen", SHOTCALLER_ID, block_on_obligations=None
+            )
+            row = store.connection.execute(
+                "SELECT metadata_json FROM watcher_scopes WHERE scope_id='watcher:Garen'"
+            ).fetchone()
+            metadata = json.loads(row["metadata_json"])
+            metadata.setdefault("supervision", {})["service_owner"] = "persistent"
+            store.connection.execute(
+                "UPDATE watcher_scopes SET metadata_json=? WHERE scope_id='watcher:Garen'",
+                (json.dumps(metadata, sort_keys=True, separators=(",", ":")),),
+            )
+        payload = _stop_payload(adapter_kind, session_ref, "bound:generation")
+        first = _watcher(env, command, payload=payload)
+        repeated = _watcher(env, command, payload=payload)
+        assert first == repeated
+        assert "supervisor_unavailable" in str(first)
+        with SQLiteStorage(state) as store:
+            scope = store.connection.execute(
+                "SELECT last_terminal_generation FROM watcher_scopes WHERE scope_id='watcher:Garen'"
+            ).fetchone()
+            assert scope["last_terminal_generation"] is None
+            rearmed = store.rearm_wait(
+                "watcher:Garen", SHOTCALLER_ID, f"event:rearm:{adapter_kind}", AT2
+            )
+        next_payload = _stop_payload(
+            adapter_kind, session_ref, "bound:generation:rearmed"
+        )
+        next_first = _watcher(env, command, payload=next_payload)
+        next_repeated = _watcher(env, command, payload=next_payload)
+        assert next_first == next_repeated
+        assert "supervisor_unavailable" in str(next_first)
+        with SQLiteStorage(state) as store:
+            scope = store.connection.execute(
+                "SELECT wait_generation,last_terminal_generation FROM watcher_scopes "
+                "WHERE scope_id='watcher:Garen'"
+            ).fetchone()
+            assert scope["wait_generation"] == rearmed["wait_generation"]
+            assert scope["last_terminal_generation"] is None
+
+    for adapter_kind, command in (
+        ("codex", "codex-stop-hook"),
+        ("cursor", "cursor-stop-hook"),
+        ("pi", "pi-stop-hook"),
+    ):
+        _, state, _ = seeded_state(root, f"bound-stop-champion-{adapter_kind}")
+        env = _environment(root / f"bound-stop-champion-{adapter_kind}", state)
+        champion_session = f"bound:{adapter_kind}:champion"
+        _register_champion_runtime(
+            state,
+            f"absent-broker-{adapter_kind}",
+            champion_session,
+            harness_kind=f"{adapter_kind}-thread",
+        )
+        payload = _stop_payload(
+            adapter_kind, champion_session, "champion:generation"
+        )
+        assert _watcher(env, command, payload=payload)
+        assert _watcher(env, command, payload=payload) == {}
+        with SQLiteStorage(state) as store:
+            owner_scope = store.resolve_supervisor_scope(SHOTCALLER_ID)
+            store.rearm_wait(
+                str(owner_scope["scope_id"]),
+                SHOTCALLER_ID,
+                f"event:champion-rearm:{adapter_kind}",
+                AT2,
+            )
+        rearmed = _stop_payload(
+            adapter_kind, champion_session, "champion:generation:rearmed"
+        )
+        assert _watcher(env, command, payload=rearmed)
+        assert _watcher(env, command, payload=rearmed) == {}
 
 
 def test_stop_reason_uses_resolved_callsign_not_provider_turn_identity() -> None:
@@ -193,7 +354,13 @@ def _register_garen_runtime(
     return runtime_id
 
 
-def _register_champion_runtime(state: Path, suffix: str, session_ref: str) -> str:
+def _register_champion_runtime(
+    state: Path,
+    suffix: str,
+    session_ref: str,
+    *,
+    harness_kind: str = "codex-thread",
+) -> str:
     runtime_id = f"runtime:champion:{suffix}"
     _league(
         state,
@@ -204,7 +371,7 @@ def _register_champion_runtime(state: Path, suffix: str, session_ref: str) -> st
         "--actor-agent-id",
         CHAMPION_ID,
         "--harness-kind",
-        "codex-thread",
+        harness_kind,
         "--backend-kind",
         "herdr",
         "--session-ref",
@@ -349,7 +516,7 @@ def test_working_and_progress_tasks_remain_supervised(root: Path) -> None:
                 store.connection.execute(
                     "UPDATE tasks SET state=? WHERE task_id=?", (task_state, TASK_ID)
                 )
-            counts = _obligation_counts(store, SHOTCALLER_ID)
+            counts = obligation_counts(store, SHOTCALLER_ID)
             snapshot = _supervision_snapshot(
                 store, "watcher:Garen", SHOTCALLER_ID
             )
@@ -1420,7 +1587,7 @@ def test_transition_contention_keeps_stop_safe_and_prompt_durable(root: Path) ->
             """,
             (SHOTCALLER_ID, prompt_payload["prompt"]),
         ).fetchall()
-        obligations = _obligation_counts(store, SHOTCALLER_ID)
+        obligations = obligation_counts(store, SHOTCALLER_ID)
     holder.close()
     assert champion is not None and champion["version"] == 3
     assert champion["status"] == "blocked"
@@ -1700,6 +1867,8 @@ def test_watcher_readiness_timeout_terminates_exact_supervisor(root: Path) -> No
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="league-canonical-watcher-") as temporary:
         root = Path(temporary)
+        test_unbound_provider_stops_allow_without_mutation_when_broker_is_absent(root)
+        test_bound_shotcallers_fail_closed_and_champion_gate_survives_absent_broker(root)
         test_stop_reason_uses_resolved_callsign_not_provider_turn_identity()
         test_explicit_and_session_stop_dispatch(root)
         test_supervise_wakes_and_stop_allows_after_settlement(root)

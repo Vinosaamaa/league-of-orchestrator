@@ -45,6 +45,10 @@ class WatcherStorage(Protocol):
         self, *, limit: int = 64
     ) -> tuple[dict[str, Any], ...]: ...
 
+    def resolve_supervisor_scope(
+        self, actor_agent_id: str, callsign: Optional[str] = None
+    ) -> dict[str, Any]: ...
+
     def supervision_owner(self, actor_agent_id: str) -> Optional[str]: ...
 
     def begin_shotcaller_turn(
@@ -168,6 +172,27 @@ class WatcherStorage(Protocol):
     ) -> dict[str, Any]: ...
 
     def set_allow_stop_once(self, scope_id: str, actor_agent_id: str) -> dict[str, Any]: ...
+
+    def prepare_owner_stop_control(
+        self,
+        actor_agent_id: str,
+        control_id: str,
+        prompt_id: str,
+        interrupt_delegates: bool,
+        at: str,
+    ) -> dict[str, Any]: ...
+
+    def pending_owner_stop_controls(
+        self, scope_ids: tuple[str, ...], *, limit: int = 64
+    ) -> tuple[dict[str, Any], ...]: ...
+
+    def finalize_owner_stop_control(
+        self, actor_agent_id: str, control_id: str, at: str
+    ) -> dict[str, Any]: ...
+
+    def fail_owner_stop_control(
+        self, actor_agent_id: str, control_id: str, reason: str, at: str
+    ) -> dict[str, Any]: ...
 
     def stop_decision(
         self,

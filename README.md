@@ -381,6 +381,17 @@ universal second-Stop allowance. A detached Shotcaller blocks owner-actionable
 work and may end only delegated work after the exact persistent watcher lease,
 runtime generation, locator, and fence match its durable detachment receipt.
 
+An explicit owner stop is not inferred from prompt text. The active Shotcaller
+may attach the exact structured `owner_control` object to its semantic decision.
+The final turn transaction records that control against the latest prompt and
+user-message generation; optional delegated interruption emits only exact
+owner-scoped runtime outboxes through each provider adapter's steering
+capability. Stop becomes authorized only after every requested delivery has an
+exact receipt, consumes that authorization once, treats retry of the identical
+terminal generation idempotently, and blocks again after a new owner prompt.
+Codex, Pi (with either provider), and Cursor remain adapter-selected rather than
+hard-coded in this control path.
+
 Installed 0.2.45 was observed healthy as a release, but its Ashe service status
 was `live:false`, `monitor_live:false`, `reason:registration_missing`; attachment
 resume refused `supervisor_not_live`, and no persistent service process existed.

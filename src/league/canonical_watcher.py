@@ -19,7 +19,11 @@ from typing import Any, Iterator
 from .agent_adapters import SharedLifecyclePolicy, builtin_agent_adapter_registry
 from .multiplexer_adapters import builtin_multiplexer_adapter_registry
 from .sqlite_store import DEFAULT_BUSY_TIMEOUT_MS, SQLiteStorage
-from .sqlite_watcher_ops import _obligation_counts, stop_feedback_reason
+from .sqlite_watcher_ops import (
+    obligation_counts,
+    resolve_supervisor_scope,
+    stop_feedback_reason,
+)
 from .sqlite_runtime_replacement_ops import runtime_replacement_mutation_fenced
 from .storage import RuntimeRegistrationCommand, StorageRefusal
 from .persistent_supervisor import (
@@ -295,11 +299,7 @@ def _actor(
 
 
 def _scope(store: SQLiteStorage, actor_id: str, callsign: str) -> str:
-    row = store.connection.execute(
-        "SELECT scope_id FROM watcher_scopes WHERE actor_agent_id=? ORDER BY scope_id LIMIT 1",
-        (actor_id,),
-    ).fetchone()
-    return str(row[0]) if row is not None else f"watcher:{callsign}"
+    return str(resolve_supervisor_scope(store, actor_id, callsign)["scope_id"])
 
 
 def _codex_turn_generation(session_ref: str, turn_id: str) -> str:
@@ -854,7 +854,7 @@ def handle_brokered_hook(
     if command in STOP_HOOK_ADAPTERS:
         if actor is None:
             return {
-                "hook_output": _supervisor_unavailable_stop_output(str(command)),
+                "hook_output": {},
                 "capture": None,
                 "actor_agent_id": None,
             }
@@ -1069,7 +1069,7 @@ def _supervision_snapshot(
     ).fetchone()
     return {
         "user_message_generation": 0 if generation is None else int(generation[0]),
-        "obligations": _obligation_counts(store, actor_id),
+        "obligations": obligation_counts(store, actor_id),
         "champions": [dict(row) for row in champions],
         "watcher_delivery": None if watcher_delivery is None else dict(watcher_delivery),
     }
@@ -1322,6 +1322,30 @@ def main(argv: list[str] | None = None) -> int:
         except StorageRefusal:
             raise
         except SupervisorUnavailable:
+            persistent_required = False
+            if args.command in STOP_HOOK_ADAPTERS:
+                try:
+                    with SQLiteStorage(
+                        _state_root(), busy_timeout_ms=STOP_BUSY_TIMEOUT_MS
+                    ) as observer:
+                        actor = _actor(
+                            observer,
+                            args,
+                            payload,
+                            adapter_kind=_adapter_kind_for_command(args.command),
+                        )
+                        if actor is None:
+                            _emit({})
+                            return 0
+                        persistent_required = bool(
+                            str(actor[2]) == "shotcaller"
+                            and observer.persistent_supervision_required(str(actor[0]))
+                        )
+                except StorageRefusal as exc:
+                    if exc.code == "busy":
+                        _emit(_busy_stop_result(args, payload))
+                        return 0
+                    raise
             if _persistent_service_lock_held(_state_root()):
                 try:
                     response = _broker_hook(
@@ -1335,33 +1359,9 @@ def main(argv: list[str] | None = None) -> int:
                 else:
                     _emit(response["hook_output"])
                     return 0
-            if args.command in STOP_HOOK_ADAPTERS:
-                _stop_generation(args.command, args, payload)
-                try:
-                    with SQLiteStorage(
-                        _state_root(), busy_timeout_ms=STOP_BUSY_TIMEOUT_MS
-                    ) as observer:
-                        actor = _actor(
-                            observer,
-                            args,
-                            payload,
-                            adapter_kind=_adapter_kind_for_command(args.command),
-                        )
-                        persistent_required = bool(
-                            actor is not None
-                            and observer.persistent_supervision_required(str(actor[0]))
-                        )
-                except StorageRefusal as exc:
-                    if exc.code == "busy":
-                        _emit(_busy_stop_result(args, payload))
-                        return 0
-                    raise
-                if actor is None:
-                    _emit(_supervisor_unavailable_stop_output(args.command))
-                    return 0
-                if persistent_required:
-                    _emit(_supervisor_unavailable_stop_output(args.command))
-                    return 0
+            if args.command in STOP_HOOK_ADAPTERS and persistent_required:
+                _emit(_supervisor_unavailable_stop_output(args.command))
+                return 0
             fallback_store = _direct_hook_fallback_store(args, payload)
         else:
             _emit(response["hook_output"])

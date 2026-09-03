@@ -181,7 +181,11 @@ class DeliveryAdapter(Protocol):
 
 
 class DeliveryUnavailable(RuntimeError):
-    pass
+    """The transport proved no external effect occurred and retry is safe."""
+
+
+class DeliveryAmbiguous(RuntimeError):
+    """An external effect may have occurred; retry requires reconciliation."""
 
 
 class DeliveryService:
@@ -195,12 +199,14 @@ class DeliveryService:
         ids: IdFactory,
         *,
         dispatcher_id: str,
+        target_resolver: Callable[[str, str], Optional[dict[str, Any]]] | None = None,
     ) -> None:
         self.store = store
         self.adapter = adapter
         self.clock = clock
         self.ids = ids
         self.dispatcher_id = dispatcher_id
+        self.target_resolver = target_resolver or store.delivery_target
 
     def dispatch_source(
         self, outbox_id: str, event_id: str, recipient_agent_id: str
@@ -221,7 +227,12 @@ class DeliveryService:
         )
         if claim["state"] == "delivered":
             return claim
-        target = self.store.delivery_target(recipient_agent_id, at)
+        if claim["state"] == "awaiting_receipt":
+            raise StorageRefusal(
+                "delivery_receipt_ambiguous",
+                "delivery requires exact receipt reconciliation before retry",
+            )
+        target = self.target_resolver(recipient_agent_id, at)
         if target is None:
             self.store.fail_outbox(
                 identity,
@@ -243,6 +254,26 @@ class DeliveryService:
                 target["channel"],
                 reason,
                 self.clock.after(30),
+                self.clock.now(),
+            )
+            raise
+        except DeliveryAmbiguous as exc:
+            reason = str(exc) or "receipt_ambiguous"
+            self.store.await_outbox_receipt(
+                identity,
+                claim["fence"],
+                target["channel"],
+                reason,
+                self.clock.now(),
+            )
+            raise
+        except Exception as exc:
+            reason = getattr(exc, "code", None) or str(exc) or "receipt_ambiguous"
+            self.store.await_outbox_receipt(
+                identity,
+                claim["fence"],
+                target["channel"],
+                reason,
                 self.clock.now(),
             )
             raise
@@ -292,7 +323,7 @@ class DeliveryService:
                         item["outbox_id"], item["event_id"], item["recipient_agent_id"]
                     )
                 )
-            except (DeliveryUnavailable, StorageRefusal) as exc:
+            except (DeliveryAmbiguous, DeliveryUnavailable, StorageRefusal) as exc:
                 outcomes.append(
                     {
                         "outbox_id": item["outbox_id"],

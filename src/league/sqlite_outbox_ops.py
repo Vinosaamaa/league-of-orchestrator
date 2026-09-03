@@ -66,6 +66,11 @@ def claim_outbox(
                 }
             if outbox["state"] == "cancelled":
                 raise StorageRefusal("delivery_conflict", "cancelled outbox cannot be dispatched")
+            if outbox["state"] == "awaiting_receipt":
+                raise StorageRefusal(
+                    "delivery_receipt_ambiguous",
+                    "delivery effect is ambiguous and requires exact receipt reconciliation",
+                )
             if _time(str(outbox["available_at"]), "outbox availability") > now:
                 raise StorageRefusal("delivery_not_due", "outbox row is not yet due", retryable=True)
             lease = store.connection.execute(
@@ -73,6 +78,26 @@ def claim_outbox(
             ).fetchone()
             if lease is not None and _time(str(lease["leased_until"]), "stored dispatch lease") > now:
                 raise StorageRefusal("delivery_claimed", "outbox has an unexpired dispatch lease")
+            if outbox["state"] == "in_flight":
+                event = store.connection.execute(
+                    "SELECT event_type FROM events WHERE event_id=?", (event_id,)
+                ).fetchone()
+                if event is not None and event["event_type"] == "owner_stop_control":
+                    store.connection.execute(
+                        "UPDATE delivery_outbox SET state='awaiting_receipt',last_outcome='dispatch_interrupted' WHERE outbox_id=?",
+                        (outbox_id,),
+                    )
+                    store.connection.execute(
+                        "DELETE FROM outbox_dispatch_leases WHERE outbox_id=?", (outbox_id,)
+                    )
+                    return {
+                        "outbox_id": outbox_id,
+                        "event_id": event_id,
+                        "recipient_agent_id": recipient_agent_id,
+                        "state": "awaiting_receipt",
+                        "fence": None,
+                        "idempotent": False,
+                    }
             fence = 1 if lease is None else int(lease["fence"]) + 1
             store.connection.execute(
                 """
@@ -262,6 +287,59 @@ def acknowledge_outbox(
     }
 
 
+def await_outbox_receipt(
+    store: Any,
+    identity: OutboxDispatchIdentity,
+    fence: int,
+    adapter_kind: str,
+    reason: str,
+    at: str,
+) -> dict[str, Any]:
+    """Fence an ambiguous external effect until an exact receipt is reconciled."""
+
+    _time(at, "ambiguous delivery time")
+    bounded_reason = " ".join(str(reason).split())[:160] or "receipt_ambiguous"
+    try:
+        with store._transaction():
+            lease = store.connection.execute(
+                "SELECT dispatcher_id,fence FROM outbox_dispatch_leases WHERE outbox_id=?",
+                (identity.outbox_id,),
+            ).fetchone()
+            if (
+                lease is None
+                or lease["dispatcher_id"] != identity.dispatcher_id
+                or int(lease["fence"]) != fence
+            ):
+                raise StorageRefusal(
+                    "delivery_fenced", "ambiguous delivery uses a stale dispatch fence"
+                )
+            store.connection.execute(
+                "UPDATE delivery_outbox SET state='awaiting_receipt',last_outcome=? WHERE outbox_id=?",
+                (bounded_reason, identity.outbox_id),
+            )
+            store.connection.execute(
+                "UPDATE delivery_attempts SET adapter_kind=?,finished_at=?,outcome='awaiting_receipt' WHERE attempt_id=?",
+                (adapter_kind, at, identity.attempt_id),
+            )
+            store.connection.execute(
+                "DELETE FROM outbox_dispatch_leases WHERE outbox_id=?",
+                (identity.outbox_id,),
+            )
+    except StorageRefusal:
+        raise
+    except sqlite3.DatabaseError as exc:
+        raise store._translate_database_error(
+            exc, "ambiguous delivery recording conflicted"
+        ) from exc
+    return {
+        "outbox_id": identity.outbox_id,
+        "event_id": identity.event_id,
+        "recipient_agent_id": identity.recipient_agent_id,
+        "state": "awaiting_receipt",
+        "reason": bounded_reason,
+    }
+
+
 def fail_outbox(
     store: Any,
     identity: OutboxDispatchIdentity,
@@ -383,34 +461,10 @@ def pending_backlog(
     return result
 
 
-def delivery_target(store: Any, recipient_agent_id: str, at: str) -> Optional[dict[str, Any]]:
-    now = _time(at, "delivery target time")
-    watcher = store.connection.execute(
-        """
-        SELECT w.watcher_id,w.runtime_instance_id,w.wake_locator,w.leased_until,w.fence,
-               r.status,r.verified,r.runtime_generation
-          FROM watcher_registrations w
-          JOIN runtime_instances r ON r.runtime_instance_id=w.runtime_instance_id
-         WHERE w.actor_agent_id=?
-        """,
-        (recipient_agent_id,),
-    ).fetchone()
-    watcher_eligible = (
-        watcher is not None
-        and _time(str(watcher["leased_until"]), "watcher lease") > now
-        and watcher["status"] in {"active", "idle"}
-        and watcher["verified"]
-    )
-    if watcher_eligible:
-        supervision = store.supervision_policy(recipient_agent_id)
-        if supervision["attachment_mode"] == "attached":
-            return {
-                "channel": "watcher",
-                "runtime_instance_id": watcher["runtime_instance_id"],
-                "locator": watcher["wake_locator"],
-                "generation": watcher["runtime_generation"],
-                "fence": int(watcher["fence"]),
-            }
+def direct_delivery_target(
+    store: Any, recipient_agent_id: str, at: str
+) -> Optional[dict[str, Any]]:
+    _time(at, "direct delivery target time")
     runtime = store.connection.execute(
         """
         SELECT r.runtime_instance_id,r.endpoint,r.runtime_generation,r.status,r.verified,
@@ -440,6 +494,37 @@ def delivery_target(store: Any, recipient_agent_id: str, at: str) -> Optional[di
     }
 
 
+def delivery_target(store: Any, recipient_agent_id: str, at: str) -> Optional[dict[str, Any]]:
+    now = _time(at, "delivery target time")
+    watcher = store.connection.execute(
+        """
+        SELECT w.watcher_id,w.runtime_instance_id,w.wake_locator,w.leased_until,w.fence,
+               r.status,r.verified,r.runtime_generation
+          FROM watcher_registrations w
+          JOIN runtime_instances r ON r.runtime_instance_id=w.runtime_instance_id
+         WHERE w.actor_agent_id=?
+        """,
+        (recipient_agent_id,),
+    ).fetchone()
+    watcher_eligible = (
+        watcher is not None
+        and _time(str(watcher["leased_until"]), "watcher lease") > now
+        and watcher["status"] in {"active", "idle"}
+        and watcher["verified"]
+    )
+    if watcher_eligible:
+        supervision = store.supervision_policy(recipient_agent_id)
+        if supervision["attachment_mode"] == "attached":
+            return {
+                "channel": "watcher",
+                "runtime_instance_id": watcher["runtime_instance_id"],
+                "locator": watcher["wake_locator"],
+                "generation": watcher["runtime_generation"],
+                "fence": int(watcher["fence"]),
+            }
+    return direct_delivery_target(store, recipient_agent_id, at)
+
+
 def outbox_envelope(
     store: Any, outbox_id: str, event_id: str, recipient_agent_id: str
 ) -> dict[str, Any]:
@@ -449,7 +534,9 @@ def outbox_envelope(
                e.aggregate_kind,e.aggregate_id,e.entity_version,e.status,e.update_text,
                e.request_id,e.task_id,COALESCE(e.agent_id,t.champion_agent_id) source_agent_id,
                json_extract(e.detail_json,'$.runtime_instance_id') source_runtime_instance_id,
-               json_extract(e.detail_json,'$.runtime_generation') source_runtime_generation
+               json_extract(e.detail_json,'$.runtime_generation') source_runtime_generation,
+               json_extract(e.detail_json,'$.target_runtime_instance_id') target_runtime_instance_id,
+               json_extract(e.detail_json,'$.target_runtime_generation') target_runtime_generation
           FROM delivery_outbox o JOIN events e ON e.event_id=o.event_id
           LEFT JOIN tasks t ON t.task_id=e.task_id
          WHERE o.outbox_id=?
@@ -469,6 +556,8 @@ def outbox_envelope(
         "source_agent_id": row["source_agent_id"],
         "source_runtime_instance_id": row["source_runtime_instance_id"],
         "source_runtime_generation": row["source_runtime_generation"],
+        "target_runtime_instance_id": row["target_runtime_instance_id"],
+        "target_runtime_generation": row["target_runtime_generation"],
         "event_type": row["event_type"],
         "aggregate_kind": row["aggregate_kind"],
         "aggregate_id": row["aggregate_id"],

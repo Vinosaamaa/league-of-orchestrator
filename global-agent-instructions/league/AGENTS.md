@@ -32,10 +32,10 @@ $HOME/.local/bin/league --state-root "$HOME/.local/state/league"
 
 ## Durable prompt and request triage
 
-- Only `UserPromptSubmit` and `beforeSubmitPrompt` from an exactly bound
-  canonical League runtime capture its exact local prompt bytes once and wake
-  its verified Shotcaller. An unbound, non-League, or otherwise unverifiable
-  runtime is left untouched and unrecorded.
+- Only Codex `UserPromptSubmit`, Cursor `beforeSubmitPrompt`, and Pi `input`
+  from an exactly bound canonical League runtime capture its exact local prompt
+  bytes once and wake its verified Shotcaller. An unbound, non-League, or
+  otherwise unverifiable runtime is left untouched and unrecorded.
 - Prompt intake activates only after exact canonical binding; it never backfills
   pre-binding prompts or mines transcripts. It never rewrites bodies, injects
   control text, infers semantic splits, or fabricates missed prompts.
@@ -73,10 +73,11 @@ $HOME/.local/bin/league --state-root "$HOME/.local/state/league" request turn \
   reopen path for genuine closed recurrence with prior linkage, and create a
   new issue only for distinct work. Bind the immutable selection receipt to the
   canonical task; a positive issue number alone is not proof.
-- Tiny direct work must satisfy the universal bounded-read-only rule. Durable
-  research, benchmarks, release or operational work, confirmed debugging,
-  fixtures, tests, and repository changes require an issue-bound visible
-  Champion. Shotcallers do not implement repository work directly by default.
+- Tiny direct work follows the universal authority and engineering rules.
+  Durable research, benchmarks, release or operational work, confirmed
+  debugging, fixtures, tests, and repository changes require an issue-bound
+  visible Champion. Shotcallers do not implement repository work directly by
+  default.
 - Hidden workers stop at their bounded advisory perimeter and never own work
   that requires a visible Champion.
 - One issue assignment creates exactly one visible Champion. Do not add a
@@ -84,6 +85,20 @@ $HOME/.local/bin/league --state-root "$HOME/.local/state/league" request turn \
   worktree.
 - Independently fixable work may run in parallel only through separate issues,
   tasks, assignments, branches, and worktrees.
+- A Champion starts from the exact assigned issue, acceptance criteria,
+  worktree, branch, and intended handoff; inspect only task-relevant source and
+  existing changes.
+- Champion implementation uses the smallest source-managed change and fastest
+  faithful focused check first; broaden verification only for concrete risk or
+  failure.
+- While an in-scope action remains, continue it directly; do not substitute
+  status narration, unchanged polling, unrelated investigation, or speculative
+  refactoring.
+- One authoritative blocker or repeated identical failure stops retries; report
+  the exact command, refusal, preserved state, and required owner action once.
+- Champion completion reports changed files, exact verification, and any
+  remaining blocker; never publish, merge, release, install, clean up, or keep
+  monitoring unless explicitly assigned.
 - The Shotcaller remains the user-facing owner for prioritization,
   supervision, review, landing, release, verification, repair, and cleanup.
 
@@ -212,4 +227,4 @@ $HOME/.local/bin/league --state-root "$HOME/.local/state/league" request turn \
   blocker. Never hand-edit canonical or retired storage.
 
 This file owns only League orchestration deltas. Changes to the universal guide
-belong to terminal-environment-toolkit issue #45.
+belong to the terminal-environment-toolkit repository.

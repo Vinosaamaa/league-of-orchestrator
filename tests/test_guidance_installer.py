@@ -144,9 +144,9 @@ def source_contract(source: Path) -> bytes:
         .split()
     )
     for required_clause in (
-        "Only `UserPromptSubmit` and `beforeSubmitPrompt` from an exactly bound "
-        "canonical League runtime capture its exact local prompt bytes once and wake "
-        "its verified Shotcaller.",
+        "Only Codex `UserPromptSubmit`, Cursor `beforeSubmitPrompt`, and Pi `input` "
+        "from an exactly bound canonical League runtime capture its exact local prompt "
+        "bytes once and wake its verified Shotcaller.",
         "An unbound, non-League, or otherwise unverifiable runtime is left untouched "
         "and unrecorded.",
         "Prompt intake activates only after exact canonical binding; it never "
@@ -160,6 +160,27 @@ def source_contract(source: Path) -> bytes:
         b"Every prompt item is classified",
     ):
         assert contradictory_clause not in original, contradictory_clause
+    delegation = " ".join(
+        original.decode("utf-8")
+        .split("## Issue binding and delegation\n", 1)[1]
+        .split("\n## ", 1)[0]
+        .split()
+    )
+    for required_clause in (
+        "A Champion starts from the exact assigned issue, acceptance criteria, "
+        "worktree, branch, and intended handoff",
+        "Champion implementation uses the smallest source-managed change and fastest "
+        "faithful focused check first",
+        "While an in-scope action remains, continue it directly",
+        "do not substitute status narration, unchanged polling, unrelated "
+        "investigation, or speculative refactoring",
+        "One authoritative blocker or repeated identical failure stops retries",
+        "Champion completion reports changed files, exact verification, and any "
+        "remaining blocker",
+        "never publish, merge, release, install, clean up, or keep monitoring unless "
+        "explicitly assigned",
+    ):
+        assert required_clause in delegation, required_clause
     delivery = " ".join(
         original.decode("utf-8")
         .split("## Delivery and supervision\n", 1)[1]
@@ -202,7 +223,12 @@ def source_contract(source: Path) -> bytes:
     assert b"one or two words" in original
     assert b"autonomous_delivery" in original
     assert b"exact-thread reopen" in original
-    assert b"terminal-environment-toolkit issue #45" in original
+    assert b"belong to the terminal-environment-toolkit repository" in original
+    assert b"universal bounded-read-only rule" not in original
+    assert (
+        b"Tiny direct work follows the universal authority and engineering rules"
+        in original
+    )
     for forbidden_overlap in (
         b"Repository writer ->",
         b"Fast lane ->",

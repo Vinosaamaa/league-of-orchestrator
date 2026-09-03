@@ -312,6 +312,27 @@ class ProviderPresentationAfterPublishHerdr(RecordingHerdr):
         )
 
 
+class BenignSequenceAdvanceAfterPublishHerdr(RecordingHerdr):
+    """A status refresh advances the global sequence after exact publication."""
+
+    def run(
+        self, arguments, *, timeout_seconds: int = 30
+    ) -> subprocess.CompletedProcess[str]:
+        command = tuple(arguments)
+        result = super().run(arguments, timeout_seconds=timeout_seconds)
+        if (
+            command[:3] == ("herdr", "pane", "report-metadata")
+            and "--source" in command
+            and command[command.index("--source") + 1].startswith(
+                "league-shotcaller-"
+            )
+            and command[command.index("--source") + 1]
+            != "league-shotcaller-rollback"
+        ):
+            self.state_change_seq += 3
+        return result
+
+
 class CrashAfterRenameHerdr(RecordingHerdr):
     """The process dies after Herdr commits the routing rename."""
 
@@ -1052,6 +1073,53 @@ def test_named_tet_pi_publication_rollback_preserves_original_route(root: Path) 
     assert runner.tokens["thread_title"] == baseline["thread_title"]
     assert "shotcaller_title_owner" not in runner.tokens
     assert "shotcaller_title_source" not in runner.tokens
+
+
+def test_named_tet_pi_accepts_benign_sequence_advance_after_publication(
+    root: Path,
+) -> None:
+    state, _ = migrated_state(root, "named-tet-pi-sequence-advance")
+    worktree = root / "named-tet-pi-sequence-advance" / "worktree"
+    worktree.mkdir()
+    clock = FakeClock()
+    session = "/synthetic/pi/sessions/shotcaller.jsonl"
+    runner = BenignSequenceAdvanceAfterPublishHerdr(
+        worktree, thread_id=session, agent_kind="pi", provider_kind="codex"
+    )
+    _tet_pi_projection(runner, name="ashe", sidebar_name="Ashe")
+    spec = ShotcallerBootstrapSpec(
+        assignment_id="callsign-assignment:bootstrap:named-tet-pi-sequence-advance",
+        agent_id="agent:shotcaller:named-tet-pi-sequence-advance",
+        runtime_instance_id="runtime:shotcaller:named-tet-pi-sequence-advance",
+        thread_id=session,
+        capabilities=("request.triage", "rollover.accept"),
+    )
+    options = ShotcallerBootstrapOptions(
+        workspace_id="w1",
+        tab_id="w1:t1",
+        pane_id="w1:p1",
+        worktree=str(worktree.resolve()),
+        runtime_kind="pi",
+        provider_kind="codex",
+    )
+    with SQLiteStorage(state) as store:
+        _seed_available_ashe(store, clock)
+        created = ShotcallerBootstrapService(
+            store,
+            HerdrShotcallerBootstrapAdapter(
+                options,
+                runner,
+                environment={
+                    "HERDR_ENV": "1",
+                    "HERDR_WORKSPACE_ID": "w1",
+                    "HERDR_TAB_ID": "w1:t1",
+                    "HERDR_PANE_ID": "w1:p1",
+                },
+            ),
+            clock,
+        ).bootstrap(spec)
+        assert created["state"] == "active"
+        assert created["callsign"] == "Ashe"
 
 
 def test_in_place_bootstrap_retries_transient_malformed_identity_read_without_layout(
@@ -4263,6 +4331,7 @@ def main() -> None:
         test_in_place_bootstrap_adopts_exact_named_tet_pi_session(root)
         test_in_place_bootstrap_refuses_named_tet_pi_callsign_mismatch(root)
         test_named_tet_pi_publication_rollback_preserves_original_route(root)
+        test_named_tet_pi_accepts_benign_sequence_advance_after_publication(root)
         test_in_place_bootstrap_retries_transient_malformed_identity_read_without_layout(root)
         test_in_place_bootstrap_refuses_persistently_malformed_identity_without_mutation(root)
         test_bootstrap_refuses_later_provider_title_without_overwriting_it(root)

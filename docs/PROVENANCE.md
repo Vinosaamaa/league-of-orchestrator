@@ -1841,3 +1841,12 @@ read-only predicate before supervisor or SQLite access while shell and every
 potentially mutating tool remain fail-closed. A consumed one-shot Stop also
 records its exact actor, input, and terminal generation so the same provider
 settlement can replay safely without authorizing a later generation.
+
+Release `0.2.71` assigns the next immutable install identity to merged PR #189
+at main commit `183c0cbb762bbbddb4475ace8e4fa4d2f986f937` and exact
+reviewed head `92839dfe1f0cc660da608ba62728859a8a10ae41`. It packages
+the provider-neutral read-only authorization fast path, asynchronous and
+deduplicated Pi hook subprocesses, and replay-safe one-shot Stop consumption.
+This release delta changes only the version contract, deterministic
+release-staging expectations, and this provenance record beyond that merged
+tree.

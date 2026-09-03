@@ -1717,3 +1717,11 @@ handoff without any additional hook, watcher, provider, multiplexer, or
 storage-contract change. This release delta changes only the version contract,
 deterministic release-staging expectations, and this provenance record beyond
 that merged tree.
+
+Herdr plugin actions are asynchronous: a successful invocation returns an
+exact log identity while the command may still be running. Legacy display
+reconciliation now waits only for that returned `local.tab-status` log to reach
+`succeeded`, bounded to five seconds, before checking the rendered identity and
+finalizing its receipt. Missing, ambiguous, failed, or timed-out log evidence
+clears only League's owned overlay and refuses; unrelated plugin completion can
+never satisfy the gate.

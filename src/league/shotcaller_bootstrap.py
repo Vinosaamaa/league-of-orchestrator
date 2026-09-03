@@ -909,7 +909,7 @@ class HerdrShotcallerBootstrapAdapter:
                 if (
                     self._expected_published_sequence is not None
                     and consecutive == 0
-                    and sequence != self._expected_published_sequence
+                    and sequence < self._expected_published_sequence
                 ):
                     raise StorageRefusal(
                         "shotcaller_metadata_unverified",

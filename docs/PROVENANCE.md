@@ -1708,3 +1708,12 @@ to render the exact identity tokens. The adapter accepts the target only when
 the rendered pane title and the complete owned token tuple agree. This
 supersedes the earlier `local.tab-status` authority choice without changing
 already-finalized receipts, which retain and verify their recorded authority.
+
+Release `0.2.62` assigns the next immutable install identity to merged PR #170
+at main commit `c0952c96358e8476e89710d3010405d5bf19ce63` and exact
+reviewed/merged tree `9e0fbc61dd6aaae956dc1ab07522c601077fcfd6`. It packages
+the stable native-source display reconciliation and token-only status-renderer
+handoff without any additional hook, watcher, provider, multiplexer, or
+storage-contract change. This release delta changes only the version contract,
+deterministic release-staging expectations, and this provenance record beyond
+that merged tree.

@@ -46,29 +46,52 @@ def native_assignment(store: Any, row: Mapping[str, Any]) -> str:
     if row["role"] == "champion":
         rows = store.connection.execute(
             """
-            SELECT task_assignment_id AS assignment_id
+            SELECT task_assignment_id AS assignment_id,NULL AS scope_kind,
+                   NULL AS scope_id
               FROM task_assignments
              WHERE runtime_instance_id=? AND champion_agent_id=? AND state='active'
+             ORDER BY task_assignment_id LIMIT 2
             """,
             (row["runtime_instance_id"], row["agent_id"]),
         ).fetchall()
     else:
         rows = store.connection.execute(
             """
-            SELECT callsign_assignment_id AS assignment_id
+            SELECT callsign_assignment_id AS assignment_id,scope_kind,scope_id
               FROM callsign_assignments
              WHERE runtime_instance_id=? AND agent_id=? AND role='shotcaller'
-               AND scope_kind='shotcaller' AND state='active'
+               AND state='active'
+             ORDER BY callsign_assignment_id LIMIT 2
             """,
             (row["runtime_instance_id"], row["agent_id"]),
         ).fetchall()
-    return str(
-        _one(
-            list(rows),
-            "display_replay_assignment_unproven",
-            "runtime does not bind one active canonical assignment",
-        )["assignment_id"]
+    assignment = _one(
+        list(rows),
+        "display_replay_assignment_unproven",
+        "runtime does not bind one active canonical assignment",
     )
+    if row["role"] == "shotcaller":
+        current_scope = (
+            assignment["scope_kind"] == "shotcaller"
+            and assignment["scope_id"] == row["agent_id"]
+        )
+        legacy_scope = assignment["scope_kind"] == "squad"
+        if legacy_scope:
+            squad_rows = store.connection.execute(
+                """
+                SELECT squad_id FROM squads
+                 WHERE squad_id=? AND shotcaller_agent_id=? AND state='active'
+                 ORDER BY squad_id LIMIT 2
+                """,
+                (assignment["scope_id"], row["agent_id"]),
+            ).fetchall()
+            legacy_scope = len(squad_rows) == 1
+        if not current_scope and not legacy_scope:
+            raise StorageRefusal(
+                "display_replay_assignment_unproven",
+                "Shotcaller assignment scope does not prove current ownership",
+            )
+    return str(assignment["assignment_id"])
 
 
 def no_replacement_descriptor_transactions(**_inputs: Any) -> tuple[Any, ...]:

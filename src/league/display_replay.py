@@ -19,6 +19,7 @@ from .storage_types import StorageRefusal
 
 LIVE_RUNTIME_STATES = frozenset({"active", "idle"})
 VISIBLE_ROLES = frozenset({"shotcaller", "champion"})
+MAX_DIAGNOSTIC_ID_BYTES = 96
 
 
 def _adapter_kind(value: str) -> str:
@@ -39,33 +40,112 @@ def _one(rows: list[Any], code: str, message: str) -> Any:
     return rows[0]
 
 
-def _project_code(store: Any, row: Mapping[str, Any]) -> str:
+def _bounded_diagnostic_id(value: Any) -> str:
+    encoded = str(value if value is not None else "unknown").encode("utf-8")
+    return encoded[:MAX_DIAGNOSTIC_ID_BYTES].decode("utf-8", errors="ignore")
+
+
+def _diagnostic_identity(row: Mapping[str, Any]) -> str:
+    return (
+        f"agent={_bounded_diagnostic_id(row.get('agent_id'))} "
+        f"runtime={_bounded_diagnostic_id(row.get('runtime_instance_id'))}"
+    )
+
+
+def _shotcaller_publication(
+    store: Any, row: Mapping[str, Any], assignment_id: str
+) -> Mapping[str, Any]:
+    diagnostic = _diagnostic_identity(row)
+    try:
+        publication = store.shotcaller_bootstrap_publication(assignment_id)
+    except StorageRefusal as exc:
+        raise StorageRefusal(
+            "display_replay_project_unproven",
+            f"Shotcaller bootstrap publication is malformed; {diagnostic}",
+        ) from exc
+    if not isinstance(publication, Mapping):
+        raise StorageRefusal(
+            "display_replay_project_unproven",
+            f"Shotcaller bootstrap publication is missing; {diagnostic}",
+        )
+    if (
+        publication.get("assignment_id") != assignment_id
+        or publication.get("agent_id") != row.get("agent_id")
+        or publication.get("callsign") != row.get("callsign")
+        or publication.get("routing_name") != row.get("routing_name")
+        or publication.get("session_identity") != row.get("session_ref")
+    ):
+        raise StorageRefusal(
+            "display_replay_project_unproven",
+            f"Shotcaller bootstrap publication identity is ambiguous; {diagnostic}",
+        )
+    worktree = publication.get("worktree")
+    root = Path(str(worktree))
+    if (
+        not isinstance(worktree, str)
+        or not worktree
+        or not root.is_absolute()
+        or root == Path("/")
+        or not root.name
+    ):
+        raise StorageRefusal(
+            "display_replay_project_unproven",
+            f"Shotcaller bootstrap publication cwd is malformed; {diagnostic}",
+        )
+    return publication
+
+
+def _project_code(
+    store: Any, row: Mapping[str, Any], *, shotcaller_worktree: str | None = None
+) -> str:
+    diagnostic = _diagnostic_identity(row)
     if row["role"] == "champion":
         project_rows = store.connection.execute(
             """
-            SELECT p.code FROM tasks t JOIN projects p ON p.project_id=t.project_id
+            SELECT p.code
+              FROM tasks t JOIN projects p ON p.project_id=t.project_id
              WHERE t.task_id=? AND p.state='active'
+             ORDER BY p.project_id LIMIT 2
             """,
             (row["task_id"],),
         ).fetchall()
         project = _one(
             list(project_rows),
             "display_replay_project_unproven",
-            "Champion runtime does not bind one active canonical project",
+            f"Champion does not bind one active canonical project; {diagnostic}",
         )
         code = project["code"]
     else:
-        repository = row.get("repository")
-        project = (
-            store.resolve_project(repository, visibility="local")
-            if isinstance(repository, str) and repository
-            else None
+        project_rows = list(
+            store.connection.execute(
+                """
+                SELECT p.code,p.state
+                  FROM squads s
+                  JOIN project_squad_suggestions ps ON ps.squad_id=s.squad_id
+                  JOIN projects p ON p.project_id=ps.project_id
+                 WHERE s.shotcaller_agent_id=? AND s.state='active'
+                 ORDER BY p.project_id LIMIT 2
+                """,
+                (row["agent_id"],),
+            ).fetchall()
         )
-        code = project.get("code") if isinstance(project, Mapping) else None
+        if len(project_rows) > 1:
+            raise StorageRefusal(
+                "display_replay_project_unproven",
+                f"Shotcaller binds multiple active Squad projects; {diagnostic}",
+            )
+        if project_rows and project_rows[0]["state"] != "active":
+            raise StorageRefusal(
+                "display_replay_project_unproven",
+                f"Shotcaller Squad project is not active; {diagnostic}",
+            )
+        code = project_rows[0]["code"] if project_rows else Path(
+            str(shotcaller_worktree)
+        ).name
     if not isinstance(code, str) or not code or len(code.encode("utf-8")) > 80:
         raise StorageRefusal(
             "display_replay_project_unproven",
-            "runtime project code is not exact canonical metadata",
+            f"runtime project code is not exact canonical metadata; {diagnostic}",
         )
     return code
 
@@ -78,7 +158,8 @@ def canonical_presentations(
         SELECT r.runtime_instance_id,r.harness_kind,r.backend_kind,r.session_ref,
                r.endpoint,r.runtime_generation,
                r.status AS runtime_status,r.verified,a.agent_id,a.callsign,a.role,
-               a.task_id,a.kind,a.thread_id,a.routing_name,a.display_agent,a.repository,a.worktree,
+               a.task_id,a.kind,a.thread_id,a.routing_name,a.display_agent,
+               a.repository,a.worktree,
                a.status AS agent_status,a.retired_at
           FROM runtime_instances r JOIN agent_instances a
             ON a.agent_id=r.actor_agent_id
@@ -95,23 +176,37 @@ def canonical_presentations(
         for key in (
             "runtime_instance_id", "session_ref", "endpoint", "runtime_generation",
             "agent_id", "callsign",
-            "role", "thread_id", "routing_name", "display_agent", "worktree", "agent_status",
+            "role", "thread_id", "routing_name", "display_agent", "agent_status",
         ):
             if not isinstance(row.get(key), str) or not row[key]:
                 raise StorageRefusal(
                     "display_replay_identity_unproven",
                     "canonical restored runtime identity is incomplete",
                 )
-        cwd = Path(str(row["worktree"]))
+        adapter_kind = _adapter_kind(str(row["harness_kind"]))
+        adapter = builtin_agent_adapter_registry().adapter(adapter_kind)
+        try:
+            assignment_id = adapter.canonical_assignment(store=store, row=row)
+        except StorageRefusal as exc:
+            raise StorageRefusal(
+                exc.code,
+                "canonical restored runtime assignment is not exact; "
+                + _diagnostic_identity(row),
+            ) from exc
+        shotcaller_worktree = None
+        if row["role"] == "shotcaller":
+            publication = _shotcaller_publication(store, row, assignment_id)
+            shotcaller_worktree = str(publication["worktree"])
+            row["worktree"] = shotcaller_worktree
+        project_code = _project_code(
+            store, row, shotcaller_worktree=shotcaller_worktree
+        )
+        cwd = Path(str(row.get("worktree")))
         if not cwd.is_absolute() or cwd == Path("/"):
             raise StorageRefusal(
                 "display_replay_identity_unproven",
                 "canonical restored runtime cwd is not exact",
             )
-        adapter_kind = _adapter_kind(str(row["harness_kind"]))
-        adapter = builtin_agent_adapter_registry().adapter(adapter_kind)
-        assignment_id = adapter.canonical_assignment(store=store, row=row)
-        project_code = _project_code(store, row)
         owned = adapter.canonical_presentation(
             store=store,
             row=row,

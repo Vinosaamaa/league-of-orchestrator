@@ -162,6 +162,13 @@ def native_presentation(
         delivery = context.get("context_delivery")
         display = delivery.get("display_receipt") if isinstance(delivery, Mapping) else None
         if not isinstance(display, Mapping):
+            reconciliation = context.get("legacy_display_reconciliation")
+            display = (
+                reconciliation.get("receipt")
+                if isinstance(reconciliation, Mapping)
+                else None
+            )
+        if not isinstance(display, Mapping):
             raise StorageRefusal(
                 "display_replay_descriptor_unproven",
                 "Champion runtime has no canonical display receipt",

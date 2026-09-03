@@ -1769,7 +1769,8 @@ def assignment_launch_context(store: Any, assignment_id: str) -> dict[str, Any]:
                 == legacy_intent.get("target_title")
                 and legacy_receipt["terminal_title"]
                 == legacy_intent.get("target_title")
-                and legacy_receipt["state_change_seq"] == expected_sequence + 1
+                and legacy_receipt["state_change_seq"]
+                in {expected_sequence, expected_sequence + 1}
             )
             if not exact_result:
                 raise StorageRefusal(
@@ -2288,6 +2289,24 @@ def finalize_legacy_display_reconciliation(
                                 "legacy Champion runtime changed before final reconciliation",
                             )
                 if command.previous_worktree is not None:
+                    current_agent = store.connection.execute(
+                        """
+                        SELECT worktree,branch FROM agent_instances
+                         WHERE agent_id=? AND retired_at IS NULL
+                        """,
+                        (command.champion_agent_id,),
+                    ).fetchone()
+                    if (
+                        current_agent is None
+                        or current_agent["branch"] != command.previous_branch
+                        or not _physical_worktree_exact(
+                            current_agent["worktree"], command.previous_worktree
+                        )
+                    ):
+                        raise StorageRefusal(
+                            "legacy_display_conflict",
+                            "legacy Champion worktree changed before final reconciliation",
+                        )
                     changed = store.connection.execute(
                         """
                         UPDATE agent_instances
@@ -2300,8 +2319,8 @@ def finalize_legacy_display_reconciliation(
                             command.branch,
                             at,
                             command.champion_agent_id,
-                            command.previous_worktree,
-                            command.previous_branch,
+                            current_agent["worktree"],
+                            current_agent["branch"],
                         ),
                     ).rowcount
                     if changed != 1:

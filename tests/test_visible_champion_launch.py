@@ -1158,6 +1158,17 @@ def test_legacy_display_reconciliation_records_one_exact_worktree_transition(
     current_worktree = root / "legacy-worktree-transition" / "current-worktree"
     current_worktree.mkdir()
     (current_worktree / ".git").mkdir()
+    store.connection.execute(
+        """
+        UPDATE projects SET code='LEAGUE'
+         WHERE project_id=(SELECT project_id FROM tasks WHERE task_id=?)
+        """,
+        ("task:legacy-worktree-transition",),
+    )
+    store.connection.execute(
+        "UPDATE runtime_instances SET status='closed' WHERE runtime_instance_id<>?",
+        (launch["runtime_instance_id"],),
+    )
     source_less = SourceLessLegacyRunner(current_worktree)
     source_less.started = True
     source_less.title = runner.title
@@ -1249,8 +1260,12 @@ def test_legacy_display_reconciliation_records_one_exact_worktree_transition(
     ).hexdigest()[:24]
     assert runtime["runtime_generation"] == restored_generation
     durable = store.assignment_launch_context(str(launch["assignment_id"]))
-    assert durable["acceptance_receipt"]["worktree"] == str(previous_worktree.resolve())
-    assert durable["acceptance_receipt"]["branch"] == previous_branch
+    assert (
+        durable["legacy_display_reconciliation"]["receipt"]["state_change_seq"]
+        == spec.expected_state_change_seq
+    )
+    assert durable["acceptance_receipt"]["worktree"] == receipt["worktree"]
+    assert durable["acceptance_receipt"]["branch"] == receipt["branch"]
     assert durable["acceptance_receipt"]["runtime_generation"] != restored_generation
     assert durable["legacy_display_reconciliation"]["intent"] == {
         **durable["legacy_display_reconciliation"]["intent"],
@@ -2399,6 +2414,7 @@ def main() -> None:
         test_active_retry_requires_migration18_issue_binding(root)
         test_active_retry_refuses_changed_owner_issue_before_title_read(root)
         test_legacy_active_champion_display_is_reconciled_once_with_exact_receipt(root)
+        test_legacy_display_reconciliation_records_one_exact_worktree_transition(root)
         test_legacy_display_reconciliation_refuses_user_title_race_before_write(root)
         test_legacy_display_compare_and_set_does_not_overwrite_last_window_user_title(root)
         test_legacy_display_reconciliation_refuses_modern_receipt_before_live_write(root)

@@ -1682,3 +1682,10 @@ without any additional hook, watcher, provider, multiplexer, or storage-contract
 change. This release delta changes only the version contract, deterministic
 release-staging expectations, and this provenance record beyond that merged
 tree.
+
+The issue-#84 legacy display repair now supports the ordinary restored-session
+case where Herdr assigns a new terminal identity while the Champion remains in
+the exact same worktree and branch. A v4 durable intent binds the immutable
+acceptance generation to the verified restored generation without fabricating
+a worktree transition or incrementing the agent CAS version. Final runtime and
+display acceptance remain one transaction, and retry remains effect-free.

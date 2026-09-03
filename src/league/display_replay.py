@@ -197,7 +197,18 @@ def canonical_presentations(
         if row["role"] == "shotcaller":
             publication = _shotcaller_publication(store, row, assignment_id)
             shotcaller_worktree = str(publication["worktree"])
-            row["worktree"] = shotcaller_worktree
+            durable_worktree = row.get("worktree")
+            if durable_worktree in (None, ""):
+                row["worktree"] = shotcaller_worktree
+            elif (
+                not isinstance(durable_worktree, str)
+                or durable_worktree != shotcaller_worktree
+            ):
+                raise StorageRefusal(
+                    "display_replay_project_unproven",
+                    "Shotcaller durable cwd conflicts with bootstrap publication; "
+                    + _diagnostic_identity(row),
+                )
         project_code = _project_code(
             store, row, shotcaller_worktree=shotcaller_worktree
         )

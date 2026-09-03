@@ -762,6 +762,51 @@ def test_shotcallers_use_publication_cwd_and_optional_exact_project_without_proc
             )
 
 
+def test_shotcaller_publication_cwd_accepts_absent_or_matching_and_refuses_conflict(
+    root: Path,
+) -> None:
+    for case in ("absent", "matching", "conflicting"):
+        case_root = root / case
+        state = canonical_state(case_root, include_champions=False)
+        expected_cwd = str(case_root / "Projects")
+        with SQLiteStorage(state) as store:
+            if case == "matching":
+                store.connection.execute(
+                    "UPDATE agent_instances SET worktree=? WHERE agent_id='agent:ashe'",
+                    (expected_cwd,),
+                )
+            elif case == "conflicting":
+                conflicting_cwd = case_root / "different-project"
+                conflicting_cwd.mkdir()
+                store.connection.execute(
+                    "UPDATE agent_instances SET worktree=? WHERE agent_id='agent:ashe'",
+                    (str(conflicting_cwd),),
+                )
+            if case == "conflicting":
+                try:
+                    canonical_presentations(store)
+                except StorageRefusal as exc:
+                    assert exc.code == "display_replay_project_unproven"
+                    assert "agent:ashe" in str(exc)
+                    assert "runtime:ashe" in str(exc)
+                    assert len(str(exc).encode("utf-8")) <= 320
+                else:
+                    raise AssertionError("conflicting Shotcaller cwd was accepted")
+                continue
+            expected = canonical_presentations(store)
+            assert len(expected) == 1 and expected[0]["cwd"] == expected_cwd
+            herdr = RestoredHerdr(expected)
+            before_processes = json.loads(json.dumps(herdr.processes))
+            receipt = replay_restored_display(
+                store,
+                herdr_runner=herdr,
+                timeout_ms=1_000,
+                sleeper=lambda _: None,
+            )
+            assert receipt["created_processes"] == receipt["resumed_sessions"] == 0
+            assert herdr.processes == before_processes
+
+
 def test_shotcaller_project_binding_refuses_ambiguous_or_malformed_sources(
     root: Path,
 ) -> None:
@@ -1213,6 +1258,9 @@ def main() -> None:
         test_async_restart_converges_without_duplicate_processes(root / "success")
         test_shotcallers_use_publication_cwd_and_optional_exact_project_without_process_effects(
             root / "named-shotcallers"
+        )
+        test_shotcaller_publication_cwd_accepts_absent_or_matching_and_refuses_conflict(
+            root / "shotcaller-cwd-evidence"
         )
         test_shotcaller_project_binding_refuses_ambiguous_or_malformed_sources(
             root / "shotcaller-project-refusals"

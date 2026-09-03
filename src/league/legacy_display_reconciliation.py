@@ -39,6 +39,19 @@ OWNERSHIP_TOKENS = {
 LEGACY_OWNERSHIP_TOKENS = {
     key for key in OWNERSHIP_TOKENS if key.startswith("legacy_display_")
 }
+_LAST_METADATA_SEQUENCE = 0
+
+
+def _next_metadata_sequence() -> int:
+    """Return a process-monotonic sequence for League's metadata source."""
+    global _LAST_METADATA_SEQUENCE
+    candidate = time.time_ns()
+    if candidate <= _LAST_METADATA_SEQUENCE:
+        candidate = _LAST_METADATA_SEQUENCE + 1
+    _LAST_METADATA_SEQUENCE = candidate
+    return candidate
+
+
 def _stable_json(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
 
@@ -390,7 +403,7 @@ class HerdrLegacyDisplayAdapter:
                     "--clear-display-agent",
                     *clear_arguments,
                     "--seq",
-                    str(sequence),
+                    str(max(sequence, _next_metadata_sequence())),
                 ),
                 "legacy Champion display rollback",
                 silent=True,
@@ -485,8 +498,9 @@ class HerdrLegacyDisplayAdapter:
             )
 
         # A second fresh read is the ordering barrier. Herdr sequences are scoped
-        # per metadata source, so the effect uses a dedicated League source and
-        # the global observation sequence detects any interleaved presentation.
+        # per metadata source, so the effect uses a fresh process-monotonic value
+        # on League's dedicated source. The agent state sequence remains the
+        # independent guard for interleaved native presentation changes.
         current, current_tokens = self._observe(spec)
         if current != baseline or current_tokens != baseline_tokens:
             raise StorageRefusal(
@@ -496,7 +510,7 @@ class HerdrLegacyDisplayAdapter:
         target = f"{spec.callsign} · {spec.target_task_label}"
         source = self._metadata_source(reconciliation_id)
         authority = str(current["authority_source"])
-        sequence = int(current["state_change_seq"]) + 1
+        sequence = _next_metadata_sequence()
         reconciliation_tokens = self._reconciliation_tokens(
             spec, reconciliation_id, source, authority
         )

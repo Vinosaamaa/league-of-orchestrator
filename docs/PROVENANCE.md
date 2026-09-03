@@ -1799,3 +1799,12 @@ also used a synthetic follow-up prompt to report an unavailable Stop guard;
 each settlement generated another model turn. Pi now rejects unavailable input
 before submission and reports a later Stop outage once through its non-model UI
 notification. Healthy bound Stop feedback remains repeatable and unchanged.
+
+Release `0.2.69` assigns the next immutable install identity to merged PR #184
+at main commit `5a5130c3e1d1be1d3dbdc64e88b25d1d6318e8e1` and exact
+reviewed head `810a184a3b72ef8fe2249a571bde9ce50c307b6c`. It packages
+rendered-plist validation that binds the supervisor to its exact release
+executable path and non-model Pi outage reporting that cannot create recursive
+prompt or Stop turns. This release delta changes only the version contract,
+deterministic release-staging expectations, and this provenance record beyond
+that merged tree.

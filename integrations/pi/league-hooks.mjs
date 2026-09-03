@@ -171,6 +171,7 @@ export function createLeagueHookBootstrap(options = {}) {
   const activation = options.activationStore || defaultActivationStore();
   return function registerLeagueHookBootstrap(pi) {
     let currentInput;
+    let stopGuardUnavailable = false;
 
     function managed(session) {
       return launchManaged() || activation.isManaged(session);
@@ -213,11 +214,13 @@ export function createLeagueHookBootstrap(options = {}) {
         bound: false,
         managed: managed(session),
       };
+      stopGuardUnavailable = false;
       const capture = captureCurrentInput(ctx);
       if (
         (capture.state === "unavailable" || capture.state === "unbound") &&
         currentInput.managed
       ) {
+        currentInput = undefined;
         return unavailableInput(ctx);
       }
       return { action: "continue" };
@@ -280,22 +283,21 @@ export function createLeagueHookBootstrap(options = {}) {
     pi.on("agent_settled", (_event, ctx) => {
       const session = sessionIdentity(ctx);
       if (!session) return;
-      if (!currentInput) {
-        if (!managed(session)) return;
-        pi.sendUserMessage(
-          "League canonical Stop guard is unavailable. Preserve this session and wait for recovery.",
-          { deliverAs: "followUp" },
-        );
-        return;
-      }
+      if (!currentInput) return;
+      const pauseForUnavailableGuard = () => {
+        if (!stopGuardUnavailable) {
+          ctx.ui.notify(
+            "League Stop guard is unavailable; session is paused pending watcher recovery.",
+            "error",
+          );
+          stopGuardUnavailable = true;
+        }
+      };
       if (!currentInput.bound) {
         const capture = captureCurrentInput(ctx);
         if (capture.state === "unbound") {
           if (currentInput.managed) {
-            pi.sendUserMessage(
-              "League canonical Stop guard is unavailable. Preserve this session and wait for recovery.",
-              { deliverAs: "followUp" },
-            );
+            pauseForUnavailableGuard();
             return;
           }
           currentInput = undefined;
@@ -306,10 +308,7 @@ export function createLeagueHookBootstrap(options = {}) {
             currentInput = undefined;
             return;
           }
-          pi.sendUserMessage(
-            "League canonical Stop guard is unavailable. Preserve this session and wait for recovery.",
-            { deliverAs: "followUp" },
-          );
+          pauseForUnavailableGuard();
           return;
         }
       }
@@ -319,22 +318,17 @@ export function createLeagueHookBootstrap(options = {}) {
       );
       if (result?.binding === "unbound") {
         if (currentInput.managed) {
-          pi.sendUserMessage(
-            "League canonical Stop guard is unavailable. Preserve this session and wait for recovery.",
-            { deliverAs: "followUp" },
-          );
+          pauseForUnavailableGuard();
           return;
         }
         currentInput = undefined;
         return;
       }
       if (result?.binding !== "bound") {
-        pi.sendUserMessage(
-          "League canonical Stop guard is unavailable. Preserve this session and wait for recovery.",
-          { deliverAs: "followUp" },
-        );
+        pauseForUnavailableGuard();
         return;
       }
+      stopGuardUnavailable = false;
       const followup = result.followup_message;
       if (typeof followup === "string" && followup) {
         pi.sendUserMessage(followup, { deliverAs: "followUp" });

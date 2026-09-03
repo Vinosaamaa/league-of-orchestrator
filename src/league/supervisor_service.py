@@ -431,14 +431,15 @@ class SupervisorServiceInstaller:
             )
 
     def _assert_source_manifest(self, manifest: Mapping[str, Any]) -> None:
-        _, watcher_digest, template_digest = self._source()
+        rendered, watcher_digest, template_digest = self._source()
         if (
             watcher_digest != manifest["agent_watcher_sha256"]
             or template_digest != manifest["template_sha256"]
+            or _sha256(rendered) != manifest["installed_plist_sha256"]
         ):
             raise StorageRefusal(
                 "supervisor_service_source_mismatch",
-                "service source bytes no longer match the authorized manifest",
+                "service source bytes or executable path no longer match the authorized manifest",
             )
 
     def _assert_live_source_manifest(self, manifest: Mapping[str, Any]) -> None:

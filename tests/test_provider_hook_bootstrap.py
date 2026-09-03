@@ -551,17 +551,27 @@ def test_pi_outage_is_inert_when_unbound_and_closed_when_managed() -> None:
         "terminate": True,
     }
     assert len(managed["notifications"]) == 1
-    assert len(managed["messages"]) == 1
+    assert managed["messages"] == []
 
     activation_failure = run_pi_scenario("activation-write-failure")
     assert activation_failure["firstInput"] == {"action": "handled"}
-    assert activation_failure["tool"] == {
-        "block": True,
-        "reason": "League prompt binding is unavailable",
-        "terminate": True,
-    }
+    assert activation_failure["tool"] is None
     assert len(activation_failure["notifications"]) == 1
-    assert len(activation_failure["messages"]) == 1
+    assert activation_failure["messages"] == []
+
+    stop_outage = run_pi_scenario("outage-stop")
+    assert stop_outage["firstInput"] == {"action": "continue"}
+    assert stop_outage["tool"] is None
+    assert stop_outage["messages"] == []
+    assert stop_outage["notifications"] == [
+        {
+            "message": (
+                "League Stop guard is unavailable; session is paused pending "
+                "watcher recovery."
+            ),
+            "level": "error",
+        }
+    ]
 
 
 def test_disposable_installed_profiles_accept_exact_native_payloads(root: Path) -> None:

@@ -2126,6 +2126,29 @@ def _owner_stop_metadata(metadata: dict[str, Any]) -> dict[str, Any] | None:
     return value
 
 
+def _allow_stop_once_receipt(metadata: dict[str, Any]) -> dict[str, Any] | None:
+    value = metadata.get("allow_stop_once_receipt")
+    if value is None:
+        return None
+    if (
+        not isinstance(value, dict)
+        or value.get("schema") != "league.allow-stop-once-receipt.v1"
+        or not isinstance(value.get("actor_agent_id"), str)
+        or not value["actor_agent_id"]
+        or not isinstance(value.get("terminal_generation"), str)
+        or not value["terminal_generation"]
+        or type(value.get("user_message_generation")) is not int
+        or value["user_message_generation"] < 0
+        or not isinstance(value.get("consumed_at"), str)
+        or not value["consumed_at"]
+    ):
+        raise StorageRefusal(
+            "allow_stop_receipt_invalid",
+            "one-shot Stop receipt metadata is malformed",
+        )
+    return value
+
+
 def _owner_stop_result(
     scope_id: str, value: dict[str, Any], *, idempotent: bool
 ) -> dict[str, Any]:
@@ -2861,6 +2884,7 @@ def stop_decision(
             metadata = _scope_metadata(scope)
             turn = _shotcaller_turn(metadata)
             owner_stop = _owner_stop_metadata(metadata)
+            allow_stop_receipt = _allow_stop_once_receipt(metadata)
             turn_active = turn is not None and turn.get("active") is True
             detached = policy["attachment_mode"] == "detached"
             all_counts = obligation_counts(store, actor_agent_id)
@@ -2917,20 +2941,43 @@ def stop_decision(
                     (scope_id,),
                 )
             if scope["allow_stop_once"]:
+                metadata["allow_stop_once_receipt"] = {
+                    "schema": "league.allow-stop-once-receipt.v1",
+                    "actor_agent_id": actor_agent_id,
+                    "terminal_generation": terminal_generation,
+                    "user_message_generation": int(scope["user_message_generation"]),
+                    "consumed_at": at,
+                }
                 store.connection.execute(
                     """
                     UPDATE watcher_scopes
-                       SET allow_stop_once=0,stop_blocked=0,wait_active=0,
+                       SET metadata_json=?,allow_stop_once=0,stop_blocked=0,wait_active=0,
                            pending_stop_feedback_digest=NULL,
                            pending_stop_terminal_generation=NULL,
                            pending_stop_wait_generation=NULL
                      WHERE scope_id=?
                     """,
-                    (scope_id,),
+                    (
+                        json.dumps(metadata, sort_keys=True, separators=(",", ":")),
+                        scope_id,
+                    ),
                 )
                 return {
                     **common,
                     "status": "allowed_once",
+                    "decision": "allow",
+                    "priority": "explicit_allow_stop_once",
+                }
+            if (
+                allow_stop_receipt is not None
+                and allow_stop_receipt["actor_agent_id"] == actor_agent_id
+                and allow_stop_receipt["terminal_generation"] == terminal_generation
+                and allow_stop_receipt["user_message_generation"]
+                == int(scope["user_message_generation"])
+            ):
+                return {
+                    **common,
+                    "status": "allowed_once_replay",
                     "decision": "allow",
                     "priority": "explicit_allow_stop_once",
                 }

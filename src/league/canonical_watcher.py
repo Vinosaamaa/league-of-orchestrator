@@ -69,6 +69,7 @@ PRE_TOOL_HOOK_ADAPTERS = _hook_routes("pre_tool_authorization")
 BROKERED_HOOK_COMMANDS = frozenset(
     PROMPT_HOOK_ADAPTERS | STOP_HOOK_ADAPTERS | PRE_TOOL_HOOK_ADAPTERS
 )
+READ_ONLY_TOOL_NAMES = frozenset({"read", "grep", "find", "ls", "glob"})
 
 
 def _registered_multiplexer(kind: Any) -> bool:
@@ -125,6 +126,23 @@ def _native_hook_output(
     if adapter.contract.kind == "pi":
         canonical = {"binding": "bound" if bound else "unbound", **canonical}
     return dict(adapter.translate_hook_output(_hook_operation(command), canonical))
+
+
+def _read_only_pre_tool(command: str, payload: dict[str, Any]) -> bool:
+    tool_name = payload.get("tool_name")
+    return bool(
+        command in PRE_TOOL_HOOK_ADAPTERS
+        and isinstance(tool_name, str)
+        and tool_name.casefold() in READ_ONLY_TOOL_NAMES
+    )
+
+
+def _read_only_pre_tool_output(command: str) -> dict[str, Any]:
+    return _native_hook_output(
+        command,
+        {"decision": "accept", "reason_code": "read_only_fast_path"},
+        bound=False,
+    )
 
 
 def _stop_output_mode(command: str) -> str:
@@ -1377,6 +1395,9 @@ def main(argv: list[str] | None = None) -> int:
         payload = _canonical_hook_payload(
             args.command, payload, explicit_shotcaller=args.shotcaller
         )
+        if _read_only_pre_tool(args.command, payload):
+            _emit(_read_only_pre_tool_output(args.command))
+            return 0
     capture_event_id = (
         _codex_prompt_invocation_id()
         if args.command in PROMPT_HOOK_ADAPTERS

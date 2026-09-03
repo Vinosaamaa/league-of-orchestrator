@@ -5,10 +5,11 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 
 export const ACTIVATION_SCHEMA = "league.pi-hook-activation.v1";
 export const INSTALLED_WATCHER = "__LEAGUE_STABLE_WATCHER__";
+const PI_READ_ONLY_TOOLS = new Set(["read", "grep", "find", "ls", "glob"]);
 
 function exactRoot(value) {
   if (!value || !path.isAbsolute(value) || value === "/") return undefined;
@@ -29,33 +30,57 @@ export function installedPaths() {
   };
 }
 
-function invokeInstalledWatcher(command, payload) {
+function invokeInstalledWatcherAsync(command, payload) {
   const configured = installedPaths();
   if (
     !configured.watcher ||
     !path.isAbsolute(configured.watcher) ||
     !configured.stateRoot
   ) {
-    return undefined;
+    return Promise.resolve(undefined);
   }
-  const completed = spawnSync(configured.watcher, [command], {
-    encoding: "utf8",
-    input: `${JSON.stringify(payload)}\n`,
-    env: { ...process.env, LEAGUE_STATE_ROOT: configured.stateRoot },
-    timeout: 5000,
-    maxBuffer: 1024 * 1024,
+  return new Promise((resolve) => {
+    let stdout = "";
+    let finished = false;
+    let timer;
+    const child = spawn(configured.watcher, [command], {
+      env: { ...process.env, LEAGUE_STATE_ROOT: configured.stateRoot },
+      stdio: ["pipe", "pipe", "ignore"],
+    });
+    const finish = (value) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      resolve(value);
+    };
+    timer = setTimeout(() => {
+      child.kill("SIGTERM");
+      finish(undefined);
+    }, 5000);
+    child.on("error", () => finish(undefined));
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString("utf8");
+      if (Buffer.byteLength(stdout, "utf8") > 1024 * 1024) {
+        child.kill("SIGTERM");
+        finish(undefined);
+      }
+    });
+    child.on("close", (code) => {
+      if (code !== 0 || !stdout) return finish(undefined);
+      try {
+        const value = JSON.parse(stdout);
+        finish(
+          value && typeof value === "object" && !Array.isArray(value)
+            ? value
+            : undefined,
+        );
+      } catch {
+        finish(undefined);
+      }
+    });
+    child.stdin.on("error", () => finish(undefined));
+    child.stdin.end(`${JSON.stringify(payload)}\n`);
   });
-  if (completed.status !== 0 || completed.error || !completed.stdout) {
-    return undefined;
-  }
-  try {
-    const value = JSON.parse(completed.stdout);
-    return value && typeof value === "object" && !Array.isArray(value)
-      ? value
-      : undefined;
-  } catch {
-    return undefined;
-  }
 }
 
 function sessionIdentity(ctx) {
@@ -161,10 +186,29 @@ function unavailableInput(ctx) {
 }
 
 export function createLeagueHookBootstrap(options = {}) {
-  const rawInvoke = options.runWatcher || invokeInstalledWatcher;
-  const invoke = (command, payload) => {
+  const rawInvoke =
+    options.runPromptWatcher || options.runWatcher || invokeInstalledWatcherAsync;
+  const rawPreToolInvoke =
+    options.runPreToolWatcher || options.runWatcher || invokeInstalledWatcherAsync;
+  const rawStopInvoke =
+    options.runStopWatcher || options.runWatcher || invokeInstalledWatcherAsync;
+  const invoke = async (command, payload) => {
     try {
-      return rawInvoke(command, payload);
+      return await rawInvoke(command, payload);
+    } catch {
+      return undefined;
+    }
+  };
+  const invokeStop = async (command, payload) => {
+    try {
+      return await rawStopInvoke(command, payload);
+    } catch {
+      return undefined;
+    }
+  };
+  const invokePreTool = async (command, payload) => {
+    try {
+      return await rawPreToolInvoke(command, payload);
     } catch {
       return undefined;
     }
@@ -179,32 +223,35 @@ export function createLeagueHookBootstrap(options = {}) {
       return launchManaged() || activation.isManaged(session);
     }
 
-    function captureCurrentInput(ctx) {
+    async function captureCurrentInput(ctx, expectedInput = currentInput) {
       const session = sessionIdentity(ctx);
-      if (!session || !currentInput) return { state: "unavailable" };
-      const result = invoke(
+      if (!session || !expectedInput || currentInput !== expectedInput) {
+        return { state: "unavailable" };
+      }
+      const result = await invoke(
         "pi-input-hook",
-        envelope(session, currentInput.id, {
+        envelope(session, expectedInput.id, {
           hook_event_name: "PiInput",
-          prompt: currentInput.prompt,
+          prompt: expectedInput.prompt,
         }),
       );
+      if (currentInput !== expectedInput) return { state: "changed" };
       if (result?.binding === "unbound") {
-        currentInput.bound = false;
+        expectedInput.bound = false;
         return { state: "unbound" };
       }
       if (result?.binding !== "bound") return { state: "unavailable" };
-      currentInput.managed = true;
+      expectedInput.managed = true;
       try {
         activation.markManaged(session);
       } catch {
         return { state: "unavailable" };
       }
-      currentInput.bound = true;
+      expectedInput.bound = true;
       return { state: "bound" };
     }
 
-    pi.on("input", (event, ctx) => {
+    pi.on("input", async (event, ctx) => {
       if (event.source === "extension") return { action: "continue" };
       const session = sessionIdentity(ctx);
       if (!session || typeof event.text !== "string" || !event.text) {
@@ -215,9 +262,13 @@ export function createLeagueHookBootstrap(options = {}) {
         prompt: event.text,
         bound: false,
         managed: managed(session),
+        stopCheckInFlight: false,
+        stopFollowupPending: false,
       };
       stopGuardUnavailable = false;
-      const capture = captureCurrentInput(ctx);
+      const input = currentInput;
+      const capture = await captureCurrentInput(ctx, input);
+      if (currentInput !== input) return unavailableInput(ctx);
       if (
         (capture.state === "unavailable" || capture.state === "unbound") &&
         currentInput.managed
@@ -228,7 +279,8 @@ export function createLeagueHookBootstrap(options = {}) {
       return { action: "continue" };
     });
 
-    pi.on("tool_call", (event, ctx) => {
+    pi.on("tool_call", async (event, ctx) => {
+      if (PI_READ_ONLY_TOOLS.has(event.toolName)) return;
       const session = sessionIdentity(ctx);
       if (!session) return;
       if (!currentInput) {
@@ -239,8 +291,16 @@ export function createLeagueHookBootstrap(options = {}) {
           terminate: true,
         };
       }
-      if (!currentInput.bound) {
-        const capture = captureCurrentInput(ctx);
+      const input = currentInput;
+      if (!input.bound) {
+        const capture = await captureCurrentInput(ctx, input);
+        if (currentInput !== input) {
+          return {
+            block: true,
+            reason: "League prompt binding changed during authorization",
+            terminate: true,
+          };
+        }
         if (capture.state === "unbound") return;
         if (capture.state !== "bound") {
           if (!currentInput.managed) return;
@@ -251,14 +311,21 @@ export function createLeagueHookBootstrap(options = {}) {
           };
         }
       }
-      const result = invoke(
+      const result = await invokePreTool(
         "pi-pre-tool-hook",
-        envelope(session, currentInput.id, {
+        envelope(session, input.id, {
           hook_event_name: "PiToolCall",
           tool_name: event.toolName,
           tool_input: event.input || {},
         }),
       );
+      if (currentInput !== input) {
+        return {
+          block: true,
+          reason: "League prompt binding changed during authorization",
+          terminate: true,
+        };
+      }
       if (result?.binding === "unbound") {
         if (!currentInput.managed) {
           currentInput.bound = false;
@@ -282,10 +349,18 @@ export function createLeagueHookBootstrap(options = {}) {
       }
     });
 
-    pi.on("agent_settled", (_event, ctx) => {
+    pi.on("agent_settled", async (_event, ctx) => {
       const session = sessionIdentity(ctx);
       if (!session) return;
       if (!currentInput) return;
+      const input = currentInput;
+      if (input.stopFollowupPending) {
+        input.stopFollowupPending = false;
+        if (currentInput === input) currentInput = undefined;
+        return;
+      }
+      if (input.stopCheckInFlight) return;
+      input.stopCheckInFlight = true;
       const pauseForUnavailableGuard = () => {
         if (!stopGuardUnavailable) {
           ctx.ui.notify(
@@ -295,47 +370,58 @@ export function createLeagueHookBootstrap(options = {}) {
           stopGuardUnavailable = true;
         }
       };
-      if (!currentInput.bound) {
-        const capture = captureCurrentInput(ctx);
-        if (capture.state === "unbound") {
-          if (currentInput.managed) {
+      try {
+        if (!input.bound) {
+          const capture = await captureCurrentInput(ctx, input);
+          if (currentInput !== input) return;
+          if (capture.state === "unbound") {
+            if (input.managed) {
+              pauseForUnavailableGuard();
+              return;
+            }
+            currentInput = undefined;
+            return;
+          }
+          if (capture.state !== "bound") {
+            if (!input.managed) {
+              currentInput = undefined;
+              return;
+            }
+            pauseForUnavailableGuard();
+            return;
+          }
+        }
+        const result = await invokeStop(
+          "pi-stop-hook",
+          envelope(session, input.id, { hook_event_name: "PiStop" }),
+        );
+        if (currentInput !== input) return;
+        if (result?.binding === "unbound") {
+          if (input.managed) {
             pauseForUnavailableGuard();
             return;
           }
           currentInput = undefined;
           return;
         }
-        if (capture.state !== "bound") {
-          if (!currentInput.managed) {
-            currentInput = undefined;
-            return;
+        if (result?.binding !== "bound") {
+          pauseForUnavailableGuard();
+          return;
+        }
+        stopGuardUnavailable = false;
+        const followup = result.followup_message;
+        if (typeof followup === "string" && followup) {
+          input.stopFollowupPending = true;
+          try {
+            await pi.sendUserMessage(followup, { deliverAs: "followUp" });
+          } catch {
+            input.stopFollowupPending = false;
           }
-          pauseForUnavailableGuard();
-          return;
+        } else {
+          currentInput = undefined;
         }
-      }
-      const result = invoke(
-        "pi-stop-hook",
-        envelope(session, currentInput.id, { hook_event_name: "PiStop" }),
-      );
-      if (result?.binding === "unbound") {
-        if (currentInput.managed) {
-          pauseForUnavailableGuard();
-          return;
-        }
-        currentInput = undefined;
-        return;
-      }
-      if (result?.binding !== "bound") {
-        pauseForUnavailableGuard();
-        return;
-      }
-      stopGuardUnavailable = false;
-      const followup = result.followup_message;
-      if (typeof followup === "string" && followup) {
-        pi.sendUserMessage(followup, { deliverAs: "followUp" });
-      } else {
-        currentInput = undefined;
+      } finally {
+        input.stopCheckInFlight = false;
       }
     });
   };

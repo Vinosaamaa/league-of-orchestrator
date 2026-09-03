@@ -1689,3 +1689,12 @@ the exact same worktree and branch. A v4 durable intent binds the immutable
 acceptance generation to the verified restored generation without fabricating
 a worktree transition or incrementing the agent CAS version. Final runtime and
 display acceptance remain one transaction, and retry remains effect-free.
+
+Release `0.2.61` assigns the next immutable install identity to merged PR #168
+at main commit `f281dea3709928b5c262fe4ead7b95e220a6fd29` and exact
+reviewed/merged tree `99c2551416e099f34f56c9c831e10070dc762700`. It packages
+the same-worktree restored-generation reconciliation repair without any
+additional hook, watcher, provider, multiplexer, or storage-contract change.
+This release delta changes only the version contract, deterministic
+release-staging expectations, and this provenance record beyond that merged
+tree.

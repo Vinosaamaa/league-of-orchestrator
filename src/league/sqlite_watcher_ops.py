@@ -490,7 +490,7 @@ def set_supervision_attachment(
                 supervision.pop("detachment_receipt", None)
             else:
                 supervision["detachment_receipt"] = receipt
-            counts = _obligation_counts(store, actor_agent_id)
+            counts = obligation_counts(store, actor_agent_id)
             store.connection.execute(
                 """
                 UPDATE watcher_scopes
@@ -1244,7 +1244,7 @@ def resume_calm_supervision(
             metadata = _scope_metadata(registration)
             metadata["supervision"]["runtime_state"] = "supervising"
             metadata["supervision"]["resumed_at"] = at
-            counts = _obligation_counts(store, actor_agent_id)
+            counts = obligation_counts(store, actor_agent_id)
             store.connection.execute(
                 "UPDATE watcher_scopes SET wait_active=?,metadata_json=? WHERE scope_id=?",
                 (
@@ -1503,6 +1503,18 @@ def supervisor_bindings(
     runtimes_by_owner: dict[str, list[Any]] = {owner_id: [] for owner_id in owner_ids}
     for runtime in runtime_rows:
         runtimes_by_owner[str(runtime["actor_agent_id"])].append(runtime)
+    scope_rows = store.connection.execute(
+        f"""
+        SELECT scope_id,actor_agent_id,schema_version,initialized,generation,metadata_json
+          FROM watcher_scopes WHERE actor_agent_id IN ({placeholders})
+         ORDER BY actor_agent_id,scope_id
+         LIMIT ?
+        """,
+        (*owner_ids, len(owner_ids) * (MAX_SUPERVISOR_SCOPE_CANDIDATES + 1)),
+    ).fetchall()
+    scopes_by_owner: dict[str, list[Any]] = {owner_id: [] for owner_id in owner_ids}
+    for scope_row in scope_rows:
+        scopes_by_owner[str(scope_row["actor_agent_id"])].append(scope_row)
     bindings: list[dict[str, Any]] = []
     for row in owners:
         owner_id = str(row["agent_id"])
@@ -1513,8 +1525,8 @@ def supervisor_bindings(
                 "each active Squad requires one exact verified Shotcaller runtime",
             )
         runtime = runtimes[0]
-        scope = resolve_supervisor_scope(
-            store, owner_id, str(row["callsign"])
+        scope = _select_supervisor_scope(
+            scopes_by_owner[owner_id], str(row["callsign"])
         )
         bindings.append(
             {
@@ -2015,17 +2027,12 @@ def rearm_wait(store: Any, scope_id: str, actor_agent_id: str, event_id: str, at
 
 
 def set_allow_stop_once(store: Any, scope_id: str, actor_agent_id: str) -> dict[str, Any]:
-    try:
-        with store._transaction():
-            ensure_watcher_scope(store, scope_id, actor_agent_id, block_on_obligations=None)
-            store.connection.execute(
-                "UPDATE watcher_scopes SET allow_stop_once=1 WHERE scope_id=?", (scope_id,)
-            )
-    except StorageRefusal:
-        raise
-    except sqlite3.DatabaseError as exc:
-        raise store._translate_database_error(exc, "allow-stop update conflicted") from exc
-    return {"scope_id": scope_id, "allow_stop_once": True}
+    """Refuse the retired generic bypass without mutating canonical state."""
+
+    raise StorageRefusal(
+        "owner_stop_required",
+        "generic one-shot Stop authorization is retired; use a semantic owner stop or verified detach handoff",
+    )
 
 
 def _owner_stop_metadata(metadata: dict[str, Any]) -> dict[str, Any] | None:
@@ -2084,6 +2091,188 @@ def _owner_stop_result(
     }
 
 
+def _owner_stop_prepare_context(
+    store: Any, actor_agent_id: str, prompt_id: str
+) -> tuple[Any, Any, dict[str, Any], int, dict[str, Any] | None]:
+    actor = store.connection.execute(
+        """
+        SELECT callsign,version FROM agent_instances
+         WHERE agent_id=? AND role='shotcaller' AND retired_at IS NULL
+        """,
+        (actor_agent_id,),
+    ).fetchone()
+    if actor is None:
+        raise StorageRefusal(
+            "owner_stop_invalid", "semantic owner-stop requires an active Shotcaller"
+        )
+    selected = resolve_supervisor_scope(store, actor_agent_id, str(actor["callsign"]))
+    ensure_watcher_scope(
+        store, str(selected["scope_id"]), actor_agent_id, block_on_obligations=None
+    )
+    scope = store.connection.execute(
+        "SELECT * FROM watcher_scopes WHERE scope_id=? AND actor_agent_id=?",
+        (selected["scope_id"], actor_agent_id),
+    ).fetchone()
+    prompt = store.connection.execute(
+        """
+        SELECT prompt_id FROM prompts
+         WHERE prompt_id=? AND current_owner_agent_id=? AND triage_state='complete'
+        """,
+        (prompt_id, actor_agent_id),
+    ).fetchone()
+    if prompt is None or scope["last_event_id"] != prompt_id:
+        raise StorageRefusal(
+            "owner_stop_stale",
+            "semantic owner-stop must bind the latest fully triaged owner prompt",
+            retryable=True,
+        )
+    untriaged = int(
+        store.connection.execute(
+            "SELECT COUNT(*) FROM prompts WHERE current_owner_agent_id=? AND triage_state='untriaged'",
+            (actor_agent_id,),
+        ).fetchone()[0]
+    )
+    if untriaged:
+        raise StorageRefusal(
+            "owner_stop_stale",
+            "a newer untriaged owner prompt prevents stop authorization",
+            retryable=True,
+        )
+    metadata = _scope_metadata(scope)
+    generation = int(scope["user_message_generation"])
+    return actor, scope, metadata, generation, _owner_stop_metadata(metadata)
+
+
+def _delegated_owner_stop_targets(
+    store: Any,
+    actor_agent_id: str,
+    actor_version: int,
+    control_id: str,
+    interrupt_delegates: bool,
+    at: str,
+) -> list[dict[str, Any]]:
+    if not interrupt_delegates:
+        return []
+    delegates = store.connection.execute(
+        """
+        SELECT agent_id FROM agent_instances
+         WHERE shotcaller_agent_id=? AND role IN ('champion','hidden-worker')
+           AND retired_at IS NULL
+           AND status IN ('active','started','working','progress','blocked','ready_to_land')
+         ORDER BY agent_id LIMIT ?
+        """,
+        (actor_agent_id, MAX_OWNER_STOP_TARGETS + 1),
+    ).fetchall()
+    if len(delegates) > MAX_OWNER_STOP_TARGETS:
+        raise StorageRefusal(
+            "owner_stop_capacity",
+            "delegated runtime controls exceed the bounded owner-stop capacity",
+        )
+    delegate_ids = [str(delegate["agent_id"]) for delegate in delegates]
+    if not delegate_ids:
+        return []
+    placeholders = ",".join("?" for _ in delegate_ids)
+    runtimes = store.connection.execute(
+        f"""
+        WITH ranked AS (
+          SELECT actor_agent_id,runtime_instance_id,runtime_generation,harness_kind,
+                 backend_kind,session_ref,endpoint,
+                 ROW_NUMBER() OVER (
+                   PARTITION BY actor_agent_id ORDER BY runtime_instance_id
+                 ) AS ordinal
+            FROM runtime_instances
+           WHERE actor_agent_id IN ({placeholders})
+             AND status IN ('active','idle') AND verified=1
+        )
+        SELECT * FROM ranked WHERE ordinal<=2 ORDER BY actor_agent_id,ordinal
+        """,
+        delegate_ids,
+    ).fetchall()
+    by_delegate: dict[str, list[Any]] = {delegate_id: [] for delegate_id in delegate_ids}
+    for runtime in runtimes:
+        by_delegate[str(runtime["actor_agent_id"])].append(runtime)
+    targets: list[dict[str, Any]] = []
+    for delegate_id in delegate_ids:
+        exact = by_delegate[delegate_id]
+        if len(exact) != 1:
+            raise StorageRefusal(
+                "owner_stop_target_invalid",
+                "each active delegate requires one exact verified runtime before interruption",
+            )
+        runtime = exact[0]
+        digest = hashlib.sha256(
+            f"league.owner-stop.v1\0{control_id}\0{delegate_id}".encode("utf-8")
+        ).hexdigest()
+        event_id = f"owner-stop-event:{digest}"
+        outbox_id = f"owner-stop-outbox:{digest}"
+        target = {
+            "recipient_agent_id": delegate_id,
+            "runtime_instance_id": str(runtime["runtime_instance_id"]),
+            "runtime_generation": str(runtime["runtime_generation"]),
+            "harness_kind": str(runtime["harness_kind"]),
+            "backend_kind": str(runtime["backend_kind"]),
+            "session_ref": str(runtime["session_ref"]),
+            "endpoint": str(runtime["endpoint"]),
+            "event_id": event_id,
+            "outbox_id": outbox_id,
+        }
+        store.connection.execute(
+            """
+            INSERT INTO events
+              (event_id,agent_id,task_id,entity_version,event_type,status,
+               update_text,occurred_at,detail_json,aggregate_kind,aggregate_id)
+            VALUES(?,?,NULL,?,'owner_stop_control','pause_requested',?,?,?,'agent',?)
+            """,
+            (
+                event_id,
+                actor_agent_id,
+                actor_version,
+                "Shotcaller requested an exact delegated runtime pause.",
+                at,
+                json.dumps(
+                    {
+                        "control_id": control_id,
+                        "target_runtime_instance_id": target["runtime_instance_id"],
+                        "target_runtime_generation": target["runtime_generation"],
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                actor_agent_id,
+            ),
+        )
+        store.connection.execute(
+            """
+            INSERT INTO delivery_outbox
+              (outbox_id,event_id,recipient_agent_id,state,available_at,attempt_count)
+            VALUES(?,?,?,'pending',?,0)
+            """,
+            (outbox_id, event_id, delegate_id, at),
+        )
+        targets.append(target)
+    return targets
+
+
+def _persist_prepared_owner_stop(
+    store: Any, scope_id: str, metadata: dict[str, Any], owner_stop: dict[str, Any]
+) -> None:
+    metadata["owner_stop"] = owner_stop
+    store.connection.execute(
+        """
+        UPDATE watcher_scopes
+           SET metadata_json=?,allow_stop_once=0,stop_blocked=0,wait_active=0,
+               pending_stop_feedback_digest=NULL,
+               pending_stop_terminal_generation=NULL,
+               pending_stop_wait_generation=NULL
+         WHERE scope_id=?
+        """,
+        (
+            json.dumps(metadata, sort_keys=True, separators=(",", ":")),
+            scope_id,
+        ),
+    )
+
+
 def prepare_owner_stop_control(
     store: Any,
     actor_agent_id: str,
@@ -2107,57 +2296,9 @@ def prepare_owner_stop_control(
         )
     try:
         with store._transaction():
-            actor = store.connection.execute(
-                """
-                SELECT callsign,version FROM agent_instances
-                 WHERE agent_id=? AND role='shotcaller' AND retired_at IS NULL
-                """,
-                (actor_agent_id,),
-            ).fetchone()
-            if actor is None:
-                raise StorageRefusal(
-                    "owner_stop_invalid", "semantic owner-stop requires an active Shotcaller"
-                )
-            selected = resolve_supervisor_scope(
-                store, actor_agent_id, str(actor["callsign"])
+            actor, scope, metadata, generation, existing = _owner_stop_prepare_context(
+                store, actor_agent_id, prompt_id
             )
-            ensure_watcher_scope(
-                store, str(selected["scope_id"]), actor_agent_id,
-                block_on_obligations=None,
-            )
-            scope = store.connection.execute(
-                "SELECT * FROM watcher_scopes WHERE scope_id=? AND actor_agent_id=?",
-                (selected["scope_id"], actor_agent_id),
-            ).fetchone()
-            prompt = store.connection.execute(
-                """
-                SELECT prompt_id FROM prompts
-                 WHERE prompt_id=? AND current_owner_agent_id=?
-                   AND triage_state='complete'
-                """,
-                (prompt_id, actor_agent_id),
-            ).fetchone()
-            if prompt is None or scope["last_event_id"] != prompt_id:
-                raise StorageRefusal(
-                    "owner_stop_stale",
-                    "semantic owner-stop must bind the latest fully triaged owner prompt",
-                    retryable=True,
-                )
-            untriaged = int(
-                store.connection.execute(
-                    "SELECT COUNT(*) FROM prompts WHERE current_owner_agent_id=? AND triage_state='untriaged'",
-                    (actor_agent_id,),
-                ).fetchone()[0]
-            )
-            if untriaged:
-                raise StorageRefusal(
-                    "owner_stop_stale",
-                    "a newer untriaged owner prompt prevents stop authorization",
-                    retryable=True,
-                )
-            metadata = _scope_metadata(scope)
-            existing = _owner_stop_metadata(metadata)
-            generation = int(scope["user_message_generation"])
             if existing is not None and existing.get("control_id") == control_id:
                 exact = (
                     existing.get("prompt_id") == prompt_id
@@ -2180,91 +2321,14 @@ def prepare_owner_stop_control(
                     "owner_stop_conflict",
                     "this owner prompt generation already has another stop control",
                 )
-            delegates = store.connection.execute(
-                """
-                SELECT agent_id FROM agent_instances
-                 WHERE shotcaller_agent_id=? AND role IN ('champion','hidden-worker')
-                   AND retired_at IS NULL
-                   AND status IN ('active','started','working','progress','blocked','ready_to_land')
-                 ORDER BY agent_id LIMIT ?
-                """,
-                (actor_agent_id, MAX_OWNER_STOP_TARGETS + 1),
-            ).fetchall()
-            if interrupt_delegates and len(delegates) > MAX_OWNER_STOP_TARGETS:
-                raise StorageRefusal(
-                    "owner_stop_capacity",
-                    "delegated runtime controls exceed the bounded owner-stop capacity",
-                )
-            targets: list[dict[str, Any]] = []
-            if interrupt_delegates:
-                for delegate in delegates:
-                    delegate_id = str(delegate["agent_id"])
-                    runtimes = store.connection.execute(
-                        """
-                        SELECT runtime_instance_id,runtime_generation,harness_kind,
-                               backend_kind,session_ref,endpoint
-                          FROM runtime_instances
-                         WHERE actor_agent_id=? AND status IN ('active','idle') AND verified=1
-                         ORDER BY runtime_instance_id LIMIT 2
-                        """,
-                        (delegate_id,),
-                    ).fetchall()
-                    if len(runtimes) != 1:
-                        raise StorageRefusal(
-                            "owner_stop_target_invalid",
-                            "each active delegate requires one exact verified runtime before interruption",
-                        )
-                    runtime = runtimes[0]
-                    digest = hashlib.sha256(
-                        f"league.owner-stop.v1\0{control_id}\0{delegate_id}".encode("utf-8")
-                    ).hexdigest()
-                    event_id = f"owner-stop-event:{digest}"
-                    outbox_id = f"owner-stop-outbox:{digest}"
-                    target = {
-                        "recipient_agent_id": delegate_id,
-                        "runtime_instance_id": str(runtime["runtime_instance_id"]),
-                        "runtime_generation": str(runtime["runtime_generation"]),
-                        "harness_kind": str(runtime["harness_kind"]),
-                        "backend_kind": str(runtime["backend_kind"]),
-                        "session_ref": str(runtime["session_ref"]),
-                        "endpoint": str(runtime["endpoint"]),
-                        "event_id": event_id,
-                        "outbox_id": outbox_id,
-                    }
-                    store.connection.execute(
-                        """
-                        INSERT INTO events
-                          (event_id,agent_id,task_id,entity_version,event_type,status,
-                           update_text,occurred_at,detail_json,aggregate_kind,aggregate_id)
-                        VALUES(?,?,NULL,?,'owner_stop_control','pause_requested',?,?,?,'agent',?)
-                        """,
-                        (
-                            event_id,
-                            actor_agent_id,
-                            int(actor["version"]),
-                            "Shotcaller requested an exact delegated runtime pause.",
-                            at,
-                            json.dumps(
-                                {
-                                    "control_id": control_id,
-                                    "target_runtime_instance_id": target["runtime_instance_id"],
-                                    "target_runtime_generation": target["runtime_generation"],
-                                },
-                                sort_keys=True,
-                                separators=(",", ":"),
-                            ),
-                            actor_agent_id,
-                        ),
-                    )
-                    store.connection.execute(
-                        """
-                        INSERT INTO delivery_outbox
-                          (outbox_id,event_id,recipient_agent_id,state,available_at,attempt_count)
-                        VALUES(?,?,?,'pending',?,0)
-                        """,
-                        (outbox_id, event_id, delegate_id, at),
-                    )
-                    targets.append(target)
+            targets = _delegated_owner_stop_targets(
+                store,
+                actor_agent_id,
+                int(actor["version"]),
+                control_id,
+                interrupt_delegates,
+                at,
+            )
             owner_stop = {
                 "actor_agent_id": actor_agent_id,
                 "control_id": control_id,
@@ -2277,20 +2341,8 @@ def prepare_owner_stop_control(
             }
             if not targets:
                 owner_stop["authorized_at"] = at
-            metadata["owner_stop"] = owner_stop
-            store.connection.execute(
-                """
-                UPDATE watcher_scopes
-                   SET metadata_json=?,allow_stop_once=0,stop_blocked=0,wait_active=0,
-                       pending_stop_feedback_digest=NULL,
-                       pending_stop_terminal_generation=NULL,
-                       pending_stop_wait_generation=NULL
-                 WHERE scope_id=?
-                """,
-                (
-                    json.dumps(metadata, sort_keys=True, separators=(",", ":")),
-                    scope["scope_id"],
-                ),
+            _persist_prepared_owner_stop(
+                store, str(scope["scope_id"]), metadata, owner_stop
             )
     except StorageRefusal:
         raise
@@ -2301,23 +2353,88 @@ def prepare_owner_stop_control(
     return _owner_stop_result(str(scope["scope_id"]), owner_stop, idempotent=False)
 
 
+def _current_owner_stop_control(
+    store: Any, actor_agent_id: str, control_id: str
+) -> tuple[Any, dict[str, Any], dict[str, Any]]:
+    selected = resolve_supervisor_scope(store, actor_agent_id)
+    scope = store.connection.execute(
+        "SELECT scope_id,user_message_generation,metadata_json FROM watcher_scopes WHERE scope_id=?",
+        (selected["scope_id"],),
+    ).fetchone()
+    if scope is None:
+        raise StorageRefusal(
+            "owner_stop_conflict", "semantic owner-stop scope is no longer current"
+        )
+    metadata = _scope_metadata(scope)
+    owner_stop = _owner_stop_metadata(metadata)
+    if owner_stop is None or owner_stop.get("control_id") != control_id:
+        raise StorageRefusal(
+            "owner_stop_conflict", "semantic owner-stop control is no longer current"
+        )
+    if owner_stop.get("user_message_generation") != int(
+        scope["user_message_generation"]
+    ):
+        raise StorageRefusal(
+            "owner_stop_stale", "semantic owner-stop generation is no longer current"
+        )
+    return scope, metadata, owner_stop
+
+
+def pending_owner_stop_controls(
+    store: Any, scope_ids: tuple[str, ...], *, limit: int = 64
+) -> tuple[dict[str, Any], ...]:
+    """Return current recoverable controls for exact active supervisor scopes."""
+
+    if (
+        not 1 <= limit <= 64
+        or len(scope_ids) > limit
+        or len(set(scope_ids)) != len(scope_ids)
+        or any(not isinstance(scope_id, str) or not scope_id for scope_id in scope_ids)
+    ):
+        raise StorageRefusal(
+            "owner_stop_capacity", "owner-stop recovery scopes exceed the supported bound"
+        )
+    if not scope_ids:
+        return ()
+    placeholders = ",".join("?" for _ in scope_ids)
+    rows = store.connection.execute(
+        f"""
+        SELECT scope_id,actor_agent_id,user_message_generation,metadata_json
+          FROM watcher_scopes WHERE scope_id IN ({placeholders})
+         ORDER BY scope_id LIMIT ?
+        """,
+        (*scope_ids, limit + 1),
+    ).fetchall()
+    if len(rows) > limit:
+        raise StorageRefusal(
+            "owner_stop_capacity", "owner-stop recovery exceeds the supported bound"
+        )
+    controls: list[dict[str, Any]] = []
+    for row in rows:
+        metadata = _scope_metadata(row)
+        owner_stop = _owner_stop_metadata(metadata)
+        if (
+            owner_stop is not None
+            and owner_stop.get("actor_agent_id") == row["actor_agent_id"]
+            and owner_stop.get("user_message_generation")
+            == int(row["user_message_generation"])
+            and owner_stop.get("state") in {"dispatch_pending", "failed"}
+        ):
+            controls.append(
+                _owner_stop_result(str(row["scope_id"]), owner_stop, idempotent=True)
+            )
+    return tuple(controls)
+
+
 def finalize_owner_stop_control(
     store: Any, actor_agent_id: str, control_id: str, at: str
 ) -> dict[str, Any]:
     _time(at, "semantic owner-stop authorization time")
     try:
         with store._transaction():
-            selected = resolve_supervisor_scope(store, actor_agent_id)
-            scope = store.connection.execute(
-                "SELECT scope_id,metadata_json FROM watcher_scopes WHERE scope_id=?",
-                (selected["scope_id"],),
-            ).fetchone()
-            metadata = _scope_metadata(scope)
-            owner_stop = _owner_stop_metadata(metadata)
-            if owner_stop is None or owner_stop.get("control_id") != control_id:
-                raise StorageRefusal(
-                    "owner_stop_conflict", "semantic owner-stop control is no longer current"
-                )
+            scope, metadata, owner_stop = _current_owner_stop_control(
+                store, actor_agent_id, control_id
+            )
             if owner_stop["state"] in {"authorized", "consumed"}:
                 return _owner_stop_result(
                     str(scope["scope_id"]), owner_stop, idempotent=True
@@ -2329,19 +2446,32 @@ def finalize_owner_stop_control(
                 raise StorageRefusal(
                     "owner_stop_invalid", "semantic owner-stop targets are malformed"
                 )
-            pending = [
-                target
-                for target in targets
-                if store.connection.execute(
-                    "SELECT state FROM delivery_outbox WHERE outbox_id=? AND event_id=? AND recipient_agent_id=?",
-                    (
-                        target.get("outbox_id"),
-                        target.get("event_id"),
-                        target.get("recipient_agent_id"),
-                    ),
-                ).fetchone()["state"]
-                != "delivered"
-            ]
+            outbox_ids = [str(target.get("outbox_id", "")) for target in targets]
+            if len(set(outbox_ids)) != len(outbox_ids) or any(not value for value in outbox_ids):
+                raise StorageRefusal(
+                    "owner_stop_invalid", "semantic owner-stop outbox identities are malformed"
+                )
+            rows: list[Any] = []
+            if outbox_ids:
+                placeholders = ",".join("?" for _ in outbox_ids)
+                rows = store.connection.execute(
+                    f"""
+                    SELECT outbox_id,event_id,recipient_agent_id,state
+                      FROM delivery_outbox WHERE outbox_id IN ({placeholders})
+                    """,
+                    outbox_ids,
+                ).fetchall()
+            states = {str(row["outbox_id"]): row for row in rows}
+            pending = []
+            for target in targets:
+                row = states.get(str(target["outbox_id"]))
+                if (
+                    row is None
+                    or row["event_id"] != target.get("event_id")
+                    or row["recipient_agent_id"] != target.get("recipient_agent_id")
+                    or row["state"] != "delivered"
+                ):
+                    pending.append(target)
             if pending:
                 raise StorageRefusal(
                     "owner_stop_delivery_pending",
@@ -2378,17 +2508,9 @@ def fail_owner_stop_control(
     bounded_reason = " ".join(str(reason).split())[:160] or "receiver_unavailable"
     try:
         with store._transaction():
-            selected = resolve_supervisor_scope(store, actor_agent_id)
-            scope = store.connection.execute(
-                "SELECT scope_id,metadata_json FROM watcher_scopes WHERE scope_id=?",
-                (selected["scope_id"],),
-            ).fetchone()
-            metadata = _scope_metadata(scope)
-            owner_stop = _owner_stop_metadata(metadata)
-            if owner_stop is None or owner_stop.get("control_id") != control_id:
-                raise StorageRefusal(
-                    "owner_stop_conflict", "semantic owner-stop control is no longer current"
-                )
+            scope, metadata, owner_stop = _current_owner_stop_control(
+                store, actor_agent_id, control_id
+            )
             if owner_stop["state"] not in {"authorized", "consumed"}:
                 owner_stop["state"] = "failed"
                 owner_stop["last_error"] = bounded_reason
@@ -2535,7 +2657,7 @@ def champion_stop_decision(
     }
 
 
-def _obligation_counts(store: Any, actor_agent_id: str) -> dict[str, int]:
+def obligation_counts(store: Any, actor_agent_id: str) -> dict[str, int]:
     row = store.connection.execute(
         """
         SELECT
@@ -2684,7 +2806,7 @@ def stop_decision(
             owner_stop = _owner_stop_metadata(metadata)
             turn_active = turn is not None and turn.get("active") is True
             detached = policy["attachment_mode"] == "detached"
-            all_counts = _obligation_counts(store, actor_agent_id)
+            all_counts = obligation_counts(store, actor_agent_id)
             owner_counts = (
                 _owner_actionable_counts(store, actor_agent_id)
                 if turn_active or detached
@@ -2777,23 +2899,6 @@ def stop_decision(
                         "decision": "allow",
                         "priority": "explicit_owner_control",
                     }
-            if bool(scope["allow_stop_once"]):
-                store.connection.execute(
-                    """
-                    UPDATE watcher_scopes SET allow_stop_once=0,stop_blocked=0,wait_active=0,
-                           pending_stop_feedback_digest=NULL,
-                           pending_stop_terminal_generation=NULL,
-                           pending_stop_wait_generation=NULL
-                     WHERE scope_id=?
-                    """,
-                    (scope_id,),
-                )
-                return {
-                    **common,
-                    "status": "explicit_allow_once",
-                    "decision": "allow",
-                    "priority": None,
-                }
             if (
                 owner_stop_current
                 and owner_stop is not None

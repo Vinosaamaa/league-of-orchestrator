@@ -195,12 +195,14 @@ class DeliveryService:
         ids: IdFactory,
         *,
         dispatcher_id: str,
+        target_resolver: Callable[[str, str], Optional[dict[str, Any]]] | None = None,
     ) -> None:
         self.store = store
         self.adapter = adapter
         self.clock = clock
         self.ids = ids
         self.dispatcher_id = dispatcher_id
+        self.target_resolver = target_resolver or store.delivery_target
 
     def dispatch_source(
         self, outbox_id: str, event_id: str, recipient_agent_id: str
@@ -221,7 +223,7 @@ class DeliveryService:
         )
         if claim["state"] == "delivered":
             return claim
-        target = self.store.delivery_target(recipient_agent_id, at)
+        target = self.target_resolver(recipient_agent_id, at)
         if target is None:
             self.store.fail_outbox(
                 identity,
@@ -235,8 +237,8 @@ class DeliveryService:
         envelope = self.store.outbox_envelope(outbox_id, event_id, recipient_agent_id)
         try:
             receipt = self.adapter.send(target["channel"], target, envelope)
-        except DeliveryUnavailable as exc:
-            reason = str(exc) or "receiver_unavailable"
+        except Exception as exc:
+            reason = getattr(exc, "code", None) or str(exc) or "receiver_unavailable"
             self.store.fail_outbox(
                 identity,
                 claim["fence"],

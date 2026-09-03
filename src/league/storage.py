@@ -26,6 +26,7 @@ from .storage_reporting import ReportingStorage
 from .storage_request import (
     AnswerRequestCommand,
     DispatchRequestCommand,
+    OwnerStopControl,
     ReconcileDuplicateRequestCommand,
     RequestResultCommand,
     RequestStorage,

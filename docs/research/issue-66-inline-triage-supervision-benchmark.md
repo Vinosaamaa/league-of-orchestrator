@@ -270,7 +270,7 @@ uses no live multiplexer, and removes its temporary state after the one service
 process stops cleanly. Reproduce it with:
 
 ```sh
-python3 scripts/benchmark_watcher_service.py --samples 500
+PYTHONDONTWRITEBYTECODE=1 python3 scripts/benchmark_watcher_service.py --samples 500
 ```
 
 The 2026-09-02 owner-machine run produced output SHA-256
@@ -289,9 +289,15 @@ wake.
 
 ### Semantic owner-stop follow-up benchmark
 
-The launch-critical follow-up extends the same owner-machine command rather
-than adding a second harness. While its one temporary three-Squad service is
-live, each sample captures and triages a synthetic exact prompt, then measures
+The launch-critical follow-up uses the repository-owned
+`scripts/benchmark_watcher_service.py` with an explicit opt-in:
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 python3 scripts/benchmark_watcher_service.py --samples 500 --include-owner-stop
+```
+
+Its one temporary three-Squad service remains live while each sample captures
+and triages a synthetic exact prompt, then measures
 the canonical structured owner-stop record plus first Stop consumption and an
 identical terminal-generation replay. Delegated effects remain covered by the
 focused fake-adapter E2E because a timing run must not prompt any real runtime.
@@ -299,20 +305,22 @@ The plan retains 500 samples, zero model processes, temporary SQLite state, and
 supported aggregate service teardown.
 
 The 2026-09-03 owner-machine run was based on exact `origin/main`
-`a0f19cff697b24891bbfcece33f4912fe8d92828`; output SHA-256 was
-`4d6b33decb8a6949560024081fba0f6d3b7b8f5eca9340dbdb0291d67b58124e`:
+`8f8051b697fe5d4a7a618611c1c9c2498d882d4e`; output SHA-256 was
+`cb7c492d49974437c14ab68daffa76650437b99687e4079bc4e17a9370269369`:
 
 | Operation | p50 ms | p95 ms | min / max ms |
 | --- | ---: | ---: | ---: |
-| Aggregate `service-ping`, three isolated bindings | 3.489 | 3.898 | 2.879 / 9.920 |
-| Targeted exact-actor `ping` | 0.101 | 0.168 | 0.074 / 0.513 |
-| Semantic owner-stop record + consume + identical replay | 0.277 | 0.452 | 0.230 / 0.726 |
+| Aggregate `service-ping`, three isolated bindings | 3.597 | 4.099 | 3.076 / 5.771 |
+| Targeted exact-actor `ping` | 0.102 | 0.175 | 0.073 / 0.778 |
+| Semantic owner-stop record + consume + identical replay | 0.275 | 0.404 | 0.232 / 0.872 |
 
 The first run failed only at teardown because this older benchmark still sent an
 unscoped `{kind: stop}` message after aggregate Stop identity was hardened. The
 script now calls the supported `stop_supervisor(state)` helper, which supplies
-the exact complete binding snapshot. The successful rerun created no provider
-or model process, contacted no live multiplexer, and mutated no live state.
+the exact complete binding snapshot. Its default invocation remains the
+schema-v1 ping-only contract; only `--include-owner-stop` emits schema v2. The
+successful rerun created no provider or model process, contacted no live
+multiplexer, and mutated no live state.
 
 ## What is proved and what remains
 

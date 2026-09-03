@@ -4,7 +4,11 @@ from typing import Any, Mapping
 from ...adapter_types import HARNESS_CAPABILITIES, AdapterContract
 from ...provider_lifecycle import ProviderLifecycle
 from ...storage_types import StorageRefusal
-from ..base import DeclaredAgentAdapter, deliver_via_multiplexer
+from ..base import (
+    DeclaredAgentAdapter,
+    deliver_via_multiplexer,
+    steer_via_multiplexer,
+)
 from ..core import declared_lifecycle_operations
 from .descriptor import replacement_descriptor_transactions
 
@@ -283,6 +287,7 @@ def adapter() -> DeclaredAgentAdapter:
         },
         _visible_launch_factory,
         deliver_via_multiplexer,
+        steer_via_multiplexer,
         _presentation,
         _assignment,
         replacement_descriptor_transactions,

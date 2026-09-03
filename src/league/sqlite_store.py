@@ -79,6 +79,7 @@ from .sqlite_project_ops import set_project_suggestions as set_project_suggestio
 from .sqlite_outbox_ops import acknowledge_outbox as acknowledge_outbox_operation
 from .sqlite_outbox_ops import claim_outbox as claim_outbox_operation
 from .sqlite_outbox_ops import delivery_target as delivery_target_operation
+from .sqlite_outbox_ops import direct_delivery_target as direct_delivery_target_operation
 from .sqlite_outbox_ops import fail_outbox as fail_outbox_operation
 from .sqlite_outbox_ops import outbox_envelope as outbox_envelope_operation
 from .sqlite_outbox_ops import pending_backlog as pending_backlog_operation
@@ -158,6 +159,7 @@ from .sqlite_watcher_ops import register_runtime as register_runtime_operation
 from .sqlite_watcher_ops import register_watcher as register_watcher_operation
 from .sqlite_watcher_ops import set_allow_stop_once as set_allow_stop_once_operation
 from .sqlite_watcher_ops import prepare_owner_stop_control as prepare_owner_stop_control_operation
+from .sqlite_watcher_ops import pending_owner_stop_controls as pending_owner_stop_controls_operation
 from .sqlite_watcher_ops import finalize_owner_stop_control as finalize_owner_stop_control_operation
 from .sqlite_watcher_ops import fail_owner_stop_control as fail_owner_stop_control_operation
 from .sqlite_watcher_ops import stop_decision as stop_decision_operation
@@ -171,6 +173,7 @@ from .storage_outbox import OutboxDispatchIdentity
 from .storage_request import (
     AnswerRequestCommand,
     DispatchRequestCommand,
+    OwnerStopControl,
     ReconcileDuplicateRequestCommand,
     RequestProgressCommand,
     RequestResultCommand,
@@ -3121,7 +3124,7 @@ class SQLiteStorage(SQLiteTransactionCore):
         actions: tuple[Any, ...],
         at: str,
         *,
-        owner_controls: tuple[dict[str, Any], ...] = (),
+        owner_controls: tuple[OwnerStopControl, ...] = (),
     ) -> dict[str, Any]:
         from .sqlite_request_ops import commit_interactive_request_turn
 
@@ -3495,6 +3498,11 @@ class SQLiteStorage(SQLiteTransactionCore):
     ) -> Optional[dict[str, Any]]:
         return delivery_target_operation(self, recipient_agent_id, at)
 
+    def direct_delivery_target(
+        self, recipient_agent_id: str, at: str
+    ) -> Optional[dict[str, Any]]:
+        return direct_delivery_target_operation(self, recipient_agent_id, at)
+
     def outbox_envelope(
         self, outbox_id: str, event_id: str, recipient_agent_id: str
     ) -> dict[str, Any]:
@@ -3803,6 +3811,11 @@ class SQLiteStorage(SQLiteTransactionCore):
             interrupt_delegates,
             at,
         )
+
+    def pending_owner_stop_controls(
+        self, scope_ids: tuple[str, ...], *, limit: int = 64
+    ) -> tuple[dict[str, Any], ...]:
+        return pending_owner_stop_controls_operation(self, scope_ids, limit=limit)
 
     def finalize_owner_stop_control(
         self, actor_agent_id: str, control_id: str, at: str

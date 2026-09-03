@@ -72,6 +72,10 @@ class AgentAdapterRegistry:
             "delivery" in adapter.lifecycle_operations
             and not callable(getattr(adapter, "delivery_handler", None))
         )
+        invalid_steering = (
+            "steer" in adapter.lifecycle_operations
+            and not callable(getattr(adapter, "steering_handler", None))
+        )
         invalid_providers = (
             not isinstance(getattr(adapter, "provider_kinds", None), frozenset)
             or not adapter.provider_kinds
@@ -115,7 +119,7 @@ class AgentAdapterRegistry:
         )
         if (
             unknown or missing_methods or unsupported or invalid_profiles
-            or invalid_launch or invalid_delivery or invalid_providers
+            or invalid_launch or invalid_delivery or invalid_steering or invalid_providers
             or invalid_presentation or invalid_assignment or invalid_aliases
             or invalid_descriptor_factory
             or invalid_multiplexer_requirements

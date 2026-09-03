@@ -123,6 +123,7 @@ def adapter() -> DeclaredAgentAdapter:
         },
         _visible_launch_factory,
         _deliver,
+        _deliver,
         _presentation,
         native_assignment,
         no_replacement_descriptor_transactions,

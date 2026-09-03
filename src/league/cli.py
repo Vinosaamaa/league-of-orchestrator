@@ -9,6 +9,7 @@ import os
 import sqlite3
 import sys
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, BinaryIO, Callable, Optional
@@ -55,6 +56,7 @@ from .storage_request import (
     MAX_TRIAGE_TURN_BYTES,
     MAX_TRIAGE_TURN_PROMPTS,
     AnswerRequestCommand,
+    OwnerStopControl,
     ReconcileDuplicateRequestCommand,
     RequestProgressCommand,
     RequestResultCommand,
@@ -1424,7 +1426,10 @@ def _add_hook_commands(groups: argparse._SubParsersAction) -> None:
     rearm = commands.add_parser("rearm", help="Bind the next possible block to a fresh event wait generation.")
     for name in ("scope-id", "actor-agent-id", "event-id", "at"):
         rearm.add_argument(f"--{name}", required=True)
-    allow = commands.add_parser("allow-stop-once", help="Permit one explicit final Stop decision.")
+    allow = commands.add_parser(
+        "allow-stop-once",
+        help="Retired compatibility command; refuses in favor of semantic owner control.",
+    )
     allow.add_argument("--scope-id", required=True)
     allow.add_argument("--actor-agent-id", required=True)
     stop = commands.add_parser("stop", help="Combine request, assignment, delivery, and cleanup obligations once.")
@@ -2617,9 +2622,44 @@ def _turn_mechanical_id(kind: str, *parts: str) -> str:
     return f"{kind}:{hashlib.sha256(payload).hexdigest()}"
 
 
+@dataclass(frozen=True)
+class _MechanizedTurnDecisions:
+    decisions: list[dict[str, Any]]
+    new_requests: list[dict[str, Any]]
+    owner_controls: tuple[OwnerStopControl, ...]
+
+
+def _mechanize_owner_control(
+    prompt_count: int,
+    prompt: dict[str, Any],
+    items: list[dict[str, Any]],
+    raw_control: Any,
+) -> OwnerStopControl | None:
+    if raw_control is None:
+        return None
+    if (
+        prompt_count != 1
+        or len(items) != 1
+        or items[0]["disposition"] != "acknowledgement"
+        or not isinstance(raw_control, dict)
+        or set(raw_control) != {"action", "interrupt_delegates"}
+        or raw_control.get("action") != "stop"
+        or type(raw_control.get("interrupt_delegates")) is not bool
+    ):
+        raise StorageRefusal(
+            "owner_stop_invalid",
+            "owner stop requires one fully acknowledged prompt and an exact structured control",
+        )
+    return OwnerStopControl(
+        control_id=_turn_mechanical_id("owner-stop", str(prompt["prompt_id"])),
+        prompt_id=str(prompt["prompt_id"]),
+        interrupt_delegates=raw_control["interrupt_delegates"],
+    )
+
+
 def _mechanize_turn_decisions(
     intake: dict[str, Any], value: Any, at: str
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+) -> _MechanizedTurnDecisions:
     prompts = intake["prompts"]
     candidate_inventory = intake.get("candidate_inventory", {})
     candidates = {
@@ -2633,7 +2673,7 @@ def _mechanize_turn_decisions(
         )
     decisions: list[dict[str, Any]] = []
     new_requests: list[dict[str, Any]] = []
-    owner_controls: list[dict[str, Any]] = []
+    owner_controls: list[OwnerStopControl] = []
     for prompt_index, (prompt, raw_decision) in enumerate(zip(prompts, value), start=1):
         if (
             not isinstance(raw_decision, dict)
@@ -2728,32 +2768,17 @@ def _mechanize_turn_decisions(
                         "runtime_instance_id": prompt["owner_runtime_instance_id"],
                     }
                 )
-        raw_control = raw_decision.get("owner_control")
-        if raw_control is not None:
-            if (
-                len(prompts) != 1
-                or len(items) != 1
-                or items[0]["disposition"] != "acknowledgement"
-                or not isinstance(raw_control, dict)
-                or set(raw_control) != {"action", "interrupt_delegates"}
-                or raw_control.get("action") != "stop"
-                or type(raw_control.get("interrupt_delegates")) is not bool
-            ):
-                raise StorageRefusal(
-                    "owner_stop_invalid",
-                    "owner stop requires one fully acknowledged prompt and an exact structured control",
-                )
-            owner_controls.append(
-                {
-                    "control_id": _turn_mechanical_id(
-                        "owner-stop", str(prompt["prompt_id"])
-                    ),
-                    "prompt_id": str(prompt["prompt_id"]),
-                    "interrupt_delegates": raw_control["interrupt_delegates"],
-                }
-            )
+        owner_control = _mechanize_owner_control(
+            len(prompts), prompt, items, raw_decision.get("owner_control")
+        )
+        if owner_control is not None:
+            owner_controls.append(owner_control)
         decisions.append({"prompt_id": prompt["prompt_id"], "items": items})
-    return decisions, new_requests, owner_controls
+    return _MechanizedTurnDecisions(
+        decisions=decisions,
+        new_requests=new_requests,
+        owner_controls=tuple(owner_controls),
+    )
 
 
 def _turn_dispatch_plans(
@@ -4275,20 +4300,22 @@ def _run_interactive_request_turn(
         sink.flush()
         expected_prompt_ids = tuple(prompt["prompt_id"] for prompt in intake["prompts"])
         begin_payload = _turn_begin_payload(source, intake, expected_prompt_ids)
-        decisions, new_requests, owner_controls = _mechanize_turn_decisions(
+        mechanized = _mechanize_turn_decisions(
             intake, begin_payload["decisions"], begin_at
         )
         begun = store.begin_request_turn(
             args.owner_agent_id,
             expected_prompt_ids,
-            decisions,
-            _turn_dispatch_plans(begin_payload["plans"], begin_at, new_requests),
+            mechanized.decisions,
+            _turn_dispatch_plans(
+                begin_payload["plans"], begin_at, mechanized.new_requests
+            ),
             begin_at,
             expected_candidate_digest=intake["candidate_inventory"]["snapshot_digest"],
             candidate_limit=args.candidate_limit,
             candidate_max_bytes=args.candidate_max_bytes,
         )
-        for request, route in zip(new_requests, begun["routing"]):
+        for request, route in zip(mechanized.new_requests, begun["routing"]):
             route["mechanical"] = {
                 "request_id": request["request_id"],
                 "claim_token": _turn_mechanical_id("claim", request["request_id"]),
@@ -4315,10 +4342,10 @@ def _run_interactive_request_turn(
             args.owner_agent_id,
             turn_token,
             _turn_commit_actions(
-                commit_payload["actions"], commit_at, new_requests, begun
+                commit_payload["actions"], commit_at, mechanized.new_requests, begun
             ),
             commit_at,
-            owner_controls=tuple(owner_controls),
+            owner_controls=mechanized.owner_controls,
         )
         request_state_committed = True
         from .owner_stop import execute_owner_stop_controls

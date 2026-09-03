@@ -26,7 +26,7 @@ from league.persistent_supervisor import (  # noqa: E402
 )
 from league.request_services import DeliveryReceipt  # noqa: E402
 from league.sqlite_store import SQLiteStorage  # noqa: E402
-from league.storage import RuntimeRegistrationCommand  # noqa: E402
+from league.storage import RuntimeRegistrationCommand, StorageRefusal  # noqa: E402
 from lifecycle_fakes import FakeDeliveryAdapter  # noqa: E402
 from request_lifecycle_fixture import (  # noqa: E402
     GAREN_RUNTIME,
@@ -58,12 +58,16 @@ class FakeControlMultiplexer:
 
 
 class ExactControlAdapter:
-    def __init__(self) -> None:
+    def __init__(self, *, fail_first: bool = False) -> None:
         self.calls: list[tuple[str, dict[str, object], dict[str, object]]] = []
+        self.fail_first = fail_first
 
     def send(self, channel, target, envelope):
         assert channel == "direct"
         self.calls.append((channel, dict(target), dict(envelope)))
+        if self.fail_first:
+            self.fail_first = False
+            raise RuntimeError("synthetic unexpected owner-stop steering failure")
         return DeliveryReceipt(
             outbox_id=str(envelope["outbox_id"]),
             event_id=str(envelope["event_id"]),
@@ -206,6 +210,7 @@ def test_codex_pi_owner_control_uses_declared_steering() -> None:
     registry = builtin_agent_adapter_registry()
     for kind in ("codex", "pi"):
         adapter = registry.adapter(kind)
+        assert adapter.steering_handler is not adapter.delivery_handler
         multiplexer = FakeControlMultiplexer()
         adapter.control_delegated(
             target={"routing_name": f"synthetic-{kind}", "locator": "pane:synthetic"},
@@ -388,6 +393,18 @@ def test_live_watcher_owner_stop_interrupts_exact_codex_pi_delegates_only(
         owner_id=JARVAN_ID,
         harness_kind="codex-thread",
     )
+    # Attached watcher routing is valid for ordinary delivery, but an exact
+    # owner control must bypass it and target the captured delegated runtime.
+    store.register_watcher(
+        "watcher:Thresh",
+        "watcher:persistent:thresh",
+        CHAMPION_ID,
+        "runtime:thresh",
+        "unix:/tmp/synthetic-thresh-watcher.sock",
+        clock.after(300),
+        1,
+        clock.now(),
+    )
     startup_delivery = FakeDeliveryAdapter()
     store.close()
     runtime = PersistentSupervisor(
@@ -433,11 +450,22 @@ def test_live_watcher_owner_stop_interrupts_exact_codex_pi_delegates_only(
                 clock.now(),
             )
             adapter = ExactControlAdapter()
+            with patch(
+                "league.sqlite_store.finalize_owner_stop_control_operation",
+                side_effect=StorageRefusal(
+                    "busy", "synthetic transient finalization", retryable=True
+                ),
+            ):
+                pending = execute_owner_stop_controls(
+                    control_store, (prepared,), clock.now(), adapter=adapter
+                )
+            assert pending[0]["state"] == "dispatch_pending"
+            first_call_count = len(adapter.calls)
             completed = execute_owner_stop_controls(
                 control_store, (prepared,), clock.now(), adapter=adapter
             )
             assert completed[0]["state"] == "authorized"
-            first_call_count = len(adapter.calls)
+            assert len(adapter.calls) == first_call_count
             repeated = execute_owner_stop_controls(
                 control_store, (prepared,), clock.now(), adapter=adapter
             )
@@ -469,6 +497,83 @@ def test_live_watcher_owner_stop_interrupts_exact_codex_pi_delegates_only(
         stop_supervisor(state)
         thread.join(timeout=5)
     assert not thread.is_alive() and not errors
+
+
+def test_persistent_supervisor_recovers_failed_owner_control(root: Path) -> None:
+    state, store = _multisquad_state(root, "owner-stop-service-recovery")
+    from lifecycle_fakes import FakeClock
+
+    clock = FakeClock("2020-01-01T00:00:00Z")
+    with store._transaction():
+        store.connection.execute(
+            "UPDATE agent_instances SET status='completed' WHERE shotcaller_agent_id=?",
+            (SHOTCALLER_ID,),
+        )
+    _add_delegated_runtime(
+        store,
+        clock,
+        actor_id=PI_WORKER_ID,
+        callsign="Curie",
+        owner_id=SHOTCALLER_ID,
+        harness_kind="pi-thread",
+    )
+    prompt = store.intake_prompt(
+        "prompt:owner-stop:recovery",
+        SHOTCALLER_ID,
+        GAREN_RUNTIME,
+        "codex",
+        "session:owner-stop:recovery",
+        "source:owner-stop:recovery",
+        "Recover this structured owner stop.",
+        clock.now(),
+    )
+    store.triage_prompt(
+        prompt["prompt_id"],
+        [
+            {
+                "prompt_item_id": "item:owner-stop:recovery",
+                "ordinal": 1,
+                "summary": "Recover delegated pause",
+                "disposition": "acknowledgement",
+                "request_id": None,
+            }
+        ],
+        clock.now(),
+    )
+    prepared = store.prepare_owner_stop_control(
+        SHOTCALLER_ID,
+        "owner-stop:recovery",
+        prompt["prompt_id"],
+        True,
+        clock.now(),
+    )
+    store.close()
+
+    adapter = ExactControlAdapter(fail_first=True)
+    runtime = PersistentSupervisor(state, delivery_adapter=adapter)
+    runtime._bindings = {
+        SHOTCALLER_ID: {"scope_id": prepared["scope_id"]}
+    }
+    runtime._recover_owner_stops()
+    with SQLiteStorage(state) as observer:
+        failed = observer.pending_owner_stop_controls((str(prepared["scope_id"]),))
+        assert failed[0]["state"] == "failed"
+        with observer._transaction():
+            observer.connection.execute(
+                "UPDATE delivery_outbox SET available_at='2000-01-01T00:00:00Z' "
+                "WHERE outbox_id=?",
+                (prepared["targets"][0]["outbox_id"],),
+            )
+    runtime._recover_owner_stops()
+    with SQLiteStorage(state) as observer:
+        selected = observer.resolve_supervisor_scope(SHOTCALLER_ID)
+        row = observer.connection.execute(
+            "SELECT metadata_json FROM watcher_scopes WHERE scope_id=?",
+            (selected["scope_id"],),
+        ).fetchone()
+        owner_stop = json.loads(row["metadata_json"])["owner_stop"]
+        assert owner_stop["state"] == "authorized", owner_stop
+    assert len(adapter.calls) == 2
 
 
 def test_owner_stop_control_rolls_back_with_turn_commit(root: Path) -> None:
@@ -601,6 +706,7 @@ def main() -> None:
         test_codex_pi_owner_control_uses_declared_steering()
         test_codex_and_pi_require_semantic_control_and_consume_by_generation(root)
         test_live_watcher_owner_stop_interrupts_exact_codex_pi_delegates_only(root)
+        test_persistent_supervisor_recovers_failed_owner_control(root)
         test_owner_stop_control_rolls_back_with_turn_commit(root)
         test_startup_scope_reconciliation_selects_one_or_refuses_actionably(root)
     print(

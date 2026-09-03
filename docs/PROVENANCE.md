@@ -812,8 +812,9 @@ prompts, or closes a process.
 Ashe's post-release live exercise proved a remaining control gap: an explicit
 owner stop required repeated manual `allow-stop-once`, a new prompt generation
 blocked again, and delegated work continued. This issue-#66 follow-up is original
-League code based on exact `origin/main`
-`a0f19cff697b24891bbfcece33f4912fe8d92828`. It does not interpret natural
+League code rebased onto exact `origin/main`
+`8f8051b697fe5d4a7a618611c1c9c2498d882d4e` without changing its 0.2.52
+release identity or bytes. It does not interpret natural
 language in hooks. The active Shotcaller alone emits a structured semantic
 `owner_control`; the final request-turn transaction records its exact prompt,
 owner, scope, and user-message generation together with deterministic delegated
@@ -823,16 +824,35 @@ runtime. Codex and Pi use their declared provider-native steering/prompt surface
 Cursor retains state-aware steering, and the multiplexer remains registry-
 selected.
 
+The request transaction commits recording, request effects, outboxes, and turn
+state atomically; provider steering is necessarily post-commit. The persistent
+service retries current `dispatch_pending`/`failed` controls from exact bound
+scopes. Exact recipient receipts prevent replayed provider effects, and a
+transient final authorization write remains pending rather than falsely marking
+delivery failed. Owner control bypasses attached watcher routing and resolves the
+captured delegated runtime directly.
+
 Authorization is withheld until every requested outbox has an exact recipient
 receipt. Stop consumes it for the matching user generation, permits an identical
 terminal-generation retry without a loop, and refuses reuse by another terminal
-or owner prompt. Pending/failed delivery remains a visible refusal. Existing
-manual one-shot compatibility, notification mode, attachment mode, and detached
-watcher handoff are unchanged. Startup and hook paths now use the same bounded
+or owner prompt. Pending/failed delivery remains a visible refusal. The generic
+one-shot override is retired and refuses without mutation; notification mode,
+attachment mode, and verified detached watcher handoff remain independent.
+Startup and hook paths now use the same bounded
 scope resolver: one valid scope wins, a sole persistent-service owner reconciles
 multiple historical candidates, and all other ambiguity fails with Shotcaller
 and candidate-count repair evidence rather than generic
 `supervisor_binding_invalid`.
+
+The owner-machine benchmark plan is reproducible and synthetic: from the exact
+candidate worktree run
+`PYTHONDONTWRITEBYTECODE=1 python3 scripts/benchmark_watcher_service.py --samples 500 --include-owner-stop`.
+It creates only a temporary three-Squad state, one non-model service thread, and
+500 samples per operation. The current run produced schema v2 with service ping
+p50/p95 3.597/4.099 ms, targeted ping 0.102/0.175 ms, and semantic owner-stop
+record plus two Stop decisions 0.275/0.404 ms. The one-line JSON receipt SHA-256
+is `cb7c492d49974437c14ab68daffa76650437b99687e4079bc4e17a9370269369`.
+The default command without `--include-owner-stop` remains schema v1 compatible.
 
 ### Current-main reconciliation and encountered failures
 
@@ -875,6 +895,15 @@ failure evidence:
 | Initial scope reconciliation excluded imported watcher schema v2 and changed one malformed-policy assertion from `supervision_policy_invalid` to a generic scope code. | Valid historical scopes explicitly include initialized schema v2/v3; a sole malformed policy preserves its precise refusal, while multi-candidate invalidity/ambiguity returns bounded repair evidence. |
 | The first affected request-lifecycle gate reached the expected malformed Calm policy but the resolver hid its precise refusal. | The resolver now replays `_policy_from_scope` for a sole invalid candidate; the failing test and remaining affected request tests pass. |
 | The owner-machine benchmark's stale unscoped teardown was rejected by the hardened aggregate Stop protocol. | The benchmark now uses `stop_supervisor(state)`, which snapshots and validates the complete synthetic binding set. No production relaxation was made. |
+| PR #150 review found post-commit owner steering had no durable recovery, delivery and finalization failures were conflated, and unexpected adapter failures could escape after the turn committed. | Exact active-scope recovery now retries pending/failed controls; receipt-backed retries are idempotent, finalization failure remains pending, and external exceptions return bounded durable failure evidence. |
+| PR #150 review found owner steering reused ordinary delivery and could select an attached watcher despite requiring an exact direct runtime. | Every adapter has a distinct declared steering handler, and owner control uses an explicit direct-target resolver fenced by the captured runtime identity. |
+| PR #150 review found per-owner scope, delegate-runtime, and receipt lookups were N+1 and the canonical watcher imported a private obligation helper. | Startup scopes, delegate runtimes, and outbox states are batch-loaded under existing bounds; `obligation_counts` is now a public operation helper. |
+| PR #150 review found the benchmark changed its default schema and imported test-only identity constants. | Default `run(samples)` preserves v1 output; `--include-owner-stop` opts into v2, using benchmark-owned synthetic identities. |
+| The new P0 unbound Stop regression first failed because absent broker resolution mapped no actor to a supervisor refusal. | Codex, Cursor, and Pi now emit their allow/no-op before terminal-generation or supervisor mutation when exact actor resolution returns none; bound Shotcallers still fail closed and Champions retain their transition gate. |
+| Follow-up review found the generic one-shot bit could still authorize a bound attached Shotcaller. | Both canonical and retired JSON compatibility commands now refuse actionably without mutation, legacy stored bits are ignored, and same-generation plus rearmed Stops re-evaluate and block while obligations remain. This deliberately supersedes the baseline one-shot behavior. |
+| The first cross-provider rearm regression treated the imported fixture manifest as a clock and raised `AttributeError`; its next run also expected Codex's `decision` shape from Cursor/Pi follow-up adapters. | The test now uses the fixture's canonical timestamp and provider-neutral nonempty-block/empty-allow assertions across Codex, Cursor, and Pi retries. |
+| The first unexpected-adapter recovery run left the outbox lease claimed, so the next service attempt recorded `delivery_claimed`. | `DeliveryService` now fails/releases the exact outbox for every adapter exception before propagating bounded evidence; the persistent retry then delivers once and authorizes. |
+| The first retired-JSON one-shot regression looked for a Shotcaller-scoped state file although its control fixture intentionally uses the root compatibility state. | The test now snapshots the exact root state, proves command refusal makes no change, injects a legacy bit, and proves repeated Stop still blocks. |
 
 No row above involved a live install, Herdr restart, live canonical-state
 mutation, real multiplexer effect, or provider call.

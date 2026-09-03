@@ -15,6 +15,7 @@ from .storage_request import (
     MAX_TASK_RESULT_SOURCES,
     AnswerRequestCommand,
     DispatchRequestCommand,
+    OwnerStopControl,
     ReconcileDuplicateRequestCommand,
     RequestResultCommand,
     TurnDispatchPlan,
@@ -1044,14 +1045,14 @@ def commit_interactive_request_turn(
     actions: tuple[AnswerRequestCommand | RequestResultCommand, ...],
     at: str,
     *,
-    owner_controls: tuple[dict[str, Any], ...] = (),
+    owner_controls: tuple[OwnerStopControl, ...] = (),
 ) -> dict[str, Any]:
     """Commit request effects, semantic controls, and the supervisor turn atomically."""
 
     from .sqlite_watcher_ops import commit_shotcaller_turn, prepare_owner_stop_control
 
     if len(owner_controls) > 1 or any(
-        not isinstance(control, dict) for control in owner_controls
+        not isinstance(control, OwnerStopControl) for control in owner_controls
     ):
         raise StorageRefusal(
             "owner_stop_invalid", "one request turn can record at most one owner stop"
@@ -1063,9 +1064,9 @@ def commit_interactive_request_turn(
                 prepare_owner_stop_control(
                     store,
                     owner_agent_id,
-                    str(control.get("control_id", "")),
-                    str(control.get("prompt_id", "")),
-                    control.get("interrupt_delegates"),
+                    control.control_id,
+                    control.prompt_id,
+                    control.interrupt_delegates,
                     at,
                 )
                 for control in owner_controls
@@ -1089,10 +1090,10 @@ def commit_interactive_request_turn(
 def request_turn_boundary(store: Any, owner_agent_id: str) -> dict[str, Any]:
     """Return the full Stop-equivalent obligation boundary on the open connection."""
 
-    from .sqlite_watcher_ops import _obligation_counts
+    from .sqlite_watcher_ops import obligation_counts
 
     requests = unresolved_requests(store, owner_agent_id)
-    obligations = _obligation_counts(store, owner_agent_id)
+    obligations = obligation_counts(store, owner_agent_id)
     return {
         **requests,
         "obligations": obligations,

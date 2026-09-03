@@ -383,6 +383,39 @@ def pending_backlog(
     return result
 
 
+def direct_delivery_target(
+    store: Any, recipient_agent_id: str, at: str
+) -> Optional[dict[str, Any]]:
+    _time(at, "direct delivery target time")
+    runtime = store.connection.execute(
+        """
+        SELECT r.runtime_instance_id,r.endpoint,r.runtime_generation,r.status,r.verified,
+               r.harness_kind,r.backend_kind,r.session_ref,a.routing_name,a.thread_id
+          FROM runtime_instances r
+          JOIN agent_instances a ON a.agent_id=r.actor_agent_id
+         WHERE r.actor_agent_id=? AND r.status IN ('active','idle') AND r.verified=1
+           AND a.retired_at IS NULL
+         ORDER BY last_seen_at DESC,runtime_instance_id
+         LIMIT 1
+        """,
+        (recipient_agent_id,),
+    ).fetchone()
+    if runtime is None:
+        return None
+    return {
+        "channel": "direct",
+        "runtime_instance_id": runtime["runtime_instance_id"],
+        "locator": runtime["endpoint"],
+        "generation": runtime["runtime_generation"],
+        "backend_kind": runtime["backend_kind"],
+        "harness_kind": runtime["harness_kind"],
+        "session_ref": runtime["session_ref"],
+        "routing_name": runtime["routing_name"],
+        "thread_id": runtime["thread_id"],
+        "fence": None,
+    }
+
+
 def delivery_target(store: Any, recipient_agent_id: str, at: str) -> Optional[dict[str, Any]]:
     now = _time(at, "delivery target time")
     watcher = store.connection.execute(
@@ -411,33 +444,7 @@ def delivery_target(store: Any, recipient_agent_id: str, at: str) -> Optional[di
                 "generation": watcher["runtime_generation"],
                 "fence": int(watcher["fence"]),
             }
-    runtime = store.connection.execute(
-        """
-        SELECT r.runtime_instance_id,r.endpoint,r.runtime_generation,r.status,r.verified,
-               r.harness_kind,r.backend_kind,r.session_ref,a.routing_name,a.thread_id
-          FROM runtime_instances r
-          JOIN agent_instances a ON a.agent_id=r.actor_agent_id
-         WHERE r.actor_agent_id=? AND r.status IN ('active','idle') AND r.verified=1
-           AND a.retired_at IS NULL
-         ORDER BY last_seen_at DESC,runtime_instance_id
-         LIMIT 1
-        """,
-        (recipient_agent_id,),
-    ).fetchone()
-    if runtime is None:
-        return None
-    return {
-        "channel": "direct",
-        "runtime_instance_id": runtime["runtime_instance_id"],
-        "locator": runtime["endpoint"],
-        "generation": runtime["runtime_generation"],
-        "backend_kind": runtime["backend_kind"],
-        "harness_kind": runtime["harness_kind"],
-        "session_ref": runtime["session_ref"],
-        "routing_name": runtime["routing_name"],
-        "thread_id": runtime["thread_id"],
-        "fence": None,
-    }
+    return direct_delivery_target(store, recipient_agent_id, at)
 
 
 def outbox_envelope(

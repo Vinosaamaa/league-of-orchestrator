@@ -24,13 +24,15 @@ from league.persistent_supervisor import (  # noqa: E402
 )
 from league.sqlite_store import SQLiteStorage  # noqa: E402
 from lifecycle_fakes import FakeDeliveryAdapter  # noqa: E402
-from request_lifecycle_fixture import GAREN_RUNTIME  # noqa: E402
-from storage_fixture import SHOTCALLER_ID  # noqa: E402
 from test_multisquad_supervisor import (  # noqa: E402
     CountingRuntimeObserver,
     FakeWakeAdapter,
     _multisquad_state,
 )
+
+
+BENCHMARK_OWNER_ID = "11111111-1111-4111-8111-111111111111"
+BENCHMARK_OWNER_RUNTIME = "runtime:garen:one"
 
 
 def _percentile(values: Sequence[float], fraction: float) -> float:
@@ -71,8 +73,8 @@ def _measure_owner_stop(state: Path, samples: int) -> list[float]:
             prompt_id = f"benchmark-owner-stop-prompt:{ordinal}"
             store.intake_prompt(
                 prompt_id,
-                SHOTCALLER_ID,
-                GAREN_RUNTIME,
+                BENCHMARK_OWNER_ID,
+                BENCHMARK_OWNER_RUNTIME,
                 "codex",
                 f"benchmark-session:{ordinal}",
                 f"benchmark-source:{ordinal}",
@@ -94,7 +96,7 @@ def _measure_owner_stop(state: Path, samples: int) -> list[float]:
             )
             started = time.perf_counter_ns()
             prepared = store.prepare_owner_stop_control(
-                SHOTCALLER_ID,
+                BENCHMARK_OWNER_ID,
                 f"benchmark-owner-stop-control:{ordinal}",
                 prompt_id,
                 False,
@@ -102,13 +104,13 @@ def _measure_owner_stop(state: Path, samples: int) -> list[float]:
             )
             first = store.stop_decision(
                 str(prepared["scope_id"]),
-                SHOTCALLER_ID,
+                BENCHMARK_OWNER_ID,
                 f"benchmark-terminal:{ordinal}",
                 at,
             )
             replay = store.stop_decision(
                 str(prepared["scope_id"]),
-                SHOTCALLER_ID,
+                BENCHMARK_OWNER_ID,
                 f"benchmark-terminal:{ordinal}",
                 at,
             )
@@ -122,7 +124,7 @@ def _measure_owner_stop(state: Path, samples: int) -> list[float]:
     return values
 
 
-def run(samples: int) -> dict[str, Any]:
+def run(samples: int, *, include_owner_stop: bool = False) -> dict[str, Any]:
     if not 10 <= samples <= 5_000:
         raise ValueError("samples must be between 10 and 5000")
     with tempfile.TemporaryDirectory(prefix="league-watcher-benchmark-") as temporary:
@@ -161,30 +163,47 @@ def run(samples: int) -> dict[str, Any]:
             send_supervisor_message(locator, targeted_message)
             service = _measure(locator, service_message, samples)
             targeted = _measure(locator, targeted_message, samples)
-            owner_stop = _measure_owner_stop(state, samples)
+            owner_stop = (
+                _measure_owner_stop(state, samples) if include_owner_stop else None
+            )
         finally:
             stop_supervisor(state)
             thread.join(timeout=5)
         if thread.is_alive() or errors:
             raise RuntimeError(f"watcher benchmark service did not stop cleanly: {errors!r}")
-    return {
-        "schema": "league.watcher-service-benchmark.v2",
+    result = {
+        "schema": (
+            "league.watcher-service-benchmark.v2"
+            if include_owner_stop
+            else "league.watcher-service-benchmark.v1"
+        ),
         "samples_per_operation": samples,
         "active_squad_count": 3,
         "service_ping": _summary(service),
         "targeted_ping": _summary(targeted),
-        "semantic_owner_stop_record_and_two_stop_decisions": _summary(owner_stop),
         "service_processes": 1,
         "model_processes": 0,
         "synthetic": True,
     }
+    if owner_stop is not None:
+        result["semantic_owner_stop_record_and_two_stop_decisions"] = _summary(
+            owner_stop
+        )
+    return result
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--samples", type=int, default=200)
+    parser.add_argument("--include-owner-stop", action="store_true")
     args = parser.parse_args()
-    print(json.dumps(run(args.samples), sort_keys=True, separators=(",", ":")))
+    print(
+        json.dumps(
+            run(args.samples, include_owner_stop=args.include_owner_stop),
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    )
 
 
 if __name__ == "__main__":

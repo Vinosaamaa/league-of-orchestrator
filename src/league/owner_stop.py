@@ -56,6 +56,17 @@ class _ExactTargetAdapter:
         return self.adapter.send(channel, target, envelope)
 
 
+def _bounded_failure(control: dict[str, Any], reason: object) -> dict[str, Any]:
+    """Return a bounded failure when even durable failure recording is unavailable."""
+
+    return {
+        **control,
+        "state": "failed",
+        "last_error": " ".join(str(reason).split())[:160] or "receiver_unavailable",
+        "idempotent": False,
+    }
+
+
 def execute_owner_stop_controls(
     store: Any,
     controls: tuple[dict[str, Any], ...],
@@ -63,7 +74,7 @@ def execute_owner_stop_controls(
     *,
     adapter: DeliveryAdapter | None = None,
 ) -> list[dict[str, Any]]:
-    """Deliver exact pause controls and authorize Stop only after all receipts."""
+    """Retry exact pause effects and authorize Stop only after all receipts."""
 
     results: list[dict[str, Any]] = []
     for control in controls:
@@ -82,13 +93,14 @@ def execute_owner_stop_controls(
                 "owner_stop_invalid", "prepared semantic owner-stop control is malformed"
             )
         installed = adapter or InstalledDeliveryAdapter(store=store, at=at)
-        exact_adapter = _ExactTargetAdapter(installed, targets)
         service = DeliveryService(
             store,
-            exact_adapter,
+            _ExactTargetAdapter(installed, targets),
             _Clock(at),
             _Ids(),
             dispatcher_id=f"dispatcher:owner-stop:{control_id}",
+            # Owner control must never be redirected through an attached watcher.
+            target_resolver=store.direct_delivery_target,
         )
         try:
             for target in targets:
@@ -97,16 +109,32 @@ def execute_owner_stop_controls(
                     str(target["event_id"]),
                     str(target["recipient_agent_id"]),
                 )
+        except Exception as exc:
+            reason = getattr(exc, "code", None) or str(exc) or "receiver_unavailable"
+            try:
+                results.append(
+                    store.fail_owner_stop_control(
+                        actor_agent_id, control_id, reason, at
+                    )
+                )
+            except Exception as record_exc:
+                results.append(_bounded_failure(control, record_exc))
+            continue
+
+        # External effects are already exact-once. A transient metadata commit
+        # must remain recoverable and must not rewrite the control as failed.
+        try:
             results.append(
                 store.finalize_owner_stop_control(actor_agent_id, control_id, at)
             )
-        except (DeliveryUnavailable, StorageRefusal) as exc:
-            results.append(
-                store.fail_owner_stop_control(
-                    actor_agent_id,
-                    control_id,
-                    getattr(exc, "code", None) or str(exc) or "receiver_unavailable",
-                    at,
-                )
+        except Exception as exc:
+            pending = dict(control)
+            pending["state"] = control.get("state", "dispatch_pending")
+            pending["last_error"] = (
+                " ".join(
+                    str(getattr(exc, "code", None) or str(exc) or "authorization_pending").split()
+                )[:160]
             )
+            pending["idempotent"] = False
+            results.append(pending)
     return results

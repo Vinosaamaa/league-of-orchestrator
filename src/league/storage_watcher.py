@@ -182,6 +182,10 @@ class WatcherStorage(Protocol):
         at: str,
     ) -> dict[str, Any]: ...
 
+    def pending_owner_stop_controls(
+        self, scope_ids: tuple[str, ...], *, limit: int = 64
+    ) -> tuple[dict[str, Any], ...]: ...
+
     def finalize_owner_stop_control(
         self, actor_agent_id: str, control_id: str, at: str
     ) -> dict[str, Any]: ...

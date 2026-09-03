@@ -50,6 +50,10 @@ class OutboxStorage(Protocol):
 
     def delivery_target(self, recipient_agent_id: str, at: str) -> Optional[dict[str, Any]]: ...
 
+    def direct_delivery_target(
+        self, recipient_agent_id: str, at: str
+    ) -> Optional[dict[str, Any]]: ...
+
     def outbox_envelope(
         self, outbox_id: str, event_id: str, recipient_agent_id: str
     ) -> dict[str, Any]: ...

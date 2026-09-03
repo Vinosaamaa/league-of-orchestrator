@@ -34,6 +34,11 @@ from .importer import build_import_plan
 from .sqlite_store import CURRENT_SCHEMA_VERSION, SQLiteStorage
 from .storage import StorageRefusal
 from .storage_types import FaultInjector
+from .agent_adapters import (
+    builtin_agent_adapter_kinds,
+    builtin_agent_adapter_registry,
+)
+from .provider_hooks import release_hook_bootstrap_sources
 
 
 RECEIPT_SCHEMA = "league.acceptance-receipt.v1"
@@ -57,6 +62,7 @@ PENDING_SLICES = (
     ("teardown", 11),
 )
 UNVERIFIED_RUNTIMES = ("codex", "cursor", "pi", "herdr", "tmux")
+REGISTERED_AGENT_ADAPTER_KINDS = frozenset(builtin_agent_adapter_kinds())
 FIXTURE_RUNTIME_ROOT = Path("/synthetic/league-acceptance-runtime")
 MAX_RELEASE_FILE_BYTES = 4 * 1024 * 1024
 RELEASE_READ_CHUNK_BYTES = 64 * 1024
@@ -257,7 +263,7 @@ def _fake_adapters(context: DeterministicContext) -> dict[str, FakeAdapter]:
 
 def validate_hook_fixture(harness: str, payload: dict[str, Any]) -> dict[str, Any]:
     """Validate only the synthetic hook envelope, never provider capability."""
-    if harness not in {"codex", "cursor", "pi"}:
+    if harness not in REGISTERED_AGENT_ADAPTER_KINDS:
         raise StorageRefusal("invalid_hook_fixture", "synthetic harness fixture is unsupported")
     if payload != {
         "schema": HOOK_FIXTURE_SCHEMA,
@@ -439,6 +445,11 @@ def _release_files(source_root: Path) -> list[Path]:
         source_root / "config/league-model-routing.example.json",
         source_root / "config/league-supervisor.launchd.plist.in",
     ]
+    files.extend(
+        release_hook_bootstrap_sources(
+            builtin_agent_adapter_registry(), source_root
+        )
+    )
     files.extend(_release_directory_files(source_root, Path("src/league"), ".py"))
     for package in (
         Path("src/league/agent_adapters"),
@@ -1083,8 +1094,66 @@ def _check_staged_schemas_and_hooks(
                 env=hook_environment,
             )
         )
-        for harness in ("codex", "cursor", "pi")
+        for harness in builtin_agent_adapter_kinds()
     ]
+    hook_profile = home / "provider-hook-profile"
+    hook_profile.mkdir(mode=0o700)
+    rollback_manifest = home / "provider-hook-upgrade-rollback.json"
+    upgrade_arguments = [
+        str(release / "bin/league"),
+        "provider-hooks",
+        "upgrade",
+        "--source-root",
+        str(release),
+        "--profile-root",
+        str(hook_profile),
+        "--stable-watcher",
+        str(release / "bin/agent-watcher"),
+        "--manifest",
+        str(rollback_manifest),
+    ]
+    upgraded = json.loads(
+        _run_checked(upgrade_arguments, cwd=home, env=hook_environment)
+    )
+    if upgraded.get("result", {}).get("state") != "active":
+        raise StorageRefusal("staged_hook_upgrade_failed", "staged hook upgrade failed")
+    rolled_back = json.loads(
+        _run_checked(
+            [
+                str(release / "bin/league"),
+                "provider-hooks",
+                "rollback",
+                "--source-root",
+                str(release),
+                "--profile-root",
+                str(hook_profile),
+                "--stable-watcher",
+                str(release / "bin/agent-watcher"),
+                "--manifest",
+                str(rollback_manifest),
+            ],
+            cwd=home,
+            env=hook_environment,
+        )
+    )
+    if rolled_back.get("result", {}).get("state") != "rolled_back":
+        raise StorageRefusal("staged_hook_upgrade_failed", "staged hook rollback failed")
+    active_manifest = home / "provider-hook-upgrade-active.json"
+    upgrade_arguments[-1] = str(active_manifest)
+    active = json.loads(
+        _run_checked(upgrade_arguments, cwd=home, env=hook_environment)
+    )
+    repeated = json.loads(
+        _run_checked(upgrade_arguments, cwd=home, env=hook_environment)
+    )
+    if (
+        active.get("result", {}).get("state") != "active"
+        or repeated.get("result", {}).get("state") != "active"
+        or repeated.get("result", {}).get("idempotent") is not True
+    ):
+        raise StorageRefusal(
+            "staged_hook_upgrade_failed", "staged active hook upgrade is not idempotent"
+        )
     watcher_help = _run_checked(
         [str(release / "bin/agent-watcher"), "--help"],
         cwd=home,
@@ -1889,7 +1958,7 @@ def run_acceptance(
         adapters["github"].call("inspect-fixture", repository="synthetic://repository")
         adapters["notification"].call("record-only", delivery="disabled")
         adapters["deployment"].call("record-only", deployment="disabled")
-        for harness in ("codex", "cursor", "pi"):
+        for harness in builtin_agent_adapter_kinds():
             adapters["hook"].call(
                 "consume-fixture",
                 **validate_hook_fixture(

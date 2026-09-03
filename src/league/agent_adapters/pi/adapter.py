@@ -11,6 +11,12 @@ from ..base import (
 )
 from ..core import declared_lifecycle_operations
 from .descriptor import replacement_descriptor_transactions
+from .hooks import (
+    BOOTSTRAP_PROFILE,
+    install as install_hook_bootstrap,
+    translate_input,
+    translate_output,
+)
 
 
 def _launch_arguments(
@@ -275,6 +281,10 @@ def adapter() -> DeclaredAgentAdapter:
                 "source_field": "input_id", "output_mode": "followup",
             },
         },
+        BOOTSTRAP_PROFILE,
+        install_hook_bootstrap,
+        translate_input,
+        translate_output,
         {
             "launch": frozenset({"visible_launch"}),
             "resume": frozenset({"provider_session_lifecycle"}),

@@ -50,6 +50,7 @@ from .adapter_types import (
     RuntimeObservation,
 )
 from .adapters import AdapterRegistry, builtin_harness_contracts, builtin_registry
+from .agent_adapters import builtin_agent_adapter_kinds
 from .cleanup import (
     CLEANUP_ADAPTER_KINDS,
     CleanupAdapterRegistry,
@@ -119,7 +120,7 @@ TARGET_KINDS = frozenset(
         "archive_root",
     }
 )
-HARNESS_KINDS = frozenset({"codex", "cursor", "pi"})
+HARNESS_KINDS = frozenset(builtin_agent_adapter_kinds())
 SHOTCALLER_ID = "11111111-1111-4111-8111-111111111111"
 CHAMPION_ID = "55555555-5555-4555-8555-555555555555"
 BASE_TASK_ID = "synthetic-task-19"

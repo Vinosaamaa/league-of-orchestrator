@@ -333,6 +333,17 @@ class FakeAgentAdapter:
                 ("stop_supervision", "synthetic-stop"),
             )
         }
+        self.hook_bootstrap_profile = {
+            "schema": "league.provider-hook-bootstrap.v1",
+            "profile_loaded": True,
+            "activation": "native_hook_payload",
+            "target_relative": f".synthetic/{kind}/hooks.json",
+            "source_relative": None,
+            "launch_enforcement": "native",
+        }
+        self.hook_bootstrap_installer = self._install_hook_bootstrap
+        self.hook_input_translator = lambda _operation, payload: dict(payload)
+        self.hook_output_translator = lambda _operation, output: dict(output)
         self.visible_launch_factory = self.visible_launch
         self.delivery_handler = lambda **_inputs: None
         self.presentation_factory = lambda **inputs: inputs
@@ -353,6 +364,23 @@ class FakeAgentAdapter:
 
     def normalize_provider(self, provider_kind: str) -> str:
         return self.provider_aliases.get(provider_kind, provider_kind)
+
+    def _install_hook_bootstrap(
+        self,
+        *,
+        adapter_kind: str,
+        hook_profile: Mapping[str, Mapping[str, Any]],
+        bootstrap_profile: Mapping[str, Any],
+        source_root: Path,
+        target: Path,
+        stable_watcher: Path,
+    ) -> Mapping[str, Any]:
+        assert adapter_kind == self.kind
+        assert hook_profile == self.hook_profile
+        assert bootstrap_profile == self.hook_bootstrap_profile
+        assert source_root.is_absolute() and target.is_absolute()
+        assert stable_watcher.is_absolute()
+        return {"adapter_kind": adapter_kind, "target": str(target), "added": []}
 
     def visible_launch(self, **inputs: Any) -> ReplacementDriver:
         return ReplacementDriver(self, inputs["launch"], inputs["store"])
@@ -765,10 +793,18 @@ def test_adapter_neutral_replacement_matrix_and_exact_retry(root: Path) -> None:
     pairs = (
         ("codex", "codex", "pi", "codex", "codex-to-pi"),
         ("codex", "codex", "cursor", "cursor", "codex-to-cursor"),
+        ("codex", "codex", "codex", "codex", "codex-same-adapter"),
         ("pi", "codex", "codex", "codex", "pi-to-codex"),
         ("pi", "cursor", "pi", "codex", "pi-cursor-to-codex"),
         ("pi", "codex", "pi", "cursor", "pi-codex-to-cursor"),
+        ("pi", "codex", "pi", "codex", "pi-codex-same-adapter"),
+        ("pi", "cursor", "pi", "cursor", "pi-cursor-same-adapter"),
+        ("pi", "codex", "cursor", "cursor", "pi-codex-to-cursor-runtime"),
+        ("pi", "cursor", "cursor", "cursor", "pi-cursor-to-cursor-runtime"),
         ("cursor", "cursor", "codex", "codex", "cursor-to-codex-runtime"),
+        ("cursor", "cursor", "pi", "codex", "cursor-to-pi-codex"),
+        ("cursor", "cursor", "pi", "cursor", "cursor-to-pi-cursor"),
+        ("cursor", "cursor", "cursor", "cursor", "cursor-same-adapter"),
     )
     for old_kind, old_provider, new_kind, new_provider, suffix in pairs:
         case_root = root / suffix
@@ -1040,7 +1076,7 @@ def test_provider_pre_tool_hooks_observe_open_replacement_fence(root: Path) -> N
         ),
         (
             "cursor", "cursor", "cursor-pre-tool-hook",
-            "conversation_id", "generation_id", "beforeShellExecution",
+            "conversation_id", "generation_id", "preToolUse",
         ),
     )
     for kind, provider, command, session_field, source_field, event in cases:
@@ -1065,15 +1101,51 @@ def test_provider_pre_tool_hooks_observe_open_replacement_fence(root: Path) -> N
                     "hook_event_name": event,
                     session_field: agent["thread_id"],
                     source_field: f"source:replacement:{kind}",
-                    "authorized": True,
+                    **(
+                        {
+                            "tool_name": "Write",
+                            "tool_use_id": f"tool:replacement:{kind}",
+                            "tool_input": {"path": "synthetic.txt"},
+                        }
+                        if kind == "codex"
+                        else {
+                            "tool_name": "Write",
+                            "tool_use_id": f"tool:replacement:{kind}",
+                            "tool_input": {"path": "synthetic.txt"},
+                            "cwd": str(worktree.resolve()),
+                        }
+                        if kind == "cursor"
+                        else {
+                            "session_id": f"session:replacement:{kind}",
+                            "tool_name": "write",
+                            "tool_input": {"path": "synthetic.txt"},
+                        }
+                    ),
                 },
             },
         )
-        assert handled == {
-            "hook_output": {
+        expected_output = (
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": "runtime_replacement_fenced",
+                }
+            }
+            if kind == "codex"
+            else {
+                "permission": "deny",
+                "user_message": "runtime_replacement_fenced",
+            }
+            if kind == "cursor"
+            else {
+                "binding": "bound",
                 "decision": "refuse",
                 "reason_code": "runtime_replacement_fenced",
-            },
+            }
+        )
+        assert handled == {
+            "hook_output": expected_output,
             "capture": None,
             "actor_agent_id": agent["agent_id"],
         }

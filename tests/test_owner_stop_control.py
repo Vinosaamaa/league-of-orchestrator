@@ -183,6 +183,7 @@ def _prompt_hook(kind: str, session: str, generation: str, body: str) -> dict[st
         "command": "pi-input-hook",
         "payload": {
             "hook_event_name": "PiInput",
+            "session_id": "session:pi-owner-stop",
             "session_path": session,
             "input_id": generation,
             "prompt": body,
@@ -205,6 +206,7 @@ def _stop_hook(kind: str, session: str, generation: str) -> dict[str, object]:
         "command": "pi-stop-hook",
         "payload": {
             "hook_event_name": "PiStop",
+            "session_id": "session:pi-owner-stop",
             "session_path": session,
             "input_id": generation,
         },
@@ -341,7 +343,9 @@ def test_codex_and_pi_require_semantic_control_and_consume_by_generation(
         repeated = handle_brokered_hook(
             store, _stop_hook(kind, session, next_generation)
         )
-        assert first["hook_output"] == repeated["hook_output"] == {}
+        assert first["hook_output"] == repeated["hook_output"] == (
+            {"binding": "bound"} if kind == "pi" else {}
+        )
 
         third_generation = f"{generation}:third"
         handle_brokered_hook(

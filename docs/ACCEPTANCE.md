@@ -36,12 +36,12 @@ An active SQLite supervisor owns delivery; without one, the dispatcher uses one
 verified Herdr endpoint. Receipt uniqueness makes a duplicate retry inert, and
 an unavailable endpoint leaves the row pending.
 
-Prompt submission is availability-critical. When a valid hook payload has no
-exact verified runtime identity, the hook stores its complete bytes once in the
-canonical quarantine with a `runtime_unverified` obligation and returns success
-so the local prompt proceeds. `league request bind-prompt` later requires one
-exact actor/runtime/session match, promotes the same prompt without changing its
-identity or bytes, and wakes the bound Shotcaller for model-authored triage.
+Prompt submission is availability-critical. Exact native Codex, Cursor, and Pi
+prompt, pre-mutation, and Stop hook envelopes without a canonical League runtime
+binding return their provider-native allow/no-op result immediately. They write
+no prompt, quarantine, watcher, or Stop state. After canonical promotion, the
+same running provider process uses the ordinary prompt, pre-mutation, and Stop
+policies; a managed binding whose watcher is unavailable still fails closed.
 When the hook session already identifies one canonical Shotcaller but its exact
 runtime is unavailable, the quarantine insert and that Shotcaller's
 `user_message_generation` and `wait_generation` increments are one transaction.
@@ -486,8 +486,11 @@ rewrite a skill. Release-to-installed parity and a real runtime remain #23
 gates.
 
 The staged release manifest also proves exact source/release/staged parity for
-the portable report HTML template, League report skill, and League-specific
-`global-agent-instructions/league/AGENTS.md` source. The isolated package test
+the portable report HTML template, League report skill, League-specific
+`global-agent-instructions/league/AGENTS.md` source, and every adapter-declared
+provider bootstrap asset. The synthetic cutover installer dispatches Codex,
+Pi, and Cursor CLI through their registered installers, preserves unrelated
+native handlers, and makes exact retry byte-inert. The isolated package test
 installs only `league/AGENTS.md`, restores its prior synthetic bytes, and proves
 the synthetic universal `AGENTS.md` hash is identical before install, after
 install, and after rollback. A manifest naming the universal target refuses

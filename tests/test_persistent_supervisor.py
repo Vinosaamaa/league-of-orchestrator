@@ -143,6 +143,181 @@ def _close_secondary_runtime(store: SQLiteStorage, at: str) -> None:
     )
 
 
+def _canonical_hook_surface_digest(state: Path) -> str:
+    """Hash canonical rows while excluding the supervisor's renewable lease."""
+
+    digest = hashlib.sha256()
+    with SQLiteStorage(state, request_wal=False) as store:
+        tables = [
+            str(row["name"])
+            for row in store.connection.execute(
+                """
+                SELECT name FROM sqlite_master
+                 WHERE type='table' AND name NOT LIKE 'sqlite_%'
+                   AND name != 'watcher_registrations'
+                 ORDER BY name
+                """
+            ).fetchall()
+        ]
+        for table in tables:
+            digest.update(table.encode("utf-8"))
+            for row in store.connection.execute(
+                f'SELECT * FROM "{table}" ORDER BY rowid'
+            ).fetchall():
+                digest.update(repr(tuple(row)).encode("utf-8"))
+    return digest.hexdigest()
+
+
+def test_live_aggregate_supervisor_leaves_unbound_native_hooks_inert(
+    root: Path,
+) -> None:
+    state, store, clock = create_context(root, "state")
+    _close_secondary_runtime(store, clock.now())
+    store.close()
+    runtime = PersistentSupervisor(
+        state,
+        lease_seconds=30,
+        renew_seconds=20,
+        wake_adapter=FakeWakeAdapter(),
+        recovery_adapter=FakeRecoveryAdapter(),
+    )
+    thread, errors = _start(runtime)
+    environment = {
+        **os.environ,
+        "LEAGUE_STATE_ROOT": str(state),
+        "PYTHONDONTWRITEBYTECODE": "1",
+    }
+    session_path = str((root / "ordinary-pi-session.jsonl").resolve())
+    cases = (
+        (
+            "codex-user-prompt-hook",
+            {
+                "hook_event_name": "UserPromptSubmit",
+                "session_id": "ordinary-unbound-codex",
+                "turn_id": "turn:ordinary-unbound-codex",
+                "prompt": "ordinary Codex prompt",
+            },
+            {},
+        ),
+        (
+            "codex-pre-tool-hook",
+            {
+                "hook_event_name": "PreToolUse",
+                "session_id": "ordinary-unbound-codex",
+                "turn_id": "turn:ordinary-unbound-codex",
+                "tool_name": "Write",
+                "tool_use_id": "tool:ordinary-unbound-codex",
+                "tool_input": {"path": "synthetic.txt"},
+            },
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "allow",
+                }
+            },
+        ),
+        (
+            "codex-stop-hook",
+            {
+                "hook_event_name": "Stop",
+                "session_id": "ordinary-unbound-codex",
+                "turn_id": "turn:ordinary-unbound-codex",
+                "stop_hook_active": False,
+            },
+            {},
+        ),
+        (
+            "cursor-before-submit-hook",
+            {
+                "hook_event_name": "beforeSubmitPrompt",
+                "conversation_id": "ordinary-unbound-cursor",
+                "generation_id": "generation:ordinary-unbound-cursor",
+                "prompt": "ordinary Cursor prompt",
+            },
+            {"continue": True},
+        ),
+        (
+            "cursor-pre-tool-hook",
+            {
+                "hook_event_name": "preToolUse",
+                "conversation_id": "ordinary-unbound-cursor",
+                "generation_id": "generation:ordinary-unbound-cursor",
+                "tool_name": "Write",
+                "tool_use_id": "tool:ordinary-unbound-cursor",
+                "tool_input": {"path": "synthetic.txt"},
+                "cwd": str(root.resolve()),
+            },
+            {"permission": "allow"},
+        ),
+        (
+            "cursor-stop-hook",
+            {
+                "hook_event_name": "stop",
+                "conversation_id": "ordinary-unbound-cursor",
+                "generation_id": "generation:ordinary-unbound-cursor",
+                "status": "completed",
+                "loop_count": 1,
+            },
+            {},
+        ),
+        (
+            "pi-input-hook",
+            {
+                "hook_event_name": "PiInput",
+                "session_id": "ordinary-unbound-pi",
+                "session_path": session_path,
+                "input_id": "input:ordinary-unbound-pi",
+                "prompt": "ordinary Pi prompt",
+            },
+            {"binding": "unbound"},
+        ),
+        (
+            "pi-pre-tool-hook",
+            {
+                "hook_event_name": "PiToolCall",
+                "session_id": "ordinary-unbound-pi",
+                "session_path": session_path,
+                "input_id": "input:ordinary-unbound-pi",
+                "tool_name": "write",
+                "tool_input": {"path": "synthetic.txt"},
+            },
+            {"binding": "unbound"},
+        ),
+        (
+            "pi-stop-hook",
+            {
+                "hook_event_name": "PiStop",
+                "session_id": "ordinary-unbound-pi",
+                "session_path": session_path,
+                "input_id": "input:ordinary-unbound-pi",
+            },
+            {"binding": "unbound"},
+        ),
+    )
+    before = _canonical_hook_surface_digest(state)
+    try:
+        for command, payload, expected in cases:
+            started = time.monotonic()
+            completed = subprocess.run(
+                [str(ROOT / "bin/agent-watcher"), command],
+                input=json.dumps(payload),
+                capture_output=True,
+                text=True,
+                env=environment,
+                timeout=5,
+                check=False,
+            )
+            elapsed = time.monotonic() - started
+            assert completed.returncode == 0, completed.stderr
+            assert json.loads(completed.stdout) == expected
+            assert elapsed < 2, (command, elapsed)
+        assert _canonical_hook_surface_digest(state) == before
+    finally:
+        stop_supervisor(state)
+        thread.join(timeout=5)
+    assert not thread.is_alive() and not errors
+
+
 def test_runtime_inventory_output_is_bounded() -> None:
     runner = BoundedRuntimeCommandRunner(max_output_bytes=32)
     try:
@@ -161,6 +336,10 @@ def test_runtime_inventory_output_is_bounded() -> None:
 
 def main() -> None:
     test_runtime_inventory_output_is_bounded()
+    with tempfile.TemporaryDirectory(prefix="l84-unbound-live-supervisor-") as temporary:
+        test_live_aggregate_supervisor_leaves_unbound_native_hooks_inert(
+            Path(temporary)
+        )
     with tempfile.TemporaryDirectory(prefix="l66-supervisor-") as temporary:
         root = Path(temporary)
         state, store, clock = create_context(root, "state")
@@ -181,6 +360,37 @@ def main() -> None:
         thread, errors = _start(runtime)
         first = supervisor_status(state, "Garen")
         assert first["live"] and first["event_driven"] and first["lease_valid"], first
+        with SQLiteStorage(state) as observer:
+            unbound_before = (
+                observer.connection.execute("SELECT COUNT(*) FROM prompts").fetchone()[0],
+                observer.connection.execute(
+                    "SELECT COUNT(*) FROM prompt_quarantine"
+                ).fetchone()[0],
+            )
+        unbound = send_supervisor_message(
+            f"unix:{runtime.socket_path}",
+            {
+                "kind": "hook",
+                "hook": {
+                    "command": "pi-input-hook",
+                    "payload": {
+                        "hook_event_name": "PiInput",
+                        "session_id": "synthetic-unbound-pi",
+                        "session_path": "/synthetic/unbound/session.jsonl",
+                        "input_id": "input:unbound",
+                        "prompt": "ordinary unbound Pi prompt",
+                    },
+                },
+            },
+        )
+        assert unbound["hook_output"] == {"binding": "unbound"}
+        with SQLiteStorage(state) as observer:
+            assert (
+                observer.connection.execute("SELECT COUNT(*) FROM prompts").fetchone()[0],
+                observer.connection.execute(
+                    "SELECT COUNT(*) FROM prompt_quarantine"
+                ).fetchone()[0],
+            ) == unbound_before
         runtime.wake_adapter = ExplodingWakeAdapter()
         try:
             send_supervisor_message(
@@ -304,10 +514,8 @@ def main() -> None:
             check=False,
         )
         assert orphan.returncode == 0 and json.loads(orphan.stdout) == {}
-        assert recovery.started.wait(timeout=2) and not recovery.completed.is_set()
-        recovery.release.set()
-        assert recovery.completed.wait(timeout=2)
-        assert recovery.calls and len(recovery.calls[0][1]) == 1
+        assert not recovery.started.wait(timeout=0.2)
+        assert recovery.calls == []
 
         conflict_payload = {
             "session_id": f"session:{GAREN_RUNTIME}",

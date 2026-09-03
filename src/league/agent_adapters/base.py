@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
-from pathlib import PurePath
+from pathlib import Path, PurePath
 from typing import Any, Mapping
 
 from ..adapter_types import AdapterContract, AdapterInstruction, OpaqueIdentity, RuntimeObservation
@@ -202,6 +202,10 @@ class DeclaredAgentAdapter:
     provider_aliases: Mapping[str, str]
     launch_profile: Any
     hook_profile: Mapping[str, Mapping[str, Any]]
+    hook_bootstrap_profile: Mapping[str, Any]
+    hook_bootstrap_installer: Any
+    hook_input_translator: Any
+    hook_output_translator: Any
     multiplexer_requirements: Mapping[str, frozenset[str]]
     visible_launch_factory: Any
     delivery_handler: Any
@@ -209,6 +213,59 @@ class DeclaredAgentAdapter:
     presentation_factory: Any
     assignment_factory: Any
     replacement_descriptor_factory: Any
+
+    def install_hook_bootstrap(
+        self,
+        *,
+        source_root: Path,
+        target: Path,
+        stable_watcher: Path,
+    ) -> Mapping[str, Any]:
+        if not callable(self.hook_bootstrap_installer):
+            raise StorageRefusal(
+                "hook_bootstrap_unsupported",
+                "agent adapter does not provide a hook bootstrap installer",
+            )
+        return self.hook_bootstrap_installer(
+            adapter_kind=self.contract.kind,
+            hook_profile=self.hook_profile,
+            bootstrap_profile=self.hook_bootstrap_profile,
+            source_root=source_root,
+            target=target,
+            stable_watcher=stable_watcher,
+        )
+
+    def translate_hook_input(
+        self, operation: str, payload: Mapping[str, Any]
+    ) -> Mapping[str, Any]:
+        if not callable(self.hook_input_translator):
+            raise StorageRefusal(
+                "hook_translation_unsupported",
+                "agent adapter has no native hook input translator",
+            )
+        translated = self.hook_input_translator(operation, payload)
+        if not isinstance(translated, Mapping):
+            raise StorageRefusal(
+                "hook_translation_invalid",
+                "agent adapter returned a malformed canonical hook envelope",
+            )
+        return dict(translated)
+
+    def translate_hook_output(
+        self, operation: str, output: Mapping[str, Any]
+    ) -> Mapping[str, Any]:
+        if not callable(self.hook_output_translator):
+            raise StorageRefusal(
+                "hook_translation_unsupported",
+                "agent adapter has no native hook output translator",
+            )
+        translated = self.hook_output_translator(operation, output)
+        if not isinstance(translated, Mapping):
+            raise StorageRefusal(
+                "hook_translation_invalid",
+                "agent adapter returned a malformed native hook response",
+            )
+        return dict(translated)
 
     def accepts_provider(self, provider_kind: str) -> bool:
         return self.normalize_provider(provider_kind) in self.provider_kinds

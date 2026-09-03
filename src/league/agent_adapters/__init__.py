@@ -11,6 +11,7 @@ from .core import (
 from .registry import (
     AgentAdapterRegistry,
     adapter_kind_from_runtime,
+    builtin_agent_adapter_kinds,
     builtin_agent_adapter_registry,
 )
 
@@ -24,4 +25,5 @@ __all__ = [
     "OPERATION_METHODS",
     "SharedLifecyclePolicy",
     "builtin_agent_adapter_registry",
+    "builtin_agent_adapter_kinds",
 ]

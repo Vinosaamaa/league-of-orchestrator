@@ -294,12 +294,14 @@ Codex+Herdr and Codex+tmux were the original named adapter contracts. Issue #84
 deliberately adds Cursor+Herdr and Pi+Herdr to the production visible-assignment
 and cleanup driver while leaving the generic `RuntimeLifecycle` backend
 contract-only. Provider session values remain opaque to core storage; the
-provider boundary owns exact validation and resume arguments. Pi prompt/Stop
-capture and shell confinement are a release-local, per-process extension and
-sandbox profile, not a global Pi configuration rewrite. Focused fake-adapter
-tests cover Codex, Cursor, and Pi; they are not live-provider evidence. Merge,
-installation, live provider canaries, cutover, rollback, and teardown remain
-separate gates.
+provider boundary owns exact validation and resume arguments. Pi shell
+confinement and presentation are a release-local, per-process extension and
+sandbox profile. Prompt intake, pre-mutation authorization, and Stop/rearm are
+now a separate source-managed profile extension. It is inert for an unbound
+ordinary Pi session and activates only when the existing canonical hook command
+proves that exact Pi session. Focused fake-adapter tests cover Codex, Cursor,
+and Pi; they are not live-provider evidence. Merge, installation, live provider
+canaries, cutover, rollback, and teardown remain separate gates.
 
 ## Skill-contract implementation provenance
 
@@ -1480,6 +1482,64 @@ supplement with that merged contract: prompt intake activates only after exact
 canonical binding and never backfills, unbound or unverifiable runtimes remain
 untouched and unrecorded, attached obligations always block Stop, and detached
 handoff requires an exact durable watcher receipt. The release delta is limited
-to that normative source policy,
-its semantic regression, the version contract, deterministic release-staging
-expectations, and this provenance record.
+to that normative source policy, its semantic regression, the version contract,
+deterministic release-staging expectations, and this provenance record.
+
+The issue-#84 provider-hook follow-up adds one registry-declared installation
+contract for Codex, Pi, and Cursor CLI. Codex and Cursor retain their native
+profile hook JSON shapes; Cursor is now an explicit installed bootstrap rather
+than an implicit core branch. Pi declares `integrations/pi/league-hooks.mjs` as
+its release asset and installs those bytes as the discoverable profile entry
+`league-hooks.ts`; Pi does not auto-discover `.mjs` profile entries. Its envelope
+asks the existing `pi-input-hook`, `pi-pre-tool-hook`, and `pi-stop-hook`
+commands to prove canonical binding atomically with the hook action. A
+locally persisted receipt activates only the exact Pi session ID and absolute
+session path after that bound proof. Ordinary unregistered Pi remains usable
+and mutation-free when League is unavailable; once activated, the same outage
+fails prompt, mutation, and Stop safely. A later bound event promotes the
+running session without a Pi relaunch. The launch extension retains only
+launch-scoped sandbox and presentation behavior, preventing duplicate lifecycle
+handlers.
+
+Codex and Cursor commands validate their provider-native envelopes directly;
+callers never supply a fabricated authorization or bootstrap field. Codex
+`PreToolUse` produces Codex's native permission decision, while Cursor uses
+generic `preToolUse` and produces Cursor's native permission object so file,
+task, and MCP tools cannot bypass the shared policy. All three adapters resolve
+an unbound native session to an immediate provider-native allow/no-op before
+prompt quarantine or supervisor ownership. A focused real-socket regression
+keeps an aggregate supervisor live while unbound prompt, pre-tool, and Stop
+events for all three providers complete within the hook deadline with no
+canonical-table change.
+
+`league provider-hooks upgrade` is the supported one-time release-install step
+for an existing provider profile. It derives the complete target inventory from
+the adapter registry, validates candidate bytes before mutation, writes an
+exact prepared manifest and backups, installs all targets, verifies every
+result, and rolls the set back on failure. `provider-hooks rollback` restores
+that manifest exactly. Repeating either settled operation is effect-free;
+prepared crash recovery restores the prior profile before returning. Staged
+release acceptance runs upgrade, rollback, and a repeated active upgrade in a
+disposable profile.
+
+This follow-up consumes the stable Stop response only. Issue #66 remains the
+owner of canonical Stop, supervisor, and rearm semantics; changes in that issue
+must preserve the adapter hook output contract rather than be duplicated here.
+Exact-head review found that native hook commands did not quote an absolute
+watcher path, malformed Codex hook groups could escape the canonical refusal,
+the Pi idempotence check could read an unbounded existing target, and one fixed
+temporary name made a stale or concurrent installer block valid publication.
+The corrected installers shell-quote native command arguments, reject malformed
+groups without mutation, compare Pi targets with a bounded read, and use a
+unique same-directory atomic-write temporary file.
+The repair pass also found these acceptance failures before publication:
+
+| Failure | Resolution |
+| --- | --- |
+| Native Codex and Cursor hook payloads lacked the fabricated bootstrap and authorization fields expected by the first draft. | Adapter-owned translators now establish provenance from the installed command, validate exact native input, and render native allow or deny output. |
+| An ordinary unbound Codex prompt reached aggregate-supervisor ownership resolution and failed with `supervisor_ownership_uncertain`. | Unbound actor resolution now returns provider-native no-op before supervision ownership; the real aggregate-socket parity test covers prompt, pre-tool, and Stop for Codex, Cursor, and Pi. |
+| A globally loaded Pi extension could consume ordinary prompts during a watcher outage. | Only a durable exact-session activation receipt selects managed fail-closed behavior; unregistered sessions remain inert. |
+| Existing installations had no atomic way to add the full Codex, Cursor, and Pi hook set. | The registry-derived provider-hook upgrade/rollback command and disposable staged-install acceptance now cover that release step. |
+The candidate changes source, synthetic installers, and immutable release
+manifest bytes only. It does not edit the active Pi profile, install a release,
+restart Herdr, or mutate live League state.

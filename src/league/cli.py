@@ -84,6 +84,7 @@ from .visible_launch import (
 )
 from .display_replay import replay_restored_display
 from .restored_agent import reconcile_restored_agents, utc_now
+from .provider_hooks import rollback_provider_hooks, upgrade_provider_hooks
 from .legacy_display_reconciliation import (
     HerdrLegacyDisplayAdapter,
     LegacyDisplayReconciliationService,
@@ -1555,6 +1556,23 @@ def _add_help_commands(groups: argparse._SubParsersAction) -> None:
     commands.add_parser("inventory", help="Emit the versioned command inventory.")
 
 
+def _add_provider_hook_commands(groups: argparse._SubParsersAction) -> None:
+    provider_hooks = groups.add_parser(
+        "provider-hooks",
+        help="Upgrade or roll back every registry-declared provider hook bootstrap.",
+    )
+    commands = provider_hooks.add_subparsers(dest="action", required=True)
+    for action, help_text in (
+        ("upgrade", "Back up and atomically upgrade all registered provider hooks."),
+        ("rollback", "Restore every provider hook from one exact upgrade manifest."),
+    ):
+        command = commands.add_parser(action, help=help_text)
+        command.add_argument("--source-root", type=Path, required=True)
+        command.add_argument("--profile-root", type=Path, required=True)
+        command.add_argument("--stable-watcher", type=Path, required=True)
+        command.add_argument("--manifest", type=Path, required=True)
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="league",
@@ -1609,6 +1627,7 @@ def _parser() -> argparse.ArgumentParser:
         _add_hook_commands,
         _add_mode_commands,
         _add_issue_commands,
+        _add_provider_hook_commands,
         _add_help_commands,
         _add_acceptance_commands,
     ):
@@ -3862,6 +3881,29 @@ def _issue_select(store: Storage, args: argparse.Namespace) -> CommandResult:
     ), None
 
 
+def _provider_hooks_upgrade(args: argparse.Namespace) -> CommandResult:
+    return dict(
+        upgrade_provider_hooks(
+            builtin_agent_adapter_registry(),
+            source_root=args.source_root,
+            profile_root=args.profile_root,
+            stable_watcher=args.stable_watcher,
+            manifest_path=args.manifest,
+        )
+    ), None
+
+
+def _provider_hooks_rollback(args: argparse.Namespace) -> CommandResult:
+    return dict(
+        rollback_provider_hooks(
+            source_root=args.source_root,
+            profile_root=args.profile_root,
+            stable_watcher=args.stable_watcher,
+            manifest_path=args.manifest,
+        )
+    ), None
+
+
 def _hook_reconcile_silent(store: Storage, args: argparse.Namespace) -> CommandResult:
     return store.silent_supervision_updates(
         args.actor_agent_id,
@@ -4039,6 +4081,11 @@ CONFIG_ONLY_COMMANDS = {
     "routing.validate-config": _routing_validate_config,
 }
 
+PROVIDER_HOOK_COMMANDS = {
+    "provider-hooks.upgrade": _provider_hooks_upgrade,
+    "provider-hooks.rollback": _provider_hooks_rollback,
+}
+
 
 def _help_inventory() -> dict[str, Any]:
     return {
@@ -4048,6 +4095,7 @@ def _help_inventory() -> dict[str, Any]:
             (
                 *HANDLERS,
                 *CONFIG_ONLY_COMMANDS,
+                *PROVIDER_HOOK_COMMANDS,
                 "storage.migrate",
                 "acceptance.run",
                 "acceptance.preflight",
@@ -4218,6 +4266,13 @@ def _run(args: argparse.Namespace) -> CommandResult:
                 "skill validation uses explicit config/root inputs and refuses --state-root",
             )
         return CONFIG_ONLY_COMMANDS[command](args)
+    if command in PROVIDER_HOOK_COMMANDS:
+        if args.state_root is not None:
+            raise StorageRefusal(
+                "invalid_provider_hook_state_root",
+                "provider hook operations use explicit roots and refuse --state-root",
+            )
+        return PROVIDER_HOOK_COMMANDS[command](args)
     if command == "storage.migrate":
         if args.state_root is None:
             raise StorageRefusal(

@@ -855,13 +855,28 @@ class PersistentSupervisor:
         if kind == "champion-event" and isinstance(message.get("envelope"), dict):
             actor_agent_id = message["envelope"].get("recipient_agent_id")
         if kind == "hook":
-            from .canonical_watcher import brokered_hook_context, handle_brokered_hook
+            from .canonical_watcher import (
+                brokered_hook_context,
+                handle_brokered_hook,
+            )
 
             hook = message.get("hook")
             if not isinstance(hook, dict):
                 raise SupervisorUnavailable("supervisor hook request is malformed")
             with self.store_factory(self.state_root) as store:
                 context = brokered_hook_context(store, hook)
+                if context.actor_id is None:
+                    result = handle_brokered_hook(store, hook, context=context)
+                    self._response(
+                        connection,
+                        {
+                            "ok": True,
+                            "hook_output": result["hook_output"],
+                            "capture": None,
+                            "priority": None,
+                        },
+                    )
+                    return
                 owner_agent_id = (
                     None
                     if context.actor_id is None

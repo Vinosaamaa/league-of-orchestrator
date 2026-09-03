@@ -20,6 +20,7 @@ from .acceptance import (
     _switch_symlink,
 )
 from .agent_adapters import builtin_agent_adapter_registry
+from .provider_hooks import install_provider_hook_bootstrap
 from .precutover import _integrated_lifecycle, _read_only_shadow, _snapshot, _validate_plan
 from .sqlite_store import SQLiteStorage
 from .storage import StorageRefusal
@@ -166,78 +167,41 @@ def _reserve_release_identity(release: Path, release_bundle: Path) -> None:
         ) from exc
 
 
-def _install_hook_routes(plan: dict[str, Any]) -> list[dict[str, Any]]:
-    stable_watcher = str(plan["proposed"]["watcher_launcher"])
+def _install_hook_routes(
+    plan: dict[str, Any], *, source_root: Path
+) -> list[dict[str, Any]]:
+    stable_watcher = Path(plan["proposed"]["watcher_launcher"])
     receipts: list[dict[str, Any]] = []
     adapters = builtin_agent_adapter_registry()
     for hook in sorted(plan["proposed"]["hooks"], key=lambda item: item["harness"]):
         path = Path(hook["target"])
         before = _snapshot(path)
-        document = _load(path)
         harness = hook["harness"]
-        hooks = document.get("hooks")
-        if not isinstance(hooks, dict):
-            raise StorageRefusal("cutover_hook_invalid", "hook configuration is malformed")
-        added: list[str] = []
         try:
-            adapter = adapters.adapter(str(harness))
+            installed = install_provider_hook_bootstrap(
+                adapters,
+                str(harness),
+                source_root=source_root,
+                target=path,
+                stable_watcher=stable_watcher,
+            )
         except StorageRefusal as exc:
+            if exc.code == "hook_bootstrap_ambiguous":
+                raise StorageRefusal(
+                    "cutover_hook_ambiguous", "League hook bootstrap is duplicated"
+                ) from exc
             raise StorageRefusal(
-                "cutover_hook_invalid", "unsupported cutover hook harness"
+                "cutover_hook_invalid", "provider hook bootstrap installation failed"
             ) from exc
-        wanted = {
-            str(profile["native_event"]): f"{stable_watcher} {profile['command']}"
-            for profile in adapter.hook_profile.values()
-        }
-        if harness == "codex":
-            for event, command in wanted.items():
-                groups = hooks.setdefault(event, [])
-                if not isinstance(groups, list):
-                    raise StorageRefusal("cutover_hook_invalid", "Codex hook event is malformed")
-                matches = [
-                    handler
-                    for group in groups
-                    if isinstance(group, dict)
-                    for handler in group.get("hooks", [])
-                    if isinstance(handler, dict) and handler.get("command") == command
-                ]
-                if len(matches) > 1:
-                    raise StorageRefusal("cutover_hook_ambiguous", "Codex League hook is duplicated")
-                if not matches:
-                    groups.append(
-                        {"hooks": [{"type": "command", "command": command, "timeout": 5}]}
-                    )
-                    added.append(event)
-        elif harness == "cursor":
-            if document.get("version") != 1:
-                raise StorageRefusal("cutover_hook_invalid", "Cursor hook version is unsupported")
-            for event, command in wanted.items():
-                handlers = hooks.setdefault(event, [])
-                if not isinstance(handlers, list):
-                    raise StorageRefusal("cutover_hook_invalid", "Cursor hook event is malformed")
-                matches = [
-                    item
-                    for item in handlers
-                    if isinstance(item, dict) and item.get("command") == command
-                ]
-                if len(matches) > 1:
-                    raise StorageRefusal("cutover_hook_ambiguous", "Cursor League hook is duplicated")
-                if not matches:
-                    handlers.append({"command": command})
-                    added.append(event)
-        else:
-            raise StorageRefusal("cutover_hook_invalid", "unsupported cutover hook harness")
-        if added:
-            _atomic_write(path, _stable(document))
         after = _snapshot(path)
         receipts.append(
             {
                 "harness": harness,
                 "path": str(path),
-                "added": added,
+                "added": list(installed["added"]),
                 "before_sha256": before["sha256"],
                 "after_sha256": after["sha256"],
-                "stable_watcher": stable_watcher,
+                "stable_watcher": str(stable_watcher),
             }
         )
     return receipts
@@ -512,7 +476,7 @@ def run_live_cutover(
             pointer = pointer_operation["after"]["pointer"]
             writer_pointer = Path(proposed["writer_pointer"])
             _atomic_write(writer_pointer, _stable(pointer))
-            hooks = _install_hook_routes(plan)
+            hooks = _install_hook_routes(plan, source_root=release)
             watcher_smoke = _live_watcher_smoke(
                 state_root, Path(proposed["watcher_launcher"]), writer_pointer
             )

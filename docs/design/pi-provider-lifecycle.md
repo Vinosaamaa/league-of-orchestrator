@@ -72,6 +72,35 @@ and state root, League removes only its redundant legacy runtime/session tokens.
 This keeps the combined pane metadata beneath Herdr's fixed token limit without
 clearing native Pi or toolkit-owned identity and presentation fields.
 
+## Profile-loaded lifecycle hooks
+
+The active Pi profile loads `league-hooks.ts`, installed byte-for-byte from the
+source-managed `integrations/pi/league-hooks.mjs` bootstrap because Pi's global
+extension discovery accepts `.ts` entries rather than `.mjs` entries.
+The bootstrap contains no launch descriptor, sandbox root, provider choice, or
+presentation policy. On every interactive input it supplies Pi's exact native
+session ID and JSONL path to the stable canonical input hook. The same bound
+input identity feeds pre-mutation and settled/Stop events. The bootstrap stores
+an activation receipt only after the canonical action proves that exact session
+ID and absolute JSONL path are bound. An unregistered session receives a local
+allow/no-op if the watcher is absent, fails, times out, or responds incorrectly,
+so ordinary Pi remains usable without canonical writes. An activated managed
+session fails closed under the same outage. A later callsign/bootstrap
+publication activates the next successful event in place; no Pi process or
+provider session is relaunched.
+
+League-launched Pi separately loads `league-runtime.ts`. That launch-only
+extension restricts tools to the descriptor-bound worktree/state roots and
+publishes exact presentation metadata, but does not register prompt or Stop
+handlers. Cursor and Codex configured inside Pi therefore receive the same Pi
+runtime hooks without becoming separate session pools. Direct Codex and Cursor
+CLI keep their provider-native profile hook configurations through the same
+agent-adapter installation registry.
+
+Issue #66 owns the canonical Stop, supervision, and rearm decision. This layer
+only transports its stable hook request and response and fails closed after a
+session has been proven bound if that decision is unavailable.
+
 League reads only the first JSONL record for identity/cwd/parent validation,
 and the first parent record when lineage exists. It hashes the complete source,
 rejects a duplicate session ID at any other unified path or digest, copies with

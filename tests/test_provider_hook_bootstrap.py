@@ -8,6 +8,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 import queue
+import re
 import shlex
 import shutil
 import subprocess
@@ -30,6 +31,7 @@ from league.agent_adapters import (  # noqa: E402
 from league.provider_hooks import (  # noqa: E402
     install_provider_hook_bootstrap,
     rollback_provider_hooks,
+    stable_json,
     upgrade_provider_hooks,
 )
 from league.sqlite_store import SQLiteStorage  # noqa: E402
@@ -213,6 +215,7 @@ def test_installs_are_idempotent_and_preserve_unrelated_handlers(root: Path) -> 
     assert cursor["hooks"]["preToolUse"] == [
         {
             "command": shlex.join((str(watcher), "cursor-pre-tool-hook")),
+            "matcher": r"^(?!Read$|Grep$).+",
             "failClosed": True,
         }
     ]
@@ -511,6 +514,63 @@ def test_registry_upgrade_replaces_cursor_stop_exhaustion_and_restores(root: Pat
     )
     assert target.read_bytes() == legacy
     assert target.stat().st_mode & 0o777 == 0o644
+
+
+def test_cursor_upgrade_adds_native_read_only_matcher(root: Path) -> None:
+    profile = root / "profile"
+    profile.mkdir(parents=True)
+    watcher = root / "bin/agent-watcher"
+    watcher.parent.mkdir(parents=True)
+    watcher.write_text("synthetic watcher\n", encoding="utf-8")
+    target = _hook_targets(profile)["cursor"]
+    target.parent.mkdir(parents=True)
+    command = shlex.join((str(watcher.resolve()), "cursor-pre-tool-hook"))
+    target.write_text(
+        stable_json(
+            {
+                "version": 1,
+                "hooks": {
+                    "preToolUse": [{"command": command, "failClosed": True}],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    first = install_provider_hook_bootstrap(
+        builtin_agent_adapter_registry(),
+        "cursor",
+        source_root=ROOT,
+        target=target,
+        stable_watcher=watcher,
+    )
+    first_bytes = target.read_bytes()
+    second = install_provider_hook_bootstrap(
+        builtin_agent_adapter_registry(),
+        "cursor",
+        source_root=ROOT,
+        target=target,
+        stable_watcher=watcher,
+    )
+
+    installed = json.loads(first_bytes)
+    assert "preToolUse" in first["added"]
+    assert second["added"] == []
+    assert target.read_bytes() == first_bytes
+    assert installed["hooks"]["preToolUse"] == [
+        {
+            "command": command,
+            "matcher": r"^(?!Read$|Grep$).+",
+            "failClosed": True,
+        }
+    ]
+    matcher = installed["hooks"]["preToolUse"][0]["matcher"]
+    assert re.fullmatch(matcher, "Read") is None
+    assert re.fullmatch(matcher, "Grep") is None
+    for mutating_or_unknown in ("Shell", "Write", "Delete", "Task", "MCP:github"):
+        assert re.fullmatch(matcher, mutating_or_unknown)
+
+
 def run_pi_scenario(scenario: str, extension: Path | None = None) -> dict[str, object]:
     completed = subprocess.run(
         [

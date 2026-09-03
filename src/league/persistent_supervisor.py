@@ -26,6 +26,7 @@ from .storage import StorageRefusal
 from .storage_watcher import RuntimeRegistrationCommand
 from .agent_adapters import adapter_kind_from_runtime
 from .multiplexer_adapters import builtin_multiplexer_adapter_registry
+from .operational_input import render_operational_input, transition_content
 
 
 MAX_MESSAGE_BYTES = 1_100_000
@@ -249,7 +250,6 @@ class HerdrWakeAdapter:
         backend_kind = binding.get("backend_kind")
         if not isinstance(backend_kind, str) or not backend_kind or not routing_target:
             raise SupervisorUnavailable("verified Shotcaller wake endpoint is unavailable")
-        summary = " ".join(str(envelope.get("summary", "")).split())
         try:
             multiplexer = self.multiplexers.adapter(backend_kind)
             if "delivery" not in multiplexer.capabilities:
@@ -259,12 +259,11 @@ class HerdrWakeAdapter:
                 )
             multiplexer.delivery(
                 str(routing_target),
-                (
-                    f"CHAMPION TRANSITION [{envelope['event_id']}] "
-                    f"{envelope.get('status')}: {summary}"
+                render_operational_input(
+                    "delivery", envelope, transition_content(envelope)
                 ),
             )
-        except (OSError, subprocess.SubprocessError, StorageRefusal) as exc:
+        except (OSError, subprocess.SubprocessError, StorageRefusal, ValueError) as exc:
             raise SupervisorUnavailable("verified Shotcaller wake failed") from exc
 
 

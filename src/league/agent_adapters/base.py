@@ -8,6 +8,11 @@ from pathlib import Path, PurePath
 from typing import Any, Mapping
 
 from ..adapter_types import AdapterContract, AdapterInstruction, OpaqueIdentity, RuntimeObservation
+from ..operational_input import (
+    owner_control_content,
+    render_operational_input,
+    transition_content,
+)
 from ..storage_types import StorageRefusal
 from .core import LifecycleEvent
 
@@ -24,12 +29,10 @@ def deliver_via_multiplexer(
             "multiplexer_delivery_unsupported",
             "selected multiplexer has no delivery transport",
         )
-    summary = " ".join(str(envelope.get("summary", "")).split())
     multiplexer.delivery(
         routing_target,
-        (
-            f"CHAMPION TRANSITION [{envelope['event_id']}] "
-            f"{envelope.get('status')}: {summary}"
+        render_operational_input(
+            "delivery", envelope, transition_content(envelope)
         ),
     )
 
@@ -53,9 +56,8 @@ def steer_via_multiplexer(
         )
     multiplexer.delivery(
         routing_target,
-        (
-            f"LEAGUE OWNER CONTROL [{envelope['event_id']}] Pause delegated work now, "
-            "preserve durable progress, and await a new explicit owner instruction."
+        render_operational_input(
+            "owner-control", envelope, owner_control_content(envelope)
         ),
     )
 

@@ -1808,3 +1808,16 @@ executable path and non-model Pi outage reporting that cannot create recursive
 prompt or Stop turns. This release delta changes only the version contract,
 deterministic release-staging expectations, and this provenance record beyond
 that merged tree.
+
+Post-restart Pi hook failures exposed a stale-client boundary: restored Pi
+processes retain their original release-specific `LEAGUE_WATCHER_COMMAND`, and
+profile extension reload cannot change inherited environment. The Pi hook
+installer now binds its configured stable watcher directly into the installed
+extension and gives that path precedence over legacy launch environment. Pi
+and Cursor follow-up Stop output also uses the same callsign, wait-generation,
+and unresolved-summary renderer as Codex instead of discarding the details.
+The explicit one-shot Stop control is restored as an exact active-Shotcaller
+SQLite write and is consumed by the next provider-neutral Stop decision.
+Attached foreground `agent-watcher wait` reuses canonical state without
+replacing the OS-managed persistent watcher registration, and publishes its
+event baseline before wait readiness so an immediate wake cannot be missed.

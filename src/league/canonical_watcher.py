@@ -223,12 +223,17 @@ def _parser() -> argparse.ArgumentParser:
     _add_service_file_options(service_rollback)
     service_rollback.add_argument("--expected-installed-plist-sha256", required=True)
     service_rollback.add_argument("--expected-backup-sha256")
-    supervise = commands.add_parser("supervise")
-    supervise.add_argument("--poll-seconds", type=float, default=1.0)
+    for name in ("supervise", "wait"):
+        foreground = commands.add_parser(name)
+        foreground.add_argument("--poll-seconds", type=float, default=1.0)
+    allow_stop = commands.add_parser(
+        "allow-stop", help="Authorize exactly one subsequent Shotcaller Stop."
+    )
+    allow_stop.add_argument("--once", action="store_true", required=True)
     deliver = commands.add_parser("deliver")
     deliver.add_argument("--event-id", required=True)
     for name in (
-        "enable", "disable", "allow-stop", "wait",
+        "enable", "disable",
         "transition", "reconcile", "preflight", "launch", "resume", "teardown",
         "install-codex-hooks", "hidden-worker", "lead-relay", "route-model",
         "resource-inspect",
@@ -928,7 +933,13 @@ def handle_brokered_hook(
         if result["decision"] != "block":
             output = {}
         elif _stop_output_mode(command) != "decision":
-            output = {"followup_message": "League has unresolved obligations."}
+            output = {
+                "followup_message": _codex_stop_reason(
+                    callsign,
+                    result["wait_generation"],
+                    tuple(result.get("unresolved_summaries", ())),
+                )
+            }
         else:
             output = {
                 "decision": "block",
@@ -1128,6 +1139,8 @@ def _supervise(
     actor_id: str,
     callsign: str,
     poll_seconds: float,
+    *,
+    own_watcher_registration: bool = True,
 ) -> dict[str, Any]:
     if poll_seconds <= 0:
         raise StorageRefusal("invalid_supervision", "poll interval must be positive")
@@ -1171,31 +1184,35 @@ def _supervise(
                 "runtime_unverified",
                 "SQLite supervision requires one exact verified Shotcaller runtime",
             )
-        current = store.connection.execute(
-            "SELECT fence FROM watcher_registrations WHERE actor_agent_id=?",
-            (actor_id,),
-        ).fetchone()
-        fence = 1 if current is None else int(current["fence"]) + 1
-        watcher_id = f"watcher:sqlite:{actor_id}:{os.getpid()}"
-        now = datetime.now().astimezone()
-        store.register_watcher(
-            scope,
-            watcher_id,
-            actor_id,
-            str(runtimes[0]["runtime_instance_id"]),
-            f"sqlite-supervise:{marker}",
-            (now + timedelta(minutes=10)).isoformat(timespec="seconds"),
-            fence,
-            now.isoformat(timespec="seconds"),
-            block_on_obligations=True,
-        )
+        if own_watcher_registration:
+            current = store.connection.execute(
+                "SELECT fence FROM watcher_registrations WHERE actor_agent_id=?",
+                (actor_id,),
+            ).fetchone()
+            fence = 1 if current is None else int(current["fence"]) + 1
+            watcher_id = f"watcher:sqlite:{actor_id}:{os.getpid()}"
+            now = datetime.now().astimezone()
+            store.register_watcher(
+                scope,
+                watcher_id,
+                actor_id,
+                str(runtimes[0]["runtime_instance_id"]),
+                f"sqlite-supervise:{marker}",
+                (now + timedelta(minutes=10)).isoformat(timespec="seconds"),
+                fence,
+                now.isoformat(timespec="seconds"),
+                block_on_obligations=True,
+            )
         store.rearm_wait(
             scope,
             actor_id,
             f"sqlite-supervision:{marker}",
             datetime.now().astimezone().isoformat(timespec="seconds"),
         )
-        baseline = _supervision_snapshot(store, scope, actor_id)
+        # `initial` is the event baseline. Publishing wait_active in
+        # rearm_wait only after this snapshot makes it the readiness signal and
+        # prevents an immediate user/event wake from falling into a gap.
+        baseline = initial
         while True:
             time.sleep(max(poll_seconds, 0.01))
             current = _supervision_snapshot(store, scope, actor_id)
@@ -1302,6 +1319,8 @@ def main(argv: list[str] | None = None) -> int:
         "attach-shotcaller",
         "detach-shotcaller",
         "status",
+        "allow-stop",
+        "wait",
     }:
         raise StorageRefusal(
             "legacy_writer_fenced",
@@ -1504,8 +1523,25 @@ def main(argv: list[str] | None = None) -> int:
             _emit({})
             return 0
         assert actor_id is not None and callsign is not None and scope is not None
-        if args.command == "supervise":
-            _emit(_supervise(store, scope, actor_id, callsign, args.poll_seconds))
+        if args.command == "allow-stop":
+            if actor_role != "shotcaller":
+                raise StorageRefusal(
+                    "allow_stop_invalid",
+                    "one-shot Stop authorization requires an active Shotcaller",
+                )
+            _emit(store.set_allow_stop_once(scope, actor_id))
+            return 0
+        if args.command in {"supervise", "wait"}:
+            _emit(
+                _supervise(
+                    store,
+                    scope,
+                    actor_id,
+                    callsign,
+                    args.poll_seconds,
+                    own_watcher_registration=args.command == "supervise",
+                )
+            )
             return 0
         if args.command == "deliver":
             from .canonical_delivery import dispatch_event
@@ -1572,9 +1608,14 @@ def main(argv: list[str] | None = None) -> int:
                 _emit(
                     _native_hook_output(
                         args.command,
-                        {"followup_message": "League has unresolved obligations."}
-                        if blocked
-                        else {},
+                        {
+                            "followup_message": _codex_stop_reason(
+                                callsign,
+                                result["wait_generation"],
+                                tuple(result.get("unresolved_summaries", ())),
+                            )
+                        }
+                        if blocked else {},
                         bound=True,
                     )
                 )

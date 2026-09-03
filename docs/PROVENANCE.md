@@ -1662,3 +1662,14 @@ additional hook, watcher, provider, multiplexer, or storage-contract change.
 This release delta changes only the version contract, deterministic
 release-staging expectations, and this provenance record beyond that merged
 tree.
+
+The issue-#84 restored-agent pass now consumes an exact legacy reconciliation
+receipt as the Champion's canonical display receipt when the original launch
+predates display receipts. Both the durable parser and replay path accept
+Herdr's display-only behavior, where the exact pane observation is updated while
+the workspace state sequence remains at the owner-authorized baseline. Final
+worktree reconciliation compares physical path identity before using the exact
+stored path in its SQL compare-and-set, so macOS `/var` and `/private/var`
+aliases cannot create a false conflict. The combined transition-and-replay test
+is registered in the focused suite and verifies immutable predecessor evidence,
+the restored runtime generation, idempotent retry, and canonical replay.

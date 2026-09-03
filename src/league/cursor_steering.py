@@ -10,6 +10,7 @@ from pathlib import PurePath
 from typing import Any, Callable, Mapping
 
 from .request_services import DeliveryAmbiguous, DeliveryReceipt, DeliveryUnavailable
+from .operational_input import render_operational_input
 from .storage_types import StorageRefusal
 
 
@@ -48,7 +49,8 @@ def structured_delivery_prompt(
         "delivery": dict(envelope),
         "actions": actions,
     }
-    return "LEAGUE ROUTED DELIVERY " + _stable_json(routed)
+    content = "LEAGUE ROUTED DELIVERY " + _stable_json(routed)
+    return render_operational_input("routed-delivery", envelope, content)
 
 
 class HerdrCursorSteeringAdapter:

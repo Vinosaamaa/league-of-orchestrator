@@ -29,6 +29,11 @@ from request_lifecycle_fixture import (  # noqa: E402
     dispatch_request,
 )
 from league.request_services import AssignmentService, AssignmentSpec  # noqa: E402
+from league.cursor_steering import structured_delivery_prompt  # noqa: E402
+from league.operational_input import (  # noqa: E402
+    render_operational_input,
+    transition_content,
+)
 from league.sqlite_store import SQLiteStorage  # noqa: E402
 from league.sqlite_watcher_ops import obligation_counts  # noqa: E402
 from league.storage import RuntimeRegistrationCommand  # noqa: E402
@@ -1019,6 +1024,198 @@ def test_provider_prompt_capture_identity_contracts(root: Path) -> None:
         assert stop["decision"] == "block"
 
 
+def test_provider_operational_wakes_never_become_user_prompt_intake(
+    root: Path,
+) -> None:
+    for name, command, payload in (
+        (
+            "codex-operational-wake",
+            "codex-user-prompt-hook",
+            {
+                "session_id": SHOTCALLER_ID,
+                "turn_id": "turn:codex-operational-wake",
+                "hook_event_name": "UserPromptSubmit",
+            },
+        ),
+        (
+            "cursor-operational-wake",
+            "cursor-before-submit-hook",
+            {
+                "conversation_id": SHOTCALLER_ID,
+                "generation_id": "generation:cursor-operational-wake",
+                "hook_event_name": "beforeSubmitPrompt",
+            },
+        ),
+        (
+            "pi-operational-wake",
+            "pi-input-hook",
+            {
+                "session_id": "33333333-3333-4333-8333-333333333334",
+                "session_path": str((root / "pi-operational-wake.jsonl").resolve()),
+                "input_id": "input:pi-operational-wake",
+                "hook_event_name": "PiInput",
+            },
+        ),
+    ):
+        _, state, _ = seeded_state(root, name)
+        env = _environment(root / name, state)
+        adapter_kind = command.split("-", 1)[0]
+        session_ref = (
+            str(payload["session_path"])
+            if adapter_kind == "pi"
+            else SHOTCALLER_ID
+        )
+        runtime_id = _register_garen_runtime(
+            state,
+            name,
+            session_ref=session_ref,
+            harness_kind=f"{adapter_kind}-thread",
+        )
+        event_id = f"event:{name}"
+        outbox_id = f"outbox:{name}"
+        with SQLiteStorage(state) as store:
+            with store._transaction():
+                event_version = int(
+                    store.connection.execute(
+                        "SELECT COALESCE(MAX(entity_version),0)+1 FROM events "
+                        "WHERE agent_id=?",
+                        (CHAMPION_ID,),
+                    ).fetchone()[0]
+                )
+                store.connection.execute(
+                    """
+                    INSERT INTO events
+                      (event_id,agent_id,task_id,entity_version,event_type,status,
+                       update_text,occurred_at,detail_json,request_id,aggregate_kind,
+                       aggregate_id)
+                    VALUES(?,?,NULL,?,'agent_transition','completed',?,?,'{}',NULL,
+                           'agent',?)
+                    """,
+                    (
+                        event_id,
+                        CHAMPION_ID,
+                        event_version,
+                        "Synthetic Champion completion — résumé preserved.",
+                        AT2,
+                        CHAMPION_ID,
+                    ),
+                )
+                store.connection.execute(
+                    """
+                    INSERT INTO delivery_outbox
+                      (outbox_id,event_id,recipient_agent_id,state,available_at,
+                       attempt_count)
+                    VALUES(?,?,?,'in_flight',?,1)
+                    """,
+                    (outbox_id, event_id, SHOTCALLER_ID, AT2),
+                )
+            envelope = store.outbox_envelope(
+                outbox_id, event_id, SHOTCALLER_ID
+            )
+            if adapter_kind == "cursor":
+                wake = structured_delivery_prompt(
+                    {"runtime_instance_id": runtime_id},
+                    envelope,
+                    state_root=str(state),
+                )
+            else:
+                wake = render_operational_input(
+                    "delivery", envelope, transition_content(envelope)
+                )
+            initial_prompts = store.connection.execute(
+                "SELECT COUNT(*) FROM prompts WHERE intake_actor_id=?",
+                (SHOTCALLER_ID,),
+            ).fetchone()[0]
+            initial_requests = store.connection.execute(
+                "SELECT COUNT(*) FROM requests WHERE owner_agent_id=?",
+                (SHOTCALLER_ID,),
+            ).fetchone()[0]
+
+        expected = (
+            {"continue": True}
+            if adapter_kind == "cursor"
+            else {"binding": "bound"}
+            if adapter_kind == "pi"
+            else {}
+        )
+        assert _watcher(env, command, payload={**payload, "prompt": wake}) == expected
+        with SQLiteStorage(state) as store:
+            assert store.connection.execute(
+                "SELECT COUNT(*) FROM prompt_payloads WHERE body=?", (wake,)
+            ).fetchone()[0] == 0
+            before = store.connection.execute(
+                "SELECT COUNT(*) FROM prompts WHERE intake_actor_id=?",
+                (SHOTCALLER_ID,),
+            ).fetchone()[0]
+            after_wake_requests = store.connection.execute(
+                "SELECT COUNT(*) FROM requests WHERE owner_agent_id=?",
+                (SHOTCALLER_ID,),
+            ).fetchone()[0]
+        assert before == initial_prompts
+        assert after_wake_requests == initial_requests
+
+        real_prompt = f"Real owner prompt after {adapter_kind} operational wake."
+        real_payload = {**payload, "prompt": real_prompt}
+        if adapter_kind == "cursor":
+            real_payload["generation_id"] = "generation:real-owner-prompt"
+        elif adapter_kind == "pi":
+            real_payload["input_id"] = "input:real-owner-prompt"
+        else:
+            real_payload["turn_id"] = "turn:real-owner-prompt"
+        assert _watcher(env, command, payload=real_payload) == expected
+        with SQLiteStorage(state) as store:
+            assert store.connection.execute(
+                "SELECT COUNT(*) FROM prompt_payloads WHERE body=?", (real_prompt,)
+            ).fetchone()[0] == 1
+            after = store.connection.execute(
+                "SELECT COUNT(*) FROM prompts WHERE intake_actor_id=?",
+                (SHOTCALLER_ID,),
+            ).fetchone()[0]
+        assert after == before + 1
+
+        stop_command = {
+            "codex": "codex-stop-hook",
+            "cursor": "cursor-stop-hook",
+            "pi": "pi-stop-hook",
+        }[adapter_kind]
+        stop_generation = str(
+            real_payload[
+                "turn_id"
+                if adapter_kind == "codex"
+                else "generation_id"
+                if adapter_kind == "cursor"
+                else "input_id"
+            ]
+        )
+        with SQLiteStorage(state) as store:
+            stopped = handle_brokered_hook(
+                store,
+                {
+                    "command": stop_command,
+                    "payload": _stop_payload(
+                        adapter_kind, session_ref, stop_generation
+                    ),
+                },
+            )["hook_output"]
+        feedback = str(
+            stopped[
+                "reason" if adapter_kind == "codex" else "followup_message"
+            ]
+        )
+        feedback_payload = {**payload, "prompt": feedback}
+        if adapter_kind == "codex":
+            feedback_payload["turn_id"] = stop_generation
+        elif adapter_kind == "cursor":
+            feedback_payload["generation_id"] = "generation:stop-feedback"
+        else:
+            feedback_payload["input_id"] = "input:stop-feedback"
+        assert _watcher(env, command, payload=feedback_payload) == expected
+        with SQLiteStorage(state) as store:
+            assert store.connection.execute(
+                "SELECT COUNT(*) FROM prompt_payloads WHERE body=?", (feedback,)
+            ).fetchone()[0] == 0
+
+
 def test_provider_pre_tool_policy_and_pi_stop_are_shared_and_fail_closed(
     root: Path,
 ) -> None:
@@ -1922,7 +2119,7 @@ def test_material_delivery_watcher_direct_dedup_and_unavailable(root: Path) -> N
         event_id,
     )
     assert delivered["state"] == "delivered" and delivered["idempotent"] is False
-    assert len(prompt_log.read_text(encoding="utf-8").splitlines()) == 1
+    assert prompt_log.read_text(encoding="utf-8").count("LEAGUE_OP: ") == 1
     retry = _watcher(
         direct_env,
         "--shotcaller",
@@ -1932,7 +2129,7 @@ def test_material_delivery_watcher_direct_dedup_and_unavailable(root: Path) -> N
         event_id,
     )
     assert retry["state"] == "delivered" and retry["idempotent"] is True
-    assert len(prompt_log.read_text(encoding="utf-8").splitlines()) == 1
+    assert prompt_log.read_text(encoding="utf-8").count("LEAGUE_OP: ") == 1
 
     _, unavailable_state, _ = seeded_state(root, "unavailable-delivery")
     unavailable_env = _environment(root / "unavailable-delivery", unavailable_state)
@@ -2274,6 +2471,7 @@ def main() -> None:
         test_supervise_user_priority(root)
         test_long_lived_supervisor_allows_concurrent_prompt_and_stop(root)
         test_provider_prompt_capture_identity_contracts(root)
+        test_provider_operational_wakes_never_become_user_prompt_intake(root)
         test_provider_pre_tool_policy_and_pi_stop_are_shared_and_fail_closed(root)
         test_queued_prompts_reusing_turn_id_are_unique_and_conflicts_quarantine(root)
         test_missing_identity_is_inert_then_exact_binding_captures(root)

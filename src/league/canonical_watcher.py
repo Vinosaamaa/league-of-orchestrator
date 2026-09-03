@@ -6,6 +6,7 @@ import argparse
 from contextlib import ExitStack, contextmanager
 import fcntl
 import hashlib
+import hmac
 import json
 import os
 import secrets
@@ -18,6 +19,13 @@ from typing import Any, Iterator
 
 from .agent_adapters import SharedLifecyclePolicy, builtin_agent_adapter_registry
 from .multiplexer_adapters import builtin_multiplexer_adapter_registry
+from .operational_input import (
+    owner_control_content,
+    parse_operational_input,
+    render_operational_input,
+    transition_content,
+)
+from .sqlite_outbox_ops import outbox_envelope
 from .sqlite_store import DEFAULT_BUSY_TIMEOUT_MS, SQLiteStorage
 from .sqlite_watcher_ops import (
     obligation_counts,
@@ -359,8 +367,10 @@ def _scope(store: SQLiteStorage, actor_id: str, callsign: str) -> str:
     return str(resolve_supervisor_scope(store, actor_id, callsign)["scope_id"])
 
 
-def _codex_turn_generation(session_ref: str, turn_id: str) -> str:
-    identity = f"codex\0{session_ref}\0{turn_id}"
+def _provider_terminal_generation(
+    adapter_kind: str, session_ref: str, source_event_key: str
+) -> str:
+    identity = f"{adapter_kind}\0{session_ref}\0{source_event_key}"
     return hashlib.sha256(identity.encode()).hexdigest()
 
 
@@ -460,6 +470,71 @@ def _valid_codex_prompt_invocation_id(value: Any) -> bool:
     )
 
 
+def _exact_operational_input(
+    store: SQLiteStorage,
+    actor_id: str | None,
+    adapter_kind: str,
+    session_ref: str,
+    body: str,
+) -> bool:
+    """Recognize only an intact delivery bound to a canonical outbox recipient."""
+
+    header = parse_operational_input(body)
+    if header is None or actor_id is None or header["recipient_agent_id"] != actor_id:
+        return False
+    row = store.connection.execute(
+        """
+        SELECT state FROM delivery_outbox
+         WHERE outbox_id=? AND event_id=? AND recipient_agent_id=?
+        """,
+        (header["outbox_id"], header["event_id"], actor_id),
+    ).fetchone()
+    if row is None or row["state"] not in {
+        "in_flight", "awaiting_receipt", "delivered"
+    }:
+        return False
+    try:
+        envelope = outbox_envelope(
+            store, header["outbox_id"], header["event_id"], actor_id
+        )
+    except StorageRefusal:
+        return False
+    kind = header["kind"]
+    try:
+        if kind == "owner-control" and envelope["event_type"] == "owner_stop_control":
+            expected = render_operational_input(
+                kind, envelope, owner_control_content(envelope)
+            )
+        elif kind == "delivery" and envelope["event_type"] != "owner_stop_control":
+            expected = render_operational_input(
+                kind, envelope, transition_content(envelope)
+            )
+        elif kind == "routed-delivery" and adapter_kind == "cursor":
+            runtimes = store.connection.execute(
+                """
+                SELECT runtime_instance_id FROM runtime_instances
+                 WHERE actor_agent_id=? AND session_ref=? AND verified=1
+                   AND status IN ('active','idle')
+                 ORDER BY runtime_instance_id
+                """,
+                (actor_id, session_ref),
+            ).fetchall()
+            if len(runtimes) != 1:
+                return False
+            from .cursor_steering import structured_delivery_prompt
+
+            expected = structured_delivery_prompt(
+                {"runtime_instance_id": str(runtimes[0]["runtime_instance_id"])},
+                envelope,
+                state_root=str(store.state_root),
+            )
+        else:
+            return False
+    except (KeyError, TypeError, ValueError):
+        return False
+    return hmac.compare_digest(body.encode("utf-8"), expected.encode("utf-8"))
+
+
 def _capture_prompt(
     store: SQLiteStorage,
     scope: str | None,
@@ -509,6 +584,14 @@ def _capture_prompt(
         raise StorageRefusal(decision.reason_code, "shared agent lifecycle policy refused prompt intake")
     session_ref = event.session_ref
     raw_source_event_key = event.source_event_key
+    if _exact_operational_input(
+        store, actor_id, adapter_kind, session_ref, body
+    ):
+        return {
+            "suppressed": "exact_operational_input",
+            "prompt_id": None,
+            "idempotent": False,
+        }
     prompt_id, source_event_key = _prompt_identity(
         adapter_kind, session_ref, raw_source_event_key, body
     )
@@ -520,7 +603,13 @@ def _capture_prompt(
         and store.consume_stop_feedback(
             scope,
             actor_id,
-            _codex_turn_generation(session_ref, provider_turn_id),
+            (
+                _provider_terminal_generation(
+                    adapter_kind, session_ref, str(provider_turn_id)
+                )
+                if adapter_kind == "codex"
+                else None
+            ),
             body,
         )
     ):

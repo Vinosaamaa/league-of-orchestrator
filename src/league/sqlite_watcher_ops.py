@@ -63,7 +63,7 @@ def consume_stop_feedback(
     store: Any,
     scope_id: str,
     actor_agent_id: str,
-    terminal_generation: str,
+    terminal_generation: str | None,
     body: str,
 ) -> bool:
     """Consume only the exact one-time feedback emitted by the last Stop block."""
@@ -71,19 +71,33 @@ def consume_stop_feedback(
     body_digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
     try:
         with store._transaction():
-            changed = store.connection.execute(
-                """
-                UPDATE watcher_scopes
-                   SET pending_stop_feedback_digest=NULL,
-                       pending_stop_terminal_generation=NULL,
-                       pending_stop_wait_generation=NULL
-                 WHERE scope_id=? AND actor_agent_id=?
-                   AND pending_stop_feedback_digest=?
-                   AND pending_stop_terminal_generation=?
-                   AND pending_stop_wait_generation=last_blocked_wait_generation
-                """,
-                (scope_id, actor_agent_id, body_digest, terminal_generation),
-            )
+            if terminal_generation is None:
+                changed = store.connection.execute(
+                    """
+                    UPDATE watcher_scopes
+                       SET pending_stop_feedback_digest=NULL,
+                           pending_stop_terminal_generation=NULL,
+                           pending_stop_wait_generation=NULL
+                     WHERE scope_id=? AND actor_agent_id=?
+                       AND pending_stop_feedback_digest=?
+                       AND pending_stop_wait_generation=last_blocked_wait_generation
+                    """,
+                    (scope_id, actor_agent_id, body_digest),
+                )
+            else:
+                changed = store.connection.execute(
+                    """
+                    UPDATE watcher_scopes
+                       SET pending_stop_feedback_digest=NULL,
+                           pending_stop_terminal_generation=NULL,
+                           pending_stop_wait_generation=NULL
+                     WHERE scope_id=? AND actor_agent_id=?
+                       AND pending_stop_feedback_digest=?
+                       AND pending_stop_terminal_generation=?
+                       AND pending_stop_wait_generation=last_blocked_wait_generation
+                    """,
+                    (scope_id, actor_agent_id, body_digest, terminal_generation),
+                )
     except sqlite3.DatabaseError as exc:
         raise store._translate_database_error(
             exc, "Stop feedback suppression conflicted with canonical state"

@@ -3793,7 +3793,7 @@ class SQLiteStorage(SQLiteTransactionCore):
         self,
         scope_id: str,
         actor_agent_id: str,
-        terminal_generation: str,
+        terminal_generation: str | None,
         body: str,
     ) -> bool:
         return consume_stop_feedback_operation(

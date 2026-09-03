@@ -1821,3 +1821,12 @@ SQLite write and is consumed by the next provider-neutral Stop decision.
 Attached foreground `agent-watcher wait` reuses canonical state without
 replacing the OS-managed persistent watcher registration, and publishes its
 event baseline before wait readiness so an immediate wake cannot be missed.
+
+Release `0.2.70` assigns the next immutable install identity to merged PR #187
+at main commit `e2c75739e9722ad3e1f122402bd8b59a798fd697` and exact
+reviewed head `054f36abcd2b473730d097b637f2ef9ad5fc1cee`. It packages
+stable restored-Pi watcher routing, detailed provider-neutral Stop feedback,
+explicit one-shot Stop control, and non-disruptive attached foreground waiting.
+This release delta changes only the version contract, deterministic
+release-staging expectations, and this provenance record beyond that merged
+tree.

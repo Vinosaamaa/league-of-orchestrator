@@ -203,7 +203,7 @@ def test_universal_target_refuses_without_any_filesystem_change(root: Path) -> N
 def test_release_identity_collisions_refuse_before_any_filesystem_change(
     root: Path,
 ) -> None:
-    assert __version__ == "0.2.69"
+    assert __version__ == "0.2.70"
     for collision_kind in ("release", "bundle"):
         case = root / collision_kind
         namespace = f"{collision_kind}-collision"
@@ -300,9 +300,13 @@ def test_authority_bound_live_apply(root: Path) -> None:
         "beforeSubmitPrompt", "preToolUse", "stop"
     ]
     assert hook_receipts["pi"]["added"] == ["profile_extension"]
-    assert fixture["pi_hooks"].read_bytes() == (
-        ROOT / "integrations/pi/league-hooks.mjs"
-    ).read_bytes()
+    pi_source = (ROOT / "integrations/pi/league-hooks.mjs").read_bytes()
+    assert fixture["pi_hooks"].read_bytes() == pi_source.replace(
+        b'"__LEAGUE_STABLE_WATCHER__"',
+        json.dumps(fixture["plan"]["proposed"]["watcher_launcher"]).encode(
+            "utf-8"
+        ),
+    )
     assert json.loads(fixture["cursor_hooks"].read_text())["hooks"][
         "sessionStart"
     ] == [{"command": "keep-me"}]

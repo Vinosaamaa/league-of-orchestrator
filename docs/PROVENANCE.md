@@ -1876,3 +1876,12 @@ Summoner prompt intake while preserving model-visible wake delivery for Pi,
 Codex, and Cursor. This release delta changes only the version contract,
 deterministic release-staging expectations, and this provenance record beyond
 that merged tree.
+
+Release `0.2.75` assigns the next immutable install identity to merged PR #199
+at main commit `66fa38b980f523afe359d305bde97acded296231` and exact
+reviewed head `5eebb611fc1cc4214c8c106010d252cf3c00a8dc`. It reports
+bounded details for every Stop-obligation category across Pi, Codex, and Cursor
+and prevents routine Stop feedback from authorizing bypass or hook recovery
+actions. This release delta changes only the version contract, deterministic
+release-staging expectations, and this provenance record beyond that merged
+tree.

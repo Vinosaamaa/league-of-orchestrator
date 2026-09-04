@@ -17,6 +17,8 @@ DEFAULT_UNREACHABLE_GRACE_SECONDS = 60
 MAX_CHAMPION_STOP_GUARDS = 64
 MAX_OWNER_STOP_TARGETS = 64
 MAX_SUPERVISOR_SCOPE_CANDIDATES = 16
+MAX_STOP_DETAIL_ROWS = 10
+MAX_STOP_DETAIL_TEXT = 160
 ATTENTION_STATUSES = frozenset(
     {
         "blocked",
@@ -56,7 +58,94 @@ def stop_feedback_reason(
     )
     if not summaries:
         return base
-    return base + " Unresolved requests: " + " | ".join(summaries)
+    return base + " Unresolved obligations: " + " | ".join(summaries)
+
+
+def _stop_obligation_summaries(
+    store: Any,
+    actor_agent_id: str,
+    counts: Mapping[str, int],
+) -> tuple[str, ...]:
+    """Describe every Stop-obligation kind instead of only durable requests."""
+
+    summaries: list[str] = []
+    unresolved_items = int(counts.get("unresolved_requests", 0))
+    owner_decisions = int(counts.get("owner_decisions", 0))
+    if unresolved_items or owner_decisions:
+        owner_decision_filter = "" if unresolved_items else """
+              AND (
+                requests.state IN ('awaiting_user','blocked')
+                OR NOT EXISTS (
+                  SELECT 1 FROM tasks t
+                   WHERE t.request_id=requests.request_id
+                     AND t.state IN
+                       ('active','pending','accepted','working','progress','in_progress','blocked','ready_to_land')
+                )
+              )
+        """
+        request_rows = store.connection.execute(
+            f"""
+            SELECT summary,COUNT(*) OVER() AS total FROM requests
+             WHERE owner_agent_id=? AND state NOT IN ('answered','cancelled')
+                   {owner_decision_filter}
+             ORDER BY updated_at DESC,request_id LIMIT ?
+            """,
+            (actor_agent_id, MAX_STOP_DETAIL_ROWS),
+        ).fetchall()
+        summaries.extend(
+            " ".join(str(row["summary"]).split())[:MAX_STOP_DETAIL_TEXT]
+            for row in request_rows
+        )
+        request_total = int(request_rows[0]["total"]) if request_rows else 0
+        if request_total > len(request_rows):
+            additional = request_total - len(request_rows)
+            noun = "request" if additional == 1 else "requests"
+            summaries.append(f"{additional} additional unresolved {noun}")
+
+    if unresolved_items or int(counts.get("untriaged_prompts", 0)):
+        prompt_rows = store.connection.execute(
+            """
+            SELECT pp.body,COUNT(*) OVER() AS total FROM prompts p
+            LEFT JOIN prompt_payloads pp ON pp.prompt_id=p.prompt_id
+             WHERE p.current_owner_agent_id=? AND p.triage_state='untriaged'
+             ORDER BY p.created_at,p.prompt_id LIMIT ?
+            """,
+            (actor_agent_id, MAX_STOP_DETAIL_ROWS),
+        ).fetchall()
+        for row in prompt_rows:
+            body = " ".join(str(row["body"] or "").split())
+            summaries.append(
+                f"Untriaged prompt: {body[:MAX_STOP_DETAIL_TEXT]}"
+                if body
+                else "Untriaged prompt awaiting semantic triage"
+            )
+        prompt_total = int(prompt_rows[0]["total"]) if prompt_rows else 0
+        if prompt_total > len(prompt_rows):
+            additional = prompt_total - len(prompt_rows)
+            noun = "prompt" if additional == 1 else "prompts"
+            summaries.append(f"{additional} additional untriaged {noun}")
+
+    category_labels = {
+        "active_champions": ("active Champion", "active Champions"),
+        "pending_assignments": ("pending assignment", "pending assignments"),
+        "pending_deliveries": ("pending delivery", "pending deliveries"),
+        "cleanup_obligations": ("cleanup obligation", "cleanup obligations"),
+        "decision_tasks": ("task awaiting owner action", "tasks awaiting owner action"),
+        "failed_deliveries": ("failed delivery", "failed deliveries"),
+        "cleanup_decisions": ("cleanup decision", "cleanup decisions"),
+    }
+    for key, labels in category_labels.items():
+        count = int(counts.get(key, 0))
+        if count:
+            summaries.append(f"{count} {labels[0] if count == 1 else labels[1]}")
+    if owner_decisions:
+        summaries.append(
+            f"{owner_decisions} "
+            f"{'owner decision' if owner_decisions == 1 else 'owner decisions'}"
+        )
+    if counts.get("turn_commit_pending", 0):
+        summaries.append("Shotcaller turn commit pending")
+    return tuple(dict.fromkeys(summaries))
 
 
 def consume_stop_feedback(
@@ -2914,23 +3003,9 @@ def stop_decision(
             effective_counts = owner_counts if detached else all_counts
             total = sum(effective_counts.values())
             delegated_total = sum(all_counts.values())
-            if effective_counts.get("unresolved_requests", 0) or effective_counts.get(
-                "owner_decisions", 0
-            ):
-                summary_rows = store.connection.execute(
-                    """
-                    SELECT summary FROM requests
-                     WHERE owner_agent_id=? AND state NOT IN ('answered','cancelled')
-                     ORDER BY updated_at DESC,request_id LIMIT 10
-                    """,
-                    (actor_agent_id,),
-                ).fetchall()
-                summaries = tuple(
-                    " ".join(str(row["summary"]).split())[:160]
-                    for row in summary_rows
-                )
-            else:
-                summaries = ()
+            summaries = _stop_obligation_summaries(
+                store, actor_agent_id, effective_counts
+            )
             common = {
                 "scope_id": scope_id,
                 "wait_generation": int(scope["wait_generation"]),

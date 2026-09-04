@@ -151,6 +151,13 @@ def source_contract(source: Path) -> bytes:
         "and unrecorded.",
         "Prompt intake activates only after exact canonical binding; it never "
         "backfills pre-binding prompts or mines transcripts.",
+        "Stop feedback is an operational continuation, not new Summoner steering. "
+        "If it names an untriaged prompt, reconcile that prompt through the canonical "
+        "request turn before attempting to end again.",
+        "A routine Stop block never authorizes hook disablement, `service-start`, "
+        "detachment, request cancellation, `/new`, or `allow-stop --once`; use the "
+        "named recovery only for its exact refusal, and reserve the one-shot allowance "
+        "for an explicit Summoner stop after work is paused.",
     ):
         assert required_clause in triage, required_clause
     for contradictory_clause in (

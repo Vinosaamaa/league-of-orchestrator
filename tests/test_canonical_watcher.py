@@ -1833,6 +1833,8 @@ def test_real_codex_stop_payload_rearms_per_prompt_event(root: Path) -> None:
     assert blocked["decision"] == "block"
     assert blocked["reason"] == (
         "League has unresolved obligations for Garen at wait generation 2."
+        " Unresolved obligations: Untriaged prompt: Synthetic first real steer "
+        "in the active turn. | 1 active Champion"
     ), blocked
     assert "turn:owner-visible-one" not in str(blocked["reason"])
 
@@ -2439,10 +2441,17 @@ def test_native_provider_hooks_are_inert_until_exact_binding_then_activate(
         )
         if kind == "pi":
             assert stopped["binding"] == "bound"
-        if kind in {"cursor", "pi"}:
-            assert stopped["followup_message"].startswith(
-                "League has unresolved obligations for Garen at wait generation "
-            )
+        provider_feedback = (
+            stopped["reason"] if kind == "codex" else stopped["followup_message"]
+        )
+        assert provider_feedback.startswith(
+            "League has unresolved obligations for Garen at wait generation "
+        )
+        assert (
+            "Unresolved obligations: Untriaged prompt: promoted bound prompt"
+            in provider_feedback
+        ), stopped
+        assert "1 active Champion" in provider_feedback, stopped
 
         result = subprocess.run(
             [env["TEST_INSTALLED_WATCHER"], pretool_command],

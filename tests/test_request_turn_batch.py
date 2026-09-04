@@ -146,6 +146,9 @@ def test_interactive_turn_uses_one_process_and_one_ordered_batch(root: Path) -> 
         )
     assert active_turn_stop["decision"] == "block", active_turn_stop
     assert active_turn_stop["obligations"]["turn_commit_pending"] == 1, active_turn_stop
+    assert (
+        "Shotcaller turn commit pending" in active_turn_stop["unresolved_summaries"]
+    ), active_turn_stop
     decisions = {
         "candidate_inventory_digest": intake["result"]["candidate_inventory"]["digest"],
         "decisions": [

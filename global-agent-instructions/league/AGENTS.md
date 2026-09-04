@@ -62,6 +62,13 @@ $HOME/.local/bin/league --state-root "$HOME/.local/state/league" request turn \
   Champion, and cleanup obligation.
 - Stop is an omission backstop, not the normal triage mechanism. Genuine user
   steering rearms it and outranks material-event waits.
+- Stop feedback is an operational continuation, not new Summoner steering. If
+  it names an untriaged prompt, reconcile that prompt through the canonical
+  request turn before attempting to end again.
+- A routine Stop block never authorizes hook disablement, `service-start`,
+  detachment, request cancellation, `/new`, or `allow-stop --once`; use the
+  named recovery only for its exact refusal, and reserve the one-shot allowance
+  for an explicit Summoner stop after work is paused.
 
 ## Issue binding and delegation
 

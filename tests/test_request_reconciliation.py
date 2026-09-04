@@ -102,6 +102,7 @@ def test_stop_is_read_only_and_reconciliation_is_exact(root: Path) -> None:
     assert stop["unresolved_summaries"] == [
         "Canonical owner request",
         "Paraphrased duplicate owner request",
+        "1 active Champion",
     ]
     assert [row["request_id"] for row in after_stop["requests"]] == before_ids
     store.close()

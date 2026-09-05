@@ -82,6 +82,17 @@ class LaunchctlServiceManager:
 
     def bootout(self, label: str) -> None:
         self._run(["bootout", f"{self.domain}/{label}"])
+        # launchctl can accept bootout before the job is removed. Do not
+        # publish rollback completion or race the next bootstrap against it.
+        deadline = time.monotonic() + 15.0
+        while self.is_loaded(label):
+            if time.monotonic() >= deadline:
+                raise StorageRefusal(
+                    "supervisor_service_stop_timeout",
+                    "launchd accepted stop but the watcher job remains loaded",
+                    retryable=True,
+                )
+            time.sleep(0.05)
 
 
 def _sha256(payload: bytes) -> str:

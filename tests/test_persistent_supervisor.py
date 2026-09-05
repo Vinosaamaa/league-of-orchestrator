@@ -209,12 +209,7 @@ def test_live_aggregate_supervisor_leaves_unbound_native_hooks_inert(
                 "tool_use_id": "tool:ordinary-unbound-codex",
                 "tool_input": {"path": "synthetic.txt"},
             },
-            {
-                "hookSpecificOutput": {
-                    "hookEventName": "PreToolUse",
-                    "permissionDecision": "allow",
-                }
-            },
+            {},
         ),
         (
             "codex-stop-hook",

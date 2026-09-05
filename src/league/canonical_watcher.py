@@ -1091,7 +1091,7 @@ def _broker_hook(
     args: argparse.Namespace,
     payload: dict[str, Any],
     *,
-    timeout_seconds: float = 0.1,
+    timeout_seconds: float = 2.0,
     capture_event_id: str | None = None,
 ) -> dict[str, Any]:
     locator = f"unix:{PersistentSupervisor(_state_root()).socket_path}"

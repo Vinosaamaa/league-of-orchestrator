@@ -13,6 +13,7 @@ import tempfile
 import threading
 import time
 import sys
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -25,6 +26,7 @@ from league.persistent_supervisor import (  # noqa: E402
     supervisor_status,
 )
 from league.supervisor_service import (  # noqa: E402
+    LaunchctlServiceManager,
     MANIFEST_SCHEMA,
     SERVICE_LABEL,
     SupervisorServiceInstaller,
@@ -136,6 +138,26 @@ class SyntheticLaunchd:
 
 def sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_bootout_waits_for_launchd_unload() -> None:
+    manager = LaunchctlServiceManager()
+    # bootout acceptance does not mean the asynchronous job removal finished.
+    with patch.object(manager, '_run', return_value=0) as run, patch.object(
+        manager, 'is_loaded', side_effect=[True, True, False]
+    ) as loaded, patch('league.supervisor_service.time.sleep'):
+        manager.bootout(SERVICE_LABEL)
+        assert loaded.call_count == 3
+        run.assert_called_once_with(['bootout', f'{manager.domain}/{SERVICE_LABEL}'])
+    with patch.object(manager, '_run', return_value=0), patch.object(
+        manager, 'is_loaded', return_value=True
+    ), patch('league.supervisor_service.time.monotonic', side_effect=[0, 16]):
+        try:
+            manager.bootout(SERVICE_LABEL)
+        except StorageRefusal as exc:
+            assert exc.code == 'supervisor_service_stop_timeout'
+        else:
+            raise AssertionError('still-loaded job must never claim rollback complete')
 
 
 def test_launchd_environment_starts_the_canonical_watcher(root: Path) -> None:
@@ -532,6 +554,7 @@ def test_install_refuses_unapproved_source_without_side_effects(root: Path) -> N
 
 
 def main() -> None:
+    test_bootout_waits_for_launchd_unload()
     with tempfile.TemporaryDirectory(prefix="league-supervisor-service-") as temporary:
         root = Path(temporary)
         test_launchd_environment_starts_the_canonical_watcher(root / "environment")

@@ -540,7 +540,9 @@ class PersistentSupervisor:
         self._bindings: dict[str, dict[str, Any]] = {}
         self.registration_receipt: dict[str, Any] | None = None
         self._executor: ThreadPoolExecutor | None = None
+        self._request_executor: ThreadPoolExecutor | None = None
         self._work_slots = threading.BoundedSemaphore(max_accepted_work)
+        self._request_slots = threading.BoundedSemaphore(16)
         self._priority_lock = threading.Lock()
         self._user_priority_generation = 0
         self.user_priority = threading.Event()
@@ -568,21 +570,24 @@ class PersistentSupervisor:
                 self._user_priority_generation += 1
                 self.user_priority.set()
 
-    def _submit(self, function: Callable[..., Any], *args: Any) -> bool:
-        executor = self._executor
-        if executor is None or not self._work_slots.acquire(blocking=False):
+    def _submit(
+        self, function: Callable[..., Any], *args: Any, control: bool = False
+    ) -> bool:
+        executor = self._request_executor if control else self._executor
+        slots = self._request_slots if control else self._work_slots
+        if executor is None or not slots.acquire(blocking=False):
             return False
 
         def guarded() -> None:
             try:
                 function(*args)
             finally:
-                self._work_slots.release()
+                slots.release()
 
         try:
             executor.submit(guarded)
         except RuntimeError:
-            self._work_slots.release()
+            slots.release()
             return False
         return True
 
@@ -1434,6 +1439,10 @@ class PersistentSupervisor:
         acquired = False
         executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="league-supervisor")
         self._executor = executor
+        # Hook, ping, and owner-control traffic must not queue behind delivery
+        # adapters or recovery jobs. Both lanes retain bounded admission.
+        request_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="league-control")
+        self._request_executor = request_executor
         previous_handlers: dict[int, Any] = {}
         if threading.current_thread() is threading.main_thread():
             for signum in (signal.SIGTERM, signal.SIGINT):
@@ -1550,7 +1559,7 @@ class PersistentSupervisor:
                     connection, _ = server.accept()
                 except socket.timeout:
                     continue
-                if not self._submit(self._handle, connection):
+                if not self._submit(self._handle, connection, control=True):
                     self._response(
                         connection,
                         {"ok": False, "error": "supervisor_capacity_exceeded"},
@@ -1560,6 +1569,8 @@ class PersistentSupervisor:
             self.stop_requested.set()
             if server is not None:
                 server.close()
+            request_executor.shutdown(wait=True)
+            self._request_executor = None
             executor.shutdown(wait=True, cancel_futures=True)
             self._executor = None
             if acquired:

@@ -173,12 +173,7 @@ def test_read_only_pre_tool_fast_path_needs_no_state_or_supervisor(root: Path) -
                 "tool_use_id": "tool:read-only-codex",
                 "tool_input": {"path": "synthetic.txt"},
             },
-            {
-                "hookSpecificOutput": {
-                    "hookEventName": "PreToolUse",
-                    "permissionDecision": "allow",
-                }
-            },
+            {},
         ),
         (
             "cursor-pre-tool-hook",
@@ -1277,12 +1272,7 @@ def test_provider_pre_tool_policy_and_pi_stop_are_shared_and_fail_closed(
         )
         accepted = _watcher(env, pretool_command, payload=pretool)
         assert accepted == (
-            {
-                "hookSpecificOutput": {
-                    "hookEventName": "PreToolUse",
-                    "permissionDecision": "allow",
-                }
-            }
+            {}
             if kind == "codex"
             else {"permission": "allow"}
             if kind == "cursor"
@@ -2358,12 +2348,7 @@ def test_native_provider_hooks_are_inert_until_exact_binding_then_activate(
             }
             stop_detail = {"stop_hook_active": True}
             prompt_allow: dict[str, object] = {}
-            pretool_allow = {
-                "hookSpecificOutput": {
-                    "hookEventName": "PreToolUse",
-                    "permissionDecision": "allow",
-                }
-            }
+            pretool_allow = {}
             stop_allow: dict[str, object] = {}
         elif kind == "cursor":
             pretool_detail = {

@@ -1885,3 +1885,17 @@ and prevents routine Stop feedback from authorizing bypass or hook recovery
 actions. This release delta changes only the version contract, deterministic
 release-staging expectations, and this provenance record beyond that merged
 tree.
+
+The issue #66 hook-compatibility candidate deliberately replaces Codex's
+accepted pre-tool `permissionDecision: allow` response with an empty JSON
+object. It does not rewrite tool input or bypass native sandbox or approval
+checks; canonical refusals still produce `permissionDecision: deny`. Broker
+requests receive a two-second response budget within the existing five-second
+native hook limit. A separate bounded control executor prevents background
+recovery and delivery work from exhausting the request-handler pool. Existing
+ownership fences, exact-once prompt handling, and attached Stop blocking remain
+unchanged. `tests/test_hook_runtime_regressions.py` covers native response
+compatibility, delayed replies, control-lane progress, and bounded admission.
+The launchd adapter also verifies asynchronous job removal before returning
+from bootout; a bounded failure preserves the refusal instead of claiming a
+completed rollback. The service tests cover delayed removal and timeout.

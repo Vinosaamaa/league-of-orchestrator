@@ -29,6 +29,7 @@ const pi = {
 };
 
 const ctx = {
+  cwd: "/synthetic/repository",
   sessionManager: {
     getSessionId: () => "session-pi-bootstrap",
     getSessionFile: () => "/synthetic/pi/session.jsonl",
@@ -53,6 +54,9 @@ function runWatcher(command, payload) {
     return { binding: "unbound" };
   }
   if (command === "pi-pre-tool-hook") {
+    if (scenario === "delegation-required") {
+      return { binding: "bound", decision: "refuse", reason_code: "delegation_required" };
+    }
     return { binding: "bound", decision: "accept", reason_code: "policy_accepted" };
   }
   if (
@@ -125,6 +129,10 @@ if (scenario === "promoted" || scenario === "outage-stop") {
     input: scenario === "read-only" ? {} : { path: "file" },
   });
   settled = await invoke("agent_settled", {});
+}
+if (scenario === "delegation-required") {
+  secondInput = await invoke("input", { source: "interactive", text: "stop implementation; inspect only" });
+  rearmed = await invoke("tool_call", { toolName: "read", input: { path: "file" } });
 }
 
 process.stdout.write(

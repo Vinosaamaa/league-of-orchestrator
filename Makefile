@@ -20,6 +20,7 @@ STORAGE_TESTS := \
 REQUEST_LIFECYCLE_TESTS := \
 	tests/test_request_lifecycle.py \
 	tests/test_request_turn_batch.py \
+	tests/test_delegation_policy.py \
 	tests/test_assignment_dispatch.py \
 	tests/test_request_concurrency.py \
 	tests/test_transition_delivery.py \

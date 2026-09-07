@@ -156,6 +156,93 @@ def _request_row(store: Any, request_id: str) -> sqlite3.Row:
     return row
 
 
+def _require_issue_owned_champion_tasks(
+    store: Any,
+    *,
+    request_id: str,
+    coordinator_agent_id: str,
+    task_ids: tuple[str, ...],
+    require_active: bool = True,
+) -> None:
+    if not task_ids:
+        raise StorageRefusal(
+            "champion_delegation_required",
+            "Champion-routed implementation requires an issue-owned visible Champion result",
+        )
+    placeholders = ",".join("?" for _ in task_ids)
+    rows = store.connection.execute(
+        f"""
+        SELECT t.task_id
+          FROM tasks t
+          JOIN task_assignments a
+            ON a.task_id=t.task_id AND a.request_id=t.request_id
+          JOIN repository_issue_bindings b
+            ON b.task_id=t.task_id
+           AND b.assignment_id=a.task_assignment_id
+           AND b.request_id=t.request_id
+          JOIN repository_issue_selection_receipts s
+            ON s.receipt_digest=b.issue_selection_receipt_digest
+           AND s.task_id=t.task_id
+         WHERE t.request_id=?
+           AND t.task_id IN ({placeholders})
+           AND t.state IN ('completed','complete','ready_to_land')
+           AND t.result_summary IS NOT NULL
+           AND a.assignment_role='champion'
+           AND (?=0 OR a.coordinator_agent_id=?)
+           AND a.champion_agent_id<>a.coordinator_agent_id
+           AND a.runtime_instance_id IS NOT NULL
+           AND a.acceptance_receipt_json IS NOT NULL
+           AND (?=0 OR a.state='active')
+           AND b.issue_state='open'
+           AND s.issue_state='open'
+           AND s.repository=b.repository
+           AND s.issue=b.issue
+           AND s.task_scope_digest=b.task_scope_digest
+        """,
+        (request_id, *task_ids, int(require_active), coordinator_agent_id, int(require_active)),
+    ).fetchall()
+    if {str(row["task_id"]) for row in rows} != set(task_ids):
+        raise StorageRefusal(
+            "champion_delegation_required",
+            "Champion-routed implementation lacks an exact issue-owned visible Champion receipt",
+        )
+
+
+def _require_champion_answer_result(store: Any, request: sqlite3.Row) -> None:
+    if request["execution_mode"] != "champion":
+        return
+    result_id = request["latest_result_id"]
+    result = (
+        None
+        if result_id is None
+        else store.connection.execute(
+            "SELECT produced_by_agent_id FROM request_results WHERE result_id=? AND request_id=?",
+            (result_id, request["request_id"]),
+        ).fetchone()
+    )
+    if result is None:
+        raise StorageRefusal(
+            "champion_delegation_required",
+            "Champion-routed implementation cannot be answered before its Champion result",
+        )
+    task_ids = tuple(
+        str(row["task_id"])
+        for row in store.connection.execute(
+            "SELECT task_id FROM request_result_sources WHERE result_id=? ORDER BY task_id",
+            (result_id,),
+        ).fetchall()
+    )
+    _require_issue_owned_champion_tasks(
+        store,
+        request_id=str(request["request_id"]),
+        coordinator_agent_id=str(result["produced_by_agent_id"]),
+        task_ids=task_ids,
+        # The accepted result is durable evidence even after a rollover or
+        # cleanup. Recheck its immutable issue proof, not current ownership.
+        require_active=False,
+    )
+
+
 def _active_claim(
     store: Any,
     request_id: str,
@@ -2153,6 +2240,13 @@ def record_request_result(store: Any, command: RequestResultCommand) -> dict[str
             _active_claim(store, request_id, token=claim_token, at=at)
             if int(request["version"]) != expected_version:
                 raise StorageRefusal("version_conflict", "request result expected-version failed")
+            if request["execution_mode"] == "champion":
+                _require_issue_owned_champion_tasks(
+                    store,
+                    request_id=request_id,
+                    coordinator_agent_id=str(request["owner_agent_id"]),
+                    task_ids=sources,
+                )
             cited_tasks: dict[str, sqlite3.Row] = {}
             if sources:
                 placeholders = ",".join("?" for _ in sources)
@@ -2358,6 +2452,7 @@ def answer_request(store: Any, command: AnswerRequestCommand) -> dict[str, Any]:
             claim = _active_claim(store, request_id, token=claim_token, at=at)
             if int(request["version"]) != expected_version:
                 raise StorageRefusal("version_conflict", "request answer expected-version failed")
+            _require_champion_answer_result(store, request)
             next_version = expected_version + 1
             store.connection.execute(
                 """

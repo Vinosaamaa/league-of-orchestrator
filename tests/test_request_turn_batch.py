@@ -263,6 +263,54 @@ def test_turn_handler_never_spawns_a_second_process(root: Path) -> None:
     assert phases == ["intake", "begun", "committed"]
 
 
+def test_pr134_shaped_direct_implementation_refuses_before_completion(root: Path) -> None:
+    state, store, clock = create_context(root, "turn-pr134-delegation")
+    _capture(
+        store,
+        clock,
+        "prompt:pr134",
+        "Update AGENTS.md with an owner-address instruction and open a pull request.",
+    )
+    store.close()
+
+    process = _start_turn(state, clock.now())
+    assert process.stdin is not None and process.stdout is not None
+    intake = json.loads(process.stdout.readline())
+    begun = _submit_semantic(
+        process,
+        {
+            "candidate_inventory_digest": intake["result"]["candidate_inventory"]["digest"],
+            "decisions": [_semantic_decision("Implement the repository instruction change")],
+            "plans": [_external_semantic_plan()],
+        },
+    )
+    assert begun["result"]["routing"][0]["dispatch"]["execution_mode"] == "champion"
+    refused = _submit_semantic(
+        process,
+        {
+            "actions": [
+                {
+                    "kind": "answer",
+                    "request_index": 1,
+                    "content": "I changed the file and opened the pull request directly.",
+                    "resolution_summary": "Direct implementation claimed complete",
+                }
+            ]
+        },
+    )
+    assert process.wait(timeout=10) == 2
+    assert refused["error"]["code"] == "champion_delegation_required", refused
+    with SQLiteStorage(state) as observer:
+        request = observer.connection.execute(
+            "SELECT state,execution_mode,latest_result_id FROM requests WHERE summary=?",
+            ("Implement the repository instruction change",),
+        ).fetchone()
+        assert tuple(request) == ("in_progress", "champion", None)
+        assert observer.connection.execute(
+            "SELECT COUNT(*) FROM response_references"
+        ).fetchone()[0] == 0
+
+
 def test_batch_failure_is_atomic_and_exact_retry_is_idempotent(root: Path) -> None:
     state, store, clock = create_context(root, "turn-atomic")
     _capture(store, clock, "prompt:C", "Third exact prompt")
@@ -689,6 +737,7 @@ def main() -> None:
         root = Path(temporary)
         test_interactive_turn_uses_one_process_and_one_ordered_batch(root)
         test_turn_handler_never_spawns_a_second_process(root)
+        test_pr134_shaped_direct_implementation_refuses_before_completion(root)
         test_batch_failure_is_atomic_and_exact_retry_is_idempotent(root)
         test_partial_duplicate_or_reordered_decisions_refuse(root)
         test_one_process_persists_all_dispositions_without_minting_deferred_requests(root)

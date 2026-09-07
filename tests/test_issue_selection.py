@@ -9,6 +9,8 @@ import tempfile
 import threading
 from dataclasses import replace
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
+from unittest.mock import patch
 import sys
 
 
@@ -83,7 +85,22 @@ class FakeGitHubRunner:
                 self.list_started.set()
                 assert self.release_list.wait(timeout=5)
             with self._lock:
-                payload = [[dict(issue) for issue in self.issues]]
+                assert "--paginate" not in command and "--slurp" not in command
+                assert command[command.index("--jq") + 1] == (
+                    "{count: length, issues: [.[] | select(.pull_request == null) | {number, title}]}"
+                )
+                page = int(parse_qs(urlsplit(endpoint).query)["page"][0])
+                raw = self.issues[(page - 1) * 100:page * 100]
+                payload = {"count": len(raw), "issues": [
+                    {key: issue[key] for key in ("number", "title")}
+                    for issue in raw if issue.get("pull_request") is None
+                ]}
+            return subprocess.CompletedProcess(command, 0, json.dumps(payload), "")
+        if command[command.index("--method") + 1] == "GET":
+            number = int(endpoint.rsplit("/", 1)[1])
+            with self._lock:
+                selected = next(issue for issue in self.issues if issue["number"] == number)
+                payload = {key: selected[key] for key in ("number", "state", "title", "body", "html_url")}
             return subprocess.CompletedProcess(command, 0, json.dumps(payload), "")
         if "--input" not in command:
             raise AssertionError(f"unexpected GitHub command: {command}")
@@ -511,6 +528,69 @@ def test_expected_issue_mismatch_refuses_before_create(root: Path) -> None:
     store.close()
 
 
+def test_oversized_repository_is_paged_before_runner_output_limit(root: Path) -> None:
+    from league.visible_launch import MAX_COMMAND_OUTPUT_BYTES
+
+    class BoundedRunner(FakeGitHubRunner):
+        def run(self, arguments, *, timeout_seconds=30):
+            # Reproduce the installed failure if aggregate full bodies return.
+            if "--slurp" in arguments:
+                raise StorageRefusal("launch_adapter_output_too_large", "synthetic oversized response")
+            result = super().run(arguments, timeout_seconds=timeout_seconds)
+            assert len(result.stdout.encode()) < MAX_COMMAND_OUTPUT_BYTES
+            return result
+
+    _, store, _ = create_context(root, "oversized-selection")
+    huge_body = "unrelated body " * 4000
+    pull_requests = [dict(_issue(number, state="closed", body=huge_body), pull_request={})
+                     for number in range(1, 101)]
+    runner = BoundedRunner(pull_requests + [
+        _issue(215, state="open", title="Unrelated work", body=huge_body),
+        _issue(216, state="open", title=TITLE.upper()),
+    ])
+    assert len(json.dumps(runner.issues).encode()) > MAX_COMMAND_OUTPUT_BYTES
+    selected = GitHubIssueSelectionService(store, runner).select(
+        _spec("task:oversized"), "attempt:oversized", AT,
+        allow_create=False, expected_issue=216,
+    )
+    assert selected["issue"] == 216 and selected["decision"] == "reuse_open"
+    assert runner.created == 0
+    endpoints = [next(arg for arg in call if arg.startswith("repos/")) for call in runner.calls]
+    assert len(endpoints) == 3 and "page=2" in endpoints[1]
+    assert endpoints[2].endswith("/issues/216")  # Only the exact title's body is fetched.
+    assert store.connection.execute(
+        "SELECT COUNT(*) FROM repository_issue_selection_receipts"
+    ).fetchone()[0] == 1
+    store.close()
+
+
+def test_incomplete_paginated_search_never_creates(root: Path) -> None:
+    class EndlessPages(FakeGitHubRunner):
+        def run(self, arguments, *, timeout_seconds=30):
+            self.calls.append(tuple(arguments))
+            return subprocess.CompletedProcess(arguments, 0, '{"count":100,"issues":[]}', '')
+
+    for label, runner, ticks in (
+        ("page-bound", EndlessPages([]), None),
+        ("scan-time-bound", FakeGitHubRunner([]), [0, 0, 61]),
+    ):
+        _, store, _ = create_context(root, label)
+        try:
+            with patch("league.issue_first.time.monotonic", side_effect=ticks, return_value=0):
+                GitHubIssueSelectionService(store, runner).select(
+                    _spec(f"task:{label}"), f"attempt:{label}", AT,
+                )
+        except StorageRefusal as exc:
+            assert exc.code == "issue_selection_search_failed", exc.code
+        else:
+            raise AssertionError("incomplete duplicate preflight allowed creation")
+        assert runner.created == 0 and not any("POST" in call for call in runner.calls)
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM repository_issue_selection_receipts"
+        ).fetchone()[0] == 0
+        store.close()
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="league-issue-selection-") as temporary:
         root = Path(temporary)
@@ -521,6 +601,8 @@ def main() -> None:
         test_concurrent_distinct_selection_creates_exactly_one_issue(root)
         test_read_only_exact_issue_selection_never_creates(root)
         test_expected_issue_mismatch_refuses_before_create(root)
+        test_oversized_repository_is_paged_before_runner_output_limit(root)
+        test_incomplete_paginated_search_never_creates(root)
     print("PASS: duplicate preflight reuses, reopens with linkage, creates only distinct scope, and serializes concurrency")
 
 

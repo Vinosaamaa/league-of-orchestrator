@@ -508,7 +508,14 @@ current goal version; a later use cannot strand an older valid one.
 An autonomous grant never
 makes repository implementation direct: `request dispatch` still requires a
 visible Champion, and `assign run` verifies the issue against GitHub before any
-canonical assignment or terminal mutation.
+canonical assignment or terminal mutation. The same provider-neutral
+delegation policy blocks Shotcaller repository writes through Codex
+`PreToolUse` and Pi `tool_call` with `delegation_required`; a Champion-routed
+request also cannot be answered or settled without its issue-bound visible
+Champion task receipt. Native file edits and recognized shell file writes are
+checked; this is not a general-purpose shell sandbox. Read-only diagnostics,
+canonical recovery commands, prompt intake, Stop, and detachment retain their
+existing paths. Recovery still requires its own exact protected-action authority.
 
 Before `assign run`, select the issue through the duplicate-preflight command:
 

@@ -18,6 +18,8 @@ teardown; issue #23 owns those gates.
   `awaiting_requester`, `deferred`, `answered`, or `cancelled`.
 - Repository initialization/writes, configuration writes, migrations,
   supervised tests, and long work require a visible Champion before mutation.
+  One shared League policy enforces that boundary at Codex `PreToolUse` and Pi
+  `tool_call`; provider adapters do not own or duplicate the decision.
   User-selected model, effort, and explicit route are recorded unchanged.
 - Shotcaller-owned intake is fenced by the stable Squad owner. A draining or
   superseded Shotcaller incarnation refuses new prompts; the atomic rollover

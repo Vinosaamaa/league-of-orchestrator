@@ -733,23 +733,31 @@ class HerdrCodexLaunchAdapter:
 
     def _token_only_presentation(self, agent: Mapping[str, Any]) -> bool:
         tokens = agent.get("tokens")
-        return bool(
-            isinstance(tokens, Mapping)
-            and self._created is not None
-            and agent.get("pane_id") == self._created.get("pane_id")
+        if not isinstance(tokens, Mapping) or self._created is None:
+            return False
+        session_id = _session_id(agent)
+        endpoint_matches = (
+            agent.get("pane_id") == self._created.get("pane_id")
             and agent.get("terminal_id") == self._created.get("terminal_id")
             and agent.get("name") == self._created.get("routing_name")
             and agent.get("cwd") == self._created.get("worktree")
             and agent.get("foreground_cwd") == self._created.get("worktree")
-            and _session_id(agent) == self._created.get("thread_id")
-            and tokens.get("identity_title_mode") == "tokens-only"
-            and tokens.get("identity_thread_id") == _session_id(agent)
-            and isinstance(_session_id(agent), str)
-            and agent.get("agent") == self.profile.kind
             and agent.get("workspace_id") == self.options.workspace_id
-            and tokens.get("harness") == self.profile.kind
+        )
+        session_matches = (
+            isinstance(session_id, str)
+            and session_id == self._created.get("thread_id")
+        )
+        provider_matches = (
+            agent.get("agent") == self.profile.kind
             and _session_source(agent) == f"herdr:{self.profile.kind}"
         )
+        tokens_match = (
+            tokens.get("identity_title_mode") == "tokens-only"
+            and tokens.get("identity_thread_id") == session_id
+            and tokens.get("harness") == self.profile.kind
+        )
+        return endpoint_matches and session_matches and provider_matches and tokens_match
 
     def _title_exact(
         self, agent: Mapping[str, Any], callsign: str, assignment_id: str

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 import hashlib
 import subprocess
 import tempfile
@@ -3330,9 +3331,95 @@ def test_token_only_without_project_refuses_provider_fallback(root: Path) -> Non
         store.close()
 
 
+def test_registered_direct_factory_project_metadata(root: Path) -> None:
+    import league.cli as cli
+
+    for kind in ("codex", "cursor"):
+        for index, (explicit, catalog, expected) in enumerate((
+            ("LEAGUE", "Catalog", "LEAGUE"),
+            (None, "Catalog", "Catalog"),
+            (None, None, None),
+            ("", "Catalog", "invalid"),
+            ("Bad Code", "Catalog", "invalid"),
+            ("x" * 25, "Catalog", "invalid"),
+        )):
+            suffix = f"registered-{kind}-project-{index}"
+            store, clock, worktree = _context(root, suffix)
+            options = _options(root)
+            spec = _spec(worktree, suffix)
+            runner = (FakeHerdrRunner(worktree, harness_kind=kind)
+                      if expected is None else TokenOnlyLaunchRunner(worktree, kind))
+            arguments = ["--state-root", options.state_root, "assign", "run"]
+            for key in (
+                "assignment_id", "request_id", "claim_token", "task_id",
+                "task_summary", "coordinator_agent_id", "champion_agent_id",
+                "repository", "issue", "branch", "worktree",
+            ):
+                arguments.extend(("--" + key.replace("_", "-"), str(getattr(spec, key))))
+            arguments.extend((
+                "--runtime-kind", kind, "--provider-kind", kind,
+                "--workspace-id", "w1", "--task-label", "Tiny Gate",
+                "--issue-selection-receipt-digest", "a" * 64,
+                "--league-command", options.league_command,
+            ))
+            if explicit is not None:
+                arguments.extend(("--project-code", explicit))
+            args = cli._parser().parse_args(arguments)
+            with (
+                patch.dict(os.environ, {"HERDR_ENV": "1", "HERDR_WORKSPACE_ID": "w1"}),
+                patch.object(cli, "SubprocessRunner", return_value=runner),
+                patch.object(cli, "GitHubIssueVerifier", return_value=FakeIssueVerifier(store=store)),
+                patch.object(cli, "_champion_launch_route", return_value={
+                    "model": options.model, "effort": options.effort,
+                    "runtime": kind, "provider": kind,
+                    "explicit": {"runtime": True, "provider": True,
+                                 "model": True, "effort": True},
+                }),
+                patch.object(cli, "_turn_time", side_effect=clock.now),
+                patch.object(visible_launch, "_Clock", return_value=clock),
+                patch.object(store, "resolve_project", return_value=(
+                    {"code": catalog} if catalog is not None else None
+                )) as resolve_project,
+                patch.object(visible_launch.time, "sleep", lambda _: None),
+            ):
+                if expected == "invalid":
+                    try:
+                        cli._assign_launch(store, args)
+                    except StorageRefusal as exc:
+                        assert exc.code == "presentation_metadata_invalid", exc.code
+                    else:
+                        raise AssertionError("invalid project metadata reached allocation")
+                    assert runner.calls == []
+                    try:
+                        store.assignment_launch_context(spec.assignment_id)
+                    except StorageRefusal as exc:
+                        assert exc.code == "assignment_unknown"
+                    else:
+                        raise AssertionError("invalid project metadata reserved an assignment")
+                else:
+                    first, _ = cli._assign_launch(store, args)
+                    assert first["state"] == "active", first
+                    receipt = store.assignment_launch_context(spec.assignment_id)
+                    retry, _ = cli._assign_launch(store, args)
+                    assert retry["state"] == "active" and retry["idempotent"]
+                    assert store.assignment_launch_context(spec.assignment_id) == receipt
+                    suffix_title = f"{expected}|Tiny Gate" if expected else "Tiny Gate"
+                    assert runner.tokens["thread_title"] == f"Lux · {suffix_title}"
+                    assert runner.tokens.get("launch_project_code") == expected
+                    assert f"Project code: {expected or 'none'}" in runner.contexts[-1]
+                    assert len([call for call in runner.calls
+                                if call[:3] == ("herdr", "tab", "create")]) == 1
+                if explicit is not None:
+                    resolve_project.assert_not_called()
+                else:
+                    assert resolve_project.call_count == 2
+            store.close()
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="league-visible-launch-") as temporary:
         root = Path(temporary)
+        test_registered_direct_factory_project_metadata(root)
         test_token_only_native_title_refresh_preserves_launch_identity(root)
         test_token_only_native_title_refresh_preserves_launch_identity(root, "cursor")
         test_token_only_without_project_refuses_provider_fallback(root)

@@ -3197,9 +3197,117 @@ def test_legacy_display_refuses_malformed_agent_status_without_type_error(root: 
     store.close()
 
 
+class TokenOnlyLaunchRunner(DeferredSessionRunner):
+    """Native OSC stays native; the identity helper renders explicit launch inputs."""
+
+    def __init__(self, worktree: Path, harness_kind: str = "codex"):
+        super().__init__(worktree, harness_kind=harness_kind)
+        self.title = f"Launch handshake synthetic | {harness_kind}"
+        self.tokens.update(
+            identity_title_mode="tokens-only",
+            harness=harness_kind,
+            identity_thread_id=THREAD_ID,
+        )
+
+    def _agent(self):
+        # Faithful identity-helper precedence: incomplete launch identity falls
+        # back to the provider prompt, even after an early League metadata write.
+        callsign = self.tokens.get("launch_callsign", "")
+        task = self.tokens.get("launch_task_label", "")
+        project = self.tokens.get("launch_project_code", "")
+        title = (
+            f"{callsign} · {project}|{task}"
+            if callsign and project and task
+            else "Launch handshake synthetic"
+        )
+        prior_tokens = dict(self.tokens)
+        self.tokens.update(
+            callsign=callsign or title,
+            thread_title=title,
+            identity_title=f"{self.harness_kind.title()} | {title}",
+        )
+        if self.tokens != prior_tokens:
+            self.state_change_seq += 1
+        agent = super()._agent()
+        agent.pop("metadata_source")
+        agent["terminal_title"] = agent["terminal_title_stripped"] = self.title
+        return agent
+
+    def run(self, arguments, *, timeout_seconds: int = 30):
+        result = super().run(arguments, timeout_seconds=timeout_seconds)
+        if tuple(arguments[:3]) == ("herdr", "agent", "prompt"):
+            self.title = f"New native prompt title | {self.harness_kind}"
+            self.state_change_seq += 1
+        return result
+
+
+def test_token_only_native_title_refresh_preserves_launch_identity(
+    root: Path, harness_kind: str = "codex"
+) -> None:
+    suffix = f"token-only-{harness_kind}-launch"
+    store, clock, worktree = _context(root, suffix)
+    options = replace(_options(root), project_code="League")
+    runner = TokenOnlyLaunchRunner(worktree, harness_kind)
+    spec = _spec(worktree, suffix)
+    service = VisibleChampionLaunchService(
+        store, _adapter(options, runner, store, harness_kind=harness_kind), options, clock
+    )
+    with patch.object(visible_launch.time, "sleep", lambda _: None):
+        first = service.launch(spec)
+        assert first["state"] == "active", first
+        receipt = store.assignment_launch_context(spec.assignment_id)
+        again = VisibleChampionLaunchService(
+            store, _adapter(options, runner, store, harness_kind=harness_kind), options, clock
+        ).launch(spec)
+    assert again["idempotent"] is True
+    assert again["state"] == "active"
+    assert store.assignment_launch_context(spec.assignment_id) == receipt
+    assert first["context_delivery"]["display_receipt"]["state_change_seq"] == runner.state_change_seq
+    assert len(runner.contexts) == 2  # one READY handshake and one work brief
+    assert runner.tokens["thread_title"] == "Lux · League|Tiny Gate"
+    assert runner.tokens["sidebar_name"] == "Lux"
+    assert runner.tokens["orchestrator_role"] == "champion"
+    assert runner.title == f"New native prompt title | {harness_kind}"
+    assert len([call for call in runner.calls if call[:3] == ("herdr", "tab", "create")]) == 1
+    assert len([call for call in runner.calls if call[:3] == ("herdr", "pane", "report-metadata")]) == 1
+    # Reverification must not turn absent top-level source into blanket authority.
+    adapter = _adapter(options, runner, store, harness_kind=harness_kind)
+    acceptance = receipt["acceptance_receipt"]
+    for mutate in (
+        lambda agent: agent.update(metadata_source="user:selected"),
+        lambda agent: agent.update(metadata_source=None),
+        lambda agent: agent.update(title="User title"),
+        lambda agent: agent["tokens"].update(launch_title_owner="foreign"),
+        lambda agent: agent["tokens"].update(launch_callsign="Other"),
+        lambda agent: agent["tokens"].update(identity_thread_id="foreign"),
+        lambda agent: agent["tokens"].update(harness="foreign"),
+        lambda agent: agent["tokens"].update(orchestrator_role="shotcaller"),
+        lambda agent: agent.update(terminal_id="other-terminal"),
+        lambda agent: agent.update(workspace_id="other-workspace"),
+        lambda agent: agent["agent_session"].update(source="foreign"),
+    ):
+        original_agent = runner._agent
+        def changed_agent():
+            agent = original_agent()
+            mutate(agent)
+            return agent
+        before = len(runner.calls)
+        with patch.object(runner, "_agent", changed_agent):
+            try:
+                adapter.verify_active_title(acceptance)
+            except StorageRefusal as exc:
+                assert exc.code in {"launch_title_restore_refused", "launch_identity_unverified"}
+            else:
+                raise AssertionError("ambiguous token-only presentation was accepted")
+        assert all(call[:3] == ("herdr", "agent", "get") for call in runner.calls[before:])
+    store.close()
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="league-visible-launch-") as temporary:
         root = Path(temporary)
+        test_token_only_native_title_refresh_preserves_launch_identity(root)
+        test_token_only_native_title_refresh_preserves_launch_identity(root, "cursor")
         test_generated_task_labels_are_deterministic_two_word_names()
         test_legacy_display_command_exposes_exact_owner_cas_inputs()
         test_task_label_defaults_and_explicit_labels_stay_two_words(root)

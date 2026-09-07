@@ -947,8 +947,12 @@ def test_factory_persisted_routing_ownership(root: Path) -> None:
     from league.cli import _champion_launch_route
     from league.routing import ModelRouter, load_routing_config
 
-    for foreign in (True, False):
-        suffix = f"factory-decision-{foreign}"
+    for scenario in ("foreign", "valid", "invalid-json", "null", "mixed", "object"):
+        foreign = scenario == "foreign"
+        malformed = {
+            "invalid-json": "[", "null": "null", "mixed": '[1,"write"]', "object": "{}",
+        }.get(scenario)
+        suffix = f"factory-decision-{scenario}"
         store, clock, worktree = _context(root, suffix)
         runner = FakePiHerdr(root / suffix)
         adapter, options, _ = factory_adapter(store, clock, worktree, root, runner)
@@ -965,15 +969,30 @@ def test_factory_persisted_routing_ownership(root: Path) -> None:
             routing_decision_id=decision["decision_id"], request_id=subject,
             task_id=spec.task_id, requires=[],
         ), assignment_id=spec.assignment_id)
+        if malformed is not None:
+            # The canonical TEXT column and storage API accept malformed JSON.
+            # Persist it through the real API, not a mocked validator/read result.
+            bad_id = f"route:{suffix}:malformed"
+            store.record_routing_decision({
+                **store.routing_decision(decision["decision_id"]),
+                "decision_id": bad_id, "required_capabilities_json": malformed,
+            })
+            routing["decision_id"] = bad_id
         adapter.descriptor.update(routing=routing, model=routing["model"], effort=routing["effort"])
         try:
             result = VisibleChampionLaunchService(
                 store, adapter, options, clock, issue_verifier=FakeIssueVerifier(store=store),
             ).launch(spec)
-            if foreign:
+            if foreign or malformed is not None:
                 assert result["state"] == "blocked", result
                 assert result["failure_class"] == "provider_launch_routing_mismatch", result
+                assert result["cleanup_required"] is False
                 assert runner.start_count == 0 and not adapter.created_endpoint
+                assert all(call[1:3] == ("agent", "list") for call in runner.calls)
+                assert store.provider_launch_descriptor("pi-launch:assignment:factory") is None
+                assert store.callsign_assignment_status(
+                    f"callsign-assignment:{spec.assignment_id}"
+                )["state"] == "rolled_back"
             else:
                 assert result["state"] == "active", result
                 assert store.assignment_launch_context(spec.assignment_id)["acceptance_receipt"]["routing"] == routing

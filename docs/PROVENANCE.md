@@ -2007,3 +2007,11 @@ repair. Both now refuse. During the ownership-check implementation, the focused
 test caught an incorrect assignment capability-column lookup (`IndexError`);
 the check now reads the exact callsign reservation's `requirements_json`.
 These are local source and synthetic-test receipts, not live launch evidence.
+The PR #202 follow-up reproduced malformed capability JSON through the canonical
+routing-decision storage API: its TEXT column has no JSON constraint. Such
+evidence previously escaped as `launch_adapter_jsondecodeerror` and left a fresh
+reservation cleanup-pending. Both canonical capability inputs now use the
+existing capability validator and map parse/type/shape failures to
+`provider_launch_routing_mismatch` inside descriptor preparation's transaction.
+Synthetic factory regressions prove no descriptor or endpoint allocation and
+exact reservation rollback for malformed JSON, null, mixed arrays, and objects.

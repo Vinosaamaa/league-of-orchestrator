@@ -176,8 +176,22 @@ def _validate_canonical_routing_assignment(store: Any, exact: Mapping[str, Any])
             "task": assignment["task_id"], "request": assignment["request_id"],
         }
         from .agent_adapters import builtin_agent_adapter_registry
+        from .sqlite_callsign_ops import capabilities
 
         provider_adapter = builtin_agent_adapter_registry().adapter(exact["runtime_kind"])
+        capabilities_match = False
+        if decision is not None and assignment is not None:
+            try:
+                capabilities_match = capabilities(
+                    json.loads(decision["required_capabilities_json"])
+                ) == capabilities(
+                    json.loads(assignment["requirements_json"])
+                )
+            except (json.JSONDecodeError, TypeError, StorageRefusal) as exc:
+                raise StorageRefusal(
+                    "provider_launch_routing_mismatch",
+                    "Pi canonical routing capabilities are malformed",
+                ) from exc
         if not (
             decision is not None and assignment is not None
             and decision.get("subject_kind") in targets
@@ -189,8 +203,7 @@ def _validate_canonical_routing_assignment(store: Any, exact: Mapping[str, Any])
                 "model", "effort", "tier", "reason", "reason_code",
                 "policy_version", "provider_config_version",
             ))
-            and sorted(json.loads(decision["required_capabilities_json"]))
-            == sorted(json.loads(assignment["requirements_json"]))
+            and capabilities_match
         ):
             raise StorageRefusal(
                 "provider_launch_routing_mismatch",

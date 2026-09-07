@@ -709,7 +709,7 @@ class HerdrPiLaunchAdapter:
             or (modern_role and sample["tokens"].get("orchestrator_role") != self.descriptor["role"])
         ):
             raise StorageRefusal("launch_title_restore_refused", "Pi presentation authority or identity changed")
-        return sample
+        return {**sample, "initial_display": prior_display is None}
 
     def verify_active_title(self, receipt: Mapping[str, Any]) -> dict[str, Any]:
         sample = self._display_sample(receipt)
@@ -728,16 +728,22 @@ class HerdrPiLaunchAdapter:
             )
 
         if not exact(sample):
-            # Provider titles may race context delivery. An owned-source mismatch
-            # is ambiguous (including a user token-only edit); only a pre-token
-            # receipt with otherwise exact names may acquire the canonical role.
+            # The native bootstrap publishes launch_* identity tokens only.
+            # Promote that exact first display once, never a conflicting or
+            # previously accepted display (including user token-only edits).
+            owned_bootstrap = (
+                sample["initial_display"]
+                and sample["source"] == source
+                and sample["terminal_title"] == display["terminal_title"]
+                and not any(key in sample["tokens"] for key in tokens)
+            )
             legacy_role_only = (
                 "orchestrator_role" not in sample["tokens"]
                 and sample["terminal_title"] == display["terminal_title"]
                 and all(sample["tokens"].get(key) == value for key, value in tokens.items()
                         if key != "orchestrator_role")
             )
-            if sample["source"] != "herdr:pi" and not legacy_role_only:
+            if sample["source"] != "herdr:pi" and not (legacy_role_only or owned_bootstrap):
                 raise StorageRefusal("launch_title_restore_refused", "Pi owned display tokens changed")
             if self._display_sample(receipt) != sample:
                 raise StorageRefusal("launch_title_restore_refused", "Pi presentation changed before restoration")

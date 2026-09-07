@@ -4086,15 +4086,24 @@ class SQLiteStorage(SQLiteTransactionCore):
             at,
         )
 
+    def pending_shotcaller_identity_repair(self, request: dict[str, Any], generation: str,
+                                           proof: dict[str, Any]) -> Optional[dict[str, Any]]:
+        return sqlite_runtime_ops.pending_shotcaller_identity_repair(self, request, generation, proof)
+
+    def repair_shotcaller_identity(self, request: dict[str, Any], generation: str,
+                                  proof: dict[str, Any], at: str) -> dict[str, Any]:
+        return sqlite_runtime_ops.repair_shotcaller_identity(self, request, generation, proof, at)
+
     def record_restored_runtime_recovery(
         self,
         runtime_instance_id: str,
         actor_agent_id: str,
         failure_code: str,
         at: str,
+        *, next_action: str = "retry runtime reconcile-restored-agent with the same multiplexer",
     ) -> dict[str, Any]:
         return sqlite_runtime_ops.record_restored_runtime_recovery(
-            self, runtime_instance_id, actor_agent_id, failure_code, at
+            self, runtime_instance_id, actor_agent_id, failure_code, at, next_action=next_action
         )
 
     def satisfy_restored_runtime_recovery(

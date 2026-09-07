@@ -444,10 +444,22 @@ def handoff_transition_delivery(
         "state": "pending",
         "reason": "supervisor_unavailable",
     }
-    if target is None or target.get("channel") != "watcher":
+    if target is None:
+        return pending
+    if target.get("channel") == "direct":
+        # Detachment changes the delivery route, not the service that owns it.
+        registration = store.watcher_registration(recipient_agent_id)
+        if (not isinstance(registration, Mapping)
+            or registration.get("actor_agent_id") != recipient_agent_id
+            or registration.get("runtime_instance_id") != target.get("runtime_instance_id")
+            or datetime.fromisoformat(str(registration["leased_until"]).replace("Z", "+00:00"))
+               <= datetime.fromisoformat(at.replace("Z", "+00:00"))):
+            return pending
+        target = {**target, "locator": registration["wake_locator"], "fence": registration["fence"]}
+    elif target.get("channel") != "watcher":
         return pending
     locator = str(target.get("locator", ""))
-    if locator.startswith("sqlite-supervise:"):
+    if target.get("channel") == "watcher" and locator.startswith("sqlite-supervise:"):
         # Compatibility facade for the bounded legacy watcher. Delivery still
         # belongs to the watcher path, never to the provider-facing direct path.
         from .canonical_delivery import dispatch_event
@@ -469,12 +481,15 @@ def handoff_transition_delivery(
                 "outbox_id": outbox_id,
                 "event_id": event_id,
                 "recipient_agent_id": recipient_agent_id,
+                "actor_agent_id": recipient_agent_id,
                 "fence": target["fence"],
                 "runtime_generation": target["generation"],
             },
             timeout_seconds=0.5,
         )
     except (SupervisorUnavailable, StorageRefusal):
+        return pending
+    if response.get("scheduled") is not True or response.get("fence") != target["fence"]:
         return pending
     return {
         "outbox_id": outbox_id,
@@ -540,7 +555,13 @@ class PersistentSupervisor:
         self._bindings: dict[str, dict[str, Any]] = {}
         self.registration_receipt: dict[str, Any] | None = None
         self._executor: ThreadPoolExecutor | None = None
+        self._request_executor: ThreadPoolExecutor | None = None
+        self._delivery_executor: ThreadPoolExecutor | None = None
+        # No delivery backlog: a socket caller must not wait behind another
+        # native send and exhaust its transport deadline before execution.
+        self._delivery_slots = threading.BoundedSemaphore(2)
         self._work_slots = threading.BoundedSemaphore(max_accepted_work)
+        self._request_slots = threading.BoundedSemaphore(16)
         self._priority_lock = threading.Lock()
         self._user_priority_generation = 0
         self.user_priority = threading.Event()
@@ -568,21 +589,26 @@ class PersistentSupervisor:
                 self._user_priority_generation += 1
                 self.user_priority.set()
 
-    def _submit(self, function: Callable[..., Any], *args: Any) -> bool:
-        executor = self._executor
-        if executor is None or not self._work_slots.acquire(blocking=False):
+    def _submit(
+        self, function: Callable[..., Any], *args: Any, control: bool = False, delivery: bool = False
+    ) -> bool:
+        executor = self._request_executor if control else self._executor
+        slots = self._request_slots if control else self._work_slots
+        if delivery:
+            executor, slots = self._delivery_executor, self._delivery_slots
+        if executor is None or not slots.acquire(blocking=False):
             return False
 
         def guarded() -> None:
             try:
                 function(*args)
             finally:
-                self._work_slots.release()
+                slots.release()
 
         try:
             executor.submit(guarded)
         except RuntimeError:
-            self._work_slots.release()
+            slots.release()
             return False
         return True
 
@@ -1076,18 +1102,32 @@ class PersistentSupervisor:
             return
         if kind != "champion-event" or not isinstance(message.get("envelope"), dict):
             raise SupervisorUnavailable("supervisor message kind is unsupported")
-        with self.store_factory(self.state_root) as store:
-            self._assert_fenced_registration(store, state, fence)
-        self.wake_adapter.send(state, message["envelope"])
-        self._response(
-            connection,
-            {
-                "ok": True,
-                "delivered": True,
-                "event_id": message["envelope"].get("event_id"),
-                "fence": fence,
-            },
-        )
+        if not self._submit(self._deliver_champion_event, connection, message, state, delivery=True):
+            self._response(connection, {"ok": False, "error": "supervisor_capacity_exceeded"})
+
+    def _deliver_champion_event(self, connection: socket.socket, message: dict[str, Any],
+                                admitted: dict[str, Any]) -> None:
+        """Retain the caller connection until its bounded native effect finishes."""
+        try:
+            state = self._binding_state(str(admitted["actor_agent_id"]))
+            if any(state.get(key) != admitted.get(key) for key in
+                   ("fence", "runtime_instance_id", "runtime_generation", "session_ref", "endpoint")):
+                raise SupervisorUnavailable("queued delivery binding changed")
+            fence = int(state["fence"])
+            with self.store_factory(self.state_root) as store:
+                self._assert_fenced_registration(store, state, fence)
+            self.wake_adapter.send(state, message["envelope"])
+            response = {"ok": True, "delivered": True,
+                        "event_id": message["envelope"].get("event_id"), "fence": fence}
+        except StorageRefusal as exc:
+            response = {"ok": False, "error": "storage_refusal", "code": exc.code,
+                        "retryable": exc.retryable}
+        except Exception:
+            response = {"ok": False, "error": "supervisor_wake_refused"}
+        try:
+            self._response(connection, response)
+        except OSError:
+            connection.close()
 
     def _handle(self, connection: socket.socket) -> None:
         connection.settimeout(15)
@@ -1434,6 +1474,12 @@ class PersistentSupervisor:
         acquired = False
         executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="league-supervisor")
         self._executor = executor
+        # Hook, ping, and owner-control traffic must not queue behind delivery
+        # adapters or recovery jobs. Both lanes retain bounded admission.
+        request_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="league-control")
+        self._request_executor = request_executor
+        delivery_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="league-delivery")
+        self._delivery_executor = delivery_executor
         previous_handlers: dict[int, Any] = {}
         if threading.current_thread() is threading.main_thread():
             for signum in (signal.SIGTERM, signal.SIGINT):
@@ -1550,7 +1596,7 @@ class PersistentSupervisor:
                     connection, _ = server.accept()
                 except socket.timeout:
                     continue
-                if not self._submit(self._handle, connection):
+                if not self._submit(self._handle, connection, control=True):
                     self._response(
                         connection,
                         {"ok": False, "error": "supervisor_capacity_exceeded"},
@@ -1560,8 +1606,12 @@ class PersistentSupervisor:
             self.stop_requested.set()
             if server is not None:
                 server.close()
+            request_executor.shutdown(wait=True)
+            self._request_executor = None
             executor.shutdown(wait=True, cancel_futures=True)
             self._executor = None
+            delivery_executor.shutdown(wait=True)
+            self._delivery_executor = None
             if acquired:
                 self._release()
                 _remove_owned_socket(self.socket_path)

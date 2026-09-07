@@ -70,6 +70,7 @@ class FakePiHerdr:
         self.agent_get_count = 0
         self.report_process_argv = True
         self.launch_metadata_available = True
+        self.bootstrap_tokens_only = False
         self.native_session_available = True
         self.presentation_title: str | None = None
         self.presentation_source: str | None = None
@@ -125,6 +126,8 @@ class FakePiHerdr:
             "thread_title": title,
             "activation_phase": "session_started",
         }
+        if self.bootstrap_tokens_only:
+            tokens = {}
         if self.launch_metadata_available:
             tokens.update({
                 "launch_runtime_kind": "pi",
@@ -1103,13 +1106,15 @@ def test_factory_persisted_routing_ownership(root: Path) -> None:
 
 def test_pi_context_display_receipt_matches_shared_contract(root: Path) -> None:
     root = root.resolve()
-    for provider in ("cursor", "codex"):
-        suffix = f"pi-context-{provider}"
+    for provider, bootstrap in (("cursor", False), ("codex", False),
+                                ("cursor", True), ("codex", True)):
+        suffix = f"pi-context-{provider}-{bootstrap}"
         store, clock, worktree = _context(root, suffix)
         descriptor = _descriptor(root / suffix, worktree, provider, "create")
         descriptor["task_label"] = "Tiny Gate"
         runner = FakePiHerdr(root / suffix)
-        runner.context_title = "Prompt generated title"
+        runner.bootstrap_tokens_only = bootstrap
+        runner.context_title = None if bootstrap else "Prompt generated title"
         adapter = HerdrPiLaunchAdapter(
             store, descriptor, at=clock.now(), runner=runner,
             environment={"HERDR_ENV": "1"},
@@ -1241,6 +1246,62 @@ def test_pi_context_display_receipt_matches_shared_contract(root: Path) -> None:
             store.close()
 
 
+def test_failed_context_settles_exact_provider_descriptor(root: Path) -> None:
+    store, clock, worktree = _context(root, "pi-context-cleanup")
+    descriptor = _descriptor(root / "pi-context-cleanup", worktree, "codex", "create")
+    runner = FakePiHerdr(root / "pi-context-cleanup")
+    runner.bootstrap_tokens_only = True
+    runner.context_title = "User title"
+    runner.context_source = "user-selected"
+    adapter = HerdrPiLaunchAdapter(store, descriptor, at=clock.now(), runner=runner,
+                                  environment={"HERDR_ENV": "1"})
+    service = VisibleChampionLaunchService(
+        store, adapter, replace(_options(root), project_code="LEAGUE"), clock,
+        issue_verifier=FakeIssueVerifier(store=store),
+    )
+    spec = champion_spec(worktree, "pi-context-cleanup")
+    try:
+        result = service.launch(spec)
+        assert result["state"] == "blocked", result
+        assert not runner.running
+        row = store.connection.execute(
+            "SELECT * FROM provider_launch_descriptors WHERE assignment_id=?",
+            (spec.assignment_id,),
+        ).fetchone()
+        assert row["state"] == "blocked" and row["version"] == 3
+        close_calls = len(runner.calls)
+        # Reproduce the old settled assignment with its orphaned active descriptor.
+        store.connection.execute(
+            "UPDATE provider_launch_descriptors SET state='active',version=2,pane_id='foreign' "
+            "WHERE descriptor_id=?", (row["descriptor_id"],),
+        )
+        store.connection.commit()
+        before = list(store.connection.iterdump())
+        try:
+            store.settle_assignment_launch_cleanup(
+                spec.assignment_id, result["version"], result["cleanup_receipt"], clock.now())
+        except StorageRefusal as exc:
+            assert exc.code == "cleanup_unproven"
+        else:
+            raise AssertionError("foreign provider descriptor was settled")
+        assert list(store.connection.iterdump()) == before
+        store.connection.execute(
+            "UPDATE provider_launch_descriptors SET pane_id=? WHERE descriptor_id=?",
+            (row["pane_id"], row["descriptor_id"]),
+        )
+        store.connection.commit()
+        repaired = store.settle_assignment_launch_cleanup(
+            spec.assignment_id, result["version"], result["cleanup_receipt"], clock.now())
+        assert not repaired["idempotent"]
+        before = list(store.connection.iterdump())
+        retry = store.settle_assignment_launch_cleanup(
+            spec.assignment_id, result["version"], result["cleanup_receipt"], clock.now())
+        assert retry["idempotent"] and list(store.connection.iterdump()) == before
+        assert len(runner.calls) == close_calls
+    finally:
+        store.close()
+
+
 def test_pi_metadata_source_reuses_owned_legacy_source(root: Path) -> None:
     worktree = root / "pi-metadata-source" / "worktree"
     worktree.mkdir(parents=True)
@@ -1321,6 +1382,7 @@ def main() -> None:
         test_factory_invalid_project_refuses_before_reservation(root)
         test_factory_persisted_routing_ownership(root)
         test_pi_context_display_receipt_matches_shared_contract(root)
+        test_failed_context_settles_exact_provider_descriptor(root)
         test_fork_metadata_restart_and_duplicate_suppression(root)
         test_provider_mapping_and_role_placement(root)
         test_pi_metadata_source_reuses_owned_legacy_source(root)

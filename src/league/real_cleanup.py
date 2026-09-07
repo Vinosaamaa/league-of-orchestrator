@@ -557,6 +557,55 @@ class GitAdapter(_BaseAdapter):
         return {"exact_git_target": True, "action": action["action_kind"]}
 
 
+class RetainedRepositoryAdapter(_BaseAdapter):
+    """Read-only proof of one standalone clone; no remove or delete capability."""
+
+    kind = "retain"
+
+    def __init__(self, identity: Mapping[str, Any], runner: CommandRunner) -> None:
+        self.identity = dict(identity)
+        self.runner = runner
+
+    def inspect(self, action: Mapping[str, Any]) -> Mapping[str, Any]:
+        if (action["action_kind"] != "retain"
+                or action["expected_identity"] != self.identity
+                or action["intended_state"] != {"retained": True}):
+            raise StorageRefusal("cleanup_identity_mismatch", "retained repository plan changed")
+        path = Path(self.identity["worktree"])
+        if (not path.is_absolute() or str(path.resolve()) != str(path)
+                or not (path / ".git").is_dir() or (path / ".git").is_symlink()):
+            raise StorageRefusal("cleanup_identity_mismatch", "retention requires an exact standalone clone")
+
+        def git(*args: str) -> str:
+            return self.runner.run(("git", "--no-optional-locks", "-C", str(path), *args)).stdout.strip()
+
+        if (git("rev-parse", "--show-toplevel") != str(path)
+                or git("rev-parse", "--absolute-git-dir") != str(path / ".git")
+                or git("status", "--porcelain", "--untracked-files=all")
+                or git("rev-parse", "HEAD") != self.identity["head"]
+                or git("branch", "--show-current") != self.identity["branch"]
+                or git("for-each-ref", "--format=%(refname)", "refs/stash")):
+            raise StorageRefusal("cleanup_identity_mismatch", "retained repository is dirty, ambiguous, or changed")
+        integrated = self.runner.run(
+            ("git", "--no-optional-locks", "-C", str(path), "merge-base", "--is-ancestor",
+             self.identity["merge_commit"], self.identity["base_ref"]), allow_failure=True,
+        )
+        if integrated.returncode != 0:
+            raise StorageRefusal("cleanup_identity_mismatch", "retained release is not in the published base")
+        GitAdapter(self.identity, self.runner)._branch_deletion_mode()
+        # The exact accepted squash head may not be an ancestor of a remote ref.
+        # Every other local branch/tag must still be published; a stash is refused above.
+        for head in git("for-each-ref", "--format=%(objectname)", "refs/heads", "refs/tags").splitlines():
+            if head != self.identity["head"] and not git(
+                "for-each-ref", f"--contains={head}", "--format=%(refname)", "refs/remotes"
+            ):
+                raise StorageRefusal("cleanup_identity_mismatch", "retained repository has unpublished refs")
+        return {"retained": True}
+
+    def apply(self, action: Mapping[str, Any]) -> Mapping[str, Any]:
+        raise StorageRefusal("cleanup_action_unsupported", "repository retention has no mutation action")
+
+
 class CallsignAdapter(_BaseAdapter):
     kind = "callsign"
 

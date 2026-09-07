@@ -867,6 +867,7 @@ def _settle_transition_and_request(
             "unresolved_requests": 0,
             "pending_deliveries": 0,
             "cleanup_obligations": 1,
+            "runtime_recovery": 0,
         }
         if (
             obligation is None

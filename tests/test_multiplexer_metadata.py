@@ -1290,7 +1290,66 @@ def test_plugin_is_supported_async_startup_only() -> None:
     assert "resume-launch" not in restore and "agent start" not in restore
 
 
+def test_native_launcher_process_proof() -> None:
+    from copy import deepcopy
+    from league.multiplexer_adapters.herdr.adapter import _foreground_process
+
+    session = SESSIONS["Ashe"]
+    agent = {"agent": "codex", "pane_id": "synthetic:p1",
+             "agent_session": {"value": session}}
+    info = {"pane_id": "synthetic:p1", "foreground_process_group_id": 8000,
+            "foreground_processes": [
+                {"pid": 8001, "cwd": "/synthetic/project",
+                 "argv": ["/synthetic/bin/codex", "resume", session]},
+                {"pid": 8000, "cwd": "/synthetic/project",
+                 "argv": ["/bin/zsh", "/synthetic/launcher/codex", "resume", session]},
+            ]}
+
+    class ProcessReader:
+        output = ("8000 42 8000 Fri Sep 4 17:50:46 2026 /bin/zsh\n"
+                  "8001 8000 8000 Fri Sep 4 17:50:46 2026 /synthetic/bin/codex\n")
+
+        def run(self, args, timeout_seconds):
+            assert args[0] == "/bin/ps" and timeout_seconds == 3
+            assert args[1:] == ("-p", "8000,8001", "-o", "pid=,ppid=,pgid=,lstart=,comm=")
+            return subprocess.CompletedProcess(args, 0, self.output, "")
+
+    reader = ProcessReader()
+    verified = _foreground_process(reader, info, agent)
+    assert verified["pid"] == 8001 and verified["process_start"] == "Fri Sep 4 17:50:46 2026"
+    assert len(verified["process_group_proof"]) == 2
+    baseline = reader.output
+    reader.output = baseline.replace("17:50:46", "17:51:00")
+    assert verified != _foreground_process(reader, info, agent), "PID reuse must change the fingerprint"
+    reader.output = baseline
+    bad = []
+    for replacement in (
+        baseline.replace("8001 8000", "8001 9999"),
+        baseline.replace("8001 8000 8000", "8001 8000 9999"),
+        baseline.replace("/synthetic/bin/codex", "/synthetic/bin/unrelated"),
+        baseline.splitlines()[0] + "\n",
+        baseline + baseline.splitlines()[0] + "\n",
+    ):
+        bad.append((deepcopy(info), agent, replacement))
+    changed = deepcopy(info)
+    changed["foreground_processes"][1]["argv"][-1] = SESSIONS["Azir"]
+    bad.append((changed, agent, baseline))
+    changed = deepcopy(info)
+    changed["foreground_processes"][1]["argv"][0] = "/synthetic/bin/codex"
+    bad.append((changed, agent, baseline.replace("/bin/zsh", "/synthetic/bin/codex")))
+    bad.append((info, {**agent, "agent": "pi"}, baseline))
+    for inventory, identity, output in bad:
+        reader.output = output
+        try:
+            _foreground_process(reader, inventory, identity)
+        except StorageRefusal as exc:
+            assert exc.code == "display_replay_process_ambiguous"
+        else:
+            raise AssertionError("ambiguous launcher/process evidence was accepted")
+
+
 def main() -> None:
+    test_native_launcher_process_proof()
     with tempfile.TemporaryDirectory(prefix="league-async-restore-") as temporary:
         root = Path(temporary)
         test_async_restart_converges_without_duplicate_processes(root / "success")

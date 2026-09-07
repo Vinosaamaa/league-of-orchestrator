@@ -140,6 +140,48 @@ def require_cleanup_task_disposition(task_state: str, disposition: str) -> None:
         )
 
 
+def retained_repository_resource(
+    retention: Any, resources: Sequence[Mapping[str, Any]],
+    owner: Mapping[str, Any], policy: Mapping[str, Any], proof: Mapping[str, Any],
+) -> Optional[Mapping[str, Any]]:
+    """Explicit endpoint-only policy; ordinary persistent resources do not opt in."""
+    repositories = [r for r in resources if r.get("resource_type") == "standalone_repository"]
+    if retention is None and not repositories:
+        return None
+    if (
+        not isinstance(retention, Mapping)
+        or set(retention) != {"resource_id", "reason", "acceptance_receipt", "release_receipt"}
+        or any(not isinstance(v, str) or not v.strip() for v in retention.values())
+        or len(repositories) != 1
+        or owner.get("role") != "champion"
+        or owner.get("persistent") is not False
+        or policy["disposition"] != "completed"
+        or policy["task_class"] not in {"pr_ci", "deployed_service"}
+        or _proof(proof, "acceptance.required_gates_complete") is not True
+        or _proof(proof, "release.required_gates_complete") is not True
+    ):
+        raise StorageRefusal("cleanup_retention_refused", "repository retention requires explicit completed acceptance and release evidence")
+    resource = repositories[0]
+    expected = resource.get("expected_identity")
+    if (
+        resource.get("resource_id") != retention["resource_id"]
+        or resource.get("owner_id") != owner["id"]
+        or resource.get("owner_role") != "champion"
+        or resource.get("lifetime") != "persistent_retain"
+        or resource.get("cleanup_action") != "retain"
+        or resource.get("adapter_kind") != "retain"
+        or resource.get("applicable") is not True
+        or not isinstance(expected, Mapping)
+        or set(expected) != {"repository", "worktree", "branch", "head", "base_ref", "merge_commit"}
+        or any(not isinstance(v, str) or not v.strip() for v in expected.values())
+        or expected["repository"] != expected["worktree"]
+        or not expected["base_ref"].startswith("refs/remotes/")
+        or any(r.get("lifetime") == "task_owned" for r in resources)
+    ):
+        raise StorageRefusal("cleanup_retention_refused", "retained repository identity or endpoint-only resource policy is ambiguous")
+    return resource
+
+
 @dataclass(frozen=True)
 class ResourceRegistration:
     resource_id: str
@@ -402,6 +444,11 @@ class CleanupPlanner:
             if not resource.applicable:
                 raise StorageRefusal("resource_not_applicable", "task resource is not applicable to this cleanup")
 
+        retention = manifest.get("repository_retention")
+        retained = retained_repository_resource(
+            retention, [r.as_record() for r in resources], owner, policy, proof
+        )
+
         actions: list[dict[str, Any]] = [
             {
                 "action_id": f"{operation_id}:000",
@@ -423,9 +470,11 @@ class CleanupPlanner:
                 },
             }
         ]
+        if retained is not None:
+            actions[0]["intended_state"]["repository_retention"] = dict(retention)
         ordinal = 1
         for resource in sorted(resources, key=lambda item: item.resource_id):
-            if resource.lifetime == "persistent_retain":
+            if resource.lifetime == "persistent_retain" and resource.resource_type != "standalone_repository":
                 continue
             actions.append(
                 {
@@ -435,7 +484,7 @@ class CleanupPlanner:
                     "adapter_kind": resource.adapter_kind,
                     "resource_id": resource.resource_id,
                     "expected_identity": dict(resource.expected_identity),
-                    "intended_state": {"completed": True},
+                    "intended_state": {"retained": True} if resource.resource_type == "standalone_repository" else {"completed": True},
                 }
             )
             ordinal += 1
@@ -464,7 +513,7 @@ class CleanupPlanner:
             raise StorageRefusal("cleanup_manifest_invalid", "cleanup final actions must be a list")
         allowed_final = set(FINAL_ACTION_ADAPTERS)
         required_final = ["session_exit", "endpoint_close"]
-        if policy["task_class"] != "analysis":
+        if policy["task_class"] != "analysis" and retained is None:
             required_final.extend(("worktree_remove", "branch_delete"))
         required_final.append("callsign_release")
         if continuation_archive is not None:

@@ -8,7 +8,10 @@ import sqlite3
 from datetime import datetime
 from typing import Any, Mapping, Optional
 
-from .cleanup import require_cleanup_task_disposition, select_cleanup_policy
+from .cleanup import (
+    cleanup_action_digest, require_cleanup_task_disposition,
+    retained_repository_resource, select_cleanup_policy,
+)
 from .storage_types import StorageRefusal
 
 
@@ -243,12 +246,164 @@ def reconcile_restored_runtime(
     }
 
 
+def repaired_bootstrap_publication(store: Any, publication: Mapping[str, Any],
+                                  row: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Translate an immutable legacy receipt only through its exact repair event."""
+    if publication.get("session_identity") == row.get("session_ref"):
+        return publication
+    repairs = store.connection.execute(
+        """SELECT detail_json FROM events WHERE aggregate_kind='runtime' AND aggregate_id=?
+             AND agent_id=? AND event_type='runtime_identity_repaired' LIMIT 2""",
+        (row["runtime_instance_id"], row["agent_id"]),
+    ).fetchall()
+    for repair in repairs:
+        request = json.loads(repair["detail_json"])["request"]
+        if (request["expected_session_ref"] == publication.get("session_identity")
+            and request["thread_id"] == row.get("session_ref") == row.get("thread_id")):
+            return {**publication, "session_identity": request["thread_id"]}
+    return publication
+
+
+def pending_shotcaller_identity_repair(store: Any, request: dict[str, Any],
+                                       generation: str, proof: dict[str, Any]) -> Optional[dict[str, Any]]:
+    """Read only the exact committed repair's still-open watcher obligation."""
+    event_id = "runtime:identity-repair:" + hashlib.sha256(_json(request).encode()).hexdigest()
+    row = store.connection.execute(
+        "SELECT detail_json FROM events WHERE event_id=?", (event_id,)
+    ).fetchone()
+    if row is None:
+        return None
+    obligation = store.connection.execute(
+        "SELECT * FROM obligations WHERE dedupe_key=? AND state='open'",
+        ("runtime-restore:" + request["runtime_instance_id"],),
+    ).fetchone()
+    if obligation is None:
+        return None
+    detail = json.loads(row["detail_json"])
+    runtime = store.connection.execute(
+        """SELECT r.*,a.thread_id,a.version,a.retired_at FROM runtime_instances r
+           JOIN agent_instances a ON a.agent_id=r.actor_agent_id
+           WHERE r.runtime_instance_id=?""", (request["runtime_instance_id"],)
+    ).fetchone()
+    if (detail.get("request") != request or runtime is None
+        or runtime["actor_agent_id"] != request["agent_id"]
+        or runtime["thread_id"] != request["thread_id"] or runtime["session_ref"] != request["thread_id"]
+        or runtime["runtime_generation"] != generation or runtime["endpoint"] != request["endpoint"]
+        or runtime["version"] != request["expected_version"] + 1
+        or runtime["status"] not in {"active", "idle"} or not runtime["verified"]
+        or runtime["retired_at"] is not None
+        or obligation["owner_agent_id"] != request["agent_id"]
+        or obligation["aggregate_id"] != request["runtime_instance_id"]
+        or json.loads(obligation["details_json"]).get("next_action") !=
+           "retry runtime repair-shotcaller-identity with the exact original arguments"
+        or any(detail.get("proof", {}).get(key) != value for key, value in proof.items())):
+        raise StorageRefusal("runtime_identity_repair_conflict", "pending repair evidence no longer matches")
+    watcher = detail.get("proof", {}).get("watcher")
+    if (not isinstance(watcher, dict) or type(watcher.get("fence")) is not int
+        or watcher["fence"] < 1 or watcher.get("runtime_generation") != request["expected_generation"]
+        or watcher.get("session_ref") != request["expected_session_ref"]
+        or watcher.get("endpoint") != request["endpoint"]
+        or not isinstance(watcher.get("locator"), str) or not watcher["locator"].startswith("unix:")):
+        raise StorageRefusal("runtime_identity_repair_conflict", "pending repair lacks exact prior watcher evidence")
+    return {**watcher, "current_generation": generation}
+
+
+def repair_shotcaller_identity(store: Any, request: dict[str, Any], generation: str,
+                              proof: dict[str, Any], at: str) -> dict[str, Any]:
+    """CAS a malformed imported identity, keeping ownership and historical receipts intact."""
+    from .provider_lifecycle import provider_lifecycle
+
+    _time(at, "identity repair time", "runtime_identity_repair_refused")
+    profile = provider_lifecycle("codex")
+    if (
+        set(request) != {"agent_id", "runtime_instance_id", "expected_version", "expected_session_ref",
+                         "expected_generation", "endpoint", "thread_id"}
+        or type(request["expected_version"]) is not int or request["expected_version"] < 1
+        or request["agent_id"] != request["thread_id"]
+        or not profile.validate_session(request["thread_id"])
+        or profile.validate_session(request["expected_session_ref"])
+        or not all(isinstance(value, str) and value for key, value in request.items() if key != "expected_version")
+        or proof.get("stable_readbacks") != 2 or proof.get("session_source") != "herdr:codex"
+        or not all(isinstance(proof.get(key), str) and proof[key] for key in ("terminal_id", "process_fingerprint", "cwd"))
+    ):
+        raise StorageRefusal("runtime_identity_repair_refused", "identity recovery evidence is incomplete or not legacy")
+    from .restored_agent import restored_runtime_generation
+    if generation != restored_runtime_generation("herdr", proof["terminal_id"], request["thread_id"]):
+        raise StorageRefusal("runtime_identity_repair_refused", "native generation evidence differs")
+    event_id = "runtime:identity-repair:" + hashlib.sha256(_json(request).encode()).hexdigest()
+    with store._transaction():
+        row = store.connection.execute(
+            """SELECT r.*,a.thread_id,a.address,a.kind,a.backend,a.role,a.retired_at,a.version
+                 FROM runtime_instances r JOIN agent_instances a ON a.agent_id=r.actor_agent_id
+                WHERE r.runtime_instance_id=? AND a.agent_id=?""",
+            (request["runtime_instance_id"], request["agent_id"]),
+        ).fetchone()
+        if (row is None or row["role"] != "shotcaller" or row["retired_at"] is not None
+            or row["kind"] != "codex-thread" or row["harness_kind"].removesuffix("-thread") != "codex"
+            or row["backend"] != "herdr" or row["backend_kind"] != "herdr"
+            or row["status"] not in {"active", "idle"} or not row["verified"]
+            or row["address"] != request["endpoint"] or row["endpoint"] != request["endpoint"]):
+            raise StorageRefusal("runtime_identity_repair_refused", "canonical owner or runtime no longer matches")
+        receipt = {"event_id": event_id, "actor_agent_id": request["agent_id"],
+                   "runtime_instance_id": request["runtime_instance_id"], "endpoint": request["endpoint"],
+                   "session_ref": request["thread_id"], "runtime_generation": generation}
+        recovery = store.connection.execute(
+            "SELECT details_json FROM obligations WHERE dedupe_key=? AND state='open'",
+            ("runtime-restore:" + request["runtime_instance_id"],),
+        ).fetchone()
+        if recovery is not None and json.loads(recovery["details_json"]).get("next_action") != (
+            "retry runtime repair-shotcaller-identity with the exact original arguments"
+        ):
+            raise StorageRefusal("runtime_identity_repair_conflict", "an unrelated runtime recovery must be preserved")
+        collision = store.connection.execute(
+            """SELECT 1 FROM runtime_instances WHERE runtime_instance_id<>? AND status IN ('active','idle')
+                 AND verified=1 AND (actor_agent_id=? OR (backend_kind='herdr' AND endpoint=?) OR session_ref=?) LIMIT 1""",
+            (request["runtime_instance_id"], request["agent_id"], request["endpoint"], request["thread_id"]),
+        ).fetchone()
+        if collision is not None:
+            raise StorageRefusal("runtime_identity_repair_conflict", "another runtime occupies the owner, pane or session")
+        previous = store.connection.execute("SELECT detail_json FROM events WHERE event_id=?", (event_id,)).fetchone()
+        if previous is not None:
+            detail = json.loads(previous["detail_json"])
+            if (detail["request"] != request or row["thread_id"] != request["thread_id"]
+                or row["session_ref"] != request["thread_id"] or row["runtime_generation"] != generation
+                or row["version"] != request["expected_version"] + 1
+                or any(detail.get("proof", {}).get(key) != proof.get(key) for key in
+                       ("terminal_id", "process_fingerprint", "session_source", "cwd", "stable_readbacks"))):
+                raise StorageRefusal("runtime_identity_repair_conflict", "completed repair no longer matches live state")
+            return {**receipt, "idempotent": True}
+        if (row["version"] != request["expected_version"] or row["thread_id"] != request["expected_session_ref"]
+            or row["session_ref"] != request["expected_session_ref"] or row["runtime_generation"] != request["expected_generation"]):
+            raise StorageRefusal("runtime_identity_repair_conflict", "expected identity or version changed")
+        store.connection.execute(
+            "UPDATE runtime_instances SET session_ref=?,runtime_generation=?,last_seen_at=? WHERE runtime_instance_id=?",
+            (request["thread_id"], generation, at, request["runtime_instance_id"]),
+        )
+        store.connection.execute(
+            "UPDATE agent_instances SET thread_id=?,version=version+1,updated_at=?,update_text='legacy runtime identity repaired' WHERE agent_id=?",
+            (request["thread_id"], at, request["agent_id"]),
+        )
+        store.connection.execute(
+            """INSERT INTO events (event_id,agent_id,entity_version,event_type,status,update_text,occurred_at,
+                                  detail_json,aggregate_kind,aggregate_id)
+               VALUES(?,?,?,'runtime_identity_repaired','active','legacy runtime identity repaired',?,?,'runtime',?)""",
+            (event_id, request["agent_id"], request["expected_version"] + 1, at,
+             _json({"request": request, "proof": proof, "receipt": receipt}), request["runtime_instance_id"]),
+        )
+        # A crash between this commit and native watcher rebinding must remain visible.
+        record_restored_runtime_recovery(store, request["runtime_instance_id"], request["agent_id"],
+            "runtime_identity_repair_pending", at,
+            next_action="retry runtime repair-shotcaller-identity with the exact original arguments")
+        return {**receipt, "idempotent": False}
+
+
 def record_restored_runtime_recovery(
     store: Any,
     runtime_instance_id: str,
     actor_agent_id: str,
     failure_code: str,
     at: str,
+    *, next_action: str = "retry runtime reconcile-restored-agent with the same multiplexer",
 ) -> dict[str, Any]:
     """Persist one retry obligation after a restore effect crossed its CAS boundary."""
 
@@ -291,7 +446,7 @@ def record_restored_runtime_recovery(
                 "schema": "league.runtime-restore-recovery.v1",
                 "runtime_instance_id": runtime_instance_id,
                 "failure_code": failure_code,
-                "next_action": "retry runtime reconcile-restored-agent with the same multiplexer",
+                "next_action": next_action,
             }
         )
         existing = store.connection.execute(
@@ -778,9 +933,76 @@ def task_resources(store: Any, task_id: str) -> list[dict[str, Any]]:
     return resources
 
 
+def _validate_retained_repository_owner(
+    store: Any, task_id: str, owner_id: str, archive: Mapping[str, Any],
+    actions: list[dict[str, Any]],
+) -> bool:
+    """Bind retention to canonical ownership; return exact release-retry proof."""
+    resource = retained_repository_resource(
+        archive.get("repository_retention"), archive["resources"],
+        archive["owner"], archive["policy"], archive["proof"],
+    )
+    if resource is None:
+        return False
+    identity = resource["expected_identity"]
+    owner = store.connection.execute(
+        "SELECT * FROM agent_instances WHERE agent_id=?", (owner_id,),
+    ).fetchone()
+    task = store.connection.execute("SELECT state FROM tasks WHERE task_id=?", (task_id,)).fetchone()
+    if (owner is None or task is None or task["state"] != "completed"
+            or owner["role"] != "champion" or owner["task_id"] != task_id
+            or owner["status"] != "completed" or owner["worktree"] != identity["worktree"]
+            or owner["branch"] != identity["branch"] or resource["task_id"] != task_id):
+        raise StorageRefusal("cleanup_owner_refused", "retained repository is not the exact completed owner's checkout")
+    kinds = [a["action_kind"] for a in actions]
+    expected_kinds = ["archive_identity_evidence"] + [
+        r["cleanup_action"] for r in sorted(archive["resources"], key=lambda r: r["resource_id"])
+        if r["lifetime"] != "persistent_retain" or r["resource_type"] == "standalone_repository"
+    ] + ["session_exit", "endpoint_close", "callsign_release"]
+    if kinds not in (expected_kinds, expected_kinds + ["issue_close"]):
+        raise StorageRefusal("cleanup_retention_refused", "retention may release only exact endpoints and this task's leases")
+    backend = next(a for a in actions if a["action_kind"] == "endpoint_close")["expected_identity"]
+    release = next(a for a in actions if a["action_kind"] == "callsign_release")
+    expected = release["expected_identity"]
+    callsign = store.connection.execute(
+        "SELECT * FROM callsign_assignments WHERE callsign_assignment_id=?", (expected.get("assignment_id"),),
+    ).fetchone()
+    runtimes = store.connection.execute(
+        "SELECT * FROM runtime_instances WHERE actor_agent_id=? AND (status IN ('active','idle') OR runtime_instance_id=?)",
+        (owner_id, backend.get("runtime_instance_id")),
+    ).fetchall()
+    assignments = store.connection.execute(
+        "SELECT * FROM task_assignments WHERE task_id=?", (task_id,),
+    ).fetchall()
+    if (callsign is None or callsign["agent_id"] != owner_id
+            or callsign["callsign"] != expected.get("callsign")
+            or len(runtimes) != 1
+            or runtimes[0]["runtime_instance_id"] != backend.get("runtime_instance_id")
+            or runtimes[0]["endpoint"] != backend.get("pane_id")
+            or runtimes[0]["runtime_generation"] != backend.get("runtime_generation")
+            or len(assignments) > 1
+            or any(a["champion_agent_id"] != owner_id
+                   or a["runtime_instance_id"] != backend.get("runtime_instance_id")
+                   or a["acceptance_receipt_json"] is None
+                   or a["state"] not in {"active", "completed"} for a in assignments)):
+        raise StorageRefusal("cleanup_identity_mismatch", "retention endpoint, callsign, or assignment ownership changed")
+    released = (callsign["state"] == "released"
+                and callsign["version"] == expected.get("expected_version", -1) + 1
+                and callsign["release_receipt_digest"] == cleanup_action_digest(release)
+                and runtimes[0]["status"] == "closed")
+    if not released and (callsign["state"] != "active"
+                         or callsign["version"] != expected.get("expected_version")
+                         or owner["retired_at"] is not None):
+        raise StorageRefusal("cleanup_identity_mismatch", "retention has no exact active or released callsign receipt")
+    return released
+
+
 def plan_cleanup(store: Any, plan: Mapping[str, Any]) -> dict[str, Any]:
     try:
         with store._transaction():
+            archive = plan["actions"][0]["intended_state"]
+            if archive.get("repository_retention") is not None:
+                _validate_retained_repository_owner(store, plan["task_id"], plan["owner_id"], archive, plan["actions"])
             task = store.connection.execute(
                 "SELECT state FROM tasks WHERE task_id=?", (plan["task_id"],)
             ).fetchone()
@@ -1017,7 +1239,7 @@ def _validate_cleanup_resources(
                 )
             resource_actions[resource_id].append(action)
     for resource_id, resource in canonical_resources.items():
-        expected_count = 0 if resource["lifetime"] == "persistent_retain" else 1
+        expected_count = 0 if resource["lifetime"] == "persistent_retain" and resource["resource_type"] != "standalone_repository" else 1
         matching = resource_actions[resource_id]
         if (
             len(matching) != expected_count
@@ -1093,6 +1315,9 @@ def cleanup_execution_context(store: Any, operation_id: str) -> dict[str, Any]:
             missing.append(dotted)
     if missing:
         raise StorageRefusal("cleanup_proof_missing", "canonical cleanup proof is incomplete")
+    retained_release = _validate_retained_repository_owner(
+        store, row["task_id"], row["owner_id"], archive, actions
+    )
     if owner.get("role") == "shotcaller":
         rollover = archive.get("rollover")
         if (
@@ -1111,6 +1336,7 @@ def cleanup_execution_context(store: Any, operation_id: str) -> dict[str, Any]:
             or (
                 row["owner_retired_at"] is not None
                 and operation["state"] != "completed"
+                and not retained_release
             )
         ):
             raise StorageRefusal("cleanup_owner_refused", "cleanup owner is not the exact terminal task owner")
@@ -1471,6 +1697,26 @@ def finalize_cleanup(store: Any, operation_id: str, fence: int, at: str) -> dict
             )]
             digest = hashlib.sha256(_json({"operation_id": operation_id, "receipts": receipts}).encode("utf-8")).hexdigest()
             receipt_id = f"teardown:{operation_id}"
+            archive = json.loads(store.connection.execute(
+                "SELECT intended_state_json FROM cleanup_actions WHERE operation_id=? AND ordinal=0",
+                (operation_id,),
+            ).fetchone()[0])
+            if archive.get("repository_retention") is not None:
+                # No new successful-task transition: acceptance was already terminal.
+                # Settle only this bound assignment, in the final receipt transaction.
+                cleanup_execution_context(store, operation_id)
+                assignment = store.connection.execute(
+                    "SELECT * FROM task_assignments WHERE task_id=?", (operation["task_id"],),
+                ).fetchone()
+                if assignment is not None:
+                    if assignment["cleanup_receipt"] not in {None, digest}:
+                        raise StorageRefusal("cleanup_receipt_conflict", "assignment already has foreign cleanup evidence")
+                    store.connection.execute(
+                        """UPDATE task_assignments SET state='completed',cleanup_required=0,
+                                   cleanup_receipt=?,version=version+1,updated_at=?
+                             WHERE task_assignment_id=? AND version=?""",
+                        (digest, at, assignment["task_assignment_id"], assignment["version"]),
+                    )
             store.connection.execute(
                 "INSERT INTO teardown_receipts(receipt_id,operation_id,task_id,policy_version,receipt_hash,completed_at) VALUES(?,?,?,?,?,?)",
                 (receipt_id, operation_id, operation["task_id"], operation["required_policy"], digest, at),

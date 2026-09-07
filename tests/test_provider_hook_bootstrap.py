@@ -721,7 +721,7 @@ def test_disposable_installed_profiles_accept_exact_native_payloads(root: Path) 
                 "turn_id": "turn-unbound", "tool_name": "Write",
                 "tool_use_id": "tool-unbound", "tool_input": {"path": "synthetic.txt"},
             },
-            "expected": {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow"}},
+            "expected": {},
         },
         "cursor": {
             "command": "cursor-pre-tool-hook",

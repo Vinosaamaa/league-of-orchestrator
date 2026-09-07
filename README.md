@@ -32,6 +32,8 @@ the watcher service installer runs only as an explicit, hash-authorized command.
 - Synthetic examples, authoring schemas, and focused local regression tests.
 - One standard-library SQLite implementation behind a `Storage` protocol and
   stable `league` command facade.
+- Bounded `agent startup-context` and receipt-driven `rollover run` over the
+  [existing guarded handoff stages](docs/HANDOFF_CALLSIGNS.md#startup-context-and-bounded-runner-8--pr-54).
 - Twenty-three contiguous checksummed schema migrations, a loaded-runtime WAL gate,
   verified backups, integrity checks, expected-version writes, and bounded contention.
 - A strict manifest importer covering every canonical issue-#18 artifact

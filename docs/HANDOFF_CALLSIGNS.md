@@ -117,3 +117,100 @@ Repository-local deterministic tests use temporary state roots and synthetic
 adapters only. They do not establish real Herdr/tmux/Codex support, installation,
 live migration, cutover, or smoke. Issue #23 must record those separately
 authorized receipts.
+
+## Startup context and bounded runner (#8 / PR #54)
+
+`league agent startup-context --agent-id <id> --runtime-instance-id <id> --at <time>`
+reads one exact accepted Champion or successor Shotcaller runtime. It refuses
+ambiguous runtimes, unreconciled Champion owners, stale successor owner/intake
+fences, and missing native adapter capabilities. Its 64-KiB, 128-obligation
+output contains identities, task/request state, owning and original requesting
+Shotcallers, Squad/routing context, permitted actions and pending obligations.
+It excludes prompt bodies, summaries, raw provider output, thread/endpoint
+locators and local paths. Successor expiry follows the current snapshot revision,
+not the original plan's expiry. Historical requesters remain historical.
+
+`league rollover run --manifest <file> --at <time>` uses
+`league-shotcaller-rollover-run.schema.json` and the existing staged storage
+APIs. Initial invocation prepares and returns one bounded binding page. The
+successor reads all pages through `rollover bindings`, then explicitly supplies
+the existing pages receipt with `run --pages <file>` or uses `rollover acknowledge`.
+Reading a page never acknowledges it. A later `run` consumes the durable
+acknowledgement and commits the existing atomic owner/intake/event/outbox switch.
+Exact retries inspect the persisted operation, including after original plan
+expiry; they do not re-prepare, launch a runtime, or deliver another owner event.
+
+The switched result names the existing descendant/intake reconciliation and
+guarded cleanup commands. Those commands keep their exact per-row identity,
+version, authority and cleanup-plan gates. `run --abort-receipt <file>` and
+`run --drain-receipt <file>` consume the existing cleanup receipt schemas through
+the existing stages; they never close a process, mark a runtime closed, or
+manufacture a cleanup receipt. Drain still refuses remaining obligations or a
+live predecessor. `cleanup execute` already derives the final drain receipt
+for its exact switched predecessor, so a subsequent plain `run` observes completion.
+No bulk descendant/obligation rewrite or second cleanup mechanism is added.
+
+The runner uses the registered native runtime kinds `codex-thread`,
+`cursor-thread` (the Cursor CLI adapter), and `pi-thread`, plus registered
+multiplexer capabilities. It adds no executable-command adapter registry.
+`runtime matrix` reports source support, not live acceptance. The focused suite
+uses temporary canonical records and synthetic runtime observations for both
+Codex-to-Cursor and Cursor-to-Codex directions. Installed, native bidirectional
+end-to-end acceptance remains a separately authorized release gate. `run`
+requires explicit authority; automatic grants retain the protected staged path.
+
+### Switched recovery when the active set has changed
+
+`snapshot_refresh_set_changed` remains a hard refusal: never shrink or replace
+the frozen set to make refresh pass. For an unchanged surviving frozen binding,
+the supported `rollover reconcile-descendant` path does not require snapshot
+refresh or unexpired snapshot paging. It requires the retained original snapshot
+digest and row receipt, current exact versions, fresh registered-adapter runtime
+verification, and the exact pending descendant outbox IDs. It rechecks the row,
+membership, owner fence and runtime before its atomic reconciliation; retry
+reuses the same reconciliation identity. Other descendants remain untouched.
+
+The focused expired/changed-set regression proves refresh refusal and exact
+survivor reconciliation/retry without changing the snapshot or Champion identity.
+This is conditional recovery, not proof that any live survivor matches. If a
+survivor's binding changed, preserve the precise refusal. If its original page
+receipt is unavailable, do not backdate a read, use direct SQL, or reconstruct
+its digest: a bounded read-only historical-receipt accessor would be the smallest
+missing surface, not a weaker snapshot refresh or another state machine.
+
+### Exact imported one-row compatibility
+
+For an unchanged frozen imported binding with both route and displayed provider
+absent, `reconcile-descendant` reuses snapshot refresh's imported null-route
+eligibility proof. The native adapter must find exactly one matching live
+pane/thread/worktree, with the existing lowercase-callsign route and Codex
+provider. Unnamed unrelated endpoints are not route matches. This operation
+does not rename the live endpoint. Only after verification does the existing
+owner transaction adopt the paired routing fields, alongside the task,
+assignment, callsign, and exact pending deliveries. The original frozen row
+and imported history remain immutable. Modern, partially populated, foreign,
+ambiguous, and changed frozen bindings still refuse before adoption.
+
+An existing legacy hook runtime is accepted only when its ID and `hook:`
+generation exactly reproduce the hook producer's hash of adapter kind, thread,
+backend, and endpoint. Its actor, provider, capabilities, verification, and
+active/idle status must still agree. Fresh native inspection verifies the
+terminal, thread, route, worktree, and readiness; the existing runtime receipt
+binds that terminal and observation sequence. The historical hook generation
+is not replaced by the different terminal/thread-based `herdr:` fingerprint.
+No runtime is duplicated, and existing runtime rows remain unchanged.
+
+The existing read-only `rollover_descendant_target` preflight now returns
+`pending_outbox_ids`: the complete sorted set of pending predecessor deliveries
+whose source event belongs to this exact Champion or task. This is necessary
+because the recipient-wide backlog can hide eligible rows behind unrelated
+work. It exposes IDs only, does not filter out future-due pending rows, and
+refuses claimed deliveries or sets above 1,000 IDs rather than truncating.
+Pass that exact set through the existing repeated `--pending-outbox-id` option;
+commit repeats the same preflight under its transaction, including the frozen
+private-binding digest check. Changed sets, stale versions, and injected
+failures leave adoption and reconciliation rolled back together.
+
+These exceptions do not accept a runtime materialized after the frozen row or
+any other changed binding, do not refresh the broad snapshot, and do not add a
+schema, service, inspection command, or live recovery authority.

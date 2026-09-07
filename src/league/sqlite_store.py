@@ -25,6 +25,7 @@ from . import sqlite_stopped_retirement_ops
 from . import sqlite_mode_ops
 from . import sqlite_issue_ops
 from . import sqlite_continuation_ops
+from . import sqlite_startup_ops
 from .sqlite_artifact_ops import declare as declare_repository_artifact_operation
 from .sqlite_artifact_ops import publish as record_repository_publication_operation
 from .sqlite_artifact_ops import status as task_artifacts_operation
@@ -2793,6 +2794,12 @@ class SQLiteStorage(SQLiteTransactionCore):
 
     def rollover_status(self, operation_id: str) -> Optional[dict[str, Any]]:
         return rollover_status_operation(self, operation_id)
+
+    def startup_context(self, agent_id: str, runtime_instance_id: str, at: str) -> dict[str, Any]:
+        return sqlite_startup_ops.startup_context(self, agent_id, runtime_instance_id, at)
+
+    def rollover_run_context(self, manifest: Mapping[str, Any]) -> dict[str, Any]:
+        return sqlite_startup_ops.rollover_run_context(self, manifest)
 
     def rollover_cleanup_target(self, operation_id: str) -> Optional[dict[str, Any]]:
         return rollover_cleanup_target_operation(self, operation_id)

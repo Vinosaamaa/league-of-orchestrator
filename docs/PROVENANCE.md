@@ -1,5 +1,26 @@
 # Source provenance
 
+## Issue-#8 retained-row recovery compatibility
+
+The PR54 continuation deliberately adds two narrow compatibility cases to the
+existing one-row descendant reconciliation: imported paired-null routing
+metadata may be adopted only after exact live verification, and a verified
+legacy hook generation may retain its original identity after recomputation
+of the original producer hash. Null-route eligibility is shared with the
+already-landed snapshot refresh implementation; snapshot set guards and
+immutable binding digests are not weakened. Existing runtime rows are not
+rewritten. The same transaction now rechecks the frozen private binding before
+any adoption, closing the preflight-to-commit drift window.
+
+The existing target preflight also exposes the complete scoped pending outbox
+ID set (maximum 1,000; overflow refuses) using the same query as commit. This
+avoids the unrelated-recipient backlog cap without a new inspection surface.
+Synthetic `test_one_row_recovery_*` regressions cover exact recovery, changed
+active-set isolation, foreign and malformed live identity, forged hook
+identity, immutable runtime history, delivery selection, and rollback at every
+existing descendant fault boundary. No schema, installed state, live runtime,
+canonical ownership, or unrelated frozen binding is changed by this source work.
+
 ## Schema-16 release compatibility repair
 
 Issue #90 restores the already-canonical schema-16 migration omitted from the
@@ -218,6 +239,14 @@ root as an additional workspace-write root, and records bounded context or
 exact failure-cleanup receipts. Those League-specific rules now live only in
 the orchestration supplement and no longer claim universal-guide ownership.
 
+The issue-#81 limited-batch regression permits a fresh `request turn` after
+the prior turn committed when already-captured, untriaged prompts remain for
+that same owner and generation. The check and token replacement share one
+SQLite write transaction. An uncommitted turn, exhausted same-generation
+backlog, or stale generation still refuses; owner-active supervision and exact
+prompt accounting are unchanged. No fabricated intake or generation bump is
+needed to drain consecutive bounded batches.
+
 The issue-#23 rollover-successor correction deliberately separates immutable
 prompt capture provenance from mutable current triage ownership, moves each
 frozen Champion's agent/task/assignment/callsign/pending-delivery ownership in
@@ -302,6 +331,18 @@ ordinary Pi session and activates only when the existing canonical hook command
 proves that exact Pi session. Focused fake-adapter tests cover Codex, Cursor,
 and Pi; they are not live-provider evidence. Merge, installation, live provider
 canaries, cutover, rollback, and teardown remain separate gates.
+
+## Issue-#8 current-stage port
+
+PR #54 adds bounded startup reads and a thin staged rollover runner on schema
+24 without modifying migrations or rollover storage semantics. It replaces the
+historical candidate's custom provider commands, bulk obligation rewrite and
+duplicate cleanup with registered native capability checks, explicit successor
+page receipts, and current staged reconciliation/cleanup gates.
+`tests/test_rollover_successor.py` covers both native-kind directions using
+synthetic state, separate-process and concurrent retry, and exact survivor
+recovery after expired changed-set refresh refuses. These are repository-local
+proofs, not installation or live-provider receipts.
 
 ## Skill-contract implementation provenance
 
@@ -634,6 +675,40 @@ repository-issue binding before visible launch mutation. Repository,
 configuration, migration, test, benchmark, durable research, release,
 operational, reproduction, debugging, and bug-fix work now force visible
 Champion execution; the prior direct-tiny answer/check path is preserved.
+
+The PR #134 regression exposed two enforcement gaps after route selection:
+provider tools could mutate repository files before delegation, and a
+Champion-routed request could be answered or settled without a cited Champion
+task. Issue #81 now uses one provider-neutral pre-tool policy for Codex
+`PreToolUse` and Pi `tool_call`, returning the stable
+`delegation_required` refusal before a Shotcaller write. The canonical request
+completion path additionally requires the exact issue-selection receipt,
+semantic binding, distinct visible Champion runtime, active assignment, and
+settled task. An accepted result remains deliverable after ownership changes or
+cleanup, and settled retries remain effect-free. The preflight recognizes native
+file edits and common shell writes, not arbitrary program behavior; the provider
+sandbox remains authoritative. Read-only work, protected recovery, prompt intake,
+Stop, detachment, and Champion implementation retain their existing paths;
+Pi `agent_settled` watcher parity remains owned by issue #84.
+
+PR #201 review exposed expansion-dependent shell targets being mistaken for
+literal off-repository paths. The shared classifier now preserves shell word
+quoting and refuses unresolved mutation targets or relative writes after an
+unresolved directory change. It never evaluates shell expansion or executes
+the command. Literal off-repository writes and read-only diagnostics remain
+available, including escaped/single-quoted dollar filenames; filesystem identity
+is checked afresh rather than cached across requests. This remains a bounded
+preflight for recognized write forms, not an arbitrary-program shell sandbox.
+
+Issue selection no longer aggregates every full issue and pull-request body
+inside one bounded runner response. It pages required issue metadata, discards
+pull requests before output, and fetches bodies only for normalized-title
+candidates. Semantic/exact-issue selection and the scope lease are unchanged;
+an incomplete or timed-out scan refuses before any issue creation.
+Matching candidates are streamed and reduced to metadata/body digests after
+semantic validation, so their full bodies do not accumulate across pages.
+Champion completion reuses its issue-validated task rows within the existing
+transaction while retaining the common settled/nonempty-result checks.
 
 The owner-found duplicate-issue regression deliberately extends v17 with
 a normalized repository/title/semantic-scope lease and immutable per-task issue
@@ -1262,6 +1337,25 @@ only from matching Pi routing metadata, passes it explicitly to the Pi extension
 and publishes a reduced non-duplicative token set. Native Pi session identity,
 toolkit presentation tokens, JSONL bytes, and Job Journey state remain unchanged.
 
+Issue #85's presentation follow-up preserves the explicit two-word task when
+a project code is present: Champion thread and terminal titles are
+`<Callsign> · <PROJECT>|<Two Word Task>`, not a project-only title. Sidebar
+and Shotcaller naming remain callsign-only. Focused visible-launch coverage
+binds this deliberate correction. A service-level Pi regression exposed two
+production contract mismatches: duplicate native session fields in the strict
+activation envelope, and a native launch observation returned as a display
+receipt. Native fields remain in the durable provider descriptor; activation
+validation is unchanged. Context delivery now waits for prompt acceptance and
+returns a fresh stable, ownership-checked display receipt. Focused fake-adapter
+coverage does not replace installed end-to-end acceptance.
+
+The local integration with 0.2.75 preserves the shipped provider-neutral
+multiplexer delivery path and metadata sequence semantics. Pi requests its
+post-context wait through that shared adapter. Retained-done reconciliation
+uses intent version 5 so it cannot collide with the shipped worktree and
+runtime-generation intent versions 2–4; the focused suite retains their
+existing coverage. Combining retained-done repair with relocation or generation
+replacement refuses rather than inventing a mixed recovery operation.
 ## Provider-neutral restart display provenance
 
 A real named Herdr restart restored the same Codex/Pi sessions, panes, working
@@ -1543,3 +1637,345 @@ The repair pass also found these acceptance failures before publication:
 The candidate changes source, synthetic installers, and immutable release
 manifest bytes only. It does not edit the active Pi profile, install a release,
 restart Herdr, or mutate live League state.
+
+Release `0.2.54` assigns the next immutable install identity to merged PR #153
+at main commit `dbffad2b8ef3b2d9b75a7d3ad0d18b628b338ec0` and exact
+reviewed/merged tree `9de3c1fb5ce24c09f9960c33351abeb642be54fb`. It packages
+provider-native Codex, Cursor CLI, and Pi hook bootstraps behind the shared
+adapter registry. Unbound or non-League prompt, pre-mutation, and Stop events
+return provider-native allow/no-op output before supervisor ownership checks
+and make zero canonical mutations; exact canonical binding activates the same
+installed hooks. The release also packages bounded, symlink-safe hook upgrades
+with exact rollback, unlimited Cursor Stop continuation, and real ordinary-Pi
+exact-session resume acceptance. This release delta changes only the version
+contract, deterministic release-staging expectations, and this provenance
+record beyond the reviewed merged tree.
+
+The issue-#84 completed-display follow-up corrects one retained-session status
+boundary discovered during installed restart reconciliation. Herdr reports an
+interactive, still-present Codex session as `done` after its model turn ends;
+that state does not mean the pane, terminal, thread, worktree, or provider
+session is absent. Owner-authorized legacy display reconciliation therefore
+accepts `done` only after the same exact endpoint, thread, worktree, route,
+source, sequence, active assignment, verified runtime, and acceptance-receipt
+checks used for other present states. A genuinely stopped endpoint remains
+ineligible. The focused regression proves a retained `done` Champion receives
+one durable display receipt while a stopped or source-less presentation still
+fails before mutation.
+
+Release `0.2.55` assigns the next immutable install identity to merged PR #156
+at main commit `e1f8d58868d588bb60bb3272d10d34889656ef46` and exact
+reviewed/merged tree `ad563e6c7492245ff2e0129a3f9754b65c221cc2`. It packages
+the retained completed-Champion display reconciliation correction without any
+additional runtime, hook, watcher, provider, multiplexer, or storage-contract
+change. This release delta changes only the version contract, deterministic
+release-staging expectations, and this provenance record beyond that merged
+tree.
+
+The final issue-#84 live acceptance exposed one Herdr projection boundary:
+`agent get` can omit `metadata_source` while the installed tab-status plugin is
+the active display owner. The legacy adapter keeps the immutable native session
+source as its baseline presentation identity, but recognizes the tab-status
+owner only from that plugin's complete identity-token tuple and uses
+`local.tab-status` for the guarded `applies-to-source` write. Partial or
+conflicting tuples fall back to the native source and remain fail-closed. The
+owned overlay records its exact authority for retry and verification.
+
+Release `0.2.58` assigns the next immutable install identity to merged PR #162
+at main commit `1052e4d1649aa0362ca901138fcec8422a212dbf` and exact
+reviewed/merged tree `21d065c0e096bee538fcbff88b4deabc4258d5e0`. It packages
+the Herdr presentation-authority correction without any additional hook,
+watcher, provider, multiplexer, or storage-contract change. This release delta
+changes only the version contract, deterministic release-staging expectations,
+and this provenance record beyond that merged tree.
+
+The installed Herdr projection keeps an agent's global `state_change_seq`
+unchanged for display-only `report-metadata` updates and advances pane
+`revision` instead. Legacy display acceptance therefore permits exactly two
+stable sequence projections: the owner-authorized baseline value used by
+current Herdr, or baseline plus one used by the compatible synthetic/legacy
+projection. In both cases the dedicated League source, complete ownership
+tokens, exact title, exact underlying presentation authority, and two stable
+readbacks remain mandatory; any other sequence still refuses.
+
+Release `0.2.59` assigns the next immutable install identity to merged PR #164
+at main commit `4053a7b01ba22f880b2ea9514979f483633a19e8` and exact
+reviewed/merged tree `6d44d6010c7d6dccaf3c9b4bc13d69ca2e1ee12f`. It packages
+the current-Herdr display-only sequence projection correction without any
+additional hook, watcher, provider, multiplexer, or storage-contract change.
+This release delta changes only the version contract, deterministic
+release-staging expectations, and this provenance record beyond that merged
+tree.
+
+The issue-#84 legacy-restart follow-up handles the exact retained-session shape
+found during the first installed reconciliation. One verified Vi pane and
+immutable Codex thread remained live in a clean follow-up worktree after its
+original acceptance worktree had been preserved. The existing owner-authorized
+display repair now accepts an optional, all-or-nothing predecessor worktree and
+branch tuple. Its durable v2 intent preserves that predecessor identity; final
+display acceptance and the current `agent_instances` worktree/branch update
+commit in one transaction and increment the agent CAS version exactly once.
+Incomplete tuples, a wrong predecessor, an endpoint race, and repeated effects
+still fail closed. The original assignment acceptance receipt remains immutable.
+
+Current Herdr agent inventory can also omit the derived `metadata_source` and
+`display_agent` fields while retaining the exact native session source and
+League-owned presentation tokens. Legacy repair derives only its pre-effect
+source from that immutable native session, then derives its owned post-effect
+source from the exact reconciliation token. General restored presentation
+verification accepts an omitted derived field only when one unambiguous owned
+source token and the exact `display_provider` token match the canonical
+presentation. Explicitly present but empty or conflicting fields remain a hard
+failure. Focused tests cover source-less Codex, Cursor, and Pi reconciliation,
+stable idempotent retry, and the predecessor-to-current worktree transition.
+
+Release `0.2.56` assigns the next immutable install identity to merged PR #158
+at main commit `8bbf3105244813cc436034b42c41671218715cdd` and exact
+reviewed/merged tree `5fea15065dec14b1c192fc5620084a945f3fc9fd`. It packages
+the atomic legacy Champion worktree reconciliation and source-less Herdr
+presentation verification correction without any additional hook, watcher,
+provider, multiplexer, or storage-contract change. This release delta changes
+only the version contract, deterministic release-staging expectations, and
+this provenance record beyond that merged tree.
+
+The issue-#84 live legacy repair also treats a restored Herdr terminal
+generation as part of the same owner-authorized transition. The immutable
+assignment acceptance receipt continues to identify the predecessor runtime
+generation. A v3 reconciliation intent binds that exact predecessor to the
+generation derived from the verified live terminal and immutable provider
+thread. Final presentation acceptance updates the runtime generation and the
+current Champion worktree/branch in one SQLite transaction; collisions,
+partial tuples, stale generations, and endpoint races still fail closed, and
+an exact retry is effect-free.
+
+Release `0.2.57` assigns the next immutable install identity to merged PR #160
+at main commit `bade8dae760ca841fe2bfd022cacbd9498e0e93a` and exact
+reviewed/merged tree `210d07ab837f23579cdd6cc0aff48e839645121e`. It packages
+the restored-terminal runtime-generation reconciliation correction without any
+additional hook, watcher, provider, multiplexer, or storage-contract change.
+This release delta changes only the version contract, deterministic
+release-staging expectations, and this provenance record beyond that merged
+tree.
+
+The issue-#84 restored-agent pass now consumes an exact legacy reconciliation
+receipt as the Champion's canonical display receipt when the original launch
+predates display receipts. Both the durable parser and replay path accept
+Herdr's display-only behavior, where the exact pane observation is updated while
+the workspace state sequence remains at the owner-authorized baseline. Final
+worktree reconciliation compares physical path identity before using the exact
+stored path in its SQL compare-and-set, so macOS `/var` and `/private/var`
+aliases cannot create a false conflict. The combined transition-and-replay test
+is registered in the focused suite and verifies immutable predecessor evidence,
+the restored runtime generation, idempotent retry, and canonical replay.
+
+Release `0.2.60` assigns the next immutable install identity to merged PR #166
+at main commit `768089227a36583f052f62c45f777eac7feb7d6d` and exact
+reviewed/merged tree `6d3b91176a25c24965b32ccbffe74b236a9805e5`. It packages
+the restored legacy Champion receipt replay and physical-worktree CAS repair
+without any additional hook, watcher, provider, multiplexer, or storage-contract
+change. This release delta changes only the version contract, deterministic
+release-staging expectations, and this provenance record beyond that merged
+tree.
+
+The issue-#84 legacy display repair now supports the ordinary restored-session
+case where Herdr assigns a new terminal identity while the Champion remains in
+the exact same worktree and branch. A v4 durable intent binds the immutable
+acceptance generation to the verified restored generation without fabricating
+a worktree transition or incrementing the agent CAS version. Final runtime and
+display acceptance remain one transaction, and retry remains effect-free.
+
+Release `0.2.61` assigns the next immutable install identity to merged PR #168
+at main commit `f281dea3709928b5c262fe4ead7b95e220a6fd29` and exact
+reviewed/merged tree `99c2551416e099f34f56c9c831e10070dc762700`. It packages
+the same-worktree restored-generation reconciliation repair without any
+additional hook, watcher, provider, multiplexer, or storage-contract change.
+This release delta changes only the version contract, deterministic
+release-staging expectations, and this provenance record beyond that merged
+tree.
+
+The final issue-#84 live pass found that `local.tab-status` is intentionally a
+volatile presentation writer: status-icon refreshes advance that metadata
+source even when the native Codex session is unchanged. Legacy reconciliation
+therefore anchors its ownership tokens to the immutable `herdr:codex` session
+source, publishes no pane title of its own, and asks the installed status plugin
+to render the exact identity tokens. The adapter accepts the target only when
+the rendered pane title and the complete owned token tuple agree. This
+supersedes the earlier `local.tab-status` authority choice without changing
+already-finalized receipts, which retain and verify their recorded authority.
+
+Release `0.2.62` assigns the next immutable install identity to merged PR #170
+at main commit `c0952c96358e8476e89710d3010405d5bf19ce63` and exact
+reviewed/merged tree `9e0fbc61dd6aaae956dc1ab07522c601077fcfd6`. It packages
+the stable native-source display reconciliation and token-only status-renderer
+handoff without any additional hook, watcher, provider, multiplexer, or
+storage-contract change. This release delta changes only the version contract,
+deterministic release-staging expectations, and this provenance record beyond
+that merged tree.
+
+Herdr plugin actions are asynchronous: a successful invocation returns an
+exact log identity while the command may still be running. Legacy display
+reconciliation now waits only for that returned `local.tab-status` log to reach
+`succeeded`, bounded to five seconds, before checking the rendered identity and
+finalizing its receipt. Missing, ambiguous, failed, or timed-out log evidence
+clears only League's owned overlay and refuses; unrelated plugin completion can
+never satisfy the gate.
+
+Release `0.2.63` assigns the next immutable install identity to merged PR #172
+at main commit `d63155235ecda8383c2871582a74556950747e65` and exact
+reviewed/merged tree `210fafd41702fc1c36770ade2474ce86704b2c5b`. It packages
+the exact asynchronous Herdr status-action completion gate without any
+additional hook, watcher, provider, multiplexer, or storage-contract change.
+This release delta changes only the version contract, deterministic
+release-staging expectations, and this provenance record beyond that merged
+tree.
+
+Herdr metadata sequences are local to each reporting source and survive the
+removal of that source's visible overlay. A failed reconciliation followed by
+rollback therefore cannot derive its next League-source sequence from the
+unchanged native agent state sequence. Legacy reconciliation now emits fresh
+process-monotonic metadata sequences for both the owned effect and rollback,
+while retaining the native state sequence as the independent presentation-race
+guard. The focused retry test fails one status refresh, proves exact rollback,
+and then succeeds through the same durable intent without reusing a source
+sequence.
+
+Release `0.2.64` assigns the next immutable install identity to merged PR #174
+at main commit `f189f2998b5390984bee3d9136191a9f5529299c` and exact
+reviewed/merged tree `87014bdc912fddc971d2603d5f0f1d4243279939`. It packages
+the fresh League metadata-source sequence correction without any additional
+hook, watcher, provider, multiplexer, or storage-contract change. This release
+delta changes only the version contract, deterministic release-staging
+expectations, and this provenance record beyond that merged tree.
+
+Release `0.2.65` assigns the next immutable install identity to merged PR #176
+at main commit `215c2b5b2b0dbad73628279d06080ae271cde1ba` and exact
+reviewed/merged tree `cea3cfc5454e354f8c1c006d3f63e24341028542`. It packages
+exact adoption of already named Pi Shotcaller sessions, including queue-front
+callsign fencing and rollback to the original route and presentation. This
+release delta changes only the version contract, deterministic release-staging
+expectations, and this provenance record beyond that merged tree.
+
+Release `0.2.66` assigns the next immutable install identity to merged PR #178
+at main commit `0f6520285c1d0853a0944afd4914983667d286db` and exact
+reviewed/merged tree `55f21a03f9bc1bd55636cfdd197c51f4b0a075b5`. It packages
+the Pi Shotcaller publication-sequence correction: exact owned presentation may
+survive a newer global state sequence, while older sequence and all identity,
+route, source, or ownership mismatches still fail closed. This release delta
+changes only the version contract, deterministic release-staging expectations,
+and this provenance record beyond that merged tree.
+
+Release `0.2.67` assigns the next immutable install identity to merged PR #180
+at main commit `172112cca27b235ea189a12789ece1b6074896f1` and exact
+reviewed/merged tree `a050c0bdbe88950c37a959c1bc545558e3935051`. It packages
+the live Herdr Pi publication correction: exact bootstrap-owned metadata may
+retain the baseline agent lifecycle sequence, while older sequences and every
+endpoint, route, session, source, title, or ownership mismatch still fail
+closed. This release delta changes only the version contract, deterministic
+release-staging expectations, and this provenance record beyond that merged
+tree.
+
+Release `0.2.68` assigns the next immutable install identity to merged PR #182
+at main commit `86cdb5fe846035580e0d9e80f2bb8d4938893737` and exact
+reviewed/merged tree `8cd47044e605f7d5a9faadb741b8f1b61f9ef00e`. It packages
+the owner-rollover compatibility repair for modern bootstrapped Shotcallers:
+the exact active Shotcaller-scoped assignment is accepted alongside the legacy
+Squad-scoped reservation, while incomplete or mismatched successors still fail
+closed. This release delta changes only the version contract, deterministic
+release-staging expectations, and this provenance record beyond that merged
+tree.
+
+The post-0.2.68 restart exposed two recovery failures. Service validation
+hashed the watcher wrapper and template but did not bind the wrapper's exact
+release path, so byte-identical 0.2.68 inputs could restart a LaunchAgent still
+pinned to 0.2.53. Source-manifest validation now compares the complete rendered
+plist digest, which includes that path, before any restart. A managed Pi outage
+also used a synthetic follow-up prompt to report an unavailable Stop guard;
+each settlement generated another model turn. Pi now rejects unavailable input
+before submission and reports a later Stop outage once through its non-model UI
+notification. Healthy bound Stop feedback remains repeatable and unchanged.
+
+Release `0.2.69` assigns the next immutable install identity to merged PR #184
+at main commit `5a5130c3e1d1be1d3dbdc64e88b25d1d6318e8e1` and exact
+reviewed head `810a184a3b72ef8fe2249a571bde9ce50c307b6c`. It packages
+rendered-plist validation that binds the supervisor to its exact release
+executable path and non-model Pi outage reporting that cannot create recursive
+prompt or Stop turns. This release delta changes only the version contract,
+deterministic release-staging expectations, and this provenance record beyond
+that merged tree.
+
+Post-restart Pi hook failures exposed a stale-client boundary: restored Pi
+processes retain their original release-specific `LEAGUE_WATCHER_COMMAND`, and
+profile extension reload cannot change inherited environment. The Pi hook
+installer now binds its configured stable watcher directly into the installed
+extension and gives that path precedence over legacy launch environment. Pi
+and Cursor follow-up Stop output also uses the same callsign, wait-generation,
+and unresolved-summary renderer as Codex instead of discarding the details.
+The explicit one-shot Stop control is restored as an exact active-Shotcaller
+SQLite write and is consumed by the next provider-neutral Stop decision.
+Attached foreground `agent-watcher wait` reuses canonical state without
+replacing the OS-managed persistent watcher registration, and publishes its
+event baseline before wait readiness so an immediate wake cannot be missed.
+
+Release `0.2.70` assigns the next immutable install identity to merged PR #187
+at main commit `e2c75739e9722ad3e1f122402bd8b59a798fd697` and exact
+reviewed head `054f36abcd2b473730d097b637f2ef9ad5fc1cee`. It packages
+stable restored-Pi watcher routing, detailed provider-neutral Stop feedback,
+explicit one-shot Stop control, and non-disruptive attached foreground waiting.
+This release delta changes only the version contract, deterministic
+release-staging expectations, and this provenance record beyond that merged
+tree.
+
+The continuing issue-#84 acceptance pass found two provider hot-path defects.
+Pi synchronously launched watcher and Herdr subprocesses during prompt, tool,
+Stop, session-start, and agent-start callbacks, including one redundant metadata
+publication on every tool call. Those subprocesses are now asynchronous;
+metadata publication is deduplicated per exact session and explicit read-only Pi
+tools bypass pre-tool authorization entirely. Codex and Cursor apply the same
+read-only predicate before supervisor or SQLite access while shell and every
+potentially mutating tool remain fail-closed. A consumed one-shot Stop also
+records its exact actor, input, and terminal generation so the same provider
+settlement can replay safely without authorizing a later generation.
+
+Release `0.2.71` assigns the next immutable install identity to merged PR #189
+at main commit `183c0cbb762bbbddb4475ace8e4fa4d2f986f937` and exact
+reviewed head `92839dfe1f0cc660da608ba62728859a8a10ae41`. It packages
+the provider-neutral read-only authorization fast path, asynchronous and
+deduplicated Pi hook subprocesses, and replay-safe one-shot Stop consumption.
+This release delta changes only the version contract, deterministic
+release-staging expectations, and this provenance record beyond that merged
+tree.
+
+Release `0.2.72` assigns the next immutable install identity to merged PR #191
+at main commit `e3c68c36268def6d892f7258e8bd30d2ef1e6e8e` and exact
+reviewed head `d951bef8b91caa5c460a5cc5f15e2862c96ca052`. It prevents
+Cursor from launching League for native `Read` and `Grep` tools while all
+mutating and unknown tool categories remain fail-closed. This release delta
+changes only the version contract, deterministic release-staging expectations,
+and this provenance record beyond that merged tree.
+
+Release `0.2.73` assigns the next immutable install identity to merged PR #194
+at main commit `1294f1737a47930d1cbbda2882c8ea4ed3789785` and exact
+reviewed head `7202a4f2b9f910d8ee358579b94c69a393239b70`. It corrects
+the source-managed League supplement's native prompt-event names and ownership
+references, and adds a focused fast-path execution contract for League
+Champions. This release delta changes only the version contract, deterministic
+release-staging expectations, and this provenance record beyond that merged
+tree.
+
+Release `0.2.74` assigns the next immutable install identity to merged PR #197
+at main commit `866f033f43ea332e62deeee7ae9dab6159e26d8e` and exact
+reviewed head `1b54ace041c4c195452feb380f0b0200b20231b2`. It prevents
+provider-neutral operational wake and Stop-feedback messages from becoming
+Summoner prompt intake while preserving model-visible wake delivery for Pi,
+Codex, and Cursor. This release delta changes only the version contract,
+deterministic release-staging expectations, and this provenance record beyond
+that merged tree.
+
+Release `0.2.75` assigns the next immutable install identity to merged PR #199
+at main commit `66fa38b980f523afe359d305bde97acded296231` and exact
+reviewed head `5eebb611fc1cc4214c8c106010d252cf3c00a8dc`. It reports
+bounded details for every Stop-obligation category across Pi, Codex, and Cursor
+and prevents routine Stop feedback from authorizing bypass or hook recovery
+actions. This release delta changes only the version contract, deterministic
+release-staging expectations, and this provenance record beyond that merged
+tree.

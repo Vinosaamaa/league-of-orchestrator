@@ -17,6 +17,8 @@ DEFAULT_UNREACHABLE_GRACE_SECONDS = 60
 MAX_CHAMPION_STOP_GUARDS = 64
 MAX_OWNER_STOP_TARGETS = 64
 MAX_SUPERVISOR_SCOPE_CANDIDATES = 16
+MAX_STOP_DETAIL_ROWS = 10
+MAX_STOP_DETAIL_TEXT = 160
 ATTENTION_STATUSES = frozenset(
     {
         "blocked",
@@ -56,14 +58,101 @@ def stop_feedback_reason(
     )
     if not summaries:
         return base
-    return base + " Unresolved requests: " + " | ".join(summaries)
+    return base + " Unresolved obligations: " + " | ".join(summaries)
+
+
+def _stop_obligation_summaries(
+    store: Any,
+    actor_agent_id: str,
+    counts: Mapping[str, int],
+) -> tuple[str, ...]:
+    """Describe every Stop-obligation kind instead of only durable requests."""
+
+    summaries: list[str] = []
+    unresolved_items = int(counts.get("unresolved_requests", 0))
+    owner_decisions = int(counts.get("owner_decisions", 0))
+    if unresolved_items or owner_decisions:
+        owner_decision_filter = "" if unresolved_items else """
+              AND (
+                requests.state IN ('awaiting_user','blocked')
+                OR NOT EXISTS (
+                  SELECT 1 FROM tasks t
+                   WHERE t.request_id=requests.request_id
+                     AND t.state IN
+                       ('active','pending','accepted','working','progress','in_progress','blocked','ready_to_land')
+                )
+              )
+        """
+        request_rows = store.connection.execute(
+            f"""
+            SELECT summary,COUNT(*) OVER() AS total FROM requests
+             WHERE owner_agent_id=? AND state NOT IN ('answered','cancelled')
+                   {owner_decision_filter}
+             ORDER BY updated_at DESC,request_id LIMIT ?
+            """,
+            (actor_agent_id, MAX_STOP_DETAIL_ROWS),
+        ).fetchall()
+        summaries.extend(
+            " ".join(str(row["summary"]).split())[:MAX_STOP_DETAIL_TEXT]
+            for row in request_rows
+        )
+        request_total = int(request_rows[0]["total"]) if request_rows else 0
+        if request_total > len(request_rows):
+            additional = request_total - len(request_rows)
+            noun = "request" if additional == 1 else "requests"
+            summaries.append(f"{additional} additional unresolved {noun}")
+
+    if unresolved_items or int(counts.get("untriaged_prompts", 0)):
+        prompt_rows = store.connection.execute(
+            """
+            SELECT pp.body,COUNT(*) OVER() AS total FROM prompts p
+            LEFT JOIN prompt_payloads pp ON pp.prompt_id=p.prompt_id
+             WHERE p.current_owner_agent_id=? AND p.triage_state='untriaged'
+             ORDER BY p.created_at,p.prompt_id LIMIT ?
+            """,
+            (actor_agent_id, MAX_STOP_DETAIL_ROWS),
+        ).fetchall()
+        for row in prompt_rows:
+            body = " ".join(str(row["body"] or "").split())
+            summaries.append(
+                f"Untriaged prompt: {body[:MAX_STOP_DETAIL_TEXT]}"
+                if body
+                else "Untriaged prompt awaiting semantic triage"
+            )
+        prompt_total = int(prompt_rows[0]["total"]) if prompt_rows else 0
+        if prompt_total > len(prompt_rows):
+            additional = prompt_total - len(prompt_rows)
+            noun = "prompt" if additional == 1 else "prompts"
+            summaries.append(f"{additional} additional untriaged {noun}")
+
+    category_labels = {
+        "active_champions": ("active Champion", "active Champions"),
+        "pending_assignments": ("pending assignment", "pending assignments"),
+        "pending_deliveries": ("pending delivery", "pending deliveries"),
+        "cleanup_obligations": ("cleanup obligation", "cleanup obligations"),
+        "decision_tasks": ("task awaiting owner action", "tasks awaiting owner action"),
+        "failed_deliveries": ("failed delivery", "failed deliveries"),
+        "cleanup_decisions": ("cleanup decision", "cleanup decisions"),
+    }
+    for key, labels in category_labels.items():
+        count = int(counts.get(key, 0))
+        if count:
+            summaries.append(f"{count} {labels[0] if count == 1 else labels[1]}")
+    if owner_decisions:
+        summaries.append(
+            f"{owner_decisions} "
+            f"{'owner decision' if owner_decisions == 1 else 'owner decisions'}"
+        )
+    if counts.get("turn_commit_pending", 0):
+        summaries.append("Shotcaller turn commit pending")
+    return tuple(dict.fromkeys(summaries))
 
 
 def consume_stop_feedback(
     store: Any,
     scope_id: str,
     actor_agent_id: str,
-    terminal_generation: str,
+    terminal_generation: str | None,
     body: str,
 ) -> bool:
     """Consume only the exact one-time feedback emitted by the last Stop block."""
@@ -71,19 +160,33 @@ def consume_stop_feedback(
     body_digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
     try:
         with store._transaction():
-            changed = store.connection.execute(
-                """
-                UPDATE watcher_scopes
-                   SET pending_stop_feedback_digest=NULL,
-                       pending_stop_terminal_generation=NULL,
-                       pending_stop_wait_generation=NULL
-                 WHERE scope_id=? AND actor_agent_id=?
-                   AND pending_stop_feedback_digest=?
-                   AND pending_stop_terminal_generation=?
-                   AND pending_stop_wait_generation=last_blocked_wait_generation
-                """,
-                (scope_id, actor_agent_id, body_digest, terminal_generation),
-            )
+            if terminal_generation is None:
+                changed = store.connection.execute(
+                    """
+                    UPDATE watcher_scopes
+                       SET pending_stop_feedback_digest=NULL,
+                           pending_stop_terminal_generation=NULL,
+                           pending_stop_wait_generation=NULL
+                     WHERE scope_id=? AND actor_agent_id=?
+                       AND pending_stop_feedback_digest=?
+                       AND pending_stop_wait_generation=last_blocked_wait_generation
+                    """,
+                    (scope_id, actor_agent_id, body_digest),
+                )
+            else:
+                changed = store.connection.execute(
+                    """
+                    UPDATE watcher_scopes
+                       SET pending_stop_feedback_digest=NULL,
+                           pending_stop_terminal_generation=NULL,
+                           pending_stop_wait_generation=NULL
+                     WHERE scope_id=? AND actor_agent_id=?
+                       AND pending_stop_feedback_digest=?
+                       AND pending_stop_terminal_generation=?
+                       AND pending_stop_wait_generation=last_blocked_wait_generation
+                    """,
+                    (scope_id, actor_agent_id, body_digest, terminal_generation),
+                )
     except sqlite3.DatabaseError as exc:
         raise store._translate_database_error(
             exc, "Stop feedback suppression conflicted with canonical state"
@@ -1685,10 +1788,21 @@ def begin_shotcaller_turn(
                         "committed": existing.get("committed") is True,
                         "idempotent": True,
                     }
-                if (
-                    existing.get("committed") is not True
-                    or current_generation
-                    <= int(existing.get("user_message_generation", current_generation))
+                previous_generation = int(existing.get("user_message_generation", current_generation))
+                # A limited batch may leave already-captured prompts behind.
+                # Roll its token forward under this same write transaction;
+                # never clear the owner-active fence or synthesize new intake.
+                captured_backlog = (
+                    existing.get("committed") is True
+                    and current_generation == previous_generation
+                    and store.connection.execute(
+                        "SELECT 1 FROM prompts WHERE current_owner_agent_id=? "
+                        "AND triage_state='untriaged' LIMIT 1",
+                        (actor_agent_id,),
+                    ).fetchone() is not None
+                )
+                if existing.get("committed") is not True or (
+                    current_generation <= previous_generation and not captured_backlog
                 ):
                     raise StorageRefusal(
                         "shotcaller_turn_active",
@@ -2027,12 +2141,69 @@ def rearm_wait(store: Any, scope_id: str, actor_agent_id: str, event_id: str, at
 
 
 def set_allow_stop_once(store: Any, scope_id: str, actor_agent_id: str) -> dict[str, Any]:
-    """Refuse the retired generic bypass without mutating canonical state."""
+    """Authorize exactly one subsequent Stop for one exact active Shotcaller."""
 
-    raise StorageRefusal(
-        "owner_stop_required",
-        "generic one-shot Stop authorization is retired; use a semantic owner stop or verified detach handoff",
-    )
+    try:
+        with store._transaction():
+            actor = store.connection.execute(
+                """
+                SELECT callsign FROM agent_instances
+                 WHERE agent_id=? AND role='shotcaller' AND retired_at IS NULL
+                """,
+                (actor_agent_id,),
+            ).fetchone()
+            if actor is None:
+                raise StorageRefusal(
+                    "allow_stop_invalid",
+                    "one-shot Stop authorization requires an active Shotcaller",
+                )
+            selected = resolve_supervisor_scope(
+                store, actor_agent_id, str(actor["callsign"])
+            )
+            if selected["scope_id"] != scope_id:
+                raise StorageRefusal(
+                    "allow_stop_scope_mismatch",
+                    "one-shot Stop authorization requires the exact current watcher scope",
+                )
+            ensure_watcher_scope(
+                store, scope_id, actor_agent_id, block_on_obligations=None
+            )
+            store.connection.execute(
+                """
+                UPDATE watcher_scopes
+                   SET allow_stop_once=1,stop_blocked=0,wait_active=0,
+                       pending_stop_feedback_digest=NULL,
+                       pending_stop_terminal_generation=NULL,
+                       pending_stop_wait_generation=NULL
+                 WHERE scope_id=? AND actor_agent_id=?
+                """,
+                (scope_id, actor_agent_id),
+            )
+            row = store.connection.execute(
+                """
+                SELECT wait_generation,user_message_generation
+                  FROM watcher_scopes WHERE scope_id=? AND actor_agent_id=?
+                """,
+                (scope_id, actor_agent_id),
+            ).fetchone()
+    except StorageRefusal:
+        raise
+    except sqlite3.DatabaseError as exc:
+        raise store._translate_database_error(
+            exc, "one-shot Stop authorization conflicted with canonical state"
+        ) from exc
+    if row is None:
+        raise StorageRefusal(
+            "allow_stop_scope_mismatch",
+            "one-shot Stop authorization requires the exact current watcher scope",
+        )
+    return {
+        "scope_id": scope_id,
+        "actor_agent_id": actor_agent_id,
+        "allow_stop_once": True,
+        "wait_generation": int(row["wait_generation"]),
+        "user_message_generation": int(row["user_message_generation"]),
+    }
 
 
 def _owner_stop_metadata(metadata: dict[str, Any]) -> dict[str, Any] | None:
@@ -2065,6 +2236,29 @@ def _owner_stop_metadata(metadata: dict[str, Any]) -> dict[str, Any] | None:
     ):
         raise StorageRefusal(
             "owner_stop_invalid", "semantic owner-stop metadata is malformed"
+        )
+    return value
+
+
+def _allow_stop_once_receipt(metadata: dict[str, Any]) -> dict[str, Any] | None:
+    value = metadata.get("allow_stop_once_receipt")
+    if value is None:
+        return None
+    if (
+        not isinstance(value, dict)
+        or value.get("schema") != "league.allow-stop-once-receipt.v1"
+        or not isinstance(value.get("actor_agent_id"), str)
+        or not value["actor_agent_id"]
+        or not isinstance(value.get("terminal_generation"), str)
+        or not value["terminal_generation"]
+        or type(value.get("user_message_generation")) is not int
+        or value["user_message_generation"] < 0
+        or not isinstance(value.get("consumed_at"), str)
+        or not value["consumed_at"]
+    ):
+        raise StorageRefusal(
+            "allow_stop_receipt_invalid",
+            "one-shot Stop receipt metadata is malformed",
         )
     return value
 
@@ -2804,6 +2998,7 @@ def stop_decision(
             metadata = _scope_metadata(scope)
             turn = _shotcaller_turn(metadata)
             owner_stop = _owner_stop_metadata(metadata)
+            allow_stop_receipt = _allow_stop_once_receipt(metadata)
             turn_active = turn is not None and turn.get("active") is True
             detached = policy["attachment_mode"] == "detached"
             all_counts = obligation_counts(store, actor_agent_id)
@@ -2819,23 +3014,9 @@ def stop_decision(
             effective_counts = owner_counts if detached else all_counts
             total = sum(effective_counts.values())
             delegated_total = sum(all_counts.values())
-            if effective_counts.get("unresolved_requests", 0) or effective_counts.get(
-                "owner_decisions", 0
-            ):
-                summary_rows = store.connection.execute(
-                    """
-                    SELECT summary FROM requests
-                     WHERE owner_agent_id=? AND state NOT IN ('answered','cancelled')
-                     ORDER BY updated_at DESC,request_id LIMIT 10
-                    """,
-                    (actor_agent_id,),
-                ).fetchall()
-                summaries = tuple(
-                    " ".join(str(row["summary"]).split())[:160]
-                    for row in summary_rows
-                )
-            else:
-                summaries = ()
+            summaries = _stop_obligation_summaries(
+                store, actor_agent_id, effective_counts
+            )
             common = {
                 "scope_id": scope_id,
                 "wait_generation": int(scope["wait_generation"]),
@@ -2859,6 +3040,47 @@ def stop_decision(
                     """,
                     (scope_id,),
                 )
+            if scope["allow_stop_once"]:
+                metadata["allow_stop_once_receipt"] = {
+                    "schema": "league.allow-stop-once-receipt.v1",
+                    "actor_agent_id": actor_agent_id,
+                    "terminal_generation": terminal_generation,
+                    "user_message_generation": int(scope["user_message_generation"]),
+                    "consumed_at": at,
+                }
+                store.connection.execute(
+                    """
+                    UPDATE watcher_scopes
+                       SET metadata_json=?,allow_stop_once=0,stop_blocked=0,wait_active=0,
+                           pending_stop_feedback_digest=NULL,
+                           pending_stop_terminal_generation=NULL,
+                           pending_stop_wait_generation=NULL
+                     WHERE scope_id=?
+                    """,
+                    (
+                        json.dumps(metadata, sort_keys=True, separators=(",", ":")),
+                        scope_id,
+                    ),
+                )
+                return {
+                    **common,
+                    "status": "allowed_once",
+                    "decision": "allow",
+                    "priority": "explicit_allow_stop_once",
+                }
+            if (
+                allow_stop_receipt is not None
+                and allow_stop_receipt["actor_agent_id"] == actor_agent_id
+                and allow_stop_receipt["terminal_generation"] == terminal_generation
+                and allow_stop_receipt["user_message_generation"]
+                == int(scope["user_message_generation"])
+            ):
+                return {
+                    **common,
+                    "status": "allowed_once_replay",
+                    "decision": "allow",
+                    "priority": "explicit_allow_stop_once",
+                }
             owner_stop_current = bool(
                 owner_stop is not None
                 and owner_stop.get("user_message_generation")

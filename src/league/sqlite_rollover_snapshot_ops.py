@@ -13,6 +13,7 @@ from .rollover_descendant import (
 )
 from .sqlite_callsign_ops import capabilities, digest, stable_json, timestamp
 from .sqlite_rollover_ops import (
+    _imported_null_route_provenance,
     _descendant_source_shape,
     _descendant_reconciliation_receipt_exact,
     _historical_imported_descendant_reconciliation_receipt_exact,
@@ -444,47 +445,11 @@ def _descendant_context(
                 )
         route_adoption = None
         if champion["routing_name"] is None:
-            if (
-                champion["display_agent"] is not None
-                or champion["shotcaller_agent_id"] != predecessor_agent_id
-                or champion["kind"] != "codex-thread"
-                or champion["backend"] != "herdr"
-                or not isinstance(champion["address"], str)
-                or not champion["address"]
-                or not isinstance(champion["thread_id"], str)
-                or not champion["thread_id"]
-                or not isinstance(champion["worktree"], str)
-                or not champion["worktree"]
-            ):
-                raise StorageRefusal(
-                    "snapshot_refresh_identity_changed",
-                    "null descendant route is not an exact predecessor Herdr binding",
-                )
-            task = store.connection.execute(
-                "SELECT * FROM tasks WHERE task_id=?", (task_id,)
-            ).fetchone()
-            assignments = store.connection.execute(
-                "SELECT * FROM task_assignments WHERE task_id=? ORDER BY task_assignment_id",
-                (task_id,),
-            ).fetchall()
-            if task is None or len(assignments) > 1:
-                raise StorageRefusal(
-                    "snapshot_refresh_identity_changed",
-                    "null-route descendant task binding is missing or ambiguous",
-                )
-            source_shape, import_provenance_digest = _descendant_source_shape(
-                store,
-                task,
-                champion_agent_id,
-                predecessor_agent_id,
-                callsigns[0],
-                None if not assignments else assignments[0],
+            import_provenance_digest = _imported_null_route_provenance(
+                store, champion, predecessor_agent_id, callsigns[0],
+                code="snapshot_refresh_identity_changed",
             )
-            if source_shape != "imported_legacy_partial":
-                raise StorageRefusal(
-                    "snapshot_refresh_identity_changed",
-                    "only an exact imported legacy predecessor may adopt a null route",
-                )
+            source_shape = "imported_legacy_partial"
             def binding_digest(
                 bound_runtime: Optional[Mapping[str, Any]],
                 *,

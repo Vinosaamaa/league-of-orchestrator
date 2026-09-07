@@ -6,6 +6,7 @@ import argparse
 from contextlib import ExitStack, contextmanager
 import fcntl
 import hashlib
+import hmac
 import json
 import os
 import secrets
@@ -18,6 +19,13 @@ from typing import Any, Iterator
 
 from .agent_adapters import SharedLifecyclePolicy, builtin_agent_adapter_registry
 from .multiplexer_adapters import builtin_multiplexer_adapter_registry
+from .operational_input import (
+    owner_control_content,
+    parse_operational_input,
+    render_operational_input,
+    transition_content,
+)
+from .sqlite_outbox_ops import outbox_envelope
 from .sqlite_store import DEFAULT_BUSY_TIMEOUT_MS, SQLiteStorage
 from .sqlite_watcher_ops import (
     obligation_counts,
@@ -69,6 +77,7 @@ PRE_TOOL_HOOK_ADAPTERS = _hook_routes("pre_tool_authorization")
 BROKERED_HOOK_COMMANDS = frozenset(
     PROMPT_HOOK_ADAPTERS | STOP_HOOK_ADAPTERS | PRE_TOOL_HOOK_ADAPTERS
 )
+READ_ONLY_TOOL_NAMES = frozenset({"read", "grep", "find", "ls", "glob"})
 
 
 def _registered_multiplexer(kind: Any) -> bool:
@@ -125,6 +134,23 @@ def _native_hook_output(
     if adapter.contract.kind == "pi":
         canonical = {"binding": "bound" if bound else "unbound", **canonical}
     return dict(adapter.translate_hook_output(_hook_operation(command), canonical))
+
+
+def _read_only_pre_tool(command: str, payload: dict[str, Any]) -> bool:
+    tool_name = payload.get("tool_name")
+    return bool(
+        command in PRE_TOOL_HOOK_ADAPTERS
+        and isinstance(tool_name, str)
+        and tool_name.casefold() in READ_ONLY_TOOL_NAMES
+    )
+
+
+def _read_only_pre_tool_output(command: str) -> dict[str, Any]:
+    return _native_hook_output(
+        command,
+        {"decision": "accept", "reason_code": "read_only_fast_path"},
+        bound=False,
+    )
 
 
 def _stop_output_mode(command: str) -> str:
@@ -223,12 +249,17 @@ def _parser() -> argparse.ArgumentParser:
     _add_service_file_options(service_rollback)
     service_rollback.add_argument("--expected-installed-plist-sha256", required=True)
     service_rollback.add_argument("--expected-backup-sha256")
-    supervise = commands.add_parser("supervise")
-    supervise.add_argument("--poll-seconds", type=float, default=1.0)
+    for name in ("supervise", "wait"):
+        foreground = commands.add_parser(name)
+        foreground.add_argument("--poll-seconds", type=float, default=1.0)
+    allow_stop = commands.add_parser(
+        "allow-stop", help="Authorize exactly one subsequent Shotcaller Stop."
+    )
+    allow_stop.add_argument("--once", action="store_true", required=True)
     deliver = commands.add_parser("deliver")
     deliver.add_argument("--event-id", required=True)
     for name in (
-        "enable", "disable", "allow-stop", "wait",
+        "enable", "disable",
         "transition", "reconcile", "preflight", "launch", "resume", "teardown",
         "install-codex-hooks", "hidden-worker", "lead-relay", "route-model",
         "resource-inspect",
@@ -336,8 +367,10 @@ def _scope(store: SQLiteStorage, actor_id: str, callsign: str) -> str:
     return str(resolve_supervisor_scope(store, actor_id, callsign)["scope_id"])
 
 
-def _codex_turn_generation(session_ref: str, turn_id: str) -> str:
-    identity = f"codex\0{session_ref}\0{turn_id}"
+def _provider_terminal_generation(
+    adapter_kind: str, session_ref: str, source_event_key: str
+) -> str:
+    identity = f"{adapter_kind}\0{session_ref}\0{source_event_key}"
     return hashlib.sha256(identity.encode()).hexdigest()
 
 
@@ -437,6 +470,71 @@ def _valid_codex_prompt_invocation_id(value: Any) -> bool:
     )
 
 
+def _exact_operational_input(
+    store: SQLiteStorage,
+    actor_id: str | None,
+    adapter_kind: str,
+    session_ref: str,
+    body: str,
+) -> bool:
+    """Recognize only an intact delivery bound to a canonical outbox recipient."""
+
+    header = parse_operational_input(body)
+    if header is None or actor_id is None or header["recipient_agent_id"] != actor_id:
+        return False
+    row = store.connection.execute(
+        """
+        SELECT state FROM delivery_outbox
+         WHERE outbox_id=? AND event_id=? AND recipient_agent_id=?
+        """,
+        (header["outbox_id"], header["event_id"], actor_id),
+    ).fetchone()
+    if row is None or row["state"] not in {
+        "in_flight", "awaiting_receipt", "delivered"
+    }:
+        return False
+    try:
+        envelope = outbox_envelope(
+            store, header["outbox_id"], header["event_id"], actor_id
+        )
+    except StorageRefusal:
+        return False
+    kind = header["kind"]
+    try:
+        if kind == "owner-control" and envelope["event_type"] == "owner_stop_control":
+            expected = render_operational_input(
+                kind, envelope, owner_control_content(envelope)
+            )
+        elif kind == "delivery" and envelope["event_type"] != "owner_stop_control":
+            expected = render_operational_input(
+                kind, envelope, transition_content(envelope)
+            )
+        elif kind == "routed-delivery" and adapter_kind == "cursor":
+            runtimes = store.connection.execute(
+                """
+                SELECT runtime_instance_id FROM runtime_instances
+                 WHERE actor_agent_id=? AND session_ref=? AND verified=1
+                   AND status IN ('active','idle')
+                 ORDER BY runtime_instance_id
+                """,
+                (actor_id, session_ref),
+            ).fetchall()
+            if len(runtimes) != 1:
+                return False
+            from .cursor_steering import structured_delivery_prompt
+
+            expected = structured_delivery_prompt(
+                {"runtime_instance_id": str(runtimes[0]["runtime_instance_id"])},
+                envelope,
+                state_root=str(store.state_root),
+            )
+        else:
+            return False
+    except (KeyError, TypeError, ValueError):
+        return False
+    return hmac.compare_digest(body.encode("utf-8"), expected.encode("utf-8"))
+
+
 def _capture_prompt(
     store: SQLiteStorage,
     scope: str | None,
@@ -486,6 +584,14 @@ def _capture_prompt(
         raise StorageRefusal(decision.reason_code, "shared agent lifecycle policy refused prompt intake")
     session_ref = event.session_ref
     raw_source_event_key = event.source_event_key
+    if _exact_operational_input(
+        store, actor_id, adapter_kind, session_ref, body
+    ):
+        return {
+            "suppressed": "exact_operational_input",
+            "prompt_id": None,
+            "idempotent": False,
+        }
     prompt_id, source_event_key = _prompt_identity(
         adapter_kind, session_ref, raw_source_event_key, body
     )
@@ -497,7 +603,13 @@ def _capture_prompt(
         and store.consume_stop_feedback(
             scope,
             actor_id,
-            _codex_turn_generation(session_ref, provider_turn_id),
+            (
+                _provider_terminal_generation(
+                    adapter_kind, session_ref, str(provider_turn_id)
+                )
+                if adapter_kind == "codex"
+                else None
+            ),
             body,
         )
     ):
@@ -928,7 +1040,13 @@ def handle_brokered_hook(
         if result["decision"] != "block":
             output = {}
         elif _stop_output_mode(command) != "decision":
-            output = {"followup_message": "League has unresolved obligations."}
+            output = {
+                "followup_message": _codex_stop_reason(
+                    callsign,
+                    result["wait_generation"],
+                    tuple(result.get("unresolved_summaries", ())),
+                )
+            }
         else:
             output = {
                 "decision": "block",
@@ -1128,6 +1246,8 @@ def _supervise(
     actor_id: str,
     callsign: str,
     poll_seconds: float,
+    *,
+    own_watcher_registration: bool = True,
 ) -> dict[str, Any]:
     if poll_seconds <= 0:
         raise StorageRefusal("invalid_supervision", "poll interval must be positive")
@@ -1171,31 +1291,35 @@ def _supervise(
                 "runtime_unverified",
                 "SQLite supervision requires one exact verified Shotcaller runtime",
             )
-        current = store.connection.execute(
-            "SELECT fence FROM watcher_registrations WHERE actor_agent_id=?",
-            (actor_id,),
-        ).fetchone()
-        fence = 1 if current is None else int(current["fence"]) + 1
-        watcher_id = f"watcher:sqlite:{actor_id}:{os.getpid()}"
-        now = datetime.now().astimezone()
-        store.register_watcher(
-            scope,
-            watcher_id,
-            actor_id,
-            str(runtimes[0]["runtime_instance_id"]),
-            f"sqlite-supervise:{marker}",
-            (now + timedelta(minutes=10)).isoformat(timespec="seconds"),
-            fence,
-            now.isoformat(timespec="seconds"),
-            block_on_obligations=True,
-        )
+        if own_watcher_registration:
+            current = store.connection.execute(
+                "SELECT fence FROM watcher_registrations WHERE actor_agent_id=?",
+                (actor_id,),
+            ).fetchone()
+            fence = 1 if current is None else int(current["fence"]) + 1
+            watcher_id = f"watcher:sqlite:{actor_id}:{os.getpid()}"
+            now = datetime.now().astimezone()
+            store.register_watcher(
+                scope,
+                watcher_id,
+                actor_id,
+                str(runtimes[0]["runtime_instance_id"]),
+                f"sqlite-supervise:{marker}",
+                (now + timedelta(minutes=10)).isoformat(timespec="seconds"),
+                fence,
+                now.isoformat(timespec="seconds"),
+                block_on_obligations=True,
+            )
         store.rearm_wait(
             scope,
             actor_id,
             f"sqlite-supervision:{marker}",
             datetime.now().astimezone().isoformat(timespec="seconds"),
         )
-        baseline = _supervision_snapshot(store, scope, actor_id)
+        # `initial` is the event baseline. Publishing wait_active in
+        # rearm_wait only after this snapshot makes it the readiness signal and
+        # prevents an immediate user/event wake from falling into a gap.
+        baseline = initial
         while True:
             time.sleep(max(poll_seconds, 0.01))
             current = _supervision_snapshot(store, scope, actor_id)
@@ -1302,6 +1426,8 @@ def main(argv: list[str] | None = None) -> int:
         "attach-shotcaller",
         "detach-shotcaller",
         "status",
+        "allow-stop",
+        "wait",
     }:
         raise StorageRefusal(
             "legacy_writer_fenced",
@@ -1358,6 +1484,9 @@ def main(argv: list[str] | None = None) -> int:
         payload = _canonical_hook_payload(
             args.command, payload, explicit_shotcaller=args.shotcaller
         )
+        if _read_only_pre_tool(args.command, payload):
+            _emit(_read_only_pre_tool_output(args.command))
+            return 0
     capture_event_id = (
         _codex_prompt_invocation_id()
         if args.command in PROMPT_HOOK_ADAPTERS
@@ -1504,8 +1633,25 @@ def main(argv: list[str] | None = None) -> int:
             _emit({})
             return 0
         assert actor_id is not None and callsign is not None and scope is not None
-        if args.command == "supervise":
-            _emit(_supervise(store, scope, actor_id, callsign, args.poll_seconds))
+        if args.command == "allow-stop":
+            if actor_role != "shotcaller":
+                raise StorageRefusal(
+                    "allow_stop_invalid",
+                    "one-shot Stop authorization requires an active Shotcaller",
+                )
+            _emit(store.set_allow_stop_once(scope, actor_id))
+            return 0
+        if args.command in {"supervise", "wait"}:
+            _emit(
+                _supervise(
+                    store,
+                    scope,
+                    actor_id,
+                    callsign,
+                    args.poll_seconds,
+                    own_watcher_registration=args.command == "supervise",
+                )
+            )
             return 0
         if args.command == "deliver":
             from .canonical_delivery import dispatch_event
@@ -1572,9 +1718,14 @@ def main(argv: list[str] | None = None) -> int:
                 _emit(
                     _native_hook_output(
                         args.command,
-                        {"followup_message": "League has unresolved obligations."}
-                        if blocked
-                        else {},
+                        {
+                            "followup_message": _codex_stop_reason(
+                                callsign,
+                                result["wait_generation"],
+                                tuple(result.get("unresolved_summaries", ())),
+                            )
+                        }
+                        if blocked else {},
                         bound=True,
                     )
                 )

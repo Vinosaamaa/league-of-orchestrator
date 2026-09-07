@@ -20,6 +20,12 @@ BOOTSTRAP_PROFILE = {
 }
 
 
+# Cursor evaluates this matcher before starting the hook command. Keep every
+# present and future tool category fail-closed except the two native,
+# side-effect-free categories documented by Cursor.
+PRE_TOOL_MATCHER = r"^(?!Read$|Grep$).+"
+
+
 def _required_text(payload: Mapping[str, Any], name: str) -> str:
     value = payload.get(name)
     if not isinstance(value, str) or not value:
@@ -132,7 +138,11 @@ def install(
         if len(matches) > 1:
             raise StorageRefusal("hook_bootstrap_ambiguous", "Cursor League hook is duplicated")
         if profile["native_event"] == "preToolUse":
-            required_handler = {"command": command, "failClosed": True}
+            required_handler = {
+                "command": command,
+                "matcher": PRE_TOOL_MATCHER,
+                "failClosed": True,
+            }
         elif profile["native_event"] == "stop":
             required_handler = {"command": command, "loop_limit": None}
         else:

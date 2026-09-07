@@ -21,7 +21,6 @@ from request_lifecycle_fixture import (  # noqa: E402
 from league.storage import (  # noqa: E402
     OutboxDispatchIdentity,
     PrepareAssignmentCommand,
-    StorageRefusal,
 )
 from league.sqlite_watcher_ops import stop_feedback_reason  # noqa: E402
 from league.request_services import AssignmentSpec  # noqa: E402
@@ -127,6 +126,15 @@ def test_attached_shotcaller_blocks_every_stop_with_obligations(root: Path) -> N
         "pending_deliveries",
         "cleanup_obligations",
     ))
+    champion_count = first["obligations"]["active_champions"]
+    for detail in (
+        f"{champion_count} "
+        f"{'active Champion' if champion_count == 1 else 'active Champions'}",
+        "1 pending assignment",
+        "1 pending delivery",
+        "1 cleanup obligation",
+    ):
+        assert detail in first["unresolved_summaries"], first
     repeated = store.stop_decision(
         "Garen-lifecycle", SHOTCALLER_ID, "terminal-generation-1", clock.now()
     )
@@ -143,6 +151,84 @@ def test_attached_shotcaller_blocks_every_stop_with_obligations(root: Path) -> N
         "Garen-lifecycle", SHOTCALLER_ID, "terminal-generation-3", clock.now()
     )
     assert fresh["decision"] == "block" and fresh["wait_generation"] == rearmed["wait_generation"]
+    store.close()
+
+
+def test_stop_feedback_names_an_untriaged_prompt(root: Path) -> None:
+    _, store, clock = create_context(root, "untriaged-prompt-stop-detail")
+    store.intake_prompt(
+        "prompt:stop-detail",
+        SHOTCALLER_ID,
+        GAREN_RUNTIME,
+        "pi",
+        "session:stop-detail",
+        "source:stop-detail",
+        "Why is Stop still looping?",
+        clock.now(),
+    )
+    register_watcher(store, clock)
+
+    blocked = store.stop_decision(
+        "Garen-lifecycle", SHOTCALLER_ID, "terminal:prompt-detail", clock.now()
+    )
+
+    assert blocked["decision"] == "block"
+    assert blocked["unresolved_summaries"] == [
+        "Untriaged prompt: Why is Stop still looping?",
+        "1 active Champion",
+    ]
+    feedback = stop_feedback_reason(
+        "Garen",
+        blocked["wait_generation"],
+        tuple(blocked["unresolved_summaries"]),
+    )
+    assert feedback.endswith(
+        "Unresolved obligations: Untriaged prompt: Why is Stop still looping?"
+        " | 1 active Champion"
+    )
+    assert store.consume_stop_feedback(
+        "Garen-lifecycle",
+        SHOTCALLER_ID,
+        "terminal:prompt-detail",
+        feedback,
+    )
+    store.close()
+
+
+def test_stop_feedback_bounds_prompt_details(root: Path) -> None:
+    _, store, clock = create_context(root, "bounded-prompt-stop-detail")
+    for ordinal in range(12):
+        store.intake_prompt(
+            f"prompt:bounded-stop-detail:{ordinal:02d}",
+            SHOTCALLER_ID,
+            GAREN_RUNTIME,
+            "pi",
+            "session:bounded-stop-detail",
+            f"source:bounded-stop-detail:{ordinal:02d}",
+            f"Bounded prompt {ordinal:02d} " + ("x" * 200),
+            clock.now(),
+        )
+    register_watcher(store, clock)
+
+    first = store.stop_decision(
+        "Garen-lifecycle", SHOTCALLER_ID, "terminal:bounded-detail", clock.now()
+    )
+    repeated = store.stop_decision(
+        "Garen-lifecycle", SHOTCALLER_ID, "terminal:bounded-detail", clock.now()
+    )
+
+    prompt_details = [
+        detail
+        for detail in first["unresolved_summaries"]
+        if detail.startswith("Untriaged prompt:")
+    ]
+    assert len(prompt_details) == 10, first
+    assert "2 additional untriaged prompts" in first["unresolved_summaries"], first
+    assert all(
+        len(detail.removeprefix("Untriaged prompt: ")) <= 160
+        for detail in prompt_details
+    )
+    assert repeated["unresolved_summaries"] == first["unresolved_summaries"], repeated
     store.close()
 
 
@@ -165,26 +251,25 @@ def test_detachment_requires_verified_live_watcher_handoff(root: Path) -> None:
     rearmed = store.rearm_wait(
         "Garen-lifecycle", SHOTCALLER_ID, "event:explicit", clock.now()
     )
-    before = store.connection.total_changes
-    try:
-        store.set_allow_stop_once("Garen-lifecycle", SHOTCALLER_ID)
-    except StorageRefusal as exc:
-        assert exc.code == "owner_stop_required"
-    else:
-        raise AssertionError("retired generic one-shot Stop bypass was accepted")
-    assert store.connection.total_changes == before
-    # A legacy imported bit is data only; it can no longer bypass supervision.
-    with store._transaction():
-        store.connection.execute(
-            "UPDATE watcher_scopes SET allow_stop_once=1 WHERE scope_id='Garen-lifecycle'"
-        )
-    for terminal in ("terminal:explicit", "terminal:explicit", "terminal:rearmed"):
-        blocked = store.stop_decision(
-            "Garen-lifecycle", SHOTCALLER_ID, terminal, clock.now()
-        )
-        assert blocked["decision"] == "block"
-        assert blocked["status"] == "blocked_attached"
-        assert blocked["wait_generation"] == rearmed["wait_generation"]
+    armed = store.set_allow_stop_once("Garen-lifecycle", SHOTCALLER_ID)
+    assert armed["allow_stop_once"] is True
+    allowed = store.stop_decision(
+        "Garen-lifecycle", SHOTCALLER_ID, "terminal:explicit", clock.now()
+    )
+    assert allowed["decision"] == "allow"
+    assert allowed["status"] == "allowed_once"
+    assert allowed["priority"] == "explicit_allow_stop_once"
+    repeated = store.stop_decision(
+        "Garen-lifecycle", SHOTCALLER_ID, "terminal:explicit", clock.now()
+    )
+    assert repeated["decision"] == "allow"
+    assert repeated["status"] == "allowed_once_replay"
+    assert repeated["wait_generation"] == rearmed["wait_generation"]
+    next_generation = store.stop_decision(
+        "Garen-lifecycle", SHOTCALLER_ID, "terminal:next-input", clock.now()
+    )
+    assert next_generation["decision"] == "block"
+    assert next_generation["status"] == "blocked_attached"
     detached = store.set_supervision_attachment(
         "Garen-lifecycle", SHOTCALLER_ID, "detached", clock.now()
     )
@@ -196,6 +281,13 @@ def test_detachment_requires_verified_live_watcher_handoff(root: Path) -> None:
     )
     assert owner_action["decision"] == "block"
     assert owner_action["status"] == "blocked_detached_owner_action"
+    owner_decisions = owner_action["obligations"]["owner_decisions"]
+    assert owner_decisions > 0
+    assert (
+        f"{owner_decisions} "
+        f"{'owner decision' if owner_decisions == 1 else 'owner decisions'}"
+        in owner_action["unresolved_summaries"]
+    )
     scope = store.connection.execute(
         """
         SELECT stop_blocked,wait_active,last_blocked_wait_generation,
@@ -280,7 +372,12 @@ def test_detached_stop_blocks_owner_decision_task_states(root: Path) -> None:
     assert blocked["decision"] == "block"
     assert blocked["status"] == "blocked_detached_owner_action"
     assert blocked["obligations"]["decision_tasks"] == 1
-    feedback = stop_feedback_reason("Garen", blocked["wait_generation"])
+    assert "1 task awaiting owner action" in blocked["unresolved_summaries"]
+    feedback = stop_feedback_reason(
+        "Garen",
+        blocked["wait_generation"],
+        tuple(blocked["unresolved_summaries"]),
+    )
     assert store.consume_stop_feedback(
         "Garen-lifecycle",
         SHOTCALLER_ID,
@@ -304,6 +401,25 @@ def test_detached_stop_blocks_owner_decision_task_states(root: Path) -> None:
     assert ready["decision"] == "block"
     assert ready["status"] == "blocked_detached_owner_action"
     assert ready["obligations"]["decision_tasks"] == 1
+    assert "1 task awaiting owner action" in ready["unresolved_summaries"]
+
+    with store._transaction():
+        store.connection.execute(
+            "UPDATE delivery_outbox SET attempt_count=1,last_outcome='failed' "
+            "WHERE recipient_agent_id=? AND state='pending'",
+            (SHOTCALLER_ID,),
+        )
+        store.connection.execute(
+            "UPDATE cleanup_obligations SET cleanup_state='blocked' "
+            "WHERE task_id='task:pending'"
+        )
+    failed = store.stop_decision(
+        "Garen-lifecycle", SHOTCALLER_ID, "terminal:failed-owner-work", clock.now()
+    )
+    assert failed["obligations"]["failed_deliveries"] == 1
+    assert failed["obligations"]["cleanup_decisions"] == 1
+    assert "1 failed delivery" in failed["unresolved_summaries"]
+    assert "1 cleanup decision" in failed["unresolved_summaries"]
     scope = store.connection.execute(
         """
         SELECT stop_blocked,wait_active,pending_stop_feedback_digest,
@@ -313,8 +429,8 @@ def test_detached_stop_blocks_owner_decision_task_states(root: Path) -> None:
     ).fetchone()
     assert scope["stop_blocked"] == 1 and scope["wait_active"] == 1
     assert scope["pending_stop_feedback_digest"] is not None
-    assert scope["pending_stop_terminal_generation"] == "terminal:ready-task"
-    assert scope["pending_stop_wait_generation"] == ready["wait_generation"]
+    assert scope["pending_stop_terminal_generation"] == "terminal:failed-owner-work"
+    assert scope["pending_stop_wait_generation"] == failed["wait_generation"]
     store.close()
 
 
@@ -382,6 +498,8 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="league-shotcaller-stop-") as temporary:
         root = Path(temporary)
         test_attached_shotcaller_blocks_every_stop_with_obligations(root)
+        test_stop_feedback_names_an_untriaged_prompt(root)
+        test_stop_feedback_bounds_prompt_details(root)
         test_detachment_requires_verified_live_watcher_handoff(root)
         test_detached_stop_blocks_owner_decision_task_states(root)
         test_role_awareness_reconciliation_and_distinct_leases(root)

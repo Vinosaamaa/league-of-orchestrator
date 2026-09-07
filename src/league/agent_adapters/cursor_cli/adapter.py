@@ -104,7 +104,7 @@ def adapter() -> DeclaredAgentAdapter:
             "prompt_intake": {
                 "command": "cursor-before-submit-hook", "native_event": "beforeSubmitPrompt",
                 "hook_event": "beforeSubmitPrompt", "session_field": "conversation_id",
-                "source_field": "generation_id",
+                "source_field": "generation_id", "stop_feedback_suppression": True,
             },
             "pre_tool_authorization": {
                 "command": "cursor-pre-tool-hook", "native_event": "preToolUse",

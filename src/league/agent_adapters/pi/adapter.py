@@ -268,7 +268,7 @@ def adapter() -> DeclaredAgentAdapter:
             "prompt_intake": {
                 "command": "pi-input-hook", "native_event": "input",
                 "hook_event": "PiInput", "session_field": "session_path",
-                "source_field": "input_id",
+                "source_field": "input_id", "stop_feedback_suppression": True,
             },
             "pre_tool_authorization": {
                 "command": "pi-pre-tool-hook", "native_event": "tool_call",

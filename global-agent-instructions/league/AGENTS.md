@@ -32,10 +32,10 @@ $HOME/.local/bin/league --state-root "$HOME/.local/state/league"
 
 ## Durable prompt and request triage
 
-- Only `UserPromptSubmit` and `beforeSubmitPrompt` from an exactly bound
-  canonical League runtime capture its exact local prompt bytes once and wake
-  its verified Shotcaller. An unbound, non-League, or otherwise unverifiable
-  runtime is left untouched and unrecorded.
+- Only Codex `UserPromptSubmit`, Cursor `beforeSubmitPrompt`, and Pi `input`
+  from an exactly bound canonical League runtime capture its exact local prompt
+  bytes once and wake its verified Shotcaller. An unbound, non-League, or
+  otherwise unverifiable runtime is left untouched and unrecorded.
 - Prompt intake activates only after exact canonical binding; it never backfills
   pre-binding prompts or mines transcripts. It never rewrites bodies, injects
   control text, infers semantic splits, or fabricates missed prompts.
@@ -62,6 +62,13 @@ $HOME/.local/bin/league --state-root "$HOME/.local/state/league" request turn \
   Champion, and cleanup obligation.
 - Stop is an omission backstop, not the normal triage mechanism. Genuine user
   steering rearms it and outranks material-event waits.
+- Stop feedback is an operational continuation, not new Summoner steering. If
+  it names an untriaged prompt, reconcile that prompt through the canonical
+  request turn before attempting to end again.
+- A routine Stop block never authorizes hook disablement, `service-start`,
+  detachment, request cancellation, `/new`, or `allow-stop --once`; use the
+  named recovery only for its exact refusal, and reserve the one-shot allowance
+  for an explicit Summoner stop after work is paused.
 
 ## Issue binding and delegation
 
@@ -73,17 +80,39 @@ $HOME/.local/bin/league --state-root "$HOME/.local/state/league" request turn \
   reopen path for genuine closed recurrence with prior linkage, and create a
   new issue only for distinct work. Bind the immutable selection receipt to the
   canonical task; a positive issue number alone is not proof.
-- Tiny direct work must satisfy the universal bounded-read-only rule. Durable
-  research, benchmarks, release or operational work, confirmed debugging,
-  fixtures, tests, and repository changes require an issue-bound visible
-  Champion. Shotcallers do not implement repository work directly by default.
+- Tiny direct work follows the universal authority and engineering rules.
+  Durable research, benchmarks, release or operational work, confirmed
+  debugging, fixtures, tests, and repository changes require an issue-bound
+  visible Champion. Direct repository implementation refuses with
+  `delegation_required` through the shared provider policy.
+- Read-only diagnostics and supported recovery commands remain available;
+  recovery still requires its own exact authority. Prompt intake, Stop, and
+  detachment do not depend on implementation delegation.
 - Hidden workers stop at their bounded advisory perimeter and never own work
   that requires a visible Champion.
 - One issue assignment creates exactly one visible Champion. Do not add a
   hidden implementation owner or a second visible Champion for the same issue
   worktree.
+- A Champion-routed request cannot record its initial result until its exact
+  settled task proves the immutable issue-selection receipt, semantic issue
+  binding, distinct visible Champion runtime, and active assignment.
+  Answers require that result; accepted evidence survives cleanup and rollover.
 - Independently fixable work may run in parallel only through separate issues,
   tasks, assignments, branches, and worktrees.
+- A Champion starts from the exact assigned issue, acceptance criteria,
+  worktree, branch, and intended handoff; inspect only task-relevant source and
+  existing changes.
+- Champion implementation uses the smallest source-managed change and fastest
+  faithful focused check first; broaden verification only for concrete risk or
+  failure.
+- While an in-scope action remains, continue it directly; do not substitute
+  status narration, unchanged polling, unrelated investigation, or speculative
+  refactoring.
+- One authoritative blocker or repeated identical failure stops retries; report
+  the exact command, refusal, preserved state, and required owner action once.
+- Champion completion reports changed files, exact verification, and any
+  remaining blocker; never publish, merge, release, install, clean up, or keep
+  monitoring unless explicitly assigned.
 - The Shotcaller remains the user-facing owner for prioritization,
   supervision, review, landing, release, verification, repair, and cleanup.
 
@@ -120,8 +149,18 @@ $HOME/.local/bin/league --state-root "$HOME/.local/state/league" request turn \
   Pi, or Cursor CLI runtime is unbound or non-League, `UserPrompt`,
   pre-mutation, and `Stop` allow/no-op immediately with zero canonical mutation.
 - An attached Shotcaller with any owner or delegated obligation blocks every
-  `Stop` attempt; neither wait-generation deduplication, a repeated `Stop`, nor
-  retired `allow-stop-once` may turn that block into allow.
+  `Stop` attempt unless the Summoner explicitly requested a final stop and the
+  Shotcaller armed the exact one-shot allowance after pausing work.
+- When the Summoner requests all work paused, the Shotcaller reaches a safe
+  boundary for its own work, sends a pause-and-preserve instruction to every
+  owned active Champion, then runs
+  `$HOME/.local/bin/agent-watcher --shotcaller <callsign> allow-stop --once`
+  immediately before `Stop`. The next Stop consumes the allowance; it never
+  disables hooks, changes supervision mode, or authorizes a later Stop.
+- An attached Shotcaller waits for material League work with one
+  `$HOME/.local/bin/agent-watcher --shotcaller <callsign> wait` invocation.
+  This provider-neutral foreground wait applies to Codex, Pi, and Cursor CLI;
+  do not poll with multiplexer-specific wait commands.
 - `attach-shotcaller` requires the exact live supervisor binding and makes the
   Shotcaller terminal-attached. `detach-shotcaller` requests token-saving
   terminal detachment without pausing supervision.
@@ -202,4 +241,4 @@ $HOME/.local/bin/league --state-root "$HOME/.local/state/league" request turn \
   blocker. Never hand-edit canonical or retired storage.
 
 This file owns only League orchestration deltas. Changes to the universal guide
-belong to terminal-environment-toolkit issue #45.
+belong to the terminal-environment-toolkit repository.

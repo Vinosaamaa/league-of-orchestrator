@@ -8,6 +8,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 import queue
+import re
 import shlex
 import shutil
 import subprocess
@@ -30,6 +31,7 @@ from league.agent_adapters import (  # noqa: E402
 from league.provider_hooks import (  # noqa: E402
     install_provider_hook_bootstrap,
     rollback_provider_hooks,
+    stable_json,
     upgrade_provider_hooks,
 )
 from league.sqlite_store import SQLiteStorage  # noqa: E402
@@ -46,6 +48,13 @@ def refused(operation, code: str) -> None:
         assert exc.code == code, (exc.code, code)
         return
     raise AssertionError(f"expected refusal {code}")
+
+
+def installed_pi_payload(watcher: Path) -> bytes:
+    source = (ROOT / "integrations/pi/league-hooks.mjs").read_bytes()
+    placeholder = b'"__LEAGUE_STABLE_WATCHER__"'
+    assert source.count(placeholder) == 1
+    return source.replace(placeholder, json.dumps(str(watcher)).encode("utf-8"))
 
 
 def test_registry_declares_provider_hook_bootstrap_parity() -> None:
@@ -206,6 +215,7 @@ def test_installs_are_idempotent_and_preserve_unrelated_handlers(root: Path) -> 
     assert cursor["hooks"]["preToolUse"] == [
         {
             "command": shlex.join((str(watcher), "cursor-pre-tool-hook")),
+            "matcher": r"^(?!Read$|Grep$).+",
             "failClosed": True,
         }
     ]
@@ -221,7 +231,29 @@ def test_installs_are_idempotent_and_preserve_unrelated_handlers(root: Path) -> 
             for profile in registry.adapter(kind).hook_profile.values()
         }
         assert expected.issubset(commands)
-    assert targets["pi"].read_bytes() == (ROOT / "integrations/pi/league-hooks.mjs").read_bytes()
+    assert targets["pi"].read_bytes() == installed_pi_payload(watcher)
+    stale_watcher = root / "stale-release/bin/agent-watcher"
+    probe = subprocess.run(
+        [
+            "node",
+            "--input-type=module",
+            "-e",
+            (
+                f'import {{ installedPaths }} from {json.dumps(targets["pi"].as_uri())}; '
+                "process.stdout.write(JSON.stringify(installedPaths()));"
+            ),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "LEAGUE_WATCHER_COMMAND": str(stale_watcher),
+            "LEAGUE_STATE_ROOT": str(root / "state"),
+        },
+    )
+    assert probe.returncode == 0, probe.stderr
+    assert json.loads(probe.stdout)["watcher"] == str(watcher)
 
 
 def test_installers_refuse_malformed_groups_and_bound_existing_reads(root: Path) -> None:
@@ -258,7 +290,7 @@ def test_installers_refuse_malformed_groups_and_bound_existing_reads(root: Path)
         target=pi_target,
         stable_watcher=watcher,
     )
-    assert pi_target.read_bytes() == (ROOT / "integrations/pi/league-hooks.mjs").read_bytes()
+    assert pi_target.read_bytes() == installed_pi_payload(watcher)
 
     codex_target = root / ".codex/hooks.json"
     codex_target.parent.mkdir(parents=True)
@@ -482,6 +514,63 @@ def test_registry_upgrade_replaces_cursor_stop_exhaustion_and_restores(root: Pat
     )
     assert target.read_bytes() == legacy
     assert target.stat().st_mode & 0o777 == 0o644
+
+
+def test_cursor_upgrade_adds_native_read_only_matcher(root: Path) -> None:
+    profile = root / "profile"
+    profile.mkdir(parents=True)
+    watcher = root / "bin/agent-watcher"
+    watcher.parent.mkdir(parents=True)
+    watcher.write_text("synthetic watcher\n", encoding="utf-8")
+    target = _hook_targets(profile)["cursor"]
+    target.parent.mkdir(parents=True)
+    command = shlex.join((str(watcher.resolve()), "cursor-pre-tool-hook"))
+    target.write_text(
+        stable_json(
+            {
+                "version": 1,
+                "hooks": {
+                    "preToolUse": [{"command": command, "failClosed": True}],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    first = install_provider_hook_bootstrap(
+        builtin_agent_adapter_registry(),
+        "cursor",
+        source_root=ROOT,
+        target=target,
+        stable_watcher=watcher,
+    )
+    first_bytes = target.read_bytes()
+    second = install_provider_hook_bootstrap(
+        builtin_agent_adapter_registry(),
+        "cursor",
+        source_root=ROOT,
+        target=target,
+        stable_watcher=watcher,
+    )
+
+    installed = json.loads(first_bytes)
+    assert "preToolUse" in first["added"]
+    assert second["added"] == []
+    assert target.read_bytes() == first_bytes
+    assert installed["hooks"]["preToolUse"] == [
+        {
+            "command": command,
+            "matcher": r"^(?!Read$|Grep$).+",
+            "failClosed": True,
+        }
+    ]
+    matcher = installed["hooks"]["preToolUse"][0]["matcher"]
+    assert re.fullmatch(matcher, "Read") is None
+    assert re.fullmatch(matcher, "Grep") is None
+    for mutating_or_unknown in ("Shell", "Write", "Delete", "Task", "MCP:github"):
+        assert re.fullmatch(matcher, mutating_or_unknown)
+
+
 def run_pi_scenario(scenario: str, extension: Path | None = None) -> dict[str, object]:
     completed = subprocess.run(
         [
@@ -517,11 +606,39 @@ def test_unbound_pi_is_inert_and_promotes_without_relaunch() -> None:
         "pi-input-hook",
         "pi-pre-tool-hook",
         "pi-stop-hook",
-        "pi-stop-hook",
     ]
     assert promoted["tool"] is None
     assert len(promoted["messages"]) == 1
     assert promoted["notifications"] == []
+
+    recursive = run_pi_scenario("recursive-followup")
+    assert [item["command"] for item in recursive["calls"]] == [
+        "pi-input-hook",
+        "pi-pre-tool-hook",
+        "pi-stop-hook",
+    ]
+    assert len(recursive["messages"]) == 1
+    assert recursive["notifications"] == []
+
+    async_pretool = run_pi_scenario("async-pretool")
+    assert async_pretool["eventLoopTicks"] == ["pretool"]
+    assert [item["command"] for item in async_pretool["calls"]] == [
+        "pi-input-hook",
+        "pi-pre-tool-hook",
+        "pi-stop-hook",
+    ]
+
+    async_input = run_pi_scenario("async-input")
+    assert async_input["eventLoopTicks"] == ["input"]
+    assert [item["command"] for item in async_input["calls"]] == [
+        "pi-input-hook", "pi-pre-tool-hook", "pi-stop-hook"
+    ]
+
+    read_only = run_pi_scenario("read-only")
+    assert [item["command"] for item in read_only["calls"]] == [
+        "pi-input-hook",
+        "pi-stop-hook",
+    ]
 
 
 def test_league_launched_and_restored_pi_provider_parity() -> None:
@@ -551,17 +668,27 @@ def test_pi_outage_is_inert_when_unbound_and_closed_when_managed() -> None:
         "terminate": True,
     }
     assert len(managed["notifications"]) == 1
-    assert len(managed["messages"]) == 1
+    assert managed["messages"] == []
 
     activation_failure = run_pi_scenario("activation-write-failure")
     assert activation_failure["firstInput"] == {"action": "handled"}
-    assert activation_failure["tool"] == {
-        "block": True,
-        "reason": "League prompt binding is unavailable",
-        "terminate": True,
-    }
+    assert activation_failure["tool"] is None
     assert len(activation_failure["notifications"]) == 1
-    assert len(activation_failure["messages"]) == 1
+    assert activation_failure["messages"] == []
+
+    stop_outage = run_pi_scenario("outage-stop")
+    assert stop_outage["firstInput"] == {"action": "continue"}
+    assert stop_outage["tool"] is None
+    assert stop_outage["messages"] == []
+    assert stop_outage["notifications"] == [
+        {
+            "message": (
+                "League Stop guard is unavailable; session is paused pending "
+                "watcher recovery."
+            ),
+            "level": "error",
+        }
+    ]
 
 
 def test_disposable_installed_profiles_accept_exact_native_payloads(root: Path) -> None:
@@ -1045,6 +1172,10 @@ def test_release_manifest_and_launch_extension_separation() -> None:
         assert command in bootstrap
     assert 'pi.on("tool_call"' in runtime
     assert "reportLeagueMetadata" in runtime
+    assert "spawnSync" not in runtime
+    assert "spawnSync" not in bootstrap
+    assert "if (sessionIdentity) reportLeagueMetadata" not in runtime
+    assert "if (session) await publishLeagueMetadata(session);" in runtime
 
 
 def main() -> None:

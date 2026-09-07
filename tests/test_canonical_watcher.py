@@ -29,6 +29,11 @@ from request_lifecycle_fixture import (  # noqa: E402
     dispatch_request,
 )
 from league.request_services import AssignmentService, AssignmentSpec  # noqa: E402
+from league.cursor_steering import structured_delivery_prompt  # noqa: E402
+from league.operational_input import (  # noqa: E402
+    render_operational_input,
+    transition_content,
+)
 from league.sqlite_store import SQLiteStorage  # noqa: E402
 from league.sqlite_watcher_ops import obligation_counts  # noqa: E402
 from league.storage import RuntimeRegistrationCommand  # noqa: E402
@@ -149,7 +154,67 @@ def _stop_mutation_snapshot(state: Path) -> str:
                 f'SELECT * FROM "{table}" ORDER BY rowid'
             ).fetchall():
                 digest.update(repr(tuple(row)).encode("utf-8"))
-        return digest.hexdigest()
+    return digest.hexdigest()
+
+
+def test_read_only_pre_tool_fast_path_needs_no_state_or_supervisor(root: Path) -> None:
+    missing_state = root / "missing-read-only-state"
+    fixture_root = root / "read-only-fast-path"
+    fixture_root.mkdir()
+    env = _environment(fixture_root, missing_state)
+    cases = (
+        (
+            "codex-pre-tool-hook",
+            {
+                "hook_event_name": "PreToolUse",
+                "session_id": "session:read-only-codex",
+                "turn_id": "turn:read-only-codex",
+                "tool_name": "Read",
+                "tool_use_id": "tool:read-only-codex",
+                "tool_input": {"path": "synthetic.txt"},
+            },
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "allow",
+                }
+            },
+        ),
+        (
+            "cursor-pre-tool-hook",
+            {
+                "hook_event_name": "preToolUse",
+                "conversation_id": "session:read-only-cursor",
+                "generation_id": "generation:read-only-cursor",
+                "tool_name": "Grep",
+                "tool_use_id": "tool:read-only-cursor",
+                "tool_input": {"query": "needle"},
+                "cwd": str(root.resolve()),
+            },
+            {"permission": "allow"},
+        ),
+        (
+            "pi-pre-tool-hook",
+            {
+                "hook_event_name": "PiToolCall",
+                "session_id": "session:read-only-pi",
+                "session_path": str((root / "read-only-pi.jsonl").resolve()),
+                "input_id": "input:read-only-pi",
+                "tool_name": "find",
+                "tool_input": {"pattern": "*.py"},
+            },
+            {
+                "binding": "unbound",
+                "decision": "accept",
+                "reason_code": "read_only_fast_path",
+            },
+        ),
+    )
+    for command, payload, expected in cases:
+        started = time.monotonic()
+        assert _watcher(env, command, payload=payload) == expected
+        assert time.monotonic() - started < MAX_HOOK_LAUNCH_SECONDS
+    assert not missing_state.exists()
 
 
 def test_unbound_provider_stops_allow_without_mutation_when_broker_is_absent(
@@ -462,6 +527,127 @@ def test_codex_stop_reason_uses_resolved_callsign_not_turn_uuid() -> None:
     reason = _codex_stop_reason("Ashe", 4)
     assert reason == "League has unresolved obligations for Ashe at wait generation 4."
     assert turn_id not in reason
+
+
+def test_allow_stop_once_is_provider_neutral_and_consumed(root: Path) -> None:
+    for adapter_kind, command, harness_kind in (
+        ("codex", "codex-stop-hook", "codex-thread"),
+        ("pi", "pi-stop-hook", "pi-thread"),
+    ):
+        name = f"allow-stop-once-{adapter_kind}"
+        _, state, _ = seeded_state(root, name)
+        env = _environment(root / name, state)
+        session_ref = (
+            f"session:{name}"
+            if adapter_kind == "codex"
+            else f"/synthetic/pi/{name}.jsonl"
+        )
+        _register_garen_runtime(
+            state,
+            name,
+            session_ref=session_ref,
+            harness_kind=harness_kind,
+        )
+        missing_once = subprocess.run(
+            [
+                env["TEST_INSTALLED_WATCHER"],
+                "--shotcaller",
+                "Garen",
+                "allow-stop",
+            ],
+            text=True,
+            capture_output=True,
+            env=env,
+            check=False,
+        )
+        assert missing_once.returncode != 0
+        armed = _watcher(
+            env, "--shotcaller", "Garen", "allow-stop", "--once"
+        )
+        assert armed["allow_stop_once"] is True
+        payload = _stop_payload(adapter_kind, session_ref, f"generation:{name}")
+        allowed = _watcher(env, command, payload=payload)
+        assert allowed == ({"binding": "bound"} if adapter_kind == "pi" else {})
+        replayed = _watcher(env, command, payload=payload)
+        assert replayed == ({"binding": "bound"} if adapter_kind == "pi" else {})
+        next_payload = _stop_payload(
+            adapter_kind, session_ref, f"generation:{name}:next-input"
+        )
+        blocked = _watcher(env, command, payload=next_payload)
+        if adapter_kind == "pi":
+            assert blocked["binding"] == "bound"
+            assert "followup_message" in blocked
+        else:
+            assert blocked["decision"] == "block"
+
+
+def test_wait_preserves_persistent_watcher_registration(root: Path) -> None:
+    _, state, _ = seeded_state(root, "foreground-wait")
+    env = _environment(root / "foreground-wait", state)
+    runtime_id = _register_garen_runtime(
+        state, "foreground-wait", session_ref="session:foreground-wait"
+    )
+    with SQLiteStorage(state) as store:
+        scope = store.resolve_supervisor_scope(SHOTCALLER_ID)
+        store.register_watcher(
+            str(scope["scope_id"]),
+            "watcher:persistent:foreground-wait",
+            SHOTCALLER_ID,
+            runtime_id,
+            "unix:/synthetic/foreground-wait.sock",
+            "2099-01-01T00:00:00+00:00",
+            7,
+            AT2,
+        )
+        starting_wait_generation = int(
+            store.connection.execute(
+                "SELECT wait_generation FROM watcher_scopes WHERE scope_id=?",
+                (scope["scope_id"],),
+            ).fetchone()[0]
+        )
+    waiter = subprocess.Popen(
+        [
+            env["TEST_INSTALLED_WATCHER"],
+            "--shotcaller",
+            "Garen",
+            "wait",
+            "--poll-seconds",
+            "0.05",
+        ],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+    )
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline:
+        with SQLiteStorage(state, busy_timeout_ms=100, request_wal=False) as store:
+            row = store.connection.execute(
+                "SELECT wait_generation FROM watcher_scopes WHERE actor_agent_id=?",
+                (SHOTCALLER_ID,),
+            ).fetchone()
+            if (
+                row is not None
+                and int(row["wait_generation"]) > starting_wait_generation
+            ):
+                store.note_user_message(
+                    str(store.resolve_supervisor_scope(SHOTCALLER_ID)["scope_id"]),
+                    SHOTCALLER_ID,
+                    AT2,
+                )
+                break
+        time.sleep(0.02)
+    else:
+        waiter.terminate()
+        raise AssertionError("foreground wait did not become active")
+    output, error = waiter.communicate(timeout=5)
+    assert not error, error
+    assert json.loads(output)["event"] == "user-message"
+    with SQLiteStorage(state) as store:
+        registration = store.watcher_registration(SHOTCALLER_ID)
+    assert registration is not None
+    assert registration["watcher_id"] == "watcher:persistent:foreground-wait"
+    assert registration["fence"] == 7
 
 
 def test_supervise_wakes_and_stop_allows_after_settlement(root: Path) -> None:
@@ -838,6 +1024,198 @@ def test_provider_prompt_capture_identity_contracts(root: Path) -> None:
         assert stop["decision"] == "block"
 
 
+def test_provider_operational_wakes_never_become_user_prompt_intake(
+    root: Path,
+) -> None:
+    for name, command, payload in (
+        (
+            "codex-operational-wake",
+            "codex-user-prompt-hook",
+            {
+                "session_id": SHOTCALLER_ID,
+                "turn_id": "turn:codex-operational-wake",
+                "hook_event_name": "UserPromptSubmit",
+            },
+        ),
+        (
+            "cursor-operational-wake",
+            "cursor-before-submit-hook",
+            {
+                "conversation_id": SHOTCALLER_ID,
+                "generation_id": "generation:cursor-operational-wake",
+                "hook_event_name": "beforeSubmitPrompt",
+            },
+        ),
+        (
+            "pi-operational-wake",
+            "pi-input-hook",
+            {
+                "session_id": "33333333-3333-4333-8333-333333333334",
+                "session_path": str((root / "pi-operational-wake.jsonl").resolve()),
+                "input_id": "input:pi-operational-wake",
+                "hook_event_name": "PiInput",
+            },
+        ),
+    ):
+        _, state, _ = seeded_state(root, name)
+        env = _environment(root / name, state)
+        adapter_kind = command.split("-", 1)[0]
+        session_ref = (
+            str(payload["session_path"])
+            if adapter_kind == "pi"
+            else SHOTCALLER_ID
+        )
+        runtime_id = _register_garen_runtime(
+            state,
+            name,
+            session_ref=session_ref,
+            harness_kind=f"{adapter_kind}-thread",
+        )
+        event_id = f"event:{name}"
+        outbox_id = f"outbox:{name}"
+        with SQLiteStorage(state) as store:
+            with store._transaction():
+                event_version = int(
+                    store.connection.execute(
+                        "SELECT COALESCE(MAX(entity_version),0)+1 FROM events "
+                        "WHERE agent_id=?",
+                        (CHAMPION_ID,),
+                    ).fetchone()[0]
+                )
+                store.connection.execute(
+                    """
+                    INSERT INTO events
+                      (event_id,agent_id,task_id,entity_version,event_type,status,
+                       update_text,occurred_at,detail_json,request_id,aggregate_kind,
+                       aggregate_id)
+                    VALUES(?,?,NULL,?,'agent_transition','completed',?,?,'{}',NULL,
+                           'agent',?)
+                    """,
+                    (
+                        event_id,
+                        CHAMPION_ID,
+                        event_version,
+                        "Synthetic Champion completion — résumé preserved.",
+                        AT2,
+                        CHAMPION_ID,
+                    ),
+                )
+                store.connection.execute(
+                    """
+                    INSERT INTO delivery_outbox
+                      (outbox_id,event_id,recipient_agent_id,state,available_at,
+                       attempt_count)
+                    VALUES(?,?,?,'in_flight',?,1)
+                    """,
+                    (outbox_id, event_id, SHOTCALLER_ID, AT2),
+                )
+            envelope = store.outbox_envelope(
+                outbox_id, event_id, SHOTCALLER_ID
+            )
+            if adapter_kind == "cursor":
+                wake = structured_delivery_prompt(
+                    {"runtime_instance_id": runtime_id},
+                    envelope,
+                    state_root=str(state),
+                )
+            else:
+                wake = render_operational_input(
+                    "delivery", envelope, transition_content(envelope)
+                )
+            initial_prompts = store.connection.execute(
+                "SELECT COUNT(*) FROM prompts WHERE intake_actor_id=?",
+                (SHOTCALLER_ID,),
+            ).fetchone()[0]
+            initial_requests = store.connection.execute(
+                "SELECT COUNT(*) FROM requests WHERE owner_agent_id=?",
+                (SHOTCALLER_ID,),
+            ).fetchone()[0]
+
+        expected = (
+            {"continue": True}
+            if adapter_kind == "cursor"
+            else {"binding": "bound"}
+            if adapter_kind == "pi"
+            else {}
+        )
+        assert _watcher(env, command, payload={**payload, "prompt": wake}) == expected
+        with SQLiteStorage(state) as store:
+            assert store.connection.execute(
+                "SELECT COUNT(*) FROM prompt_payloads WHERE body=?", (wake,)
+            ).fetchone()[0] == 0
+            before = store.connection.execute(
+                "SELECT COUNT(*) FROM prompts WHERE intake_actor_id=?",
+                (SHOTCALLER_ID,),
+            ).fetchone()[0]
+            after_wake_requests = store.connection.execute(
+                "SELECT COUNT(*) FROM requests WHERE owner_agent_id=?",
+                (SHOTCALLER_ID,),
+            ).fetchone()[0]
+        assert before == initial_prompts
+        assert after_wake_requests == initial_requests
+
+        real_prompt = f"Real owner prompt after {adapter_kind} operational wake."
+        real_payload = {**payload, "prompt": real_prompt}
+        if adapter_kind == "cursor":
+            real_payload["generation_id"] = "generation:real-owner-prompt"
+        elif adapter_kind == "pi":
+            real_payload["input_id"] = "input:real-owner-prompt"
+        else:
+            real_payload["turn_id"] = "turn:real-owner-prompt"
+        assert _watcher(env, command, payload=real_payload) == expected
+        with SQLiteStorage(state) as store:
+            assert store.connection.execute(
+                "SELECT COUNT(*) FROM prompt_payloads WHERE body=?", (real_prompt,)
+            ).fetchone()[0] == 1
+            after = store.connection.execute(
+                "SELECT COUNT(*) FROM prompts WHERE intake_actor_id=?",
+                (SHOTCALLER_ID,),
+            ).fetchone()[0]
+        assert after == before + 1
+
+        stop_command = {
+            "codex": "codex-stop-hook",
+            "cursor": "cursor-stop-hook",
+            "pi": "pi-stop-hook",
+        }[adapter_kind]
+        stop_generation = str(
+            real_payload[
+                "turn_id"
+                if adapter_kind == "codex"
+                else "generation_id"
+                if adapter_kind == "cursor"
+                else "input_id"
+            ]
+        )
+        with SQLiteStorage(state) as store:
+            stopped = handle_brokered_hook(
+                store,
+                {
+                    "command": stop_command,
+                    "payload": _stop_payload(
+                        adapter_kind, session_ref, stop_generation
+                    ),
+                },
+            )["hook_output"]
+        feedback = str(
+            stopped[
+                "reason" if adapter_kind == "codex" else "followup_message"
+            ]
+        )
+        feedback_payload = {**payload, "prompt": feedback}
+        if adapter_kind == "codex":
+            feedback_payload["turn_id"] = stop_generation
+        elif adapter_kind == "cursor":
+            feedback_payload["generation_id"] = "generation:stop-feedback"
+        else:
+            feedback_payload["input_id"] = "input:stop-feedback"
+        assert _watcher(env, command, payload=feedback_payload) == expected
+        with SQLiteStorage(state) as store:
+            assert store.connection.execute(
+                "SELECT COUNT(*) FROM prompt_payloads WHERE body=?", (feedback,)
+            ).fetchone()[0] == 0
+
+
 def test_provider_pre_tool_policy_and_pi_stop_are_shared_and_fail_closed(
     root: Path,
 ) -> None:
@@ -850,6 +1228,7 @@ def test_provider_pre_tool_policy_and_pi_stop_are_shared_and_fail_closed(
                 "turn_id": "turn:provider-hooks", "hook_event_name": "PreToolUse",
                 "tool_name": "Write", "tool_use_id": "tool:codex:write",
                 "tool_input": {"path": "synthetic.txt"},
+                "cwd": str(root.resolve()),
             },
             {
                 "session_id": "33333333-3333-4333-8333-333333333333",
@@ -882,6 +1261,7 @@ def test_provider_pre_tool_policy_and_pi_stop_are_shared_and_fail_closed(
                 "session_path": str(root / "provider-hooks-pi" / "session.jsonl"),
                 "input_id": "input:provider-hooks", "hook_event_name": "PiToolCall",
                 "tool_name": "write", "tool_input": {"path": "synthetic.txt"},
+                "cwd": str(root.resolve()),
             },
             {
                 "session_id": "session:provider-hooks-pi",
@@ -1455,6 +1835,8 @@ def test_real_codex_stop_payload_rearms_per_prompt_event(root: Path) -> None:
     assert blocked["decision"] == "block"
     assert blocked["reason"] == (
         "League has unresolved obligations for Garen at wait generation 2."
+        " Unresolved obligations: Untriaged prompt: Synthetic first real steer "
+        "in the active turn. | 1 active Champion"
     ), blocked
     assert "turn:owner-visible-one" not in str(blocked["reason"])
 
@@ -1741,7 +2123,7 @@ def test_material_delivery_watcher_direct_dedup_and_unavailable(root: Path) -> N
         event_id,
     )
     assert delivered["state"] == "delivered" and delivered["idempotent"] is False
-    assert len(prompt_log.read_text(encoding="utf-8").splitlines()) == 1
+    assert prompt_log.read_text(encoding="utf-8").count("LEAGUE_OP: ") == 1
     retry = _watcher(
         direct_env,
         "--shotcaller",
@@ -1751,7 +2133,7 @@ def test_material_delivery_watcher_direct_dedup_and_unavailable(root: Path) -> N
         event_id,
     )
     assert retry["state"] == "delivered" and retry["idempotent"] is True
-    assert len(prompt_log.read_text(encoding="utf-8").splitlines()) == 1
+    assert prompt_log.read_text(encoding="utf-8").count("LEAGUE_OP: ") == 1
 
     _, unavailable_state, _ = seeded_state(root, "unavailable-delivery")
     unavailable_env = _environment(root / "unavailable-delivery", unavailable_state)
@@ -2061,6 +2443,17 @@ def test_native_provider_hooks_are_inert_until_exact_binding_then_activate(
         )
         if kind == "pi":
             assert stopped["binding"] == "bound"
+        provider_feedback = (
+            stopped["reason"] if kind == "codex" else stopped["followup_message"]
+        )
+        assert provider_feedback.startswith(
+            "League has unresolved obligations for Garen at wait generation "
+        )
+        assert (
+            "Unresolved obligations: Untriaged prompt: promoted bound prompt"
+            in provider_feedback
+        ), stopped
+        assert "1 active Champion" in provider_feedback, stopped
 
         result = subprocess.run(
             [env["TEST_INSTALLED_WATCHER"], pretool_command],
@@ -2077,15 +2470,19 @@ def test_native_provider_hooks_are_inert_until_exact_binding_then_activate(
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="league-canonical-watcher-") as temporary:
         root = Path(temporary)
+        test_read_only_pre_tool_fast_path_needs_no_state_or_supervisor(root)
         test_unbound_provider_stops_allow_without_mutation_when_broker_is_absent(root)
         test_bound_shotcallers_fail_closed_and_champion_gate_survives_absent_broker(root)
         test_stop_reason_uses_resolved_callsign_not_provider_turn_identity()
         test_explicit_and_session_stop_dispatch(root)
+        test_allow_stop_once_is_provider_neutral_and_consumed(root)
+        test_wait_preserves_persistent_watcher_registration(root)
         test_supervise_wakes_and_stop_allows_after_settlement(root)
         test_working_and_progress_tasks_remain_supervised(root)
         test_supervise_user_priority(root)
         test_long_lived_supervisor_allows_concurrent_prompt_and_stop(root)
         test_provider_prompt_capture_identity_contracts(root)
+        test_provider_operational_wakes_never_become_user_prompt_intake(root)
         test_provider_pre_tool_policy_and_pi_stop_are_shared_and_fail_closed(root)
         test_queued_prompts_reusing_turn_id_are_unique_and_conflicts_quarantine(root)
         test_missing_identity_is_inert_then_exact_binding_captures(root)

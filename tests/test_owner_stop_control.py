@@ -283,7 +283,9 @@ def test_codex_pi_owner_control_uses_declared_steering() -> None:
         adapter.control_delegated(
             target={"routing_name": f"synthetic-{kind}", "locator": "pane:synthetic"},
             envelope={
+                "outbox_id": f"outbox:owner-stop:{kind}",
                 "event_id": f"event:owner-stop:{kind}",
+                "recipient_agent_id": f"recipient:owner-stop:{kind}",
                 "event_type": "owner_stop_control",
                 "status": "pause_requested",
                 "summary": "arbitrary owner language is never forwarded",

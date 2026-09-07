@@ -1266,9 +1266,35 @@ class HerdrMultiplexerAdapter:
         agent = observation["agent"]
         tokens = agent.get("tokens")
         titles = (agent.get("terminal_title"), agent.get("terminal_title_stripped"))
+        if isinstance(tokens, Mapping):
+            source_candidates = {
+                tokens.get(key)
+                for key in (
+                    "launch_title_source",
+                    "launch_metadata_source",
+                    "legacy_display_source",
+                )
+                if isinstance(tokens.get(key), str) and tokens.get(key)
+            }
+        else:
+            source_candidates = set()
+        source = (
+            agent.get("metadata_source")
+            if "metadata_source" in agent
+            else next(iter(source_candidates), None)
+            if len(source_candidates) == 1
+            else None
+        )
+        provider = (
+            agent.get("display_agent")
+            if "display_agent" in agent
+            else tokens.get("display_provider")
+            if isinstance(tokens, Mapping)
+            else None
+        )
         return bool(
-            agent.get("metadata_source") == presentation["metadata_source"]
-            and agent.get("display_agent") == presentation["provider_kind"]
+            source == presentation["metadata_source"]
+            and provider == presentation["provider_kind"]
             and isinstance(tokens, Mapping)
             and all(tokens.get(key) == value for key, value in presentation["tokens"].items())
             and all(

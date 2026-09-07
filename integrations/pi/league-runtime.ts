@@ -5,7 +5,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 
 let stateRoot = process.env.LEAGUE_STATE_ROOT;
 let worktree = process.env.LEAGUE_WORKTREE;
@@ -83,8 +83,8 @@ function exactMetadataInputs(): boolean {
 let metadataSeq = Date.now() * 1000;
 const MAX_TOKENS_PER_REPORT = 16;
 
-function reportLeagueMetadata(session: SessionIdentity): void {
-  if (!exactMetadataInputs()) return;
+function reportLeagueMetadata(session: SessionIdentity): Promise<boolean> {
+  if (!exactMetadataInputs()) return Promise.resolve(false);
   const threadTitle =
     launchRole === "shotcaller"
       ? callsign!
@@ -133,10 +133,24 @@ function reportLeagueMetadata(session: SessionIdentity): void {
     String(++metadataSeq),
   ];
   for (const token of tokens) commandArguments.push("--token", token);
-  spawnSync("herdr", commandArguments, {
-    encoding: "utf8",
-    timeout: 5000,
-    maxBuffer: 1024 * 1024,
+  return new Promise((resolve) => {
+    let finished = false;
+    let timer;
+    const child = spawn("herdr", commandArguments, {
+      stdio: "ignore",
+    });
+    const finish = (value: boolean) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      resolve(value);
+    };
+    timer = setTimeout(() => {
+      child.kill("SIGTERM");
+      finish(false);
+    }, 5000);
+    child.on("error", () => finish(false));
+    child.on("close", (code) => finish(code === 0));
   });
 }
 
@@ -175,6 +189,8 @@ export default function (pi) {
   exactStateRoot = exactRoot(stateRoot);
   exactWorktree = exactRoot(worktree);
   let sessionIdentity: SessionIdentity | undefined;
+  let reportedSessionKey: string | undefined;
+  const metadataReportsInFlight = new Map<string, Promise<boolean>>();
 
   function refreshSession(ctx): SessionIdentity | undefined {
     const id = ctx?.sessionManager?.getSessionId?.();
@@ -191,21 +207,44 @@ export default function (pi) {
                 : undefined,
           }
         : undefined;
-    if (sessionIdentity) reportLeagueMetadata(sessionIdentity);
     return sessionIdentity;
+  }
+
+  async function publishLeagueMetadata(
+    session: SessionIdentity,
+    force = false,
+  ): Promise<boolean> {
+    const sessionKey = `${session.id}\0${session.file}`;
+    if (!force && reportedSessionKey === sessionKey) return true;
+    const inFlight = metadataReportsInFlight.get(sessionKey);
+    if (!force && inFlight) return inFlight;
+    const pending = reportLeagueMetadata(session);
+    metadataReportsInFlight.set(sessionKey, pending);
+    const reported = await pending;
+    if (metadataReportsInFlight.get(sessionKey) === pending) {
+      metadataReportsInFlight.delete(sessionKey);
+    }
+    if (reported) reportedSessionKey = sessionKey;
+    return reported;
   }
 
   pi.registerCommand("league-sync", {
     description: "Republish exact League session and launch metadata",
     handler: async (_args, ctx) => {
-      if (!refreshSession(ctx)) {
+      const session = refreshSession(ctx);
+      if (!session) {
         ctx.ui.notify("League session identity is unavailable.", "error");
+        return;
+      }
+      if (!(await publishLeagueMetadata(session, true))) {
+        ctx.ui.notify("League metadata publication failed.", "error");
       }
     },
   });
 
-  pi.on("session_start", (_event, ctx) => {
-    refreshSession(ctx);
+  pi.on("session_start", async (_event, ctx) => {
+    const session = refreshSession(ctx);
+    if (session) await publishLeagueMetadata(session);
     pi.setActiveTools(
       pi.getActiveTools().filter((name) =>
         ["read", "grep", "find", "ls", "bash", "edit", "write"].includes(name),
@@ -213,8 +252,9 @@ export default function (pi) {
     );
   });
 
-  pi.on("agent_start", (_event, ctx) => {
-    refreshSession(ctx);
+  pi.on("agent_start", async (_event, ctx) => {
+    const session = refreshSession(ctx);
+    if (session) await publishLeagueMetadata(session);
   });
 
   pi.on("tool_call", (event, ctx) => {

@@ -20,6 +20,7 @@ from .issue_first import IssueVerifier
 from .provider_lifecycle import provider_lifecycle
 from .multiplexer_adapters import RestoredEndpoint, builtin_multiplexer_adapter_registry
 from .storage import Storage, StorageRefusal
+from .presentation import ORCHESTRATOR_ROLE_TOKEN, canonical_display_metadata
 from .worktree import verified_worktree_repository_root
 
 
@@ -110,6 +111,7 @@ class VisibleLaunchOptions:
     effort: str
     league_command: str
     state_root: str
+    project_code: str | None = None
     startup_timeout_ms: int = 120_000
     routing: Mapping[str, Any] = field(default_factory=dict)
 
@@ -250,15 +252,22 @@ def _validate_options(options: VisibleLaunchOptions) -> None:
         raise StorageRefusal("launch_scope_invalid", "Herdr workspace identity is invalid")
     words = options.task_label.split()
     if (
-        not words
-        or len(words) > 2
+        len(words) != 2
         or len(options.task_label) > 48
         or options.task_label.strip() != options.task_label
         or any(character in options.task_label for character in "\r\n\0")
     ):
         raise StorageRefusal(
-            "launch_scope_invalid", "Champion display task must contain one or two words"
+            "launch_scope_invalid", "Champion display task must contain exactly two words"
         )
+    canonical_display_metadata(
+        {
+            ORCHESTRATOR_ROLE_TOKEN: "champion",
+            "callsign": "Champion",
+            "project_code": options.project_code,
+            "task_label": options.task_label,
+        }
+    )
     if not SAFE_MODEL.fullmatch(options.model) or not SAFE_EFFORT.fullmatch(options.effort):
         raise StorageRefusal("launch_scope_invalid", "Codex model or effort is invalid")
     state_root = Path(options.state_root)
@@ -646,6 +655,16 @@ class HerdrCodexLaunchAdapter:
     def _title_source(self, assignment_id: str) -> str:
         return "league-launch-" + self._title_owner(assignment_id)
 
+    def _display(self, callsign: str) -> dict[str, str]:
+        return canonical_display_metadata(
+            {
+                ORCHESTRATOR_ROLE_TOKEN: "champion",
+                "callsign": callsign,
+                "project_code": self.options.project_code,
+                "task_label": self.options.task_label,
+            }
+        )
+
     def _report_title(
         self,
         *,
@@ -655,7 +674,18 @@ class HerdrCodexLaunchAdapter:
         applies_to_source: str,
         sequence: int,
     ) -> None:
-        title = f"{callsign} · {self.options.task_label}"
+        display = self._display(callsign)
+        title = display["title"]
+        display_tokens = {
+            key: value
+            for key, value in display.items()
+            if key not in {"title", "terminal_title"}
+        }
+        token_arguments = tuple(
+            part
+            for key, value in display_tokens.items()
+            for part in ("--token", f"{key}={value}")
+        )
         self._command(
             (
                 "herdr",
@@ -672,12 +702,7 @@ class HerdrCodexLaunchAdapter:
                 self.profile.display_kind,
                 "--title",
                 title,
-                "--token",
-                f"sidebar_name={callsign}",
-                "--token",
-                f"task_label={self.options.task_label}",
-                "--token",
-                f"thread_title={title}",
+                *token_arguments,
                 "--token",
                 f"launch_title_owner={self._title_owner(assignment_id)}",
                 "--token",
@@ -694,18 +719,20 @@ class HerdrCodexLaunchAdapter:
     def _title_exact(
         self, agent: Mapping[str, Any], callsign: str, assignment_id: str
     ) -> bool:
-        expected = f"{callsign} · {self.options.task_label}"
+        display = self._display(callsign)
+        expected = display["title"]
         terminal_titles = {
-            agent.get("terminal_title"),
-            agent.get("terminal_title_stripped"),
+            agent.get("terminal_title"), agent.get("terminal_title_stripped"),
         }
         tokens = agent.get("tokens")
         return bool(
             isinstance(tokens, Mapping)
             and agent.get("metadata_source") == self._title_source(assignment_id)
-            and tokens.get("sidebar_name") == callsign
-            and tokens.get("task_label") == self.options.task_label
-            and tokens.get("thread_title") == expected
+            and all(
+                tokens.get(key) == value
+                for key, value in display.items()
+                if key not in {"title", "terminal_title"}
+            )
             and tokens.get("launch_title_owner")
             == self._title_owner(assignment_id)
             and tokens.get("launch_title_source")
@@ -739,16 +766,18 @@ class HerdrCodexLaunchAdapter:
                     consecutive = consecutive + 1 if key == prior_key else 1
                     prior_key = key
                     if consecutive >= stable_observations:
-                        expected = f"{callsign} · {self.options.task_label}"
-                        return {
+                        display = self._display(callsign)
+                        receipt = {
                             "source": source,
                             "applies_to_source": applies_to_source,
                             "state_change_seq": sequence,
-                            "sidebar_name": callsign,
-                            "task_label": self.options.task_label,
-                            "thread_title": expected,
-                            "terminal_title": expected,
+                            **{
+                                key: value
+                                for key, value in display.items()
+                                if key != "title"
+                            },
                         }
+                        return receipt
             else:
                 prior_key = None
                 consecutive = 0
@@ -912,7 +941,7 @@ class HerdrCodexLaunchAdapter:
                         "workspace_id": self.options.workspace_id,
                         "role": "champion",
                         "cwd": str(worktree.resolve()),
-                        "label": f"{spec.callsign} · {self.options.task_label}",
+                        "label": self._display(str(spec.callsign))["title"],
                     }
                 )
                 tab_id = endpoint.tab_id
@@ -1132,6 +1161,8 @@ def render_launch_context(
     spec: AssignmentSpec,
     receipt: Mapping[str, Any],
     options: VisibleLaunchOptions,
+    *,
+    include_display_hints: bool = True,
 ) -> str:
     text = "\n".join(
         (
@@ -1146,6 +1177,11 @@ def render_launch_context(
             f"Issue: {spec.issue}",
             f"Branch: {spec.branch}",
             f"Worktree: {spec.worktree}",
+            *(
+                (f"Project code: {options.project_code or 'none'}",
+                 f"Display task: {options.task_label}")
+                if include_display_hints else ()
+            ),
             f"League command: {options.league_command}",
             f"League state root: {options.state_root}",
             "Use only the stable League SQLite commands for status, task transitions, delivery, and cleanup.",
@@ -1214,7 +1250,18 @@ class VisibleChampionLaunchService:
                 self.options,
             )
             digest = _sha256(context.encode("utf-8"))
-            if prior["context_delivery"]["context_sha256"] != digest:
+            delivered_digest = prior["context_delivery"]["context_sha256"]
+            if delivered_digest != digest:
+                # Recognize only the exact pre-display-hints producer.  Keep its
+                # durable receipt and never deliver either context again.
+                legacy_context = render_launch_context(
+                    AssignmentSpec(**{**vars(spec), "callsign": prior["callsign"]}),
+                    receipt,
+                    self.options,
+                    include_display_hints=False,
+                )
+                digest = _sha256(legacy_context.encode("utf-8"))
+            if delivered_digest != digest:
                 raise StorageRefusal(
                     "assignment_context_conflict",
                     "assignment retry produced different bounded context",

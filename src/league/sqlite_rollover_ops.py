@@ -668,6 +668,96 @@ def rollover_cleanup_target(store: Any, operation_id: str) -> Optional[dict[str,
     }
 
 
+def _imported_null_route_provenance(
+    store: Any, champion: Mapping[str, Any], predecessor_agent_id: str,
+    callsign_assignment: Mapping[str, Any], *, code: str,
+) -> str:
+    """Shared refresh/one-row eligibility for an exact imported null route."""
+    if (
+        champion["routing_name"] is not None
+        or champion["display_agent"] is not None
+        or champion["shotcaller_agent_id"] != predecessor_agent_id
+        or champion["kind"] != "codex-thread"
+        or champion["backend"] != "herdr"
+        or any(not isinstance(champion[key], str) or not champion[key]
+               for key in ("address", "thread_id", "worktree"))
+    ):
+        raise StorageRefusal(code, "null descendant route is not an exact predecessor Herdr binding")
+    task = store.connection.execute(
+        "SELECT * FROM tasks WHERE task_id=?", (champion["task_id"],)
+    ).fetchone()
+    assignments = store.connection.execute(
+        "SELECT * FROM task_assignments WHERE task_id=? ORDER BY task_assignment_id",
+        (champion["task_id"],),
+    ).fetchall()
+    if task is None or len(assignments) > 1:
+        raise StorageRefusal(code, "null-route descendant task binding is missing or ambiguous")
+    source_shape, provenance = _descendant_source_shape(
+        store, task, champion["agent_id"], predecessor_agent_id,
+        callsign_assignment, None if not assignments else assignments[0],
+    )
+    if source_shape != "imported_legacy_partial":
+        raise StorageRefusal(code, "only an exact imported legacy predecessor may adopt a null route")
+    return provenance
+
+
+def _legacy_hook_runtime_exact(
+    runtime: Mapping[str, Any], *, champion_agent_id: str, runtime_instance_id: str,
+    harness_kind: str, backend_kind: str, session_ref: str, endpoint: str,
+) -> bool:
+    """Recognize the original hook producer, never an arbitrary generation prefix."""
+    from .agent_adapters import adapter_kind_from_runtime
+
+    try:
+        provider = adapter_kind_from_runtime(harness_kind)
+    except StorageRefusal:
+        return False
+    fingerprint = hashlib.sha256(
+        f"{provider}\0{session_ref}\0{backend_kind}\0{endpoint}".encode()
+    ).hexdigest()
+    return bool(
+        runtime_instance_id == f"runtime:hook:{fingerprint}"
+        and runtime.get("runtime_instance_id") == runtime_instance_id
+        and runtime.get("runtime_generation") == f"hook:{fingerprint}"
+        and runtime.get("actor_agent_id") == champion_agent_id
+        and runtime.get("harness_kind") == harness_kind
+        and runtime.get("backend_kind") == backend_kind
+        and runtime.get("session_ref") == session_ref
+        and runtime.get("endpoint") == endpoint
+        and runtime.get("verified") == 1
+        and runtime.get("status") in ("active", "idle")
+    )
+
+
+MAX_DESCENDANT_PENDING_OUTBOXES = 1000
+
+
+def _descendant_pending_outbox_ids(
+    store: Any, predecessor_agent_id: str, champion_agent_id: str, task_id: str,
+) -> tuple[str, ...]:
+    """One complete scoped set, shared by read-only preflight and atomic commit."""
+    parameters = (predecessor_agent_id, champion_agent_id, task_id)
+    inflight = store.connection.execute(
+        """SELECT 1 FROM delivery_outbox o JOIN events e ON e.event_id=o.event_id
+             WHERE o.recipient_agent_id=? AND o.state IN ('in_flight','awaiting_receipt')
+               AND (e.agent_id=? OR e.task_id=?) LIMIT 1""", parameters,
+    ).fetchone()
+    if inflight:
+        raise StorageRefusal("descendant_delivery_inflight", "claimed descendant delivery cannot be retargeted")
+    rows = store.connection.execute(
+        """SELECT o.outbox_id FROM delivery_outbox o JOIN events e ON e.event_id=o.event_id
+             WHERE o.recipient_agent_id=? AND o.state='pending'
+               AND (e.agent_id=? OR e.task_id=?) ORDER BY o.outbox_id LIMIT ?""",
+        (*parameters, MAX_DESCENDANT_PENDING_OUTBOXES + 1),
+    ).fetchall()
+    if len(rows) > MAX_DESCENDANT_PENDING_OUTBOXES:
+        raise StorageRefusal(
+            "descendant_delivery_set_too_large",
+            f"exact descendant delivery set exceeds {MAX_DESCENDANT_PENDING_OUTBOXES} IDs",
+        )
+    return tuple(row["outbox_id"] for row in rows)
+
+
 def rollover_descendant_target(
     store: Any,
     operation_id: str,
@@ -823,6 +913,13 @@ def rollover_descendant_target(
         callsigns[0],
         assignment,
     )
+    route_adoption = None
+    if champion["routing_name"] is None:
+        _imported_null_route_provenance(
+            store, champion, operation["predecessor_agent_id"], callsigns[0],
+            code="descendant_identity_stale",
+        )
+        route_adoption = {"routing_name": str(row["callsign"]).lower(), "display_agent": "codex"}
     return {
         "reconciled": False,
         "champion_agent_id": champion_agent_id,
@@ -848,6 +945,10 @@ def rollover_descendant_target(
         "callsign_assignment_id": callsigns[0]["callsign_assignment_id"],
         "source_shape": source_shape,
         "import_provenance_digest": import_provenance_digest,
+        "route_adoption": route_adoption,
+        "pending_outbox_ids": list(_descendant_pending_outbox_ids(
+            store, operation["predecessor_agent_id"], champion_agent_id, task_id,
+        )),
     }
 
 
@@ -937,13 +1038,25 @@ def prepare_rollover(
                 "SELECT * FROM callsign_assignments WHERE callsign_assignment_id=?",
                 (callsign_assignment_id,),
             ).fetchone()
+            bootstrap_scope = bool(
+                assignment is not None
+                and assignment["scope_kind"] == "shotcaller"
+                and assignment["scope_id"] == successor_agent_id
+                and assignment["state"] == "active"
+                and assignment["runtime_instance_id"]
+                and assignment["acceptance_digest"]
+            )
+            legacy_squad_scope = bool(
+                assignment is not None
+                and assignment["scope_kind"] == "squad"
+                and assignment["scope_id"] == squad_id
+                and assignment["state"] in {"reserved", "active"}
+            )
             if (
                 assignment is None
                 or assignment["agent_id"] != successor_agent_id
                 or assignment["role"] != "shotcaller"
-                or assignment["scope_kind"] != "squad"
-                or assignment["scope_id"] != squad_id
-                or assignment["state"] not in {"reserved", "active"}
+                or not (bootstrap_scope or legacy_squad_scope)
             ):
                 raise StorageRefusal(
                     "successor_identity_mismatch", "successor callsign reservation is not exact"
@@ -1947,6 +2060,14 @@ def reconcile_rollover_descendant(
                     "descendant_runtime_ambiguous",
                     "descendant reconciliation refuses multiple canonical runtimes",
                 )
+            presentation = {
+                "routing_name": champion["routing_name"],
+                "display_agent": champion["display_agent"],
+            }
+            if champion["routing_name"] is None:
+                # Prospective receipt values only; imported eligibility and the
+                # frozen binding are rechecked below before the first write.
+                presentation = {"routing_name": str(champion["callsign"]).lower(), "display_agent": "codex"}
             receipt_keys = {
                 "schema",
                 "verified",
@@ -1983,8 +2104,8 @@ def reconcile_rollover_descendant(
                 or runtime_receipt.get("endpoint") != champion["address"]
                 or runtime_receipt.get("status") not in {"active", "idle"}
                 or runtime_receipt.get("callsign") != champion["callsign"]
-                or runtime_receipt.get("routing_name") != champion["routing_name"]
-                or runtime_receipt.get("display_agent") != champion["display_agent"]
+                or runtime_receipt.get("routing_name") != presentation["routing_name"]
+                or runtime_receipt.get("display_agent") != presentation["display_agent"]
                 or runtime_receipt.get("worktree") != champion["worktree"]
                 or runtime_receipt.get("snapshot_row_digest") != snapshot_row_digest
                 or not isinstance(runtime_receipt.get("terminal_id"), str)
@@ -2050,6 +2171,10 @@ def reconcile_rollover_descendant(
                 assignment,
             )
             created_runtime = not runtimes
+            if created_runtime and runtime_instance_id.startswith("runtime:hook:"):
+                raise StorageRefusal(
+                    "descendant_runtime_mismatch", "legacy hook recovery requires its existing canonical runtime"
+                )
             if runtimes:
                 runtime = runtimes[0]
                 if runtime["status"] in {"closed", "failed"}:
@@ -2072,12 +2197,30 @@ def reconcile_rollover_descendant(
                     or runtime["endpoint"] != runtime_receipt["endpoint"]
                     or runtime["runtime_generation"] != runtime_receipt["runtime_generation"]
                     or canonical_runtime_capabilities != receipt_capabilities
+                    or (
+                        (str(runtime["runtime_generation"]).startswith("hook:")
+                         or runtime_instance_id.startswith("runtime:hook:"))
+                        and not _legacy_hook_runtime_exact(
+                            dict(runtime), champion_agent_id=champion_agent_id,
+                            runtime_instance_id=runtime_instance_id,
+                            harness_kind=champion["kind"], backend_kind=champion["backend"],
+                            session_ref=champion["thread_id"], endpoint=champion["address"],
+                        )
+                    )
                 ):
                     raise StorageRefusal(
                         "descendant_runtime_mismatch",
                         "canonical runtime differs from exact live adapter evidence",
                     )
-            else:
+            # Preserve runtime/capability refusal precedence, then repeat the
+            # frozen-binding and delivery preflight under this transaction.
+            target = rollover_descendant_target(
+                store, operation_id, reconciliation_id, champion_agent_id, task_id,
+                snapshot_digest, snapshot_row_digest, expected_rollover_version,
+                expected_agent_version, expected_task_version,
+                expected_assignment_version, expected_callsign_assignment_version,
+            )
+            if not runtimes:
                 store.connection.execute(
                     """
                     INSERT INTO runtime_instances
@@ -2112,34 +2255,7 @@ def reconcile_rollover_descendant(
                     "descendant_assignment_conflict",
                     "existing descendant task assignment is not exactly reconcilable",
                 )
-            inflight = store.connection.execute(
-                """
-                SELECT o.outbox_id
-                  FROM delivery_outbox o JOIN events e ON e.event_id=o.event_id
-                 WHERE o.recipient_agent_id=? AND o.state IN ('in_flight','awaiting_receipt')
-                   AND (e.agent_id=? OR e.task_id=?)
-                 ORDER BY o.outbox_id
-                """,
-                (operation["predecessor_agent_id"], champion_agent_id, task_id),
-            ).fetchall()
-            if inflight:
-                raise StorageRefusal(
-                    "descendant_delivery_inflight",
-                    "claimed descendant delivery cannot be retargeted",
-                )
-            eligible = tuple(
-                row["outbox_id"]
-                for row in store.connection.execute(
-                    """
-                    SELECT o.outbox_id
-                      FROM delivery_outbox o JOIN events e ON e.event_id=o.event_id
-                     WHERE o.recipient_agent_id=? AND o.state='pending'
-                       AND (e.agent_id=? OR e.task_id=?)
-                     ORDER BY o.outbox_id
-                    """,
-                    (operation["predecessor_agent_id"], champion_agent_id, task_id),
-                )
-            )
+            eligible = tuple(target["pending_outbox_ids"])
             if declared_outboxes != eligible:
                 raise StorageRefusal(
                     "descendant_delivery_set_stale",
@@ -2325,17 +2441,21 @@ def reconcile_rollover_descendant(
             changed_agent = store.connection.execute(
                 """
                 UPDATE agent_instances
-                   SET shotcaller_agent_id=?,version=version+1,updated_at=?
+                   SET shotcaller_agent_id=?,routing_name=?,display_agent=?,version=version+1,updated_at=?
                  WHERE agent_id=? AND task_id=? AND shotcaller_agent_id=?
-                   AND retired_at IS NULL AND version=?
+                   AND retired_at IS NULL AND version=? AND routing_name IS ? AND display_agent IS ?
                 """,
                 (
                     operation["successor_agent_id"],
+                    presentation["routing_name"],
+                    presentation["display_agent"],
                     at,
                     champion_agent_id,
                     task_id,
                     operation["predecessor_agent_id"],
                     expected_agent_version,
+                    champion["routing_name"],
+                    champion["display_agent"],
                 ),
             )
             if changed_agent.rowcount != 1:

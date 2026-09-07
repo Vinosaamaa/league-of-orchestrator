@@ -25,6 +25,7 @@ from . import sqlite_stopped_retirement_ops
 from . import sqlite_mode_ops
 from . import sqlite_issue_ops
 from . import sqlite_continuation_ops
+from . import sqlite_startup_ops
 from .sqlite_artifact_ops import declare as declare_repository_artifact_operation
 from .sqlite_artifact_ops import publish as record_repository_publication_operation
 from .sqlite_artifact_ops import status as task_artifacts_operation
@@ -2404,6 +2405,7 @@ class SQLiteStorage(SQLiteTransactionCore):
         fault: Optional[FaultInjector] = None,
         recovery_baseline: Optional[Mapping[str, Any]] = None,
         recovery_thread_id: Optional[str] = None,
+        expected_callsign: Optional[str] = None,
     ) -> dict[str, Any]:
         return allocate_callsign_operation(
             self,
@@ -2417,6 +2419,7 @@ class SQLiteStorage(SQLiteTransactionCore):
             fault=fault,
             recovery_baseline=recovery_baseline,
             recovery_thread_id=recovery_thread_id,
+            expected_callsign=expected_callsign,
         )
 
     def callsign_assignment_status(self, assignment_id: str) -> Optional[dict[str, Any]]:
@@ -2435,8 +2438,12 @@ class SQLiteStorage(SQLiteTransactionCore):
             self, assignment_id, expected_version, receipt, at, fault=fault
         )
 
-    def shotcaller_bootstrap_status(self, assignment_id: str) -> Optional[dict[str, Any]]:
-        return shotcaller_bootstrap_status_operation(self, assignment_id)
+    def shotcaller_bootstrap_status(
+        self, assignment_id: str, *, include_display_ownership: bool = False
+    ) -> Optional[dict[str, Any]]:
+        return shotcaller_bootstrap_status_operation(
+            self, assignment_id, include_display_ownership=include_display_ownership
+        )
 
     def record_shotcaller_bootstrap_baseline(
         self, assignment_id: str, expected_version: int, baseline: dict[str, Any]
@@ -2791,6 +2798,12 @@ class SQLiteStorage(SQLiteTransactionCore):
 
     def rollover_status(self, operation_id: str) -> Optional[dict[str, Any]]:
         return rollover_status_operation(self, operation_id)
+
+    def startup_context(self, agent_id: str, runtime_instance_id: str, at: str) -> dict[str, Any]:
+        return sqlite_startup_ops.startup_context(self, agent_id, runtime_instance_id, at)
+
+    def rollover_run_context(self, manifest: Mapping[str, Any]) -> dict[str, Any]:
+        return sqlite_startup_ops.rollover_run_context(self, manifest)
 
     def rollover_cleanup_target(self, operation_id: str) -> Optional[dict[str, Any]]:
         return rollover_cleanup_target_operation(self, operation_id)
@@ -3791,7 +3804,7 @@ class SQLiteStorage(SQLiteTransactionCore):
         self,
         scope_id: str,
         actor_agent_id: str,
-        terminal_generation: str,
+        terminal_generation: str | None,
         body: str,
     ) -> bool:
         return consume_stop_feedback_operation(

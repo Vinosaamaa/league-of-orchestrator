@@ -13,7 +13,8 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from .agent_adapters import builtin_agent_adapter_registry
-from .sqlite_callsign_ops import digest
+from .sqlite_callsign_ops import capabilities, digest
+from .presentation import ORCHESTRATOR_ROLE_TOKEN, canonical_display_metadata
 from .storage import Storage, StorageRefusal
 from .visible_launch import CommandRunner, SubprocessRunner
 
@@ -193,12 +194,32 @@ class HerdrShotcallerBootstrapAdapter:
         return next(iter(bindings), None)
 
     def _presentation_title(self, agent: Mapping[str, Any]) -> str | None:
+        tokens = agent.get("tokens")
+        thread_id = _session(agent)
+        if (
+            agent.get("agent") == "pi"
+            and isinstance(tokens, Mapping)
+            and isinstance(thread_id, str)
+            and tokens.get("identity_thread_id")
+            == "sha256:" + hashlib.sha256(thread_id.encode("utf-8")).hexdigest()
+            and isinstance(tokens.get("thread_title"), str)
+            and tokens.get("thread_title")
+        ):
+            return str(tokens["thread_title"])
         value = agent.get("terminal_title_stripped", agent.get("terminal_title"))
         if not isinstance(value, str):
             return None
         agent_kind = agent.get("agent")
         suffix = f" | {agent_kind}" if isinstance(agent_kind, str) else ""
         return value[: -len(suffix)] if suffix and value.endswith(suffix) else value
+
+    def _display(self, callsign: str) -> dict[str, str]:
+        return canonical_display_metadata(
+            {
+                ORCHESTRATOR_ROLE_TOKEN: "shotcaller",
+                "callsign": callsign,
+            }
+        )
 
     def _presentation_source(
         self,
@@ -224,6 +245,51 @@ class HerdrShotcallerBootstrapAdapter:
             or not isinstance(title, str)
         ):
             return None
+        route = self._routing_name(agent)
+        provider_label = tokens.get("provider_label")
+        provider_name = self.options.provider_kind
+        expected_provider_label = (
+            f"pi{provider_name.title()}"
+            if self.options.runtime_kind == "pi"
+            else provider_name
+        )
+        identity_thread_id = tokens.get("identity_thread_id")
+        accepted_thread_ids = {thread_id}
+        if self.options.runtime_kind == "pi":
+            accepted_thread_ids.add(
+                "sha256:" + hashlib.sha256(thread_id.encode("utf-8")).hexdigest()
+            )
+        token_route = tokens.get("routing_alias")
+        orchestrator_identity = tokens.get("orchestrator_identity")
+        provider_projection = bool(
+            tokens.get("harness") == self.options.runtime_kind
+            and provider_label == expected_provider_label
+            and identity_thread_id in accepted_thread_ids
+            and isinstance(tokens.get("thread_title"), str)
+            and tokens.get("thread_title")
+            and tokens.get("identity_title")
+            == f"{self.options.runtime_kind.title()} | {tokens['thread_title']}"
+            and isinstance(tokens.get("sidebar_name"), str)
+            and tokens.get("sidebar_name")
+            and title
+            and tokens.get(TITLE_OWNER_TOKEN) in {None, ""}
+            and tokens.get(TITLE_SOURCE_TOKEN) in {None, ""}
+            and (
+                (
+                    route is None
+                    and token_route in {None, ""}
+                    and orchestrator_identity in {None, ""}
+                )
+                or (
+                    route is not None
+                    and token_route == route
+                    and orchestrator_identity
+                    == f"{self.options.runtime_kind} · {route}"
+                )
+            )
+        )
+        if provider_projection:
+            return authority_source
         labels = (
             tokens.get("callsign"),
             tokens.get("sidebar_name"),
@@ -239,9 +305,6 @@ class HerdrShotcallerBootstrapAdapter:
             or title != labels[0]
         ):
             return None
-        route = self._routing_name(agent)
-        token_route = tokens.get("routing_alias")
-        orchestrator_identity = tokens.get("orchestrator_identity")
         if route is None:
             if (
                 (token_route is not None and token_route != "")
@@ -308,8 +371,11 @@ class HerdrShotcallerBootstrapAdapter:
                 spec.runtime_instance_id,
             }
             or baseline.get("schema")
-            != "league.shotcaller-bootstrap-baseline.v2"
-            or baseline.get("routing_name") is not None
+            not in {
+                "league.shotcaller-bootstrap-baseline.v2",
+                "league.shotcaller-bootstrap-baseline.v3",
+            }
+            or baseline.get("routing_name") not in {None, expected_alias}
             or baseline.get("terminal_id") != agent.get("terminal_id")
             or baseline.get("endpoint_generation") != endpoint_generation
             or baseline.get("presentation_source") != source
@@ -363,6 +429,7 @@ class HerdrShotcallerBootstrapAdapter:
             )
             or tokens.get(TITLE_OWNER_TOKEN) not in (None, "")
             or tokens.get(TITLE_SOURCE_TOKEN) not in (None, "")
+            or tokens.get(ORCHESTRATOR_ROLE_TOKEN) not in (None, "")
         ):
             return None
         return source
@@ -383,6 +450,7 @@ class HerdrShotcallerBootstrapAdapter:
             )
             or tokens.get(TITLE_OWNER_TOKEN) != self._title_owner(spec)
             or tokens.get(TITLE_SOURCE_TOKEN) != self._title_source(spec)
+            or tokens.get(ORCHESTRATOR_ROLE_TOKEN) != "shotcaller"
             or not isinstance(title, str)
             or tokens.get("sidebar_name") != title
             or tokens.get("thread_title") != title
@@ -390,6 +458,26 @@ class HerdrShotcallerBootstrapAdapter:
         ):
             return None
         return self._title_source(spec)
+
+    def _ownership_tokens_exact(
+        self, spec: ShotcallerBootstrapSpec, agent: Mapping[str, Any], route: str | None
+    ) -> bool:
+        """Recognize exact ownership without deriving identity from display names."""
+
+        tokens = agent.get("tokens")
+        explicit_source = agent.get("metadata_source")
+        return bool(
+            route is not None
+            and isinstance(tokens, Mapping)
+            and tokens.get(TITLE_OWNER_TOKEN) == self._title_owner(spec)
+            and tokens.get(TITLE_SOURCE_TOKEN) == self._title_source(spec)
+            and tokens.get(ORCHESTRATOR_ROLE_TOKEN) == "shotcaller"
+            and (
+                "metadata_source" not in agent
+                or explicit_source
+                in {self._title_source(spec), _session_source(agent)}
+            )
+        )
 
     def _exact(
         self,
@@ -412,6 +500,7 @@ class HerdrShotcallerBootstrapAdapter:
             and agent.get("cwd") == worktree
             and agent.get("foreground_cwd") == worktree
             and _session(agent) == spec.thread_id
+            and isinstance(agent.get("agent_status"), str)
             and agent.get("agent_status") in LIVE_STATUSES
             and isinstance(terminal_id, str)
             and terminal_id
@@ -440,6 +529,18 @@ class HerdrShotcallerBootstrapAdapter:
         tokens = agent.get("tokens")
         routing_name = self._routing_name(agent)
         owned_source = self._owned_presentation_source(spec, agent, routing_name)
+        ownership_tokens_exact = self._ownership_tokens_exact(
+            spec, agent, routing_name
+        )
+        unowned_role = bool(
+            tokens.get(ORCHESTRATOR_ROLE_TOKEN) not in (None, "")
+            and not ownership_tokens_exact
+        ) if isinstance(tokens, Mapping) else False
+        if unowned_role:
+            raise StorageRefusal(
+                "shotcaller_metadata_unverified",
+                "Shotcaller canonical role token is not owned by this bootstrap",
+            )
         route_only_candidate = bool(
             allow_unpublished
             and expected_alias is not None
@@ -458,6 +559,11 @@ class HerdrShotcallerBootstrapAdapter:
             presentation_source = owned_source
         routing_exact = (
             routing_name is None
+            or (
+                expected_alias is None
+                and tokens.get(TITLE_OWNER_TOKEN) in {None, ""}
+                and tokens.get(TITLE_SOURCE_TOKEN) in {None, ""}
+            )
             if expected_alias is None
             else routing_name == expected_alias
             or (allow_unpublished and routing_name is None)
@@ -495,7 +601,11 @@ class HerdrShotcallerBootstrapAdapter:
 
     def recovery_baseline(self) -> dict[str, Any]:
         baseline = self.restoration_baseline()
-        baseline["schema"] = "league.shotcaller-bootstrap-baseline.v2"
+        baseline["schema"] = (
+            "league.shotcaller-bootstrap-baseline.v3"
+            if baseline["routing_name"] is not None
+            else "league.shotcaller-bootstrap-baseline.v2"
+        )
         baseline["presentation_source"] = self._observed["presentation_source"]
         return baseline
 
@@ -505,7 +615,7 @@ class HerdrShotcallerBootstrapAdapter:
                 "shotcaller_identity_unverified", "calling identity was not inspected"
             )
         tokens = self._observed["tokens"]
-        return {
+        baseline = {
             "schema": "league.shotcaller-bootstrap-baseline.v1",
             "terminal_id": self._observed["terminal_id"],
             "endpoint_generation": self._observed["endpoint_generation"],
@@ -515,6 +625,10 @@ class HerdrShotcallerBootstrapAdapter:
             "thread_title": str(tokens.get("thread_title", "")),
             "title": str(self._observed["title"] or ""),
         }
+        prior_role = tokens.get(ORCHESTRATOR_ROLE_TOKEN)
+        if prior_role in {"shotcaller", "champion"}:
+            baseline[ORCHESTRATOR_ROLE_TOKEN] = prior_role
+        return baseline
 
     def use_restoration_baseline(self, baseline: Mapping[str, Any]) -> None:
         if (
@@ -523,8 +637,21 @@ class HerdrShotcallerBootstrapAdapter:
             not in {
                 "league.shotcaller-bootstrap-baseline.v1",
                 "league.shotcaller-bootstrap-baseline.v2",
+                "league.shotcaller-bootstrap-baseline.v3",
             }
-            or baseline.get("routing_name") is not None
+            or (
+                baseline.get("schema")
+                == "league.shotcaller-bootstrap-baseline.v3"
+                and baseline.get("routing_name") != self._observed["routing_name"]
+            )
+            or (
+                baseline.get("schema")
+                in {
+                    "league.shotcaller-bootstrap-baseline.v1",
+                    "league.shotcaller-bootstrap-baseline.v2",
+                }
+                and baseline.get("routing_name") is not None
+            )
             or baseline.get("terminal_id") != self._observed["terminal_id"]
             or baseline.get("endpoint_generation") != self._observed["endpoint_generation"]
         ):
@@ -548,7 +675,11 @@ class HerdrShotcallerBootstrapAdapter:
         routing_name = self._routing_name(agent)
         presentation_source = self._presentation_source(agent)
         common_exact = bool(
-            baseline.get("schema") == "league.shotcaller-bootstrap-baseline.v2"
+            baseline.get("schema")
+            in {
+                "league.shotcaller-bootstrap-baseline.v2",
+                "league.shotcaller-bootstrap-baseline.v3",
+            }
             and self._exact(spec, pane, agent)
             and isinstance(tokens, Mapping)
             and agent.get("terminal_id") == baseline.get("terminal_id")
@@ -740,7 +871,14 @@ class HerdrShotcallerBootstrapAdapter:
                 "same-pane Shotcaller metadata authority is incomplete",
             )
         self._published_source = self._title_source(spec)
-        self._expected_published_sequence = sequence + 1
+        self._expected_published_sequence = sequence
+        display = self._display(callsign)
+        token_arguments = tuple(
+            part
+            for key, value in display.items()
+            if key not in {"title", "terminal_title"}
+            for part in ("--token", f"{key}={value}")
+        )
         self._run(
             (
                 "herdr",
@@ -756,11 +894,8 @@ class HerdrShotcallerBootstrapAdapter:
                 "--display-agent",
                 self.options.provider_kind,
                 "--title",
-                callsign,
-                "--token",
-                f"sidebar_name={callsign}",
-                "--token",
-                f"thread_title={callsign}",
+                display["title"],
+                *token_arguments,
                 "--token",
                 f"{TITLE_OWNER_TOKEN}={self._title_owner(spec)}",
                 "--token",
@@ -780,10 +915,12 @@ class HerdrShotcallerBootstrapAdapter:
         tokens = agent.get("tokens")
         presentation_source = self._presentation_source(agent)
         authority_source = _session_source(agent)
+        display = self._display(callsign)
         ownership_exact = bool(
             isinstance(tokens, Mapping)
             and tokens.get(TITLE_OWNER_TOKEN) == self._title_owner(spec)
             and tokens.get(TITLE_SOURCE_TOKEN) == self._title_source(spec)
+            and tokens.get(ORCHESTRATOR_ROLE_TOKEN) == "shotcaller"
         )
         return bool(
             self._exact(spec, pane, agent)
@@ -794,10 +931,70 @@ class HerdrShotcallerBootstrapAdapter:
                 or (presentation_source is None and ownership_exact)
             )
             and isinstance(tokens, Mapping)
+            and all(
+                tokens.get(key) == value
+                for key, value in display.items()
+                if key not in {"title", "terminal_title"}
+            )
+            and self._presentation_title(agent) == display["title"]
+        )
+
+    def ensure_active_presentation(
+        self,
+        spec: ShotcallerBootstrapSpec,
+        callsign: str,
+        *,
+        completed: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Reverify or restore only the exact bootstrap-owned live display."""
+
+        pane, agent = self._current()
+        tokens = agent.get("tokens")
+        source = self._presentation_source(agent)
+        authority = _session_source(agent)
+        route = self._routing_name(agent)
+        if completed is not None:
+            receipt = self._receipt(spec, callsign)
+            receipt["capabilities"] = list(capabilities(spec.capabilities))
+            if digest(receipt) != completed.get("receipt_digest"):
+                raise StorageRefusal(
+                    "receipt_conflict", "completed Shotcaller retry changed runtime acceptance"
+                )
+        # Only exact historical completion plus unchanged owned presentation
+        # permits the missing-token upgrade; modern token loss still refuses.
+        legacy_role = bool(
+            completed is not None
+            and completed.get("role_owned") is False
+            and isinstance(tokens, Mapping)
+            and ORCHESTRATOR_ROLE_TOKEN not in tokens
             and tokens.get("sidebar_name") == callsign
             and tokens.get("thread_title") == callsign
             and self._presentation_title(agent) == callsign
         )
+        ownership_exact = bool(
+            isinstance(tokens, Mapping)
+            and tokens.get(TITLE_OWNER_TOKEN) == self._title_owner(spec)
+            and tokens.get(TITLE_SOURCE_TOKEN) == self._title_source(spec)
+            and (tokens.get(ORCHESTRATOR_ROLE_TOKEN) == "shotcaller" or legacy_role)
+        )
+        published_exact = self._published_exact(spec, callsign, pane, agent)
+        if (
+            not self._exact(spec, pane, agent)
+            or route != callsign.lower()
+            or not ownership_exact
+            or (
+                source not in {self._title_source(spec), authority}
+                and not (source is None and published_exact)
+            )
+        ):
+            raise StorageRefusal(
+                "shotcaller_metadata_unverified",
+                "completed Shotcaller presentation ownership is not exact",
+            )
+        if not published_exact:
+            self._report_title(spec, callsign, agent)
+        self._stable_published(spec, callsign)
+        return self._receipt(spec, callsign)
 
     def _stable_published(
         self, spec: ShotcallerBootstrapSpec, callsign: str
@@ -826,7 +1023,7 @@ class HerdrShotcallerBootstrapAdapter:
                 if (
                     self._expected_published_sequence is not None
                     and consecutive == 0
-                    and sequence != self._expected_published_sequence
+                    and sequence < self._expected_published_sequence
                 ):
                     raise StorageRefusal(
                         "shotcaller_metadata_unverified",
@@ -900,6 +1097,7 @@ class HerdrShotcallerBootstrapAdapter:
                 and tokens.get(TITLE_OWNER_TOKEN)
                 == self._title_owner_from_source(self._published_source)
                 and tokens.get(TITLE_SOURCE_TOKEN) == self._published_source
+                and tokens.get(ORCHESTRATOR_ROLE_TOKEN) == "shotcaller"
                 and tokens.get("sidebar_name") == current_title
                 and tokens.get("thread_title") == current_title
                 and current_title.casefold() == routing_name.casefold()
@@ -926,6 +1124,65 @@ class HerdrShotcallerBootstrapAdapter:
                 "title": current_title,
                 "tokens": dict(tokens),
             }
+            original_route = self._restore_baseline.get("routing_name")
+            if original_route is not None:
+                if routing_name != original_route:
+                    return False
+                ownership_absent = (
+                    tokens.get(TITLE_OWNER_TOKEN) in {None, ""}
+                    and tokens.get(TITLE_SOURCE_TOKEN) in {None, ""}
+                )
+                if baseline_exact and ownership_absent:
+                    return True
+                if not owned_display:
+                    return False
+                sequence = agent.get("state_change_seq")
+                if not isinstance(sequence, int):
+                    return False
+                self._run(
+                    (
+                        "herdr",
+                        "pane",
+                        "report-metadata",
+                        self.options.pane_id,
+                        "--source",
+                        "league-shotcaller-rollback",
+                        "--applies-to-source",
+                        authority_source,
+                        "--agent",
+                        self.options.runtime_kind,
+                        "--display-agent",
+                        self.options.provider_kind,
+                        "--title",
+                        str(previous_title),
+                        "--token",
+                        f"sidebar_name={previous_sidebar}",
+                        "--token",
+                        f"thread_title={previous_thread_title}",
+                        "--token",
+                        f"{TITLE_OWNER_TOKEN}=",
+                        "--token",
+                        f"{TITLE_SOURCE_TOKEN}=",
+                        "--seq",
+                        str(sequence + 1),
+                    ),
+                    "Herdr adopted Shotcaller metadata rollback",
+                    silent=True,
+                )
+                pane, agent = self._current()
+                restored_tokens = agent.get("tokens")
+                return bool(
+                    self._exact_placeholder(pane, agent)
+                    and self._routing_name(agent) == original_route
+                    and isinstance(restored_tokens, Mapping)
+                    and restored_tokens.get(TITLE_OWNER_TOKEN) in {None, ""}
+                    and restored_tokens.get(TITLE_SOURCE_TOKEN) in {None, ""}
+                    and str(restored_tokens.get("sidebar_name", ""))
+                    == previous_sidebar
+                    and str(restored_tokens.get("thread_title", ""))
+                    == previous_thread_title
+                    and (self._presentation_title(agent) or "") == previous_title
+                )
             self._run(
                 ("herdr", "agent", "rename", self.options.pane_id, "--clear"),
                 "Herdr Shotcaller routing rollback",
@@ -969,6 +1226,19 @@ class HerdrShotcallerBootstrapAdapter:
                 expected_tokens = dict(current_tokens)
                 expected_tokens.pop(TITLE_OWNER_TOKEN, None)
                 expected_tokens.pop(TITLE_SOURCE_TOKEN, None)
+                prior_role = self._restore_baseline.get(ORCHESTRATOR_ROLE_TOKEN)
+                current_role = current_tokens.get(ORCHESTRATOR_ROLE_TOKEN)
+                restore_role = (
+                    prior_role
+                    if prior_role in {"shotcaller", "champion"}
+                    else current_role
+                    if current_role == "champion"
+                    else None
+                )
+                if restore_role in {"shotcaller", "champion"}:
+                    expected_tokens[ORCHESTRATOR_ROLE_TOKEN] = restore_role
+                else:
+                    expected_tokens.pop(ORCHESTRATOR_ROLE_TOKEN, None)
                 restore_tokens: list[tuple[str, str]] = []
                 for key, value in (
                     ("sidebar_name", previous_sidebar),
@@ -1001,12 +1271,15 @@ class HerdrShotcallerBootstrapAdapter:
                 ]
                 for key, value in restore_tokens:
                     arguments.extend(("--token", f"{key}={value}"))
+                restore_role = restore_role if restore_role in {"shotcaller", "champion"} else ""
                 arguments.extend(
                     (
                         "--token",
                         f"{TITLE_OWNER_TOKEN}=",
                         "--token",
                         f"{TITLE_SOURCE_TOKEN}=",
+                        "--token",
+                        f"{ORCHESTRATOR_ROLE_TOKEN}={restore_role}",
                         "--seq",
                         str(sequence + 1),
                     )
@@ -1059,6 +1332,14 @@ class HerdrShotcallerBootstrapAdapter:
                     f"{TITLE_OWNER_TOKEN}=",
                     "--token",
                     f"{TITLE_SOURCE_TOKEN}=",
+                    "--token",
+                    f"{ORCHESTRATOR_ROLE_TOKEN}="
+                    + str(
+                        self._restore_baseline.get(ORCHESTRATOR_ROLE_TOKEN, "")
+                        if self._restore_baseline.get(ORCHESTRATOR_ROLE_TOKEN)
+                        in {"shotcaller", "champion"}
+                        else ""
+                    ),
                     "--seq",
                     str(sequence + 1),
                 ),
@@ -1095,6 +1376,7 @@ class HerdrShotcallerBootstrapAdapter:
         worktree = str(Path(self.options.worktree).resolve())
         return bool(
             agent.get("agent") == self.options.runtime_kind
+            and isinstance(agent.get("agent_status"), str)
             and agent.get("agent_status") in LIVE_STATUSES
             and agent.get("workspace_id") == self.options.workspace_id
             and agent.get("tab_id") == self.options.tab_id
@@ -1125,7 +1407,9 @@ class ShotcallerBootstrapService:
 
     def bootstrap(self, spec: ShotcallerBootstrapSpec, *, fault: Any = None) -> dict[str, Any]:
         existing = self.store.callsign_assignment_status(spec.assignment_id)
-        completed = self.store.shotcaller_bootstrap_status(spec.assignment_id)
+        completed = self.store.shotcaller_bootstrap_status(
+            spec.assignment_id, include_display_ownership=True
+        )
         baseline = (
             self.store.shotcaller_bootstrap_baseline(spec.assignment_id)
             if existing is not None
@@ -1178,32 +1462,57 @@ class ShotcallerBootstrapService:
                 "pre-existing Shotcaller reservation has no durable pre-publication baseline",
             )
         if completed is not None:
-            receipt = self.adapter.current_receipt(spec, str(completed["callsign"]))
+            receipt = self.adapter.ensure_active_presentation(
+                spec, str(completed["callsign"]), completed=completed
+            )
             return self.store.record_shotcaller_bootstrap(
                 spec.assignment_id, 1, receipt, self.clock.now()
             )
         at = self.clock.now()
-        reserved = self.store.allocate_callsign(
-            spec.assignment_id,
-            spec.agent_id,
-            "shotcaller",
-            "shotcaller",
-            spec.agent_id,
-            spec.capabilities,
-            at,
-            recovery_baseline=self.adapter.recovery_baseline(),
-            recovery_thread_id=spec.thread_id,
-        )
+        recovery_baseline = self.adapter.recovery_baseline()
+        try:
+            reserved = self.store.allocate_callsign(
+                spec.assignment_id,
+                spec.agent_id,
+                "shotcaller",
+                "shotcaller",
+                spec.agent_id,
+                spec.capabilities,
+                at,
+                recovery_baseline=recovery_baseline,
+                recovery_thread_id=spec.thread_id,
+                expected_callsign=observed.get("routing_name"),
+            )
+        except StorageRefusal as exc:
+            if exc.code == "callsign_expectation_mismatch":
+                raise StorageRefusal(
+                    "shotcaller_identity_unverified",
+                    "calling runtime route does not match the next eligible Shotcaller callsign",
+                ) from exc
+            raise
         published = observed.get("routing_name") == str(reserved["callsign"]).lower()
         try:
+            if observed.get("routing_name") is not None and not published:
+                raise StorageRefusal(
+                    "shotcaller_callsign_mismatch",
+                    "calling runtime route does not match the allocated Shotcaller callsign",
+                )
             if baseline is None:
                 baseline = self.store.shotcaller_bootstrap_baseline(spec.assignment_id)
                 if baseline is None:
+                    initial_baseline = (
+                        recovery_baseline
+                        if observed.get("routing_name") is not None
+                        else self.adapter.restoration_baseline()
+                    )
                     baseline = self.store.record_shotcaller_bootstrap_baseline(
-                        spec.assignment_id, 1, self.adapter.restoration_baseline()
+                        spec.assignment_id, 1, initial_baseline
                     )["baseline"]
                 self.adapter.use_restoration_baseline(baseline)
-            if baseline.get("schema") == "league.shotcaller-bootstrap-baseline.v2":
+            if baseline.get("schema") in {
+                "league.shotcaller-bootstrap-baseline.v2",
+                "league.shotcaller-bootstrap-baseline.v3",
+            }:
                 if fault:
                     fault("after_shotcaller_recovery_reserved")
                 if publication is None:

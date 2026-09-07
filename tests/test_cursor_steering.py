@@ -15,6 +15,7 @@ sys.path[:0] = [str(ROOT / "src"), str(ROOT / "tests")]
 
 from league.canonical_delivery import dispatch_event  # noqa: E402
 from league.cursor_steering import HerdrCursorSteeringAdapter  # noqa: E402
+from league.operational_input import parse_operational_input  # noqa: E402
 from league.storage import OutboxDispatchIdentity, RuntimeRegistrationCommand  # noqa: E402
 from request_lifecycle_fixture import (  # noqa: E402
     GAREN_RUNTIME,
@@ -209,8 +210,12 @@ def test_idle_submit_and_structured_route(root: Path) -> None:
     assert len(prompt_effects) == 1
     assert not any("send-text" in command or "send-keys" in command for command in herdr.effects)
     prompt = prompt_effects[0][-1]
-    assert prompt.startswith("LEAGUE ROUTED DELIVERY ")
-    routed_payload = json.loads(prompt.removeprefix("LEAGUE ROUTED DELIVERY "))
+    header = parse_operational_input(prompt)
+    assert header is not None
+    assert header["kind"] == "routed-delivery"
+    content = prompt.split("\n", 1)[1]
+    assert content.startswith("LEAGUE ROUTED DELIVERY ")
+    routed_payload = json.loads(content.removeprefix("LEAGUE ROUTED DELIVERY "))
     assert routed_payload["schema"] == "league.routed-delivery.v1"
     assert routed_payload["delivery"]["event_id"] == routed["event_id"]
     assert routed_payload["actions"][0]["argv"] == [

@@ -209,6 +209,66 @@ def _require_issue_owned_champion_tasks(
     return {str(row["task_id"]): row for row in rows}
 
 
+def _require_legacy_champion_result(
+    store: Any, request_id: str, coordinator: str, task_ids: tuple[str, ...],
+    acceptance_sha256: str, *, require_owner: bool = True,
+) -> dict[str, sqlite3.Row]:
+    """Read one preserved pre-selection receipt, without inventing a preflight."""
+    refusal = StorageRefusal(
+        "legacy_result_invalid", "legacy result requires one exact preserved issue-owned acceptance",
+    )
+    if (len(task_ids) != 1 or not isinstance(acceptance_sha256, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", acceptance_sha256)):
+        raise refusal
+    rows = store.connection.execute(
+        """
+        SELECT t.task_id,t.state,t.result_summary,a.task_assignment_id,
+               a.coordinator_agent_id,a.champion_agent_id,a.runtime_instance_id,
+               a.acceptance_receipt_json,a.callsign,i.repository,i.issue,i.branch,
+               i.worktree,r.session_ref,r.actor_agent_id
+          FROM tasks t JOIN task_assignments a
+            ON a.task_id=t.task_id AND a.request_id=t.request_id
+          JOIN agent_instances i ON i.agent_id=a.champion_agent_id
+          JOIN runtime_instances r ON r.runtime_instance_id=a.runtime_instance_id
+         WHERE t.request_id=? AND t.task_id=?
+           AND t.state IN ('completed','complete','ready_to_land')
+           AND t.result_summary IS NOT NULL AND t.result_summary<>''
+           AND a.assignment_role='champion' AND a.dispatch_id IS NULL
+           AND a.champion_agent_id<>a.coordinator_agent_id
+           AND a.state IN ('active','cleanup_pending','completed')
+           AND NOT EXISTS (SELECT 1 FROM repository_issue_bindings b WHERE b.task_id=t.task_id)
+           AND NOT EXISTS (SELECT 1 FROM repository_issue_selection_receipts s WHERE s.task_id=t.task_id)
+        """, (request_id, task_ids[0]),
+    ).fetchall()
+    if len(rows) != 1:
+        raise refusal
+    row = rows[0]
+    raw = row["acceptance_receipt_json"]
+    if not isinstance(raw, str) or _digest(raw) != acceptance_sha256:
+        raise refusal
+    try:
+        receipt = json.loads(raw)
+    except (ValueError, TypeError):
+        raise refusal
+    expected = {
+        "assignment_id": row["task_assignment_id"], "task_id": row["task_id"],
+        "champion_agent_id": row["champion_agent_id"],
+        "runtime_instance_id": row["runtime_instance_id"], "callsign": row["callsign"],
+        "repository": row["repository"], "issue": row["issue"],
+        "branch": row["branch"], "worktree": row["worktree"],
+        "thread_id": row["session_ref"],
+    }
+    if (
+        not isinstance(receipt, dict) or receipt.get("verified") is not True
+        or any(receipt.get(key) != value or value in (None, "") for key, value in expected.items())
+        or type(receipt.get("issue")) is not int or receipt["issue"] < 1
+        or row["actor_agent_id"] != row["champion_agent_id"]
+        or (require_owner and row["coordinator_agent_id"] != coordinator)
+    ):
+        raise refusal
+    return {str(row["task_id"]): row}
+
+
 def _require_champion_answer_result(store: Any, request: sqlite3.Row) -> None:
     if request["execution_mode"] != "champion":
         return
@@ -217,7 +277,7 @@ def _require_champion_answer_result(store: Any, request: sqlite3.Row) -> None:
         None
         if result_id is None
         else store.connection.execute(
-            "SELECT produced_by_agent_id FROM request_results WHERE result_id=? AND request_id=?",
+            "SELECT produced_by_agent_id,payload_hash FROM request_results WHERE result_id=? AND request_id=?",
             (result_id, request["request_id"]),
         ).fetchone()
     )
@@ -233,6 +293,12 @@ def _require_champion_answer_result(store: Any, request: sqlite3.Row) -> None:
             (result_id,),
         ).fetchall()
     )
+    if result["payload_hash"] is not None:
+        _require_legacy_champion_result(
+            store, str(request["request_id"]), str(result["produced_by_agent_id"]),
+            task_ids, str(result["payload_hash"]), require_owner=False,
+        )
+        return
     _require_issue_owned_champion_tasks(
         store,
         request_id=str(request["request_id"]),
@@ -2226,7 +2292,8 @@ def record_request_result(store: Any, command: RequestResultCommand) -> dict[str
                 (request_id, idempotency_key),
             ).fetchone()
             if existing is not None:
-                if existing["summary"] != summary or existing["outcome"] != outcome:
+                if (existing["summary"] != summary or existing["outcome"] != outcome
+                    or existing["payload_hash"] != command.legacy_acceptance_sha256):
                     raise StorageRefusal("result_conflict", "idempotent result key has different content")
                 return {
                     "request_id": request_id,
@@ -2242,7 +2309,14 @@ def record_request_result(store: Any, command: RequestResultCommand) -> dict[str
             if int(request["version"]) != expected_version:
                 raise StorageRefusal("version_conflict", "request result expected-version failed")
             cited_tasks: dict[str, sqlite3.Row] = {}
-            if request["execution_mode"] == "champion":
+            if command.legacy_acceptance_sha256 is not None:
+                if request["execution_mode"] != "champion":
+                    raise StorageRefusal("legacy_result_invalid", "legacy reconciliation requires Champion execution")
+                cited_tasks = _require_legacy_champion_result(
+                    store, request_id, str(request["owner_agent_id"]), sources,
+                    command.legacy_acceptance_sha256,
+                )
+            elif request["execution_mode"] == "champion":
                 cited_tasks = _require_issue_owned_champion_tasks(
                     store,
                     request_id=request_id,
@@ -2272,7 +2346,7 @@ def record_request_result(store: Any, command: RequestResultCommand) -> dict[str
                 INSERT INTO request_results
                   (result_id,request_id,produced_by_agent_id,outcome,summary,payload_hash,
                    idempotency_key,return_event_id,return_outbox_id,created_at)
-                VALUES(?,?,?,?,?,NULL,?,?,?,?)
+                VALUES(?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     result_id,
@@ -2280,6 +2354,7 @@ def record_request_result(store: Any, command: RequestResultCommand) -> dict[str
                     request["owner_agent_id"],
                     outcome,
                     summary,
+                    command.legacy_acceptance_sha256,
                     idempotency_key,
                     event_id if return_to_requester else None,
                     outbox_id if return_to_requester else None,

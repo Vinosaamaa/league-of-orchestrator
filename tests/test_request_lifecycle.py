@@ -4,6 +4,9 @@
 from __future__ import annotations
 
 import tempfile
+import hashlib
+import json
+from dataclasses import replace
 from pathlib import Path
 
 
@@ -37,6 +40,7 @@ from request_lifecycle_fixture import (  # noqa: E402
     dispatch_request,
 )
 from storage_fixture import REPOSITORY, SHOTCALLER_ID  # noqa: E402
+from storage_test_support import invoke_cli  # noqa: E402
 
 
 def assign(
@@ -510,6 +514,93 @@ def test_p100_local_r3_completion_requires_explicit_answer(root: Path) -> None:
         ).fetchone()[0] == "answered"
 
 
+def test_explicit_legacy_result_reconciliation(root: Path) -> None:
+    state, store, clock = create_context(root, "legacy-result")
+    capture_p100(store, clock)
+    store.claim_request("R3", GAREN_RUNTIME, "claim", clock.after(300), clock.now())
+    dispatch_request(store, clock, "R3", "claim", "dispatch", "repository-write", "champion")
+    ids = FakeIds()
+    assignment = assign(store, clock, ids, assignment_id="A-legacy", request_id="R3",
+                        claim="claim", task_id="T-legacy", coordinator=SHOTCALLER_ID,
+                        champion=SONA_ID, callsign="Sona")
+    complete_task(store, clock, ids, assignment, SHOTCALLER_ID)
+    raw = store.connection.execute(
+        "SELECT acceptance_receipt_json FROM task_assignments WHERE task_assignment_id='A-legacy'"
+    ).fetchone()[0]
+    digest = hashlib.sha256(raw.encode()).hexdigest()
+    command = RequestResultCommand("R3", "claim", 2, "legacy-result", "legacy-key",
+                                   "completed", "Accepted preserved source work", ("T-legacy",),
+                                   clock.now(), False, None, None, digest)
+
+    def refuses(candidate, code="legacy_result_invalid"):
+        before = store.connection.total_changes
+        try:
+            store.record_request_result(candidate)
+        except StorageRefusal as exc:
+            assert exc.code == code, exc.code
+        else:
+            raise AssertionError("unsafe legacy result accepted")
+        assert store.connection.total_changes == before
+
+    # The explicit compatibility option must never weaken modern issue preflight.
+    refuses(command)
+    # Test-only reconstruction of the historical schema layout. Restore both
+    # immutability guards immediately after removing the synthetic newer rows.
+    triggers = store.connection.execute(
+        "SELECT name,sql FROM sqlite_master WHERE type='trigger' AND name IN "
+        "('repository_issue_bindings_immutable_delete','repository_issue_selection_receipts_immutable_delete')"
+    ).fetchall()
+    assert len(triggers) == 2
+    for trigger in triggers:
+        store.connection.execute(f'DROP TRIGGER "{trigger[0]}"')
+    store.connection.execute("DELETE FROM repository_issue_bindings WHERE task_id='T-legacy'")
+    refuses(command)
+    store.connection.execute("DELETE FROM repository_issue_selection_receipts WHERE task_id='T-legacy'")
+    for trigger in triggers:
+        store.connection.execute(trigger[1])
+    # Synthetic historical layout: old assignments have no dispatch linkage.
+    store.connection.execute(
+        "UPDATE task_assignments SET dispatch_id=NULL,state='cleanup_pending' WHERE task_assignment_id='A-legacy'"
+    )
+    refuses(replace(command, legacy_acceptance_sha256=None), "champion_delegation_required")
+    refuses(replace(command, legacy_acceptance_sha256="0" * 64))
+    refuses(replace(command, task_ids=()))
+    for field, value in (("verified", False), ("issue", 999), ("thread_id", "other"),
+                         ("champion_agent_id", JARVAN_ID), ("worktree", "/synthetic/foreign")):
+        altered = json.loads(raw)
+        altered[field] = value
+        bad = json.dumps(altered)
+        store.connection.execute(
+            "UPDATE task_assignments SET acceptance_receipt_json=? WHERE task_assignment_id='A-legacy'", (bad,)
+        )
+        refuses(replace(command, legacy_acceptance_sha256=hashlib.sha256(bad.encode()).hexdigest()))
+    store.connection.execute(
+        "UPDATE task_assignments SET acceptance_receipt_json=? WHERE task_assignment_id='A-legacy'", (raw,)
+    )
+    store.connection.execute("UPDATE task_assignments SET coordinator_agent_id=? WHERE task_assignment_id='A-legacy'", (JARVAN_ID,))
+    refuses(command)
+    store.connection.execute("UPDATE task_assignments SET coordinator_agent_id=? WHERE task_assignment_id='A-legacy'", (SHOTCALLER_ID,))
+    payload = invoke_cli(
+        state, "request", "result", "--request-id", "R3", "--claim-token", "claim",
+        "--expected-version", "2", "--result-id", "legacy-result", "--idempotency-key", "legacy-key",
+        "--outcome", "completed", "--summary", "Accepted preserved source work",
+        "--task-id", "T-legacy", "--at", clock.now(), "--legacy-acceptance-sha256", digest,
+    )
+    assert payload["ok"], payload
+    result = payload["result"]
+    assert result["version"] == 3 and result["state"] == "in_progress"
+    assert store.record_request_result(command)["idempotent"]
+    refuses(replace(command, legacy_acceptance_sha256="0" * 64), "result_conflict")
+    store.answer_request(AnswerRequestCommand(
+        "R3", "claim", 3, "legacy-response", "codex", "session:synthetic",
+        "response:legacy", "durable", "synthetic-content-hash", "Preserved result delivered",
+        "event:legacy-answer", clock.now(),
+    ))
+    assert store.connection.execute("SELECT state FROM requests WHERE request_id='R3'").fetchone()[0] == "answered"
+    assert store.connection.execute("SELECT state FROM task_assignments WHERE task_assignment_id='A-legacy'").fetchone()[0] == "cleanup_pending"
+    store.close()
+
+
 def test_cancellation_block_and_defer_transitions(root: Path) -> None:
     _, store, clock = create_context(root, "request-state-transitions")
     capture_p100(store, clock)
@@ -635,6 +726,7 @@ def main() -> None:
         test_p100_direct_r1_and_prompt_idempotency(root)
         test_p100_routed_r2_aggregation_and_owner_return(root)
         test_p100_local_r3_completion_requires_explicit_answer(root)
+        test_explicit_legacy_result_reconciliation(root)
         test_cancellation_block_and_defer_transitions(root)
         test_followup_and_duplicate_wording_account_for_sources(root)
         test_compaction_restart_preserves_request_index(root)

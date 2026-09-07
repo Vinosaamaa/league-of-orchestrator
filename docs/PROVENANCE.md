@@ -2259,3 +2259,21 @@ preserves the original uncertain attempt, refuses active dispatches and control
 events, and satisfies only that recipient's delivery obligation. It never
 claims native delivery success or completes a task/request. Exact retries do
 not write; changed owner, content, or receipt fails closed.
+
+## Explicit historical result reconciliation (issue 66)
+
+An inherited issue-owned Champion can have a settled task and a verified launch
+acceptance but no later issue-selection receipt. A retired or stale endpoint
+must not force the owner to relaunch that worker merely to report its accepted
+work. `request result --legacy-acceptance-sha256` admits exactly one such source
+only when the preserved receipt bytes match the supplied hash, task, Champion,
+runtime/thread, repository/issue, branch/worktree and callsign. It requires no
+modern dispatch or issue-selection linkage, the current coordinator and a
+settled task result. Modern result/delegation rules remain unchanged.
+
+The accepted receipt hash persists with the result and is revalidated before
+answering. This is historical acceptance evidence, never a manufactured issue
+preflight, live runtime claim or cleanup receipt. Assignment/runtime/cleanup
+state remains untouched. Focused coverage rejects modern or incomplete
+linkage, wrong hashes, missing tasks, and altered acceptance identities; it
+proves exact retries and result-to-answer settlement while cleanup stays pending.

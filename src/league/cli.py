@@ -1196,6 +1196,7 @@ def _add_request_commands(groups: argparse._SubParsersAction) -> None:
         result.add_argument(f"--{name}", required=True)
     result.add_argument("--expected-version", type=int, required=True)
     result.add_argument("--task-id", action="append", default=[])
+    result.add_argument("--legacy-acceptance-sha256", help="Explicitly reconcile one pre-issue-selection assignment using its exact preserved acceptance bytes.")
     result.add_argument("--return-to-requester", action="store_true")
     result.add_argument("--event-id")
     result.add_argument("--outbox-id")
@@ -3235,6 +3236,7 @@ def _request_result(store: Storage, args: argparse.Namespace) -> CommandResult:
             return_to_requester=args.return_to_requester,
             event_id=args.event_id,
             outbox_id=args.outbox_id,
+            legacy_acceptance_sha256=args.legacy_acceptance_sha256,
         )
     ), None
 

@@ -256,6 +256,7 @@ def render_launchd_plist(
         dict.fromkeys(
             (
                 python_directory,
+                "/opt/homebrew/bin",
                 "/usr/local/bin",
                 "/usr/bin",
                 "/bin",

@@ -2220,3 +2220,11 @@ The combined verification also caught a stale real-canary expectation: the
 current Stop summary includes `runtime_recovery`. The canary now explicitly
 requires that count to be zero alongside its one pending cleanup, preserving
 the strict complete-summary comparison.
+
+Installed acceptance identified that the launchd PATH omitted the Apple Silicon
+Homebrew command directory. The watcher could answer liveness probes while its
+Herdr delivery/observation subprocess was unavailable. The deterministic PATH
+now includes that directory, without inheriting arbitrary shell PATH entries.
+The existing exact failed-launch settlement operation is also exposed through
+`assign settle-launch-cleanup`, so historical descriptor recovery uses the
+stable CLI instead of requiring an internal storage call or another launch.

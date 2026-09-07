@@ -54,6 +54,7 @@ def test_help_inventory_and_schemas() -> None:
         "assign.prepare",
         "assign.launching",
         "assign.activate",
+        "assign.settle-launch-cleanup",
         "assign.block",
         "task.transition",
         "delivery.claim-outbox",

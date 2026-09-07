@@ -214,3 +214,39 @@ failures leave adoption and reconciliation rolled back together.
 These exceptions do not accept a runtime materialized after the frozen row or
 any other changed binding, do not refresh the broad snapshot, and do not add a
 schema, service, inspection command, or live recovery authority.
+
+### Retired original with an exact terminal handoff
+
+Expired switched-snapshot refresh may retain an original that is no longer live
+only when the existing lifecycle producers prove its completed handoff:
+
+- Runtime replacement: the frozen binding matches the immutable replacement
+  intent; retirement and handoff receipts match the closed original and the
+  current accepted successor task/runtime/callsign binding.
+- Exact-thread continuation: completed cleanup and issue-close receipts, released
+  original callsign, archived opaque thread identity, issue reopen, incarnation
+  linkage, and accepted resumed assignment all agree. The original remains
+  retired with its runtime closed; resume capabilities and current successor
+  identity must still be exact.
+
+Refresh keeps the original task, callsign, binding digest, and membership. A
+successor justified by that proof is not inserted into the frozen set. The new
+snapshot version has new row receipts, while every prior snapshot remains
+unchanged. Its progress receipt and bounded `bindings` page expose
+`retired_handoff_satisfied`, bound to the existing terminal handoff receipt.
+This is evidence, not another lifecycle state machine or synthetic acceptance.
+
+Do not run `reconcile-descendant` on that retired original: the live-operation
+refusal remains intact. Refresh does not resurrect it, rebind a callsign, adopt
+the successor into this snapshot, or settle pending delivery/cleanup/intake
+obligations. Surviving live originals still use exact one-row reconciliation.
+Unproven disappearance, foreign additions, modified frozen hashes, incomplete
+handoffs, ambiguous lineage, and stale identity still refuse. Proof is reread
+under the refresh transaction and after final live observation; any concurrent
+change rolls back. Exact refresh retries reuse the committed receipt.
+
+`tests/test_rollover_retired_original.py` uses the actual replacement,
+cleanup/issue-reopen, and assignment services with temporary records and fake
+external adapters. It covers two retired originals, mixed live membership,
+tampering, stale versions, CAS, rollback, and retry. These are synthetic source
+receipts only; installation and live recovery require separate owner authority.

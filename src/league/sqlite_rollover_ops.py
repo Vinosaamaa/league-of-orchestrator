@@ -1314,7 +1314,7 @@ def rollover_bindings(
                     or (item.get("champion_agent_id"), item.get("task_id"))
                     not in snapshot_identity
                     or item.get("state")
-                    not in {"predecessor_pending", "successor_reconciled"}
+                    not in {"predecessor_pending", "successor_reconciled", "retired_handoff_satisfied"}
                     or (
                         item.get("state") == "predecessor_pending"
                         and (
@@ -1323,7 +1323,7 @@ def rollover_bindings(
                         )
                     )
                     or (
-                        item.get("state") == "successor_reconciled"
+                        item.get("state") in {"successor_reconciled", "retired_handoff_satisfied"}
                         and (
                             not isinstance(item.get("reconciliation_id"), str)
                             or not item["reconciliation_id"]
@@ -1347,7 +1347,7 @@ def rollover_bindings(
                 (
                     dict(item)
                     for item in progress_bindings
-                    if item["state"] == "successor_reconciled"
+                    if item["state"] in {"successor_reconciled", "retired_handoff_satisfied"}
                 ),
                 key=lambda item: (item["champion_agent_id"], item["task_id"]),
             )

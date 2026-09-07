@@ -33,6 +33,7 @@ from league.sqlite_runtime_replacement_ops import (  # noqa: E402
     _apply_descriptor_transactions,
 )
 from league.storage import StorageRefusal  # noqa: E402
+from league.visible_launch import VisibleLaunchOptions  # noqa: E402
 from lifecycle_fakes import FakeDeliveryAdapter, FakeIds, issue_bound_spec  # noqa: E402
 from request_lifecycle_fixture import (  # noqa: E402
     GAREN_RUNTIME,
@@ -727,13 +728,17 @@ def replacement_spec(
         "champion_agent_id": successor_agent,
         "session_mode": "create",
     }
+    league_command = worktree.parent / "synthetic-league"
+    league_command.touch(exist_ok=True)
     return RuntimeReplacementSpec(
         request=request,
-        launch_options=SimpleNamespace(
+        launch_options=VisibleLaunchOptions(
             workspace_id="w1",
             task_label="Runtime Replace",
             model="gpt-5.6-sol",
             effort="high",
+            league_command=str(league_command),
+            state_root=str(worktree.parent),
         ),
         launch_inputs=launch_inputs,
     )

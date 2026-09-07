@@ -2059,6 +2059,40 @@ existing capability validator and map parse/type/shape failures to
 Synthetic factory regressions prove no descriptor or endpoint allocation and
 exact reservation rollback for malformed JSON, null, mixed arrays, and objects.
 
+## Issue #8: retained retired-original rollover proof
+
+Deliberate difference: an expired switched rollover snapshot no longer rejects
+an original solely because supported replacement or exact-thread continuation
+has retired it. Refresh validates the actual completed lifecycle receipts and
+current terminal/successor identities, retains the original frozen membership
+and binding digest, and records `retired_handoff_satisfied` in the existing
+refresh receipt. No runtime, callsign, task, owner, delivery, archive, or prior
+snapshot identity is rewritten. Live reconciliation of a retired original still
+refuses; predecessor drain and remaining obligations retain their own gates.
+
+The registered retired-original test first reproduced the missing proof gate
+using real replacement and cleanup/reopen/resume service flows. Focused red/green
+tests also exposed a terminal-proof change during final observation: refresh
+now rechecks that proof before committing, with transaction rollback on mismatch.
+Two-retired and mixed membership, frozen-row tamper, incomplete/foreign evidence,
+capabilities, stale versions, CAS, exact retry, and injected rollback are covered
+using synthetic temporary state. No new schema, lifecycle state machine,
+service, installation, live recovery, or standalone-repository cleanup is added.
+
+Integration with PR #204 updates only the replacement test fixture to use the
+CLI's real `VisibleLaunchOptions` type and defaults, with temporary command/state
+paths. Its incomplete `SimpleNamespace` failed current launch validation before
+the Codex-to-Cursor matrix pair could run. Production validation, other namespace
+fixtures, every matrix pair, and all assertions remain unchanged.
+
+PR #207 review regressions cover a real failed/compensated replacement followed
+by a successful replacement. Terminal proof excludes only rolled-back attempts;
+incomplete or multiple remaining attempts still refuse. The replacement row's
+predecessor runtime must equal both its immutable request and intent snapshot.
+Foreign-runtime, competing-attempt, and completed-with-rollback evidence refuse
+without writes. Both transactional proof checks and full synthetic rollback
+comparisons remain intact.
+
 ## Issue #84: Pi initial startup transport and safe native diagnostics
 
 The post-PR #202 launch reached an allocated shell pane but never verified a Pi

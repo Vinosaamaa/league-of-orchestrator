@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -17,6 +18,7 @@ from league.pi_launch import (  # noqa: E402
     HerdrPiLaunchAdapter,
     deterministic_pi_session_id,
     pi_metadata_source,
+    pi_launch_environment,
     pi_start_arguments,
     resume_pi_after_restart,
 )
@@ -61,6 +63,8 @@ class FakePiHerdr:
         self.session_path = ""
         self.parent_path: str | None = None
         self.start_count = 0
+        self.start_failure = None
+        self.start_environment_override = {}
         self.calls: list[tuple[str, ...]] = []
         self.native_title_reads_remaining = 0
         self.agent_get_count = 0
@@ -207,6 +211,9 @@ class FakePiHerdr:
                 },
             )
         if arguments[1:3] == ["agent", "start"]:
+            if self.start_failure is not None:
+                return subprocess.CompletedProcess(arguments, 1, "", self.start_failure)
+            self.env.update(self.start_environment_override)
             self.start_count += 1
             self.pi_arguments = arguments[arguments.index("--") + 1 :]
             explicit = {
@@ -814,6 +821,88 @@ def test_provider_mapping_and_role_placement(root: Path) -> None:
     store.close()
 
 
+def test_native_start_failure_preserves_safe_code(root: Path) -> None:
+    store, clock, worktree = _context(root, "native-start-failure")
+    runner = FakePiHerdr(root / "native-start-failure")
+    runner.start_failure = json.dumps({
+        "id": "cli:agent:start", "error": {
+            "code": "timeout", "message": "SENSITIVE_DIAGNOSTIC_MUST_NOT_ESCAPE",
+            "data": {"private": "SENSITIVE_DIAGNOSTIC_MUST_NOT_ESCAPE"},
+        },
+    })
+    adapter, options, _ = factory_adapter(store, clock, worktree, root, runner)
+    spec = champion_spec(worktree, "native-start-failure")
+    try:
+        result = VisibleChampionLaunchService(
+            store, adapter, options, clock, issue_verifier=FakeIssueVerifier(store=store),
+        ).launch(spec)
+        assert result["failure_class"] == "launch_native_timeout", result
+        assert result["state"] == "blocked" and result["cleanup_proven"] is True
+        assert "SENSITIVE_DIAGNOSTIC_MUST_NOT_ESCAPE" not in json.dumps(result)
+        assert runner.start_count == 0 and not adapter.created_endpoint
+    finally:
+        store.close()
+
+
+def test_native_start_failure_rejects_unsafe_diagnostics(root: Path) -> None:
+    failures = (
+        "SENSITIVE_DIAGNOSTIC_MUST_NOT_ESCAPE",
+        '{"error":{"code":"SENSITIVE_DIAGNOSTIC_MUST_NOT_ESCAPE"}}',
+        '{"error":{"code":"timeout"},"result":{}}',
+        '{"error":{"code":"other","code":"timeout"}}',
+        '{"error":{"code":"timeout","data":NaN}}',
+        '{"error":{"code":"timeout","message":"' + "x" * 16_384 + '"}}',
+        '{"error":{"code":["timeout"]}}',
+    )
+    for index, failure in enumerate(failures):
+        suffix = f"native-unsafe-{index}"
+        store, clock, worktree = _context(root, suffix)
+        runner = FakePiHerdr(root / suffix)
+        runner.start_failure = failure
+        adapter, options, _ = factory_adapter(store, clock, worktree, root, runner)
+        try:
+            result = VisibleChampionLaunchService(
+                store, adapter, options, clock, issue_verifier=FakeIssueVerifier(store=store),
+            ).launch(champion_spec(worktree, suffix))
+            assert result["failure_class"] == "launch_adapter_failed", result
+            assert result["state"] == "blocked" and result["cleanup_proven"] is True
+            assert "SENSITIVE_DIAGNOSTIC_MUST_NOT_ESCAPE" not in json.dumps(result)
+            assert runner.start_count == 0 and not adapter.created_endpoint
+        finally:
+            store.close()
+
+
+def test_initial_placement_environment_remains_identity_guarded(root: Path) -> None:
+    store, clock, worktree = _context(root, "initial-env-mismatch")
+    runner = FakePiHerdr(root / "initial-env-mismatch")
+    runner.start_environment_override = {"LEAGUE_CALLSIGN": "Foreign"}
+    adapter, options, _ = factory_adapter(store, clock, worktree, root, runner)
+    try:
+        result = VisibleChampionLaunchService(
+            store, adapter, options, clock, issue_verifier=FakeIssueVerifier(store=store),
+        ).launch(champion_spec(worktree, "initial-env-mismatch"))
+        assert result["state"] == "blocked" and result["cleanup_proven"] is True, result
+        assert result["failure_class"] == "launch_identity_unverified"
+        assert not any(call[1:3] == ("agent", "prompt") for call in runner.calls)
+        descriptor = adapter.descriptor
+        try:
+            pi_start_arguments(descriptor, placement_environment=())
+        except StorageRefusal as exc:
+            assert exc.code == "launch_scope_invalid"
+        else:
+            raise AssertionError("unproven placement environment was accepted")
+        try:
+            pi_start_arguments(descriptor, restart=True, placement_environment=pi_launch_environment(
+                descriptor, descriptor["descriptor_digest"]
+            ))
+        except StorageRefusal as exc:
+            assert exc.code == "launch_scope_invalid"
+        else:
+            raise AssertionError("restart accepted initial-only environment transport")
+    finally:
+        store.close()
+
+
 def factory_adapter(store, clock, worktree, root, runner, *, project_code="LEAGUE"):
     options = replace(_options(root), project_code=project_code)
     routing = {
@@ -854,6 +943,17 @@ def test_registered_factory_preserves_explicit_routing(root: Path) -> None:
         assert descriptor["project_code"] == "LEAGUE"
         assert descriptor["task_label"] == "Tiny Gate"
         assert runner.start_count == 1
+        placement = next(call for call in runner.calls if call[1:3] == ("tab", "create"))
+        expected_env = pi_launch_environment(descriptor, adapter.descriptor["descriptor_digest"])
+        actual_env = tuple(item for index, item in enumerate(placement)
+                           if item == "--env" or index > 0 and placement[index - 1] == "--env")
+        assert actual_env == expected_env
+        # Placement already supplies these bytes; only pane ID remains explicit.
+        league_flags = [item for item in runner.pi_arguments if item.startswith("--league-")]
+        assert league_flags == ["--league-pane-id"], league_flags
+        full_argv = pi_start_arguments(adapter.descriptor)
+        assert len(shlex.join(["pi", *runner.pi_arguments]).encode()) < len(shlex.join(["pi", *full_argv]).encode())
+        assert runner.pi_arguments[runner.pi_arguments.index("--session-id") + 1] == descriptor["requested_session_id"]
     finally:
         store.close()
 
@@ -1212,6 +1312,9 @@ def test_pi_extension_enforces_herdr_token_limit() -> None:
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="league-pi-provider-") as directory:
         root = Path(directory).resolve()
+        test_native_start_failure_preserves_safe_code(root)
+        test_native_start_failure_rejects_unsafe_diagnostics(root)
+        test_initial_placement_environment_remains_identity_guarded(root)
         test_registered_factory_preserves_explicit_routing(root)
         test_factory_preallocation_refusal_releases_only_own_reservation(root)
         test_prior_descriptor_keeps_ambiguous_cleanup_fence(root)

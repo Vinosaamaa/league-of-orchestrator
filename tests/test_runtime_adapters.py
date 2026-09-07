@@ -397,9 +397,23 @@ def test_registered_visible_launch_factories_own_provider_selection(root: Path) 
             launch={
                 **common,
                 "provider_kind": "cursor",
-                "project_code": "synthetic",
+                "project_code": "LEAGUE",
             },
         )
+        calls_before_invalid = list(multiplexer.calls)
+        try:
+            registry.adapter("pi").visible_launch(
+                store=store,
+                options=options,
+                multiplexer=multiplexer,
+                startup_timeout_ms=120_000,
+                launch={**common, "provider_kind": "cursor", "project_code": "synthetic"},
+            )
+        except StorageRefusal as exc:
+            assert exc.code == "launch_scope_invalid"
+        else:
+            raise AssertionError("lowercase Pi project code reached the driver")
+        assert multiplexer.calls == calls_before_invalid
     assert codex.profile.kind == "codex"
     assert cursor.profile.kind == "cursor"
     assert pi.descriptor["runtime_kind"] == "pi"

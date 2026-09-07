@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 from ...adapter_types import HARNESS_CAPABILITIES, AdapterContract
 from ...provider_lifecycle import ProviderLifecycle
 from ...storage_types import StorageRefusal
@@ -31,7 +33,11 @@ def _launch_arguments(*, model, effort, state_root, **_unused):
 
 def _visible_launch_factory(*, store, options, multiplexer, launch, **_unused):
     from ...continuation import continuation_resume_thread
+    from ...visible_launch import _validate_options
 
+    if launch.get("project_code") is not None:
+        options = replace(options, project_code=launch["project_code"])
+    _validate_options(options)
     resume_thread_id = continuation_resume_thread(
         store,
         assignment_id=launch["assignment_id"],
@@ -44,7 +50,7 @@ def _visible_launch_factory(*, store, options, multiplexer, launch, **_unused):
         at=launch["at"],
     )
     forbidden = (
-        launch.get("project_code"), launch.get("release_root"),
+        launch.get("release_root"),
         launch.get("session_path"), launch.get("parent_session_id"),
         launch.get("parent_session_path"), launch.get("session_id"),
     )

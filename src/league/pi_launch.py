@@ -17,11 +17,21 @@ from .presentation import canonical_display_metadata
 from .storage_types import StorageRefusal
 from .visible_launch import MAX_CONTEXT_BYTES, CommandRunner, SubprocessRunner
 from .multiplexer_adapters import RestoredEndpoint, builtin_multiplexer_adapter_registry
+from .multiplexer_adapters.herdr.adapter import (
+    _reject_nonfinite_json_constant,
+    _strict_json_object,
+)
 from .worktree import exact_launch_cwd_binding
 
 
 METADATA_SOURCE = re.compile(r"^league:pi-launch:[A-Za-z0-9._:-]{1,64}$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
+MAX_NATIVE_ERROR_BYTES = 16_384
+SAFE_NATIVE_START_ERRORS = frozenset({
+    "timeout", "agent_start_failed", "agent_start_transport_failed",
+    "agent_start_input_failed", "agent_not_ready", "agent_kind_mismatch",
+    "agent_name_lost", "agent_pane_busy",
+})
 REDUNDANT_LEGACY_TOKENS = (
     "launch_descriptor_digest",
     "activation_phase",
@@ -41,6 +51,26 @@ def _digest(value: Mapping[str, Any]) -> str:
 
 
 def _result(completed: subprocess.CompletedProcess[str], label: str) -> dict[str, Any]:
+    if completed.returncode != 0:
+        # Native Herdr failures are on stderr. Retain only known constant codes;
+        # messages, ids, data, paths, and arbitrary stderr never leave this boundary.
+        native_code = None
+        try:
+            if not completed.stdout and 0 < len(completed.stderr.encode("utf-8")) <= MAX_NATIVE_ERROR_BYTES:
+                failure = json.loads(
+                    completed.stderr, object_pairs_hook=_strict_json_object,
+                    parse_constant=_reject_nonfinite_json_constant,
+                )
+                if isinstance(failure, dict) and set(failure) in ({"error"}, {"id", "error"}):
+                    error = failure["error"]
+                    code = error.get("code") if isinstance(error, dict) else None
+                    if isinstance(code, str) and code in SAFE_NATIVE_START_ERRORS:
+                        native_code = code
+        except (AttributeError, TypeError, ValueError, RecursionError):
+            pass
+        if native_code is not None:
+            raise StorageRefusal(f"launch_native_{native_code}", f"{label} failed: {native_code}")
+        raise StorageRefusal("launch_adapter_failed", f"{label} refused or failed")
     try:
         payload = json.loads(completed.stdout)
     except (TypeError, json.JSONDecodeError) as exc:
@@ -102,7 +132,8 @@ def _session_arguments(descriptor: Mapping[str, Any], *, restart: bool) -> tuple
 
 
 def pi_start_arguments(
-    descriptor: Mapping[str, Any], *, restart: bool = False
+    descriptor: Mapping[str, Any], *, restart: bool = False,
+    placement_environment: tuple[str, ...] | None = None,
 ) -> tuple[str, ...]:
     release_root = Path(str(descriptor["release_root"]))
     integration = release_root / "integrations" / "pi" / "league-runtime.ts"
@@ -136,6 +167,12 @@ def pi_start_arguments(
         for key, value in metadata.items()
         for item in (f"--league-{key}", value)
     )
+    if placement_environment is not None:
+        if restart or placement_environment != pi_launch_environment(descriptor, digest):
+            raise StorageRefusal("launch_scope_invalid", "Pi placement environment does not match the launch descriptor")
+        # The successful placement supplied every other value through --env.
+        # Keep pane identity explicit; restored panes retain the full argv path.
+        metadata_arguments = ("--league-pane-id", metadata["pane-id"])
     if not metadata["pane-id"]:
         raise StorageRefusal("provider_launch_descriptor_invalid", "Pi launch requires the exact Herdr pane ID")
     return (
@@ -203,6 +240,7 @@ class HerdrPiLaunchAdapter:
         self.environment = dict(environment or os.environ)
         self._created: dict[str, str] | None = None
         self._receipt: dict[str, Any] | None = None
+        self._placement_environment: tuple[str, ...] | None = None
         if self.environment.get("HERDR_ENV") != "1":
             raise StorageRefusal("launch_scope_invalid", "visible Pi launch requires the current Herdr session")
 
@@ -272,8 +310,21 @@ class HerdrPiLaunchAdapter:
         if argv is not None:
             if not isinstance(argv, list) or any(not isinstance(item, str) for item in argv):
                 raise StorageRefusal("launch_identity_unverified", "Pi process arguments are ambiguous")
-            expected = list(pi_start_arguments(self.descriptor, restart=restart))
-            if not any(argv[index : index + len(expected)] == expected for index in range(len(argv) - len(expected) + 1)):
+            candidates = [list(pi_start_arguments(self.descriptor, restart=restart))]
+            if not restart:
+                # Initial observations have already proven every canonical
+                # metadata token. Recognize either exact transport for retries.
+                candidates.append(list(pi_start_arguments(
+                    self.descriptor,
+                    placement_environment=pi_launch_environment(
+                        self.descriptor, str(self.descriptor["descriptor_digest"])
+                    ),
+                )))
+            if not any(
+                argv[index : index + len(expected)] == expected
+                for expected in candidates
+                for index in range(len(argv) - len(expected) + 1)
+            ):
                 raise StorageRefusal("launch_identity_unverified", "Pi process arguments differ from the durable launch descriptor")
         elif process.get("argv0") != "pi":
             raise StorageRefusal("launch_identity_unverified", "Pi process identity is ambiguous")
@@ -476,6 +527,7 @@ class HerdrPiLaunchAdapter:
             "terminal_id": placed.terminal_id,
         }
         self._effect_command(("herdr", "pane", "rename", endpoint["pane_id"], label), "Herdr Pi canonical pane label")
+        self._placement_environment = env
         return endpoint
 
     def launch(self, spec: AssignmentSpec) -> dict[str, Any]:
@@ -527,7 +579,7 @@ class HerdrPiLaunchAdapter:
                     (
                         "herdr", "agent", "start", str(self.descriptor["routing_name"]), "--kind", "pi",
                         "--pane", endpoint["pane_id"], "--timeout", str(self.startup_timeout_ms), "--",
-                        *pi_start_arguments(self.descriptor),
+                        *pi_start_arguments(self.descriptor, placement_environment=self._placement_environment),
                     ),
                     "Herdr Pi start",
                     timeout=(self.startup_timeout_ms // 1000) + 10,

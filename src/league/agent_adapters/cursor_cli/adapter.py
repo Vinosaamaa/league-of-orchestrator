@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 from ...adapter_types import HARNESS_CAPABILITIES, AdapterContract
 from ...provider_lifecycle import ProviderLifecycle
 from ...storage_types import StorageRefusal
@@ -42,9 +44,14 @@ def _launch_arguments(*, model, effort, state_root, resume_session, **_unused):
 
 
 def _visible_launch_factory(*, options, multiplexer, launch, **_unused):
+    from ...visible_launch import _validate_options
+
+    if launch.get("project_code") is not None:
+        options = replace(options, project_code=launch["project_code"])
+    _validate_options(options)
     resume_session = launch.get("session_id")
     forbidden = (
-        launch.get("project_code"), launch.get("release_root"),
+        launch.get("release_root"),
         launch.get("session_path"), launch.get("parent_session_id"),
         launch.get("parent_session_path"),
     )

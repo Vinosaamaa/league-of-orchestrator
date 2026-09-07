@@ -1,5 +1,34 @@
 # Source provenance
 
+## Issue-#11 failed-launch settlement
+
+The existing `assign block --cleanup-proven` boundary now settles the exact
+pending `failed_launch` obligation in the reservation rollback transaction.
+Previously it could release the reservation while leaving cleanup pending.
+Already-blocked recovery requires the original durable rollback digest and
+exact current assignment version; it leaves the task/request outcome and
+retired agent/callsign unchanged. Exact retries are read-only. Proven Champion
+rollback clears `cleanup_required` rather than retaining a stale true flag.
+
+Focused assignment and visible-launch tests cover pending and historical
+settlement, command retries, competing writers, transaction faults, receipt
+conflicts, foreign policies/owners, existing operations, and retained/shared
+resource refusal. These are synthetic temporary-root proofs only. No schema,
+release identity, installed state, live endpoint, or guide ownership changes.
+
+## Issue-#85 registered direct-launch project metadata
+
+The registered Codex/Cursor factories previously classified `project_code` as
+a forbidden native-session input. They now accept optional display metadata,
+apply an explicit value to driver options, and run the existing option validator
+before allocation or continuation effects. Provider/session restrictions remain
+unchanged. The CLI uses an explicit project code ahead of the catalog fallback
+so the driver and delivered context receive the same name. Full registered
+CLI/factory/driver synthetic coverage proves explicit, catalog, and absent-code
+paths, exact retry, and invalid-code refusal before any command or assignment
+reservation. Token-only no-project helper compatibility remains a separate
+toolkit dependency; no fabricated project metadata is introduced.
+
 ## Issue-#85 token-only Champion launch compatibility
 
 The Codex/Cursor visible-launch adapter now supplies the identity helper's
@@ -2049,3 +2078,35 @@ Two-retired and mixed membership, frozen-row tamper, incomplete/foreign evidence
 capabilities, stale versions, CAS, exact retry, and injected rollback are covered
 using synthetic temporary state. No new schema, lifecycle state machine,
 service, installation, live recovery, or standalone-repository cleanup is added.
+
+Integration with PR #204 updates only the replacement test fixture to use the
+CLI's real `VisibleLaunchOptions` type and defaults, with temporary command/state
+paths. Its incomplete `SimpleNamespace` failed current launch validation before
+the Codex-to-Cursor matrix pair could run. Production validation, other namespace
+fixtures, every matrix pair, and all assertions remain unchanged.
+
+## Issue #84: Pi initial startup transport and safe native diagnostics
+
+The post-PR #202 launch reached an allocated shell pane but never verified a Pi
+session; the owning launch attempt subsequently rolled back its endpoint. A
+truncated-looking command was observed. A macOS 1,024-byte input/readiness race
+remains an unproven hypothesis, not the cause established by this source change.
+
+Synthetic factory regressions reproduced two concrete source defects: initial
+argv duplicated 15 metadata values already passed through Herdr placement's
+native `--env` arguments, and native startup errors on stderr became the opaque
+`launch_adapter_failed`. Initial launch now uses that exact placement environment
+only when it matches the descriptor-derived environment. Pane ID, provider,
+model, effort, extension, trust flag, and create/fork/resume session arguments
+remain explicit. Descriptor bytes/digests and restart argv are unchanged. Both
+initial argv forms remain recognizable only behind the existing exact metadata
+checks; the regression caught and corrected an initially stale full-argv-only
+process check. Wrong environment metadata still prevents activation and briefing.
+
+Bounded strict native error envelopes retain only allowlisted constant startup
+codes as `launch_native_<code>`. Native messages, IDs, arbitrary code values, and
+data are never copied into diagnostics. Malformed, duplicate, nonfinite, mixed,
+or oversized envelopes retain the generic refusal. Focused tests cover exact
+initial launch, retry, same-child restart, mismatched environment, and safe error
+rollback. No sleep, readiness assumption, wrapper, live launch, service change,
+or profile mutation is introduced; installed acceptance remains a separate gate.

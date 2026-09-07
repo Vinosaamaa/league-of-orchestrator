@@ -78,6 +78,7 @@ class RequestResultCommand:
     return_to_requester: bool
     event_id: Optional[str]
     outbox_id: Optional[str]
+    legacy_acceptance_sha256: Optional[str] = None
 
 
 @dataclass(frozen=True)

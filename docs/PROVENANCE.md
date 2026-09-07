@@ -2029,3 +2029,29 @@ existing capability validator and map parse/type/shape failures to
 `provider_launch_routing_mismatch` inside descriptor preparation's transaction.
 Synthetic factory regressions prove no descriptor or endpoint allocation and
 exact reservation rollback for malformed JSON, null, mixed arrays, and objects.
+
+## Issue #84: Pi initial startup transport and safe native diagnostics
+
+The post-PR #202 launch reached an allocated shell pane but never verified a Pi
+session; the owning launch attempt subsequently rolled back its endpoint. A
+truncated-looking command was observed. A macOS 1,024-byte input/readiness race
+remains an unproven hypothesis, not the cause established by this source change.
+
+Synthetic factory regressions reproduced two concrete source defects: initial
+argv duplicated 15 metadata values already passed through Herdr placement's
+native `--env` arguments, and native startup errors on stderr became the opaque
+`launch_adapter_failed`. Initial launch now uses that exact placement environment
+only when it matches the descriptor-derived environment. Pane ID, provider,
+model, effort, extension, trust flag, and create/fork/resume session arguments
+remain explicit. Descriptor bytes/digests and restart argv are unchanged. Both
+initial argv forms remain recognizable only behind the existing exact metadata
+checks; the regression caught and corrected an initially stale full-argv-only
+process check. Wrong environment metadata still prevents activation and briefing.
+
+Bounded strict native error envelopes retain only allowlisted constant startup
+codes as `launch_native_<code>`. Native messages, IDs, arbitrary code values, and
+data are never copied into diagnostics. Malformed, duplicate, nonfinite, mixed,
+or oversized envelopes retain the generic refusal. Focused tests cover exact
+initial launch, retry, same-child restart, mismatched environment, and safe error
+rollback. No sleep, readiness assumption, wrapper, live launch, service change,
+or profile mutation is introduced; installed acceptance remains a separate gate.

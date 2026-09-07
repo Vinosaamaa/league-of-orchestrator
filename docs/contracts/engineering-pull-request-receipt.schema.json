@@ -1,0 +1,107 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:interview-arc:contracts:engineering-pull-request-receipt:1",
+  "title": "Engineering Pull Request Receipt canonical frontmatter",
+  "description": "A compact factual timeline receipt for one merged pull request. Rich engineering narrative remains in the separate Engineering Journal record contract.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion", "repository", "pr", "title", "classification",
+    "richRecordRefs", "reconstructed", "confidence", "unknowns", "headCommit",
+    "mergeCommit", "mergedAt", "sources", "verification", "visibility",
+    "publicationEligibility"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "repository": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+$" },
+    "pr": { "type": "integer", "minimum": 1 },
+    "title": { "type": "string", "minLength": 1, "maxLength": 160 },
+    "classification": {
+      "enum": [
+        "none", "change-note", "adr", "architecture-review",
+        "feature-retrospective", "postmortem", "capability-dossier"
+      ]
+    },
+    "richRecordRefs": { "$ref": "#/$defs/recordRefs" },
+    "reconstructed": { "type": "boolean" },
+    "confidence": { "enum": ["verified", "high", "medium", "low", "unknown"] },
+    "unknowns": { "$ref": "#/$defs/stringList" },
+    "headCommit": { "$ref": "#/$defs/nullableCommit" },
+    "mergeCommit": { "$ref": "#/$defs/nullableCommit" },
+    "mergedAt": {
+      "type": ["string", "null"],
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$"
+    },
+    "sources": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 32,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["label", "url", "kind"],
+        "properties": {
+          "label": { "type": "string", "minLength": 1, "maxLength": 160 },
+          "url": { "type": "string", "pattern": "^https://", "maxLength": 2048 },
+          "kind": { "enum": ["issue", "pull-request", "commit", "release", "run", "documentation"] }
+        }
+      }
+    },
+    "verification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "evidenceRefs"],
+      "properties": {
+        "state": { "enum": ["verified", "not-recorded"] },
+        "evidenceRefs": { "$ref": "#/$defs/stringList" }
+      }
+    },
+    "visibility": { "const": "public-safe" },
+    "publicationEligibility": { "const": "eligible" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "classification": { "const": "none" } } },
+      "then": { "properties": { "richRecordRefs": { "maxItems": 0 } } },
+      "else": { "properties": { "richRecordRefs": { "minItems": 1 } } }
+    },
+    {
+      "if": {
+        "anyOf": [
+          { "properties": { "headCommit": { "type": "string" } }, "required": ["headCommit"] },
+          { "properties": { "mergeCommit": { "type": "string" } }, "required": ["mergeCommit"] },
+          { "properties": { "mergedAt": { "type": "string" } }, "required": ["mergedAt"] }
+        ]
+      },
+      "then": {
+        "properties": {
+          "verification": {
+            "properties": { "state": { "const": "verified" }, "evidenceRefs": { "minItems": 1 } }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "stringList": {
+      "type": "array",
+      "maxItems": 32,
+      "items": { "type": "string", "minLength": 1, "maxLength": 512 },
+      "uniqueItems": true
+    },
+    "recordRefs": {
+      "type": "array",
+      "maxItems": 16,
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*@[1-9]\\d*$",
+        "maxLength": 180
+      },
+      "uniqueItems": true
+    },
+    "nullableCommit": {
+      "type": ["string", "null"],
+      "pattern": "^[0-9a-f]{40}$"
+    }
+  }
+}

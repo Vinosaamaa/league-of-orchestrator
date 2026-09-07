@@ -2312,3 +2312,7 @@ steering, not a broker replay. Remove this invalid timing sample; require the
 entire captured batch count, not just its limited first page, to match the
 corpus. Existing exact-invocation broker retry tests remain authoritative for
 deduplication. No production prompt identity or result guard changes.
+
+## Engineering gate (#217)
+
+The receipt validator and immutable v1 schemas are reused from Interview Arc Live at `85c18e0e45824cb15a0bedb92f212f4b22207ef2`. The receipt scaffold is reused from Interview Arc Voice at `a17be67cd9659a1769d3a8ed254e9bd04c89afba` with League repository identity. The deliberate addition is repository CI and Engineering publication metadata; orchestration runtime behavior is unchanged. Synthetic gate tests verify accepted and rejected receipts.

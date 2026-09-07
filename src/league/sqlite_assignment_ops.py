@@ -1470,6 +1470,105 @@ def reconcile_assignment_runtime(
     )
 
 
+def _failed_launch_obligation(store: Any, assignment: Any) -> Any:
+    obligation = store.connection.execute(
+        "SELECT * FROM cleanup_obligations WHERE task_id=?", (assignment["task_id"],)
+    ).fetchone()
+    if obligation is not None and (
+        obligation["cleanup_obligation_id"] != f"cleanup:{assignment['task_id']}"
+        or obligation["required_policy"] != "failed_launch"
+        or obligation["owner_id"] is not None
+        or obligation["task_class"] is not None
+        or obligation["disposition"] is not None
+        or obligation["cleanup_state"] not in {"pending", "cleanup_pending", "cleanup_completed"}
+    ):
+        raise StorageRefusal("cleanup_conflict", "failed launch settlement cannot consume another cleanup policy")
+    if obligation is not None and store.connection.execute(
+        "SELECT 1 FROM cleanup_operations WHERE cleanup_obligation_id=? LIMIT 1",
+        (obligation["cleanup_obligation_id"],),
+    ).fetchone() is not None:
+        raise StorageRefusal("cleanup_conflict", "failed launch settlement cannot bypass a cleanup operation")
+    return obligation
+
+
+def _validate_failed_launch_rollback(
+    store: Any, assignment: Any, failure_class: str, failure_digest: str
+) -> None:
+    """Validate partial-launch identity before any settlement or retry writes."""
+    if (
+        assignment["failure_class"] not in {None, failure_class}
+        or (assignment["state"] in {"blocked", "cleanup_pending"} and assignment["failure_class"] != failure_class)
+        or assignment["cleanup_receipt"] not in {None, failure_digest}
+    ):
+        raise StorageRefusal("receipt_conflict", "failed launch receipt differs from history")
+    task = store.connection.execute(
+        "SELECT current_owner_agent_id,state FROM tasks WHERE task_id=?", (assignment["task_id"],)
+    ).fetchone()
+    agent = store.connection.execute(
+        "SELECT task_id,role,retired_at FROM agent_instances WHERE agent_id=?", (assignment["champion_agent_id"],)
+    ).fetchone()
+    reservation = store.connection.execute(
+        "SELECT * FROM callsign_assignments WHERE callsign_assignment_id=?",
+        (f"callsign-assignment:{assignment['task_assignment_id']}",),
+    ).fetchone()
+    task_identity_mismatch = (
+        task is None or task["current_owner_agent_id"] != assignment["champion_agent_id"]
+        or task["state"] != {
+            "pending": "pending", "launching": "accepted",
+            "cleanup_pending": "blocked", "blocked": "blocked",
+        }.get(assignment["state"])
+    )
+    owner_identity_mismatch = (
+        agent is None or agent["task_id"] != assignment["task_id"] or agent["role"] != "champion"
+    )
+    reservation_identity_mismatch = (
+        reservation is None or reservation["agent_id"] != assignment["champion_agent_id"]
+        or reservation["scope_kind"] != "task" or reservation["scope_id"] != assignment["task_id"]
+        or reservation["role"] != "champion" or reservation["callsign"] != assignment["callsign"]
+    )
+    if task_identity_mismatch or owner_identity_mismatch or reservation_identity_mismatch:
+        raise StorageRefusal("cleanup_owner_refused", "failed launch owner or reservation identity changed")
+    if reservation["state"] == "rolled_back":
+        if reservation["failure_receipt_digest"] != failure_digest or agent["retired_at"] is None:
+            raise StorageRefusal("receipt_conflict", "failed launch recovery requires the exact rollback receipt")
+    elif reservation["state"] != "reserved" or agent["retired_at"] is not None or assignment["state"] == "blocked":
+        raise StorageRefusal("receipt_conflict", "failed launch reservation has not been rolled back exactly")
+    if (
+        assignment["runtime_instance_id"] is not None or assignment["acceptance_receipt_json"] is not None
+        or reservation["runtime_instance_id"] is not None
+        or store.connection.execute(
+            "SELECT 1 FROM runtime_instances WHERE actor_agent_id=? AND status<>'closed' LIMIT 1",
+            (assignment["champion_agent_id"],),
+        ).fetchone() is not None
+        or store.connection.execute(
+            "SELECT 1 FROM runtime_bindings WHERE task_id=? AND state<>'closed' LIMIT 1", (assignment["task_id"],)
+        ).fetchone() is not None
+        or store.connection.execute(
+            "SELECT 1 FROM task_resources WHERE task_id=? AND state='active' LIMIT 1", (assignment["task_id"],)
+        ).fetchone() is not None
+    ):
+        raise StorageRefusal("cleanup_unproven", "partial launch settlement cannot bypass registered runtime or resource cleanup")
+
+
+def _settle_failed_launch_obligation(
+    store: Any, assignment_id: str, obligation: Any, digest: str, at: str
+) -> None:
+    if obligation is None:
+        return  # No cleanup was scheduled; preserve ordinary no-effect failure accounting.
+    changed = store.connection.execute(
+        """UPDATE cleanup_obligations SET cleanup_state='cleanup_completed',
+           next_action='None',version=version+1,updated_at=?
+           WHERE cleanup_obligation_id=? AND version=? AND cleanup_state IN ('pending','cleanup_pending')""",
+        (at, obligation["cleanup_obligation_id"], obligation["version"]),
+    )
+    if changed.rowcount != 1:
+        raise StorageRefusal("cleanup_conflict", "failed launch obligation changed before settlement")
+    store.connection.execute(
+        "UPDATE task_assignments SET cleanup_receipt=?,cleanup_required=0 WHERE task_assignment_id=?",
+        (digest, assignment_id),
+    )
+
+
 def block_assignment(
     store: Any,
     assignment_id: str,
@@ -1482,14 +1581,62 @@ def block_assignment(
     _time(at, "assignment failure time")
     if not failure_class:
         raise StorageRefusal("invalid_assignment_failure", "assignment failure class is required")
+    # Preserve the original producer's digest for historical rollback recovery.
+    failure_digest = hashlib.sha256(
+        stable_json({
+            "assignment_id": assignment_id,
+            "failure_class": failure_class,
+            "cleanup_proven": cleanup_proven,
+        }).encode("utf-8")
+    ).hexdigest()
     state = "cleanup_pending" if cleanup_required and not cleanup_proven else "blocked"
     try:
         with store._transaction():
             assignment = store.connection.execute(
                 "SELECT * FROM task_assignments WHERE task_assignment_id=?", (assignment_id,)
             ).fetchone()
+            obligation = None
+            if assignment is not None and assignment["assignment_role"] == "champion" and state == "blocked":
+                obligation = _failed_launch_obligation(store, assignment)
+                if obligation is not None and not cleanup_proven:
+                    raise StorageRefusal("cleanup_unproven", "existing failed launch cleanup requires proven rollback")
+                if cleanup_proven:
+                    _validate_failed_launch_rollback(store, assignment, failure_class, failure_digest)
+                    cleanup_required = False
+            if (
+                assignment is not None and assignment["state"] == "blocked"
+                and assignment["assignment_role"] == "champion" and cleanup_proven
+                and assignment["cleanup_receipt"] == failure_digest
+                and int(assignment["version"]) in {expected_version, expected_version + 1}
+            ):
+                if obligation is None:
+                    raise StorageRefusal("receipt_conflict", "settlement receipt lost its cleanup obligation")
+                if obligation is not None and obligation["cleanup_state"] != "cleanup_completed":
+                    raise StorageRefusal("cleanup_conflict", "settlement receipt has unfinished cleanup")
+                return {
+                    "assignment_id": assignment_id, "state": "blocked",
+                    "version": int(assignment["version"]), "failure_class": failure_class,
+                    "cleanup_required": False, "cleanup_proven": True, "idempotent": True,
+                }
             if assignment is None or int(assignment["version"]) != expected_version:
                 raise StorageRefusal("assignment_conflict", "assignment failure expected-version failed")
+            if assignment["state"] == "blocked" and cleanup_proven and assignment["assignment_role"] == "champion":
+                if (
+                    assignment["cleanup_receipt"] is not None or obligation is None
+                    or obligation["cleanup_state"] not in {"pending", "cleanup_pending"}
+                ):
+                    raise StorageRefusal("receipt_conflict", "failed launch recovery requires the exact rollback receipt")
+                _settle_failed_launch_obligation(store, assignment_id, obligation, failure_digest, at)
+                store.connection.execute(
+                    """UPDATE task_assignments SET version=version+1,updated_at=?
+                       WHERE task_assignment_id=? AND version=?""",
+                    (at, assignment_id, expected_version),
+                )
+                return {
+                    "assignment_id": assignment_id, "state": "blocked",
+                    "version": expected_version + 1, "failure_class": failure_class,
+                    "cleanup_required": False, "cleanup_proven": True, "idempotent": False,
+                }
             if assignment["state"] not in {"pending", "launching", "cleanup_pending"}:
                 raise StorageRefusal("assignment_conflict", "assignment is not fail-recoverable")
             next_version = expected_version + 1
@@ -1513,15 +1660,6 @@ def block_assignment(
                     raise StorageRefusal(
                         "assignment_incomplete", "assignment has no callsign reservation"
                     )
-                failure_digest = hashlib.sha256(
-                    stable_json(
-                        {
-                            "assignment_id": assignment_id,
-                            "failure_class": failure_class,
-                            "cleanup_proven": cleanup_proven,
-                        }
-                    ).encode("utf-8")
-                ).hexdigest()
                 _rollback_reserved_in_transaction(
                     store,
                     callsign_assignment,
@@ -1529,6 +1667,8 @@ def block_assignment(
                     failure_digest,
                     at,
                 )
+                if cleanup_proven and assignment["assignment_role"] == "champion":
+                    _settle_failed_launch_obligation(store, assignment_id, obligation, failure_digest, at)
                 if assignment["assignment_role"] == "hidden-worker":
                     event_id = f"assignment:{assignment_id}:{next_version}:blocked"
                     outbox_id = f"outbox:{assignment_id}:{next_version}:blocked"

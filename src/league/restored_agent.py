@@ -85,7 +85,8 @@ class SupervisorWatcherAdapter:
             "session_ref": str(presentation["session_ref"]),
         }
 
-    def preflight(self, presentation: Mapping[str, Any]) -> Mapping[str, Any]:
+    def preflight(self, presentation: Mapping[str, Any], *,
+                  pending_repair: Mapping[str, Any] | None = None) -> Mapping[str, Any]:
         registration = self.store.watcher_registration(str(presentation["agent_id"]))
         locator = (
             str(registration["wake_locator"])
@@ -112,6 +113,23 @@ class SupervisorWatcherAdapter:
             "runtime_instance_id": str(presentation["runtime_instance_id"]),
             "session_ref": str(presentation["session_ref"]),
         }
+        if pending_repair is not None:
+            # A prior session is admissible only from the exact durable pending repair.
+            old = {**exact, "session_ref": pending_repair["session_ref"],
+                   "runtime_generation": pending_repair["runtime_generation"],
+                   "endpoint": pending_repair["endpoint"], "fence": pending_repair["fence"]}
+            current = {**exact, "runtime_generation": pending_repair["current_generation"],
+                       "endpoint": pending_repair["endpoint"], "fence": pending_repair["fence"] + 1}
+            expected = old if response.get("session_ref") == old["session_ref"] else current
+            if (not isinstance(registration, Mapping)
+                or registration.get("runtime_instance_id") != exact["runtime_instance_id"]
+                or registration.get("wake_locator") != pending_repair["locator"]
+                or locator != pending_repair["locator"]
+                or registration.get("fence") != expected["fence"]
+                or _timestamp(str(registration["leased_until"])) <= self.at
+                or any(response.get(key) != value for key, value in expected.items())):
+                raise StorageRefusal("restored_agent_watcher_mismatch", "pending repair watcher evidence changed")
+            exact = expected
         if (
             response.get("callsign") != presentation["tokens"]["sidebar_name"]
             or any(response.get(key) != value for key, value in exact.items())
@@ -127,6 +145,7 @@ class SupervisorWatcherAdapter:
             "fence": int(response["fence"]),
             "runtime_generation": response.get("runtime_generation"),
             "endpoint": response.get("endpoint"),
+            "session_ref": response.get("session_ref"),
             "registration": None if registration is None else dict(registration),
         }
 

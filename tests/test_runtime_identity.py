@@ -42,14 +42,16 @@ class Native:
         self.reads += 1
         return {"session_ref": self.thread, "session_source": "herdr:codex",
                 "agent": {"agent": "codex", "agent_status": "working"},
+                "process": {"argv": ["/synthetic/bin/codex"]},
                 "process_fingerprint": str(self.reads) if self.change_process else "process:1"}
 
 
 class Watcher:
     fail = False
 
-    def preflight(self, *_):
-        return {"fence": 1}
+    def preflight(self, *_, **kwargs):
+        return {"fence": 1, "runtime_generation": "terminal:old", "endpoint": "w1:p1",
+                "session_ref": "terminal-session", "locator": "unix:/synthetic/watcher.sock"}
 
     def bind(self, *_):
         if self.fail:

@@ -6,6 +6,7 @@ Native inspection is read-only; normal hooks never invoke this recovery.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Mapping
 
 from .provider_lifecycle import provider_lifecycle
@@ -68,18 +69,21 @@ def repair_shotcaller_identity(
     presentation = {
         "agent_id": request["agent_id"], "runtime_instance_id": request["runtime_instance_id"],
         "session_ref": binding["session_ref"], "cwd": cwd,
-        "tokens": {"sidebar_name": actor["callsign"]},
+        "tokens": {"sidebar_name": actor["callsign"]}, "verify_native_process": True,
     }
     watchers = watcher or SupervisorWatcherAdapter(store, at)
-    preflight = watchers.preflight(presentation)
     before = multiplexer.inspect_restored(presentation, endpoint)
     after = multiplexer.inspect_restored(presentation, endpoint)
     for observation in (before, after):
+        process = observation.get("process")
+        argv = process.get("argv") if isinstance(process, Mapping) else None
         if (
             observation["session_ref"] != request["thread_id"]
             or observation["session_source"] != "herdr:codex"
             or observation["agent"].get("agent") != "codex"
             or observation["agent"].get("agent_status") not in {"working", "idle", "waiting"}
+            or not isinstance(argv, list) or not argv
+            or not isinstance(argv[0], str) or Path(argv[0]).name != "codex"
         ):
             raise StorageRefusal("runtime_identity_repair_refused", "native Codex session did not verify")
     if before["process_fingerprint"] != after["process_fingerprint"]:
@@ -87,6 +91,19 @@ def repair_shotcaller_identity(
     generation = restored_runtime_generation("herdr", endpoint.terminal_id, request["thread_id"])
     proof = {"terminal_id": endpoint.terminal_id, "process_fingerprint": after["process_fingerprint"],
              "session_source": after["session_source"], "cwd": cwd, "stable_readbacks": 2}
+    pending = store.pending_shotcaller_identity_repair(dict(request), generation, proof)
+    preflight = (watchers.preflight(presentation) if pending is None else
+                 watchers.preflight(presentation, pending_repair=pending))
+    if pending is None and binding["session_ref"] == request["expected_session_ref"] and (
+        preflight.get("runtime_generation") != request["expected_generation"]
+        or preflight.get("endpoint") != request["endpoint"]
+        or preflight.get("session_ref") != request["expected_session_ref"]
+        or type(preflight.get("fence")) is not int or preflight["fence"] < 1
+        or not isinstance(preflight.get("locator"), str) or not preflight["locator"].startswith("unix:")
+    ):
+        raise StorageRefusal("runtime_identity_repair_refused", "prior watcher identity did not verify")
+    proof["watcher"] = {key: preflight.get(key) for key in
+                        ("locator", "fence", "runtime_generation", "endpoint", "session_ref")}
     runtime = store.repair_shotcaller_identity(dict(request), generation, proof, at)
     presentation["session_ref"] = request["thread_id"]
     try:

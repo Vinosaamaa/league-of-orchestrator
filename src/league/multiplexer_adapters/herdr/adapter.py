@@ -51,7 +51,8 @@ def _session_value(item: Mapping[str, Any]) -> Any:
     return session.get("value") if isinstance(session, Mapping) else None
 
 
-def _foreground_process(runner: CommandRunner, info: Any, agent: Mapping[str, Any]) -> dict[str, Any]:
+def _foreground_process(runner: CommandRunner, info: Any, agent: Mapping[str, Any],
+                        *, verify_native: bool = False) -> dict[str, Any]:
     """Bind current Herdr's PID inventory to OS start/parent/group evidence.
 
     A Codex resume launcher may remain alongside its one direct Codex child.
@@ -66,7 +67,7 @@ def _foreground_process(runner: CommandRunner, info: Any, agent: Mapping[str, An
     ):
         refuse()
     # Older adapters may already supply exact process-start evidence.
-    if len(processes) == 1 and isinstance(processes[0].get("process_start"), str) and processes[0]["process_start"]:
+    if not verify_native and len(processes) == 1 and isinstance(processes[0].get("process_start"), str) and processes[0]["process_start"]:
         return dict(processes[0])
     pids = [p.get("pid") for p in processes]
     if any(type(pid) is not int or pid <= 0 for pid in pids) or len(set(pids)) != len(pids):
@@ -410,7 +411,8 @@ class HerdrMultiplexerAdapter:
             (self.binary, "pane", "process-info", "--pane", endpoint.pane_id),
             "Herdr restored process inspection",
         ).get("process_info")
-        process = _foreground_process(self.runner, info, agent)
+        process = _foreground_process(self.runner, info, agent,
+                                      verify_native=descriptor.get("verify_native_process") is True)
         if (
             agent.get("workspace_id") != endpoint.workspace_id
             or agent.get("tab_id") != endpoint.tab_id

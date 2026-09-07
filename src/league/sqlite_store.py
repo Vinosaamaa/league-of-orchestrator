@@ -4086,6 +4086,10 @@ class SQLiteStorage(SQLiteTransactionCore):
             at,
         )
 
+    def pending_shotcaller_identity_repair(self, request: dict[str, Any], generation: str,
+                                           proof: dict[str, Any]) -> Optional[dict[str, Any]]:
+        return sqlite_runtime_ops.pending_shotcaller_identity_repair(self, request, generation, proof)
+
     def repair_shotcaller_identity(self, request: dict[str, Any], generation: str,
                                   proof: dict[str, Any], at: str) -> dict[str, Any]:
         return sqlite_runtime_ops.repair_shotcaller_identity(self, request, generation, proof, at)

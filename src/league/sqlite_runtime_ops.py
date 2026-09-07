@@ -261,6 +261,50 @@ def repaired_bootstrap_publication(store: Any, publication: Mapping[str, Any],
     return publication
 
 
+def pending_shotcaller_identity_repair(store: Any, request: dict[str, Any],
+                                       generation: str, proof: dict[str, Any]) -> Optional[dict[str, Any]]:
+    """Read only the exact committed repair's still-open watcher obligation."""
+    event_id = "runtime:identity-repair:" + hashlib.sha256(_json(request).encode()).hexdigest()
+    row = store.connection.execute(
+        "SELECT detail_json FROM events WHERE event_id=?", (event_id,)
+    ).fetchone()
+    if row is None:
+        return None
+    obligation = store.connection.execute(
+        "SELECT * FROM obligations WHERE dedupe_key=? AND state='open'",
+        ("runtime-restore:" + request["runtime_instance_id"],),
+    ).fetchone()
+    if obligation is None:
+        return None
+    detail = json.loads(row["detail_json"])
+    runtime = store.connection.execute(
+        """SELECT r.*,a.thread_id,a.version,a.retired_at FROM runtime_instances r
+           JOIN agent_instances a ON a.agent_id=r.actor_agent_id
+           WHERE r.runtime_instance_id=?""", (request["runtime_instance_id"],)
+    ).fetchone()
+    if (detail.get("request") != request or runtime is None
+        or runtime["actor_agent_id"] != request["agent_id"]
+        or runtime["thread_id"] != request["thread_id"] or runtime["session_ref"] != request["thread_id"]
+        or runtime["runtime_generation"] != generation or runtime["endpoint"] != request["endpoint"]
+        or runtime["version"] != request["expected_version"] + 1
+        or runtime["status"] not in {"active", "idle"} or not runtime["verified"]
+        or runtime["retired_at"] is not None
+        or obligation["owner_agent_id"] != request["agent_id"]
+        or obligation["aggregate_id"] != request["runtime_instance_id"]
+        or json.loads(obligation["details_json"]).get("next_action") !=
+           "retry runtime repair-shotcaller-identity with the exact original arguments"
+        or any(detail.get("proof", {}).get(key) != value for key, value in proof.items())):
+        raise StorageRefusal("runtime_identity_repair_conflict", "pending repair evidence no longer matches")
+    watcher = detail.get("proof", {}).get("watcher")
+    if (not isinstance(watcher, dict) or type(watcher.get("fence")) is not int
+        or watcher["fence"] < 1 or watcher.get("runtime_generation") != request["expected_generation"]
+        or watcher.get("session_ref") != request["expected_session_ref"]
+        or watcher.get("endpoint") != request["endpoint"]
+        or not isinstance(watcher.get("locator"), str) or not watcher["locator"].startswith("unix:")):
+        raise StorageRefusal("runtime_identity_repair_conflict", "pending repair lacks exact prior watcher evidence")
+    return {**watcher, "current_generation": generation}
+
+
 def repair_shotcaller_identity(store: Any, request: dict[str, Any], generation: str,
                               proof: dict[str, Any], at: str) -> dict[str, Any]:
     """CAS a malformed imported identity, keeping ownership and historical receipts intact."""
@@ -319,7 +363,10 @@ def repair_shotcaller_identity(store: Any, request: dict[str, Any], generation: 
         if previous is not None:
             detail = json.loads(previous["detail_json"])
             if (detail["request"] != request or row["thread_id"] != request["thread_id"]
-                or row["session_ref"] != request["thread_id"] or row["runtime_generation"] != generation):
+                or row["session_ref"] != request["thread_id"] or row["runtime_generation"] != generation
+                or row["version"] != request["expected_version"] + 1
+                or any(detail.get("proof", {}).get(key) != proof.get(key) for key in
+                       ("terminal_id", "process_fingerprint", "session_source", "cwd", "stable_readbacks"))):
                 raise StorageRefusal("runtime_identity_repair_conflict", "completed repair no longer matches live state")
             return {**receipt, "idempotent": True}
         if (row["version"] != request["expected_version"] or row["thread_id"] != request["expected_session_ref"]

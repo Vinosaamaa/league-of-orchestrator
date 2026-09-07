@@ -1,5 +1,27 @@
 # Source provenance
 
+## Issue #66 shipping repair
+
+Identity repair now requires OS-verified native Codex executable evidence even
+when pane metadata includes a cached process start. The supported launcher and
+single child remain valid. A committed repair records its prior watcher binding;
+only its exact open obligation, unchanged native proof and canonical version can
+admit the old session for rebinding. Ordinary watcher preflight remains strict.
+
+Champion event sends use two bounded delivery workers with no backlog, separate
+from control and recovery workers. Admission failure leaves delivery pending;
+accepted connections receive success only after the native send completes.
+Execution rechecks the binding and fence, and shutdown drains accepted sends.
+Detached transitions notify the exact leased supervisor through its Unix socket
+while retaining canonical direct delivery, owner-active deferral, Calm policy and
+outbox deduplication. They no longer wait for the recovery sweep solely because
+the owner is detached.
+
+Synthetic regressions in `tests/test_issue66_shipping.py` and
+`tests/test_supervisor_delivery.py` cover these deliberate differences, including
+sub-second ping during slow sends and immediate detached attention delivery.
+They do not certify installed or live acceptance.
+
 ## Issue #66 legacy Shotcaller identity recovery
 
 The native runtime-registration CLI now validates the provider session and its

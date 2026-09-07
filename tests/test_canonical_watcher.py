@@ -408,30 +408,14 @@ def _register_garen_runtime(
     harness_kind: str = "codex-thread",
 ) -> str:
     runtime_id = f"runtime:installed:{suffix}"
-    _league(
-        state,
-        "hook",
-        "register-runtime",
-        "--runtime-instance-id",
-        runtime_id,
-        "--actor-agent-id",
-        SHOTCALLER_ID,
-        "--harness-kind",
-        harness_kind,
-        "--backend-kind",
-        "herdr",
-        "--session-ref",
-        session_ref or f"session:{suffix}",
-        "--endpoint",
-        "garen",
-        "--runtime-generation",
-        f"generation:{suffix}",
-        "--status",
-        "active",
-        "--verified",
-        "--at",
-        AT2,
-    )
+    # These hooks exercise synthetic opaque adapter identities. Native CLI
+    # session/actor validation has separate coverage in test_runtime_identity.
+    with SQLiteStorage(state) as store:
+        store.register_runtime(RuntimeRegistrationCommand(
+            runtime_id, SHOTCALLER_ID, harness_kind, "herdr",
+            session_ref or f"session:{suffix}", "garen", f"generation:{suffix}",
+            "active", True, AT2,
+        ))
     return runtime_id
 
 
@@ -443,30 +427,11 @@ def _register_champion_runtime(
     harness_kind: str = "codex-thread",
 ) -> str:
     runtime_id = f"runtime:champion:{suffix}"
-    _league(
-        state,
-        "hook",
-        "register-runtime",
-        "--runtime-instance-id",
-        runtime_id,
-        "--actor-agent-id",
-        CHAMPION_ID,
-        "--harness-kind",
-        harness_kind,
-        "--backend-kind",
-        "herdr",
-        "--session-ref",
-        session_ref,
-        "--endpoint",
-        "synthetic-champion",
-        "--runtime-generation",
-        f"generation:{suffix}",
-        "--status",
-        "active",
-        "--verified",
-        "--at",
-        AT2,
-    )
+    with SQLiteStorage(state) as store:
+        store.register_runtime(RuntimeRegistrationCommand(
+            runtime_id, CHAMPION_ID, harness_kind, "herdr", session_ref,
+            "synthetic-champion", f"generation:{suffix}", "active", True, AT2,
+        ))
     return runtime_id
 
 
@@ -2347,6 +2312,7 @@ def test_native_provider_hooks_are_inert_until_exact_binding_then_activate(
                 "tool_name": "Write",
                 "tool_use_id": "tool:codex:bootstrap",
                 "tool_input": {"path": "synthetic.txt"},
+                "cwd": str(root.resolve()),
             }
             stop_detail = {"stop_hook_active": True}
             prompt_allow: dict[str, object] = {}
@@ -2367,6 +2333,7 @@ def test_native_provider_hooks_are_inert_until_exact_binding_then_activate(
             pretool_detail = {
                 "tool_name": "write",
                 "tool_input": {"path": "synthetic.txt"},
+                "cwd": str(root.resolve()),
             }
             stop_detail = {}
             prompt_allow = {"binding": "unbound"}

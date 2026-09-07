@@ -195,6 +195,9 @@ class RuntimeBindingStorage(Protocol):
         at: str,
     ) -> dict[str, Any]: ...
 
+    def pending_shotcaller_identity_repair(self, request: dict[str, Any], generation: str,
+                                          proof: dict[str, Any]) -> Optional[dict[str, Any]]: ...
+
     def repair_shotcaller_identity(self, request: dict[str, Any], generation: str,
                                   proof: dict[str, Any], at: str) -> dict[str, Any]: ...
 

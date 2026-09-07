@@ -2029,3 +2029,23 @@ existing capability validator and map parse/type/shape failures to
 `provider_launch_routing_mismatch` inside descriptor preparation's transaction.
 Synthetic factory regressions prove no descriptor or endpoint allocation and
 exact reservation rollback for malformed JSON, null, mixed arrays, and objects.
+
+## Issue #8: retained retired-original rollover proof
+
+Deliberate difference: an expired switched rollover snapshot no longer rejects
+an original solely because supported replacement or exact-thread continuation
+has retired it. Refresh validates the actual completed lifecycle receipts and
+current terminal/successor identities, retains the original frozen membership
+and binding digest, and records `retired_handoff_satisfied` in the existing
+refresh receipt. No runtime, callsign, task, owner, delivery, archive, or prior
+snapshot identity is rewritten. Live reconciliation of a retired original still
+refuses; predecessor drain and remaining obligations retain their own gates.
+
+The registered retired-original test first reproduced the missing proof gate
+using real replacement and cleanup/reopen/resume service flows. Focused red/green
+tests also exposed a terminal-proof change during final observation: refresh
+now rechecks that proof before committing, with transaction rollback on mismatch.
+Two-retired and mixed membership, frozen-row tamper, incomplete/foreign evidence,
+capabilities, stale versions, CAS, exact retry, and injected rollback are covered
+using synthetic temporary state. No new schema, lifecycle state machine,
+service, installation, live recovery, or standalone-repository cleanup is added.

@@ -800,21 +800,41 @@ def _context(
             (snapshot["snapshot_id"],),
         )
     ]
+    if _snapshot_digest(old_rows) != snapshot["digest"] or any(
+        _snapshot_row_digest(snapshot["snapshot_id"], int(snapshot["snapshot_version"]),
+            {key: value for key, value in row.items() if key != "row_digest"})
+        != row["row_digest"] for row in old_rows
+    ):
+        raise StorageRefusal("snapshot_refresh_set_changed", "frozen snapshot integrity changed")
     current_rows = _snapshot_rows(store, squad_id)
     old_identity = [
         (row["champion_agent_id"], row["task_id"], row["callsign"])
         for row in old_rows
     ]
-    current_identity = [
-        (row["champion_agent_id"], row["task_id"], row["callsign"])
-        for row in current_rows
-    ]
+    terminal = []
+    current_by_agent = {row["champion_agent_id"]: row for row in current_rows}
+    from .rollover_terminal import retired_original
+    for row in old_rows:
+        if row["champion_agent_id"] not in current_by_agent:
+            retired = store.agent_status(row["champion_agent_id"])
+            if retired is None or retired["retired_at"] is None:
+                raise StorageRefusal("snapshot_refresh_set_changed", "current active descendants differ from the expired frozen set")
+            terminal.append(retired_original(store, operation, row))
+    replacement_ids = {item["successor_agent_id"] for item in terminal}
+    frozen_ids = {row["champion_agent_id"] for row in old_rows}
+    if replacement_ids & frozen_ids:
+        raise StorageRefusal("snapshot_terminal_proof_invalid", "replacement overlaps frozen membership")
+    current_rows = [row for row in current_rows if row["champion_agent_id"] not in replacement_ids]
+    retained_ids = {item["champion_agent_id"] for item in terminal}
+    current_rows.extend(dict(row) for row in old_rows if row["champion_agent_id"] in retained_ids)
+    current_rows.sort(key=lambda row: row["champion_agent_id"])
+    current_identity = [(row["champion_agent_id"], row["task_id"], row["callsign"]) for row in current_rows]
     if old_identity != current_identity or len(old_rows) != int(snapshot["total_count"]):
         raise StorageRefusal(
             "snapshot_refresh_set_changed",
             "current active descendants differ from the expired frozen set",
         )
-    descendants = _descendant_context(store, operation, current_rows, old_rows)
+    descendants = _descendant_context(store, operation, [row for row in current_rows if row["champion_agent_id"] not in retained_ids], old_rows)
     canonical_digest = digest(
         {
             "operation_id": operation_id,
@@ -824,6 +844,7 @@ def _context(
             "owner_fence": int(squad["owner_fence"]),
             "rows": current_rows,
             "descendants": descendants,
+            "terminal": terminal,
         }
     )
     return {
@@ -832,6 +853,7 @@ def _context(
         "source_snapshot": _snapshot_value(snapshot),
         "current_rows": current_rows,
         "descendants": descendants,
+        "terminal": terminal,
         "canonical_digest": canonical_digest,
         "squad_version": int(squad["version"]),
     }
@@ -1318,7 +1340,7 @@ def refresh(
                 row["champion_agent_id"]: row
                 for row in post_context["current_rows"]
             }
-            if set(before_rows) != set(after_rows) or any(
+            if context["terminal"] != post_context["terminal"] or set(before_rows) != set(after_rows) or any(
                 (
                     before_rows[agent_id]["binding_digest"]
                     != adoption_by_agent[agent_id]["pre_adoption_binding_digest"]
@@ -1431,10 +1453,12 @@ def refresh(
                     }
                     for descendant in post_context["descendants"]
                 ],
-                "progress_bindings": [
-                    descendant["progress"]
-                    for descendant in post_context["descendants"]
-                ],
+                "progress_bindings": sorted([
+                    descendant["progress"] for descendant in post_context["descendants"]
+                ] + [
+                    {key: item[key] for key in ("champion_agent_id", "task_id", "state", "reconciliation_id", "receipt_digest")}
+                    for item in post_context["terminal"]
+                ], key=lambda item: item["champion_agent_id"]),
                 "route_adoptions": route_adoptions,
                 "canonical_digest": canonical_digest,
                 "refreshed_canonical_digest": post_context["canonical_digest"],

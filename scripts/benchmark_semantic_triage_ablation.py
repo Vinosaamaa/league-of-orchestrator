@@ -619,26 +619,10 @@ def _capture_with_hook_process(
         if completed.returncode != 0 or json.loads(completed.stdout) != {}:
             raise RuntimeError(completed.stderr or "installed prompt hook failed")
         hook_durations.append((completed_ns - started_ns) / 1_000_000)
-    duplicate = {
-        "session_id": MODEL_SESSION_REF,
-        "turn_id": f"benchmark-turn-{cases[0]['id']}",
-        "hook_event_name": "UserPromptSubmit",
-        "prompt": cases[0]["prompt"],
-    }
-    duplicate_started_ns = time.perf_counter_ns()
-    duplicate_result = subprocess.run(
-        [str(watcher), "codex-user-prompt-hook"],
-        input=_stable_json(duplicate),
-        capture_output=True,
-        text=True,
-        env=environment,
-        timeout=30,
-        check=False,
-    )
-    duplicate_completed_ns = time.perf_counter_ns()
-    capture_completed_ns = duplicate_completed_ns
-    if duplicate_result.returncode != 0 or json.loads(duplicate_result.stdout) != {}:
-        raise RuntimeError(duplicate_result.stderr or "installed duplicate prompt hook failed")
+    # A second native hook invocation is a new prompt, even with identical text
+    # and turn_id. Broker replay deduplication is covered by its own tests; it
+    # cannot be measured by launching another provider hook process here.
+    capture_completed_ns = time.perf_counter_ns()
     try:
         wake_ns, wake_line = observed.get(timeout=5)
     except queue.Empty as exc:
@@ -658,7 +642,6 @@ def _capture_with_hook_process(
         "first_hook_to_wake_ms": (wake_ns - first_started_ns) / 1_000_000,
         "first_hook_process_ms": (first_completed_ns - first_started_ns) / 1_000_000,
         "wake_minus_hook_exit_ms": (wake_ns - first_completed_ns) / 1_000_000,
-        "duplicate_hook_ms": (duplicate_completed_ns - duplicate_started_ns) / 1_000_000,
     }
 
 
@@ -688,7 +671,11 @@ def _fixture_snapshot(
         raise RuntimeError(result.stderr.decode("utf-8", errors="replace"))
     payload = json.loads(result.stdout)
     prompts = payload["result"]["prompts"]
-    if len(prompts) != expected_count:
+    if (
+        len(prompts) != expected_count
+        or payload["result"]["untriaged_prompt_count"] != expected_count
+        or payload["result"]["truncated"]
+    ):
         raise RuntimeError("installed hook capture count does not match the batch")
     return (
         _sha256_bytes(_stable_json(prompts).encode("utf-8")),
@@ -748,7 +735,8 @@ def _write_turn_payload(
     )
 
 
-def _answer_actions(new_count: int) -> dict[str, Any]:
+def _answer_actions(routing: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    """Settle direct fixture answers, never fabricate completed delegated work."""
     return {
         "actions": [
             {
@@ -757,7 +745,8 @@ def _answer_actions(new_count: int) -> dict[str, Any]:
                 "content": f"Synthetic benchmark answer {index}",
                 "resolution_summary": f"Completed synthetic benchmark request {index}",
             }
-            for index in range(1, new_count + 1)
+            for index, route in enumerate(routing, start=1)
+            if route["dispatch"]["execution_mode"] == "direct"
         ]
     }
 
@@ -831,12 +820,8 @@ def _turn(
                 )
             if begun["result"]["phase"] != "begun" or process.poll() is not None:
                 raise RuntimeError("League turn begin phase failed")
-            new_count = sum(
-                item["disposition"] == "new_request"
-                for decision in league_semantic["decisions"]
-                for item in decision["items"]
-            )
-            actions = _answer_actions(new_count)
+            routing = begun["result"]["routing"]
+            actions = _answer_actions(routing)
             (
                 commit_encode_started_ns,
                 commit_encode_completed_ns,
@@ -853,8 +838,23 @@ def _turn(
         finally:
             if process is not None:
                 _terminate_and_reap(process)
+    if not committed.get("ok"):
+        error_value = committed.get("error", {})
+        raise RuntimeError(
+            "League turn commit refused: "
+            f"{error_value.get('code', 'unknown')}: "
+            f"{error_value.get('message', 'no message')}"
+        )
     if returncode != 0 or committed["result"]["phase"] != "committed":
         raise RuntimeError(error.decode("utf-8", errors="replace") or "League turn commit failed")
+    boundary = committed["result"]["unresolved"]
+    pending = len(routing) - len(actions["actions"])
+    if boundary["untriaged_prompt_count"] != 0 or boundary["unresolved_count"] != pending:
+        raise RuntimeError(
+            "League benchmark settlement mismatch: "
+            f"expected {pending} unresolved, observed {boundary['unresolved_count']}; "
+            f"untriaged {boundary['untriaged_prompt_count']}"
+        )
     return {
         "arm": arm,
         "process_startup_ms": (spawned_ns - started_ns) / 1_000_000,
@@ -872,6 +872,8 @@ def _turn(
         "one_process_total_ms": (completed_ns - started_ns) / 1_000_000,
         "league_processes": 1,
         "semantic_model_processes": 1 if arm == "on" else 0,
+        "direct_answers": len(actions["actions"]),
+        "delegated_unresolved": pending,
         "accuracy": accuracy,
     }
 
@@ -1030,7 +1032,6 @@ def _aggregate(pairs: Sequence[dict[str, Any]]) -> dict[str, Any]:
         "batch_capture_ms": _summary([pair["hook"]["hook_batch_ms"] for pair in pairs]),
         "first_hook_to_wake_ms": _summary([pair["hook"]["first_hook_to_wake_ms"] for pair in pairs]),
         "first_hook_process_ms": _summary([pair["hook"]["first_hook_process_ms"] for pair in pairs]),
-        "duplicate_hook_ms": _summary([pair["hook"]["duplicate_hook_ms"] for pair in pairs]),
     }
     accuracy_total = sum(pair["on"]["accuracy"]["total"] for pair in pairs)
     accuracy_correct = sum(pair["on"]["accuracy"]["correct"] for pair in pairs)

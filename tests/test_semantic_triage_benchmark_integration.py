@@ -101,6 +101,32 @@ def main() -> None:
         pair = BENCHMARK.run_pair(
             Path(temporary), selected, "cold", 25, 0, args, _fake_model
         )
+        # The benchmark measures triage, not execution of repository/test work.
+        # Verify actual fixture state, not just the reported counters.
+        expected_direct = sum(
+            row["gold"]["plan"] is not None
+            and row["gold"]["plan"]["requested_mode"] == "direct"
+            for row in selected
+        )
+        expected_delegated = sum(
+            row["gold"]["plan"] is not None
+            and row["gold"]["plan"]["requested_mode"] != "direct"
+            for row in selected
+        )
+        for arm in ("off", "on"):
+            assert pair[arm]["direct_answers"] == expected_direct
+            assert pair[arm]["delegated_unresolved"] == expected_delegated
+            state = Path(temporary) / "cold-25-00" / arm
+            with BENCHMARK.SQLiteStorage(state) as observer:
+                rows = observer.connection.execute(
+                    "SELECT execution_mode,state FROM requests"
+                ).fetchall()
+                assert len(rows) == expected_direct + expected_delegated
+                assert all(
+                    row["state"] == "answered" if row["execution_mode"] == "direct"
+                    else row["state"] == "in_progress"
+                    for row in rows
+                )
     assert pair["journal_mode"] == "WAL"
     assert len(pair["fixture_digest"]) == 64
     assert pair["pair_order"] in (["off", "on"], ["on", "off"])

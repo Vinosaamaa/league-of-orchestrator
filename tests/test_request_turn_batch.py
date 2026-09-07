@@ -653,12 +653,16 @@ def test_two_limited_turns_drain_one_captured_generation(root: Path) -> None:
     assert scopes[0]["user_message_generation"] == scopes[1]["user_message_generation"]
     first, second = [json.loads(row["metadata_json"])["shotcaller_turn"] for row in scopes]
     assert first["token_digest"] != second["token_digest"]
-    assert second["active"] and second["committed"]
-    # Exhaustion does not create permission for unbounded empty continuations.
+    assert not second["active"] and second["committed"]
+    # Completion releases the process fence even without another captured prompt.
+    # EOF aborts this empty continuation rather than leaving it active.
     exhausted = _start_turn(state, clock.now(), limit=5)
     output, _ = exhausted.communicate(timeout=10)
-    assert exhausted.returncode == 3
-    assert json.loads(output)["error"]["code"] == "shotcaller_turn_active"
+    assert json.loads(output.splitlines()[0])["result"]["phase"] == "intake"
+    with SQLiteStorage(state) as observer:
+        fresh = observer.begin_shotcaller_turn(SHOTCALLER_ID, "turn:after-empty", clock.now())
+        assert fresh["active"]
+        observer.abort_shotcaller_turn(SHOTCALLER_ID, "turn:after-empty", clock.now())
 
 
 def test_competing_continuations_select_one_process_and_fence_old_token(root: Path) -> None:
@@ -724,7 +728,7 @@ def test_uncommitted_turn_refuses_backlog_continuation_after_user_steering(root:
     store.close()
 
 
-def test_foreign_backlog_cannot_unlock_turn_but_fresh_steering_can(root: Path) -> None:
+def test_completed_turn_releases_fence_without_consuming_foreign_backlog(root: Path) -> None:
     _, store, clock = create_context(root, "turn-foreign-backlog")
     store.intake_prompt(
         "prompt:foreign-backlog", JARVAN_ID, JARVAN_RUNTIME, "codex",
@@ -732,12 +736,12 @@ def test_foreign_backlog_cannot_unlock_turn_but_fresh_steering_can(root: Path) -
     )
     previous = store.begin_shotcaller_turn(SHOTCALLER_ID, "turn:committed", clock.now())
     store.commit_shotcaller_turn(SHOTCALLER_ID, "turn:committed", clock.now())
-    try:
-        store.begin_shotcaller_turn(SHOTCALLER_ID, "turn:foreign-continuation", clock.now())
-    except StorageRefusal as exc:
-        assert exc.code == "shotcaller_turn_active"
-    else:
-        raise AssertionError("another owner's backlog unlocked a committed turn")
+    for operation in (store.begin_shotcaller_turn, store.commit_shotcaller_turn):
+        retry = operation(SHOTCALLER_ID, "turn:committed", clock.now())
+        assert retry["idempotent"] and retry["committed"] and not retry["active"]
+    fresh = store.begin_shotcaller_turn(SHOTCALLER_ID, "turn:material-update", clock.now())
+    assert fresh["active"] and not fresh["committed"]
+    store.abort_shotcaller_turn(SHOTCALLER_ID, "turn:material-update", clock.now())
     store.note_user_message(previous["scope_id"], SHOTCALLER_ID, clock.now())
     fresh = store.begin_shotcaller_turn(SHOTCALLER_ID, "turn:fresh-steering", clock.now())
     assert fresh["active"] and not fresh["committed"]
@@ -898,7 +902,7 @@ def main() -> None:
         test_two_limited_turns_drain_one_captured_generation(root)
         test_competing_continuations_select_one_process_and_fence_old_token(root)
         test_uncommitted_turn_refuses_backlog_continuation_after_user_steering(root)
-        test_foreign_backlog_cannot_unlock_turn_but_fresh_steering_can(root)
+        test_completed_turn_releases_fence_without_consuming_foreign_backlog(root)
         test_supervision_commit_failure_rolls_back_request_effect_and_aborts_turn(root)
     print(
         "PASS: one request-turn process emits exact intake, atomically begins ordered model "

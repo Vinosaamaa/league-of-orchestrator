@@ -1732,6 +1732,10 @@ def _shotcaller_turn(metadata: dict[str, Any]) -> dict[str, Any] | None:
         raise StorageRefusal(
             "shotcaller_turn_invalid", "Shotcaller turn metadata is malformed"
         )
+    # Older writers left completed turns active forever. Interpret that exact
+    # terminal state without a migration or mutation during read-only policy checks.
+    if value.get("committed") is True:
+        return {**value, "active": False}
     return value
 
 
@@ -1780,31 +1784,18 @@ def begin_shotcaller_turn(
             metadata = _scope_metadata(scope)
             current_generation = int(scope["user_message_generation"])
             existing = _shotcaller_turn(metadata)
-            if existing is not None and existing.get("active") is True:
+            if existing is not None and (
+                existing.get("active") is True or existing.get("committed") is True
+            ):
                 if existing.get("token_digest") == token_digest:
                     return {
                         "actor_agent_id": actor_agent_id,
                         "scope_id": str(scope["scope_id"]),
-                        "active": True,
+                        "active": existing.get("active") is True,
                         "committed": existing.get("committed") is True,
                         "idempotent": True,
                     }
-                previous_generation = int(existing.get("user_message_generation", current_generation))
-                # A limited batch may leave already-captured prompts behind.
-                # Roll its token forward under this same write transaction;
-                # never clear the owner-active fence or synthesize new intake.
-                captured_backlog = (
-                    existing.get("committed") is True
-                    and current_generation == previous_generation
-                    and store.connection.execute(
-                        "SELECT 1 FROM prompts WHERE current_owner_agent_id=? "
-                        "AND triage_state='untriaged' LIMIT 1",
-                        (actor_agent_id,),
-                    ).fetchone() is not None
-                )
-                if existing.get("committed") is not True or (
-                    current_generation <= previous_generation and not captured_backlog
-                ):
+                if existing.get("active") is True:
                     raise StorageRefusal(
                         "shotcaller_turn_active",
                         "another Shotcaller turn is already active for this prompt generation",
@@ -1855,7 +1846,7 @@ def commit_shotcaller_turn(
             active = _shotcaller_turn(metadata)
             if (
                 active is None
-                or active.get("active") is not True
+                or (active.get("active") is not True and active.get("committed") is not True)
                 or active.get("token_digest") != token_digest
             ):
                 raise StorageRefusal(
@@ -1866,11 +1857,12 @@ def commit_shotcaller_turn(
                 return {
                     "actor_agent_id": actor_agent_id,
                     "scope_id": str(scope["scope_id"]),
-                    "active": True,
+                    "active": False,
                     "committed": True,
                     "idempotent": True,
                 }
             active["committed"] = True
+            active["active"] = False
             active["committed_at"] = at
             store.connection.execute(
                 "UPDATE watcher_scopes SET metadata_json=? WHERE scope_id=?",
@@ -1892,7 +1884,7 @@ def commit_shotcaller_turn(
     return {
         "actor_agent_id": actor_agent_id,
         "scope_id": str(scope["scope_id"]),
-        "active": True,
+        "active": False,
         "committed": True,
         "idempotent": False,
     }

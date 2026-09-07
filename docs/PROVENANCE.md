@@ -2228,3 +2228,13 @@ now includes that directory, without inheriting arbitrary shell PATH entries.
 The existing exact failed-launch settlement operation is also exposed through
 `assign settle-launch-cleanup`, so historical descriptor recovery uses the
 stable CLI instead of requiring an internal storage call or another launch.
+
+Installed delivery exposed a completed-turn fence that never ended: commit left
+`active=true`, so subsequent delivery deferred forever and a same-generation
+empty request turn refused. Commit now releases that process fence atomically.
+Historical committed-active metadata is interpreted as completed without a
+read-path write. Exact begin/commit retries remain idempotent, stale tokens
+cannot change a successor, and uncommitted turns still exclude competitors and
+defer delivery. A new bounded turn may account for material work without a new
+user prompt; normal Stop obligations remain authoritative. Synthetic tests cover
+legacy records, post-commit delivery once, competing processes, and Stop blocks.

@@ -2647,7 +2647,7 @@ def test_generated_thread_mismatch_closes_owned_tab_and_blocks(root: Path) -> No
     ).launch(_spec(worktree, "wrong-thread"))
     assert result["state"] == "blocked"
     assert result["failure_class"] == "launch_identity_unverified"
-    assert result["cleanup_required"] is True
+    assert result["cleanup_required"] is False
     assert result["cleanup_proven"] is True
     assert runner.closed is True
     assert store.connection.execute(

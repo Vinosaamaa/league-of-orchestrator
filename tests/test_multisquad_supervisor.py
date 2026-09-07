@@ -837,6 +837,28 @@ def test_active_turn_persists_attention_without_duplicate_wake(root: Path) -> No
         assert receipt["state"] == "pending"
         assert receipt["reason"] == "owner_turn_active"
         assert delivery.sent == [] and wake.calls == []
+        store.commit_shotcaller_turn(
+            SHOTCALLER_ID, "turn-token:garen", "2026-01-01T00:02:03Z"
+        )
+        receipt = dispatch_event(
+            store,
+            outbox_id=fault["outbox_id"],
+            event_id=fault["event_id"],
+            recipient_agent_id=SHOTCALLER_ID,
+            at="2026-01-01T00:02:04Z",
+            adapter=delivery,
+        )
+        assert receipt["state"] == "delivered", receipt
+        assert len(delivery.sent) == 1
+        duplicate = dispatch_event(
+            store,
+            outbox_id=fault["outbox_id"],
+            event_id=fault["event_id"],
+            recipient_agent_id=SHOTCALLER_ID,
+            at="2026-01-01T00:02:05Z",
+            adapter=delivery,
+        )
+        assert duplicate["idempotent"] and len(delivery.sent) == 1
     finally:
         store.close()
         stop_supervisor(state)
@@ -859,6 +881,37 @@ def test_turn_reuses_existing_shotcaller_scope(root: Path) -> None:
     store.abort_shotcaller_turn(
         SHOTCALLER_ID, "turn-token:existing-scope", "2026-01-01T00:02:02Z"
     )
+    store.close()
+
+
+def test_historical_committed_turn_releases_delivery_without_rewriting(root: Path) -> None:
+    _, store = _multisquad_state(root, "historical-committed-turn")
+    begun = store.begin_shotcaller_turn(
+        SHOTCALLER_ID, "turn:historical", "2026-01-01T00:02:00Z"
+    )
+    store.commit_shotcaller_turn(
+        SHOTCALLER_ID, "turn:historical", "2026-01-01T00:02:01Z"
+    )
+    # Synthetic legacy fixture only: reproduce the old writer's terminal shape.
+    store.connection.execute(
+        "UPDATE watcher_scopes SET metadata_json=json_set("
+        "metadata_json,'$.shotcaller_turn.active',json('true')) WHERE scope_id=?",
+        (begun["scope_id"],),
+    )
+    fault = store.record_supervision_fault(
+        SHOTCALLER_ID, "runtime_reconciliation_refused", "synthetic-legacy-turn",
+        "2026-01-01T00:02:02Z",
+    )
+    before = store.connection.total_changes
+    policy = store.apply_supervision_delivery_policy(
+        fault["outbox_id"], fault["event_id"], SHOTCALLER_ID, "2026-01-01T00:02:03Z"
+    )
+    assert policy["action"] == "wake", policy
+    retry = store.commit_shotcaller_turn(
+        SHOTCALLER_ID, "turn:historical", "2026-01-01T00:02:04Z"
+    )
+    assert retry["idempotent"] and not retry["active"]
+    assert store.connection.total_changes == before
     store.close()
 
 
@@ -1032,6 +1085,7 @@ def main() -> None:
         test_attachment_refuses_concurrent_watcher_takeover(Path(temporary))
         test_active_turn_persists_attention_without_duplicate_wake(Path(temporary))
         test_turn_reuses_existing_shotcaller_scope(Path(temporary))
+        test_historical_committed_turn_releases_delivery_without_rewriting(Path(temporary))
         test_priority_publish_refuses_removed_binding_without_global_signal(
             Path(temporary)
         )

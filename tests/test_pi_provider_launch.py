@@ -29,6 +29,14 @@ from league.storage import StorageRefusal  # noqa: E402
 from league.request_services import AssignmentSpec  # noqa: E402
 from request_lifecycle_fixture import LUX_ID, create_context  # noqa: E402
 from storage_fixture import REPOSITORY, SHOTCALLER_ID  # noqa: E402
+from test_visible_champion_launch import (  # noqa: E402
+    FakeIssueVerifier,
+    _context,
+    _options,
+    _spec as champion_spec,
+)
+from league.visible_launch import VisibleChampionLaunchService  # noqa: E402
+from dataclasses import replace
 
 
 PARENT_ID = "11111111-1111-4111-8111-111111111111"
@@ -57,6 +65,14 @@ class FakePiHerdr:
         self.report_process_argv = True
         self.launch_metadata_available = True
         self.native_session_available = True
+        self.presentation_title: str | None = None
+        self.presentation_source: str | None = None
+        self.presentation_tokens: dict[str, str] = {}
+        self.state_change_seq = 84
+        self.context_title: str | None = None
+        self.context_source = "herdr:pi"
+        self.after_report_title: str | None = None
+        self.after_report_reads = 0
 
     @staticmethod
     def _completed(arguments, result, returncode=0):
@@ -74,6 +90,13 @@ class FakePiHerdr:
         self.native_session_available = False
 
     def _agent(self) -> dict:
+        if self.after_report_reads:
+            self.after_report_reads -= 1
+            if self.after_report_reads == 0:
+                self.presentation_title = self.after_report_title
+                self.presentation_source = "user-selected"
+                self.presentation_tokens["sidebar_name"] = "User sidebar"
+                self.state_change_seq += 1
         callsign = self.env["LEAGUE_CALLSIGN"]
         provider = self.env["LEAGUE_PROVIDER_KIND"]
         role = self.env["LEAGUE_LAUNCH_ROLE"]
@@ -140,6 +163,12 @@ class FakePiHerdr:
         if self.native_title_reads_remaining:
             self.native_title_reads_remaining -= 1
             value["terminal_title"] = f"π - {self.session_id} - worktree"
+        if self.presentation_title is not None:
+            value["terminal_title"] = self.presentation_title
+        if self.presentation_source is not None:
+            value["metadata_source"] = self.presentation_source
+        value["tokens"].update(self.presentation_tokens)
+        value["state_change_seq"] = self.state_change_seq
         return value
 
     def run(self, arguments, *, timeout_seconds=30):
@@ -256,8 +285,24 @@ class FakePiHerdr:
         if arguments[1:3] in (["pane", "report-agent-session"], ["pane", "report-metadata"]):
             if arguments[1:3] == ["pane", "report-metadata"]:
                 self.launch_metadata_available = True
+                self.state_change_seq += 1
+                if "--title" in arguments:
+                    self.presentation_title = arguments[arguments.index("--title") + 1]
+                    self.presentation_source = arguments[arguments.index("--source") + 1]
+                for token in self._pairs(arguments, "--token"):
+                    key, value = token.split("=", 1)
+                    self.presentation_tokens[key] = value
+                if self.after_report_title is not None and "--title" in arguments:
+                    self.after_report_reads = 3
             return self._completed(arguments, {"accepted": True})
         if arguments[1:3] == ["agent", "prompt"]:
+            if self.context_title is not None:
+                self.presentation_title = self.context_title
+                self.presentation_source = self.context_source
+                self.presentation_tokens.update(
+                    sidebar_name=self.context_title, thread_title=self.context_title
+                )
+                self.state_change_seq += 1
             return self._completed(arguments, {"accepted": True})
         if arguments[1:3] in (["tab", "close"], ["pane", "close"]):
             self.running = False
@@ -351,8 +396,7 @@ def test_fork_metadata_restart_and_duplicate_suppression(root: Path) -> None:
     assert receipt["harness_kind"] == "pi-thread"
     assert receipt["display_agent"] == "cursor"
     assert receipt["thread_id"] == fake.session_path
-    assert receipt["session_id"] == CHILD_ID
-    assert receipt["session_path"] == fake.session_path
+    assert "session_id" not in receipt and "session_path" not in receipt
     cleanup_action = {
         "expected_identity": {
             "agent_name": receipt["routing_name"],
@@ -396,8 +440,9 @@ def test_fork_metadata_restart_and_duplicate_suppression(root: Path) -> None:
     delivered = retried_adapter.deliver_context(
         retried, "Retry the exact bounded Pi assignment context."
     )
-    assert delivered["display_receipt"]["tab_id"] == fake.endpoint["tab_id"]
-    assert delivered["display_receipt"]["terminal_id"] == fake.endpoint["terminal_id"]
+    assert delivered["display_receipt"]["orchestrator_role"] == "champion"
+    assert delivered["display_receipt"]["thread_title"] == "Lux · LEAGUE|Session Restore"
+    assert delivered["display_receipt"]["state_change_seq"] == fake.state_change_seq
 
     fake.stop_for_restart()
     resumed = resume_pi_after_restart(
@@ -764,6 +809,146 @@ def test_provider_mapping_and_role_placement(root: Path) -> None:
     store.close()
 
 
+def test_pi_context_display_receipt_matches_shared_contract(root: Path) -> None:
+    root = root.resolve()
+    for provider in ("cursor", "codex"):
+        suffix = f"pi-context-{provider}"
+        store, clock, worktree = _context(root, suffix)
+        descriptor = _descriptor(root / suffix, worktree, provider, "create")
+        descriptor["task_label"] = "Tiny Gate"
+        runner = FakePiHerdr(root / suffix)
+        runner.context_title = "Prompt generated title"
+        adapter = HerdrPiLaunchAdapter(
+            store, descriptor, at=clock.now(), runner=runner,
+            environment={"HERDR_ENV": "1"},
+        )
+        service = VisibleChampionLaunchService(
+            store, adapter, replace(_options(root), project_code="LEAGUE"),
+            clock, issue_verifier=FakeIssueVerifier(store=store),
+        )
+        spec = champion_spec(worktree, suffix)
+        try:
+            first = service.launch(spec)
+            assert first["state"] == "active", first
+            expected = {
+                "source": runner.env["LEAGUE_LAUNCH_METADATA_SOURCE"],
+                "applies_to_source": "herdr:pi",
+                "state_change_seq": runner.state_change_seq,
+                "sidebar_name": "Lux",
+                "thread_title": "Lux · LEAGUE|Tiny Gate",
+                "terminal_title": "Lux · LEAGUE|Tiny Gate",
+                "task_label": "Tiny Gate",
+                "project_code": "LEAGUE",
+                "orchestrator_role": "champion",
+            }
+            assert first["context_delivery"]["display_receipt"] == expected
+            durable = store.assignment_launch_context(spec.assignment_id)
+            assert durable["context_delivery"]["display_receipt"] == expected
+            prompts = [call for call in runner.calls if call[1:3] == ("agent", "prompt")]
+            assert len(prompts) == 1 and "--wait" in prompts[0]
+            # Retry from durable receipts, with no in-memory launch adapter.
+            service = VisibleChampionLaunchService(
+                store,
+                HerdrPiLaunchAdapter(store, descriptor, at=clock.now(), runner=runner,
+                                     environment={"HERDR_ENV": "1"}),
+                replace(_options(root), project_code="LEAGUE"), clock,
+                issue_verifier=FakeIssueVerifier(store=store),
+            )
+            before = len(runner.calls)
+            retry = service.launch(spec)
+            assert retry["idempotent"] is True
+            assert retry["context_delivery"]["display_receipt"] == expected
+            assert not any(
+                call[1:3] in {("agent", "prompt"), ("agent", "start"),
+                             ("pane", "report-metadata"), ("tab", "create")}
+                for call in runner.calls[before:]
+            )
+            runner.presentation_tokens["status_icon"] = "idle"
+            runner.state_change_seq += 1
+            before = len(runner.calls)
+            assert service.launch(spec)["state"] == "active"
+            assert not any(call[1:3] == ("pane", "report-metadata")
+                           for call in runner.calls[before:])
+
+            for malformed in ([], {}, "shotcaller", None):
+                runner.presentation_tokens["orchestrator_role"] = malformed
+                if malformed is None:
+                    runner.presentation_tokens.pop("orchestrator_role")
+                runner.state_change_seq += 1
+                before = len(runner.calls)
+                try:
+                    adapter.verify_active_title(durable["acceptance_receipt"])
+                except StorageRefusal as exc:
+                    assert exc.code == "launch_title_restore_refused"
+                else:
+                    raise AssertionError("malformed modern Pi role was accepted")
+                assert not any(call[1:3] == ("pane", "report-metadata")
+                               for call in runner.calls[before:])
+            runner.presentation_tokens["orchestrator_role"] = "champion"
+
+            for changes in (
+                {"runtime_instance_id": "runtime:foreign"},
+                {"thread_id": "/synthetic/foreign.jsonl"},
+                {"assignment_id": "assignment:foreign"},
+            ):
+                before = len(runner.calls)
+                try:
+                    adapter.verify_active_title({**durable["acceptance_receipt"], **changes})
+                except StorageRefusal as exc:
+                    assert exc.code == "launch_title_restore_refused"
+                else:
+                    raise AssertionError("foreign Pi display identity was accepted")
+                assert not any(call[1:3] == ("pane", "report-metadata")
+                               for call in runner.calls[before:])
+
+            # A token-only user write must not be mistaken for a provider title.
+            runner.presentation_tokens["sidebar_name"] = "User sidebar"
+            runner.state_change_seq += 1
+            before = len(runner.calls)
+            try:
+                adapter.verify_active_title(durable["acceptance_receipt"])
+            except StorageRefusal as exc:
+                assert exc.code == "launch_title_restore_refused"
+            else:
+                raise AssertionError("user token-only write was overwritten")
+            assert not any(call[1:3] == ("pane", "report-metadata")
+                           for call in runner.calls[before:])
+
+            # The provider has refreshed its title; a later user write lands
+            # after League's one restoration, inside the final settling window.
+            runner.presentation_title = "Provider refresh"
+            runner.presentation_source = "herdr:pi"
+            runner.presentation_tokens["sidebar_name"] = "Provider refresh"
+            runner.state_change_seq += 1
+            runner.after_report_title = "Newer user title"
+            before = len(runner.calls)
+            try:
+                adapter.verify_active_title(durable["acceptance_receipt"])
+            except StorageRefusal as exc:
+                assert exc.code == "launch_title_restore_refused"
+            else:
+                raise AssertionError("transient early Pi restoration was accepted")
+            assert runner.presentation_title == "Newer user title"
+            assert runner.presentation_tokens["sidebar_name"] == "User sidebar"
+            assert sum(call[1:3] == ("pane", "report-metadata")
+                       for call in runner.calls[before:]) == 1
+            runner.after_report_title = None
+
+            runner.presentation_title = "User selected title"
+            runner.presentation_source = "user-selected"
+            runner.state_change_seq += 1
+            before = len(runner.calls)
+            refused = service.launch(spec)
+            assert refused["state"] == "cleanup_pending"
+            assert runner.presentation_title == "User selected title"
+            assert runner.presentation_source == "user-selected"
+            assert runner.running and runner.start_count == 1
+            assert not any(call[1:3] == ("pane", "report-metadata")
+                           for call in runner.calls[before:])
+        finally:
+            store.close()
+
+
 def test_pi_metadata_source_reuses_owned_legacy_source(root: Path) -> None:
     worktree = root / "pi-metadata-source" / "worktree"
     worktree.mkdir(parents=True)
@@ -819,7 +1004,8 @@ def test_cli_exposes_explicit_pi_inputs() -> None:
 
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="league-pi-provider-") as directory:
-        root = Path(directory)
+        root = Path(directory).resolve()
+        test_pi_context_display_receipt_matches_shared_contract(root)
         test_fork_metadata_restart_and_duplicate_suppression(root)
         test_provider_mapping_and_role_placement(root)
         test_pi_metadata_source_reuses_owned_legacy_source(root)
@@ -832,4 +1018,8 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    if sys.argv[1:] == ["--issue85-context-regression"]:
+        with tempfile.TemporaryDirectory(prefix="league-pi-title-regression-") as directory:
+            test_pi_context_display_receipt_matches_shared_contract(Path(directory))
+    else:
+        main()

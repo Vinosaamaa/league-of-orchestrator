@@ -54,7 +54,7 @@ decision outside League.
 League renders names from explicit role, callsign, project-code, and two-word
 task metadata. Shotcaller sidebar/thread/terminal names are the callsign.
 Champion sidebar is the callsign; Champion thread and terminal title are
-`<Callsign> · <PROJECT>` when an exact project code is supplied and
+`<Callsign> · <PROJECT>|<Two Word Task>` when an exact project code is supplied and
 `<Callsign> · <Two Word Task>` otherwise. The fallback task is always exactly
 two words.
 

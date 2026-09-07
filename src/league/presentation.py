@@ -30,7 +30,7 @@ def canonical_display_metadata(metadata: Any) -> dict[str, str]:
     if not isinstance(metadata, dict):
         return {}
     role = metadata.get(ORCHESTRATOR_ROLE_TOKEN)
-    if role not in ORCHESTRATOR_ROLES:
+    if not isinstance(role, str) or role not in ORCHESTRATOR_ROLES:
         return {}
     callsign = metadata.get("callsign")
     if not isinstance(callsign, str) or _CALLSIGN.fullmatch(callsign) is None:
@@ -68,7 +68,7 @@ def canonical_display_metadata(metadata: Any) -> dict[str, str]:
             "presentation_metadata_invalid",
             "canonical Champion project code is invalid",
         )
-    suffix = project_code or task_label
+    suffix = f"{project_code}|{task_label}" if project_code else task_label
     title = f"{callsign} · {suffix}"
     result = {
         "title": title,

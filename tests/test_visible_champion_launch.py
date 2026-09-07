@@ -151,10 +151,10 @@ def test_role_specific_display_names_use_only_explicit_canonical_metadata() -> N
             }
         )
         assert champion == {
-            "title": "Lux · LOL",
-            "terminal_title": "Lux · LOL",
+            "title": "Lux · LOL|Title Repair",
+            "terminal_title": "Lux · LOL|Title Repair",
             "sidebar_name": "Lux",
-            "thread_title": "Lux · LOL",
+            "thread_title": "Lux · LOL|Title Repair",
             "project_code": "LOL",
             "task_label": "Title Repair",
             "orchestrator_role": "champion",
@@ -189,6 +189,10 @@ def test_role_specific_display_names_use_only_explicit_canonical_metadata() -> N
     assert canonical_display_metadata(
         {"orchestrator_role": "unknown", "callsign": "Lux"}
     ) == {}
+    for malformed_role in (None, [], {}, 1):
+        assert canonical_display_metadata(
+            {"orchestrator_role": malformed_role, "callsign": "Lux"}
+        ) == {}
 
 
 def test_legacy_display_command_exposes_exact_owner_cas_inputs() -> None:
@@ -928,8 +932,8 @@ def test_champion_project_code_is_explicit_and_survives_provider_refresh(
     assert receipt["sidebar_name"] == "Lux"
     assert receipt["project_code"] == "LOL"
     assert receipt["task_label"] == "Tiny Gate"
-    assert receipt["thread_title"] == "Lux · LOL"
-    assert receipt["terminal_title"] == "Lux · LOL"
+    assert receipt["thread_title"] == "Lux · LOL|Tiny Gate"
+    assert receipt["terminal_title"] == "Lux · LOL|Tiny Gate"
 
     contexts = len(runner.contexts)
     runner.metadata_source = "herdr:cursor"
@@ -946,9 +950,9 @@ def test_champion_project_code_is_explicit_and_survives_provider_refresh(
     retry_calls = runner.calls[calls_before:]
     assert retry["idempotent"] is True
     assert retry["context_delivery"]["display_receipt"]["project_code"] == "LOL"
-    assert runner.title == "Lux · LOL"
+    assert runner.title == "Lux · LOL|Tiny Gate"
     assert runner.tokens["sidebar_name"] == "Lux"
-    assert runner.tokens["thread_title"] == "Lux · LOL"
+    assert runner.tokens["thread_title"] == "Lux · LOL|Tiny Gate"
     assert len(runner.contexts) == contexts == 1
     assert sum(
         call[:3] == ("herdr", "pane", "report-metadata")

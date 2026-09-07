@@ -60,7 +60,7 @@ Nothing here installs files, changes hooks, or connects to live Roster state.
 - Provider-neutral presentation names derived only from explicit canonical
   metadata: Shotcaller names are callsign-only; Champion sidebars are
   callsign-only; and Champion thread/terminal titles are
-  `<Callsign> · <PROJECT>` when an exact catalog project code exists, otherwise
+  `<Callsign> · <PROJECT>|<Two Word Task>` when an exact catalog project code exists, otherwise
   `<Callsign> · <Two Word Task>`. Runtime/provider labels are never embedded or
   parsed from titles. Prompt, context, OSC, restart, and icon-only refreshes
   cannot replace an owned name; newer user-owned presentation still wins.

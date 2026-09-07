@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from .request_services import AssignmentSpec, LaunchAdapterError
+from .presentation import canonical_display_metadata
 from .storage_types import StorageRefusal
 from .visible_launch import MAX_CONTEXT_BYTES, CommandRunner, SubprocessRunner
 from .worktree import exact_launch_cwd_binding
@@ -209,17 +210,21 @@ class HerdrPiLaunchAdapter:
             raise StorageRefusal("launch_adapter_failed", f"{label} refused or failed")
 
     def _agent(self) -> dict[str, Any]:
-        return dict(
-            self._command(
-                ("herdr", "agent", "get", str(self.descriptor["routing_name"])),
-                "Herdr Pi inspection",
-            ).get("agent", {})
-        )
+        agent = self._command(
+            ("herdr", "agent", "get", str(self.descriptor["routing_name"])),
+            "Herdr Pi inspection",
+        ).get("agent")
+        if not isinstance(agent, dict):
+            raise StorageRefusal("launch_identity_unverified", "Pi agent observation is malformed")
+        return agent
 
     def _pane(self, pane_id: str) -> dict[str, Any]:
-        return dict(
-            self._command(("herdr", "pane", "get", pane_id), "Herdr Pi pane inspection").get("pane", {})
-        )
+        pane = self._command(
+            ("herdr", "pane", "get", pane_id), "Herdr Pi pane inspection"
+        ).get("pane")
+        if not isinstance(pane, dict):
+            raise StorageRefusal("launch_identity_unverified", "Pi pane observation is malformed")
+        return pane
 
     def _process_exact(self, pane_id: str, *, restart: bool) -> None:
         info = self._command(
@@ -304,7 +309,10 @@ class HerdrPiLaunchAdapter:
             "Herdr Pi exact resume canonical label",
         )
 
-    def _observation(self, endpoint: Mapping[str, str], *, restart: bool) -> dict[str, Any]:
+    def _observation(
+        self, endpoint: Mapping[str, str], *, restart: bool,
+        with_presentation: bool = False,
+    ) -> dict[str, Any]:
         deadline = time.monotonic() + min(self.startup_timeout_ms / 1000, 15.0)
         stable_fingerprint: str | None = None
         stable_observation: dict[str, Any] | None = None
@@ -349,6 +357,8 @@ class HerdrPiLaunchAdapter:
                     and agent.get("terminal_id") == endpoint["terminal_id"]
                     and agent.get("cwd") == self.descriptor["cwd"]
                     and agent.get("foreground_cwd") == self.descriptor["cwd"]
+                    and pane.get("pane_id") == endpoint["pane_id"]
+                    and pane.get("terminal_id") == endpoint["terminal_id"]
                     and pane.get("label") == expected_thread_title
                     and tokens.get("launch_runtime_kind") == "pi"
                     and tokens.get("launch_provider_kind") == self.descriptor["provider_kind"]
@@ -393,16 +403,17 @@ class HerdrPiLaunchAdapter:
                         "pane_id": endpoint["pane_id"],
                         "terminal_id": endpoint["terminal_id"],
                     }
-                    fingerprint = _digest(
-                        {
-                            "observation": observation,
-                            "terminal_title": agent.get("terminal_title"),
-                            "pane_label": pane.get("label"),
-                            "tokens": dict(tokens),
-                        }
-                    )
+                    presentation = {
+                        "identity": observation,
+                        "terminal_title": agent.get("terminal_title"),
+                        "source": agent.get("metadata_source"),
+                        "state_change_seq": agent.get("state_change_seq"),
+                        "pane_label": pane.get("label"),
+                        "tokens": dict(tokens),
+                    }
+                    fingerprint = _digest(presentation)
                     if fingerprint == stable_fingerprint and stable_observation == observation:
-                        return observation
+                        return presentation if with_presentation else observation
                     stable_fingerprint = fingerprint
                     stable_observation = observation
                     time.sleep(0.25)
@@ -520,12 +531,9 @@ class HerdrPiLaunchAdapter:
             "champion_agent_id": spec.champion_agent_id,
             "callsign": spec.callsign,
             "runtime_instance_id": f"runtime:{spec.champion_agent_id}",
-            # Herdr's provider-native Pi identity is the exact JSONL path. Keep
-            # the UUID alongside it for reporting, but bind the canonical
-            # runtime/cleanup identity to the path Herdr will read back.
+            # The UUID and path remain in the durable provider descriptor.
+            # The canonical activation envelope binds only the native path.
             "thread_id": observation["session_path"],
-            "session_id": session_id,
-            "session_path": observation["session_path"],
             "endpoint": endpoint["pane_id"],
             "runtime_generation": runtime_generation,
             "harness_kind": "pi-thread",
@@ -544,56 +552,133 @@ class HerdrPiLaunchAdapter:
         body = context.encode()
         if not body or len(body) > MAX_CONTEXT_BYTES:
             raise LaunchAdapterError("launch_context_invalid", cleanup_required=True)
-        self._command(
-            ("herdr", "agent", "prompt", str(receipt["routing_name"]), context),
+        self._display_sample(receipt)
+        prompt_effect = self._command(
+            ("herdr", "agent", "prompt", str(receipt["routing_name"]), context,
+             "--wait", "--timeout", "30000"),
             "Herdr Pi context delivery",
+            timeout=35,
         )
-        endpoint = self._created
-        if endpoint is None:
-            stored = self.store.provider_launch_descriptor(
-                str(self.descriptor["descriptor_id"])
-            )
-            if stored is None or stored["state"] != "active":
-                raise LaunchAdapterError(
-                    "provider_launch_unknown", cleanup_required=False
-                )
-            endpoint = {
-                "tab_id": str(stored["tab_id"]),
-                "pane_id": str(stored["pane_id"]),
-                "terminal_id": str(stored["terminal_id"]),
-            }
-            if endpoint["pane_id"] != str(receipt["endpoint"]) or not all(
-                endpoint.values()
-            ):
-                raise LaunchAdapterError(
-                    "launch_identity_unverified", cleanup_required=False
-                )
-        observation = self._observation(endpoint, restart=False)
+        observation = self.verify_active_title(receipt)
         return {
             "context_sha256": hashlib.sha256(body).hexdigest(),
             "bytes": len(body),
-            "effect_sha256": _digest({"descriptor_id": self.descriptor["descriptor_id"], "context_sha256": hashlib.sha256(body).hexdigest()}),
+            "effect_sha256": _digest({"prompt_effect": prompt_effect, "display_receipt": observation}),
             "display_receipt": observation,
         }
 
-    def verify_active_title(self, receipt: Mapping[str, Any]) -> dict[str, Any]:
+    def _display_sample(self, receipt: Mapping[str, Any]) -> dict[str, Any]:
         descriptor = self.store.provider_launch_descriptor(str(self.descriptor["descriptor_id"]))
         if descriptor is None or descriptor["state"] != "active":
             raise StorageRefusal("launch_title_restore_refused", "Pi launch descriptor is not active")
+        assignment = None
+        try:
+            assignment = self.store.assignment_launch_context(descriptor["descriptor"]["assignment_id"])
+        except StorageRefusal as exc:
+            if exc.code != "assignment_unknown":
+                raise
+        bound_receipt = self._receipt
+        if assignment is not None:
+            bound_receipt = assignment["acceptance_receipt"] if assignment["state"] == "active" else None
+        if bound_receipt is None or dict(receipt) != bound_receipt:
+            raise StorageRefusal("launch_title_restore_refused", "Pi display requires the exact accepted runtime receipt")
         self.descriptor = {
             **descriptor["descriptor"],
             "descriptor_digest": descriptor["descriptor_digest"],
             "session_id": descriptor["session_id"],
             "session_path": descriptor["session_path"],
+            "pane_id": descriptor["pane_id"],
         }
-        return self._observation(
+        generation = "herdr:" + hashlib.sha256(
+            f"{descriptor['terminal_id']}\0{descriptor['session_id']}".encode()
+        ).hexdigest()[:24]
+        if any(receipt.get(key) != expected for key, expected in {
+            "verified": True,
+            "assignment_id": self.descriptor["assignment_id"],
+            "callsign": self.descriptor["callsign"],
+            "routing_name": self.descriptor["routing_name"],
+            "endpoint": descriptor["pane_id"],
+            "thread_id": descriptor["session_path"],
+            "worktree": self.descriptor["cwd"],
+            "runtime_generation": generation,
+            "harness_kind": "pi-thread",
+            "backend_kind": "herdr",
+            "display_agent": self.descriptor["provider_kind"],
+        }.items()):
+            raise StorageRefusal("launch_title_restore_refused", "Pi display receipt identity differs from its descriptor")
+        sample = self._observation(
             {
                 "tab_id": str(descriptor["tab_id"]),
                 "pane_id": str(descriptor["pane_id"]),
                 "terminal_id": str(descriptor["terminal_id"]),
             },
             restart=False,
+            with_presentation=True,
         )
+        source = pi_metadata_source(self.descriptor)
+        delivered = assignment.get("context_delivery") if assignment is not None else None
+        prior_display = delivered.get("display_receipt") if isinstance(delivered, dict) else None
+        modern_role = isinstance(prior_display, dict) and "orchestrator_role" in prior_display
+        if (
+            sample["identity"] != descriptor["launch_receipt"]
+            or type(sample["state_change_seq"]) is not int
+            or sample["state_change_seq"] < 0
+            or not isinstance(sample["source"], str)
+            or sample["source"] not in {source, "herdr:pi"}
+            or sample["tokens"].get("launch_metadata_source") != source
+            or sample["tokens"].get("orchestrator_role") not in (None, self.descriptor["role"])
+            or (modern_role and sample["tokens"].get("orchestrator_role") != self.descriptor["role"])
+        ):
+            raise StorageRefusal("launch_title_restore_refused", "Pi presentation authority or identity changed")
+        return sample
+
+    def verify_active_title(self, receipt: Mapping[str, Any]) -> dict[str, Any]:
+        sample = self._display_sample(receipt)
+        display = canonical_display_metadata({
+            **self.descriptor, "orchestrator_role": self.descriptor["role"],
+        })
+        source = pi_metadata_source(self.descriptor)
+        tokens = {key: value for key, value in display.items()
+                  if key not in {"title", "terminal_title"}}
+
+        def exact(observed: Mapping[str, Any]) -> bool:
+            return bool(
+                observed["source"] == source
+                and observed["terminal_title"] == display["terminal_title"]
+                and all(observed["tokens"].get(key) == value for key, value in tokens.items())
+            )
+
+        if not exact(sample):
+            # Provider titles may race context delivery. An owned-source mismatch
+            # is ambiguous (including a user token-only edit); only a pre-token
+            # receipt with otherwise exact names may acquire the canonical role.
+            legacy_role_only = (
+                "orchestrator_role" not in sample["tokens"]
+                and sample["terminal_title"] == display["terminal_title"]
+                and all(sample["tokens"].get(key) == value for key, value in tokens.items()
+                        if key != "orchestrator_role")
+            )
+            if sample["source"] != "herdr:pi" and not legacy_role_only:
+                raise StorageRefusal("launch_title_restore_refused", "Pi owned display tokens changed")
+            if self._display_sample(receipt) != sample:
+                raise StorageRefusal("launch_title_restore_refused", "Pi presentation changed before restoration")
+            arguments = [
+                "herdr", "pane", "report-metadata", str(receipt["endpoint"]),
+                "--source", source, "--applies-to-source", "herdr:pi",
+                "--agent", "pi", "--display-agent", str(self.descriptor["provider_kind"]),
+                "--title", display["title"], "--seq", str(time.time_ns() // 1000),
+            ]
+            for key, value in tokens.items():
+                arguments.extend(("--token", f"{key}={value}"))
+            self._effect_command(tuple(arguments), "Herdr Pi owned display restoration")
+            sample = self._display_sample(receipt)
+            if not exact(sample):
+                raise StorageRefusal("launch_title_unverified", "Pi post-context display did not settle")
+        return {
+            "source": sample["source"], "applies_to_source": "herdr:pi",
+            "state_change_seq": sample["state_change_seq"],
+            **{key: value for key, value in display.items() if key != "title"},
+        }
 
     def cleanup(self, _receipt: Mapping[str, Any] | None) -> bool:
         if self._created is None:

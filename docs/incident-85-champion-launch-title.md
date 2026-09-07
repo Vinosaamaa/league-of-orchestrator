@@ -67,8 +67,8 @@ exact runtime. Unproven cleanup remains a truthful cleanup obligation.
 
 Generated and explicit Champion task labels contain exactly two words. The
 provider-neutral naming contract is callsign-only for Shotcallers, callsign-only
-for Champion sidebars, and `<Callsign> · <PROJECT>` for Champion thread and
-terminal title when an explicit catalog project code is available, otherwise
+for Champion sidebars, and `<Callsign> · <PROJECT>|<Two Word Task>` for Champion
+thread and terminal title when an explicit catalog project code is available, otherwise
 `<Callsign> · <Two Word Task>`. Runtime/provider labels are never embedded and
 League never parses a title to discover identity. Prompt, context, OSC,
 restart, and icon refreshes cannot replace exact owned names; a newer
@@ -285,3 +285,23 @@ user races both before the write and in the final read-to-write window. The
 last-window fixture models Herdr's real per-source sequence rule and proves the
 League overlay is cleared while the newer user title/source and unrelated
 tokens survive.
+
+## Pi service-boundary follow-up
+
+The full visible-launch service reproduced `launch_receipt_unverified`: the Pi
+adapter added native session fields outside the exact activation schema. After
+removing those duplicates (retaining the durable provider descriptor), the same
+test exposed a second mismatch: context delivery returned the native launch
+observation instead of the canonical display receipt. Neither storage validator
+was relaxed. A temporary-path alias in the new fixture was also normalized to
+match the exact canonical worktree binding.
+
+Pi context delivery now waits for prompt acceptance, verifies the persisted
+assignment/native endpoint, restores only descriptor-owned provider presentation,
+and observes stable source, sequence, sidebar, thread, terminal, and canonical
+role before recording delivery. A fresh adapter retry sends no second prompt.
+Token-only user edits, foreign runtime receipts, malformed or removed modern
+role tokens, and a newer user write after an early restoration refuse without a
+second restoration. Both Pi provider mappings run through the real service and
+synthetic SQLite store in the normal focused suite. Installed acceptance remains
+a separate coordinator-owned gate.

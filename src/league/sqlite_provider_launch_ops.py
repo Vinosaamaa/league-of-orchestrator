@@ -127,6 +127,11 @@ def _validate_descriptor(value: Mapping[str, Any]) -> dict[str, Any]:
         exact = session_id is None and session_path is None and SESSION_ID.fullmatch(str(parent_id or "")) and _absolute(parent_path)
     if not exact:
         raise StorageRefusal("provider_launch_session_invalid", "Pi create, fork, or resume identity is incomplete")
+    _validate_descriptor_routing(descriptor)
+    return descriptor
+
+
+def _validate_descriptor_routing(descriptor: Mapping[str, Any]) -> None:
     if "routing" in descriptor:
         routing = descriptor["routing"]
         fields = {
@@ -154,7 +159,43 @@ def _validate_descriptor(value: Mapping[str, Any]) -> dict[str, Any]:
             )
         ):
             raise StorageRefusal("provider_launch_descriptor_invalid", "Pi launch routing evidence is not exact")
-    return descriptor
+
+
+def _validate_canonical_routing_assignment(store: Any, exact: Mapping[str, Any]) -> None:
+    routing = exact.get("routing")
+    if routing and routing["decision_id"] is not None:
+        decision = store.routing_decision(routing["decision_id"])
+        assignment = store.connection.execute(
+            """SELECT a.*,c.requirements_json FROM task_assignments a
+                 JOIN callsign_assignments c ON c.callsign_assignment_id=?
+                WHERE a.task_assignment_id=?""",
+            (f"callsign-assignment:{exact['assignment_id']}", exact["assignment_id"]),
+        ).fetchone()
+        targets = {} if assignment is None else {
+            "assignment": exact["assignment_id"],
+            "task": assignment["task_id"], "request": assignment["request_id"],
+        }
+        from .agent_adapters import builtin_agent_adapter_registry
+
+        provider_adapter = builtin_agent_adapter_registry().adapter(exact["runtime_kind"])
+        if not (
+            decision is not None and assignment is not None
+            and decision.get("subject_kind") in targets
+            and decision.get("subject_id") == targets.get(decision["subject_kind"])
+            and decision.get("role") == exact["role"]
+            and decision.get("state") in {"selected", "escalated"}
+            and provider_adapter.normalize_provider(str(decision.get("provider", ""))) == routing["provider"]
+            and all(decision.get(key) == routing[key] for key in (
+                "model", "effort", "tier", "reason", "reason_code",
+                "policy_version", "provider_config_version",
+            ))
+            and sorted(json.loads(decision["required_capabilities_json"]))
+            == sorted(json.loads(assignment["requirements_json"]))
+        ):
+            raise StorageRefusal(
+                "provider_launch_routing_mismatch",
+                "Pi routing evidence does not bind the exact canonical assignment",
+            )
 
 
 def prepare_provider_launch(store: Any, descriptor: Mapping[str, Any], at: str) -> dict[str, Any]:
@@ -163,40 +204,7 @@ def prepare_provider_launch(store: Any, descriptor: Mapping[str, Any], at: str) 
     digest = _digest(exact)
     try:
         with store._transaction():
-            routing = exact.get("routing")
-            if routing and routing["decision_id"] is not None:
-                decision = store.routing_decision(routing["decision_id"])
-                assignment = store.connection.execute(
-                    """SELECT a.*,c.requirements_json FROM task_assignments a
-                         JOIN callsign_assignments c ON c.callsign_assignment_id=?
-                        WHERE a.task_assignment_id=?""",
-                    (f"callsign-assignment:{exact['assignment_id']}", exact["assignment_id"]),
-                ).fetchone()
-                targets = {} if assignment is None else {
-                    "assignment": exact["assignment_id"],
-                    "task": assignment["task_id"], "request": assignment["request_id"],
-                }
-                from .agent_adapters import builtin_agent_adapter_registry
-
-                provider_adapter = builtin_agent_adapter_registry().adapter(exact["runtime_kind"])
-                if not (
-                    decision is not None and assignment is not None
-                    and decision.get("subject_kind") in targets
-                    and decision.get("subject_id") == targets.get(decision["subject_kind"])
-                    and decision.get("role") == exact["role"]
-                    and decision.get("state") in {"selected", "escalated"}
-                    and provider_adapter.normalize_provider(str(decision.get("provider", ""))) == routing["provider"]
-                    and all(decision.get(key) == routing[key] for key in (
-                        "model", "effort", "tier", "reason", "reason_code",
-                        "policy_version", "provider_config_version",
-                    ))
-                    and sorted(json.loads(decision["required_capabilities_json"]))
-                    == sorted(json.loads(assignment["requirements_json"]))
-                ):
-                    raise StorageRefusal(
-                        "provider_launch_routing_mismatch",
-                        "Pi routing evidence does not bind the exact canonical assignment",
-                    )
+            _validate_canonical_routing_assignment(store, exact)
             existing = store.connection.execute(
                 "SELECT * FROM provider_launch_descriptors WHERE descriptor_id=?",
                 (exact["descriptor_id"],),

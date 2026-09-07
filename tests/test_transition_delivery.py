@@ -19,6 +19,8 @@ from league.request_services import (  # noqa: E402
     DeliveryUnavailable,
 )
 from league.sqlite_store import SQLiteStorage  # noqa: E402
+from league.sqlite_outbox_ops import inspect_outbox, reconcile_received_outbox  # noqa: E402
+from storage_test_support import invoke_cli  # noqa: E402
 from league.storage import (  # noqa: E402
     OutboxDispatchIdentity,
     RuntimeRegistrationCommand,
@@ -408,6 +410,81 @@ def test_concurrent_source_transitions_commit_once(root: Path) -> None:
     second.close()
 
 
+def test_explicit_recipient_read_recovers_only_exact_uncertain_delivery(root: Path) -> None:
+    for missing_lease in (False, True):
+        state, store, clock = create_context(root, f"recipient-read-{missing_lease}")
+        event, outbox = "event:read", "outbox:read"
+        SyntheticLifecycleSeeder(store, clock).add_pending_delivery(
+            event_id=event, outbox_id=outbox, recipient_agent_id=SHOTCALLER_ID,
+            source_agent_id=CHAMPION_ID, update="Exact retained completion update",
+        )
+        identity = OutboxDispatchIdentity(outbox, event, SHOTCALLER_ID, "dispatcher:test", "attempt:test")
+        claim = store.claim_outbox(identity, clock.after(30), clock.now())
+        store.await_outbox_receipt(identity, claim["fence"], "direct", "synthetic-unknown", clock.now())
+        # Reproduce an active competing dispatch explicitly; the ordinary
+        # ambiguous-effect path removes its lease and must also be recoverable.
+        store.connection.execute(
+            "INSERT INTO outbox_dispatch_leases VALUES(?,?,?,?)",
+            (outbox, "dispatcher:test", clock.after(30), claim["fence"]),
+        )
+        inspected = inspect_outbox(store, outbox, event, SHOTCALLER_ID)
+        digest = inspected["envelope_sha256"]
+        assert inspected["envelope"]["summary"] == "Exact retained completion update"
+        try:
+            inspect_outbox(store, outbox, event, JARVAN_ID)
+        except StorageRefusal as exc:
+            assert exc.code == "source_event_mismatch"
+        else:
+            raise AssertionError("foreign recipient inspected as owner")
+        cases = (
+            (GAREN_RUNTIME, digest, clock.now(), "delivery_claimed"),
+            (JARVAN_RUNTIME, digest, clock.after(60), "runtime_unverified"),
+            (GAREN_RUNTIME, "0" * 64, clock.after(60), "source_event_mismatch"),
+        )
+        for runtime, expected, at, code in cases:
+            before = store.connection.total_changes
+            try:
+                reconcile_received_outbox(store, outbox, event, SHOTCALLER_ID, runtime, expected, "synthetic:read-receipt", at)
+            except StorageRefusal as exc:
+                assert exc.code == code
+            else:
+                raise AssertionError("unproven recipient read accepted")
+            assert store.connection.total_changes == before
+        if missing_lease:
+            # Synthetic historical fixture: rollover already removed the lease.
+            store.connection.execute("DELETE FROM outbox_dispatch_leases WHERE outbox_id=?", (outbox,))
+        result = invoke_cli(state,
+            "delivery", "reconcile-received",
+            "--outbox-id", outbox, "--event-id", event, "--recipient-agent-id", SHOTCALLER_ID,
+            "--runtime-instance-id", GAREN_RUNTIME, "--expected-envelope-sha256", digest,
+            "--receipt-reference", "synthetic:read-receipt", "--at", clock.after(60),
+        )
+        assert result["ok"] and result["result"]["effect_kind"] == "recipient_read", result
+        before = store.connection.total_changes
+        duplicate = reconcile_received_outbox(store, outbox, event, SHOTCALLER_ID, GAREN_RUNTIME, digest, "synthetic:read-receipt", clock.after(61))
+        assert duplicate["idempotent"] and store.connection.total_changes == before
+        try:
+            reconcile_received_outbox(store, outbox, event, SHOTCALLER_ID, GAREN_RUNTIME, digest, "synthetic:different-read", clock.after(62))
+        except StorageRefusal as exc:
+            assert exc.code == "receipt_conflict"
+        else:
+            raise AssertionError("different read receipt replaced the original")
+        assert store.connection.execute("SELECT count(*) FROM events WHERE event_type='delivery_recipient_read'").fetchone()[0] == 1
+        assert store.connection.execute("SELECT outcome FROM delivery_attempts WHERE attempt_id='attempt:test'").fetchone()[0] == "awaiting_receipt"
+        # Reading a pause command must never stand in for executing its effect.
+        store.connection.execute("UPDATE events SET event_type='owner_stop_control' WHERE event_id=?", (event,))
+        control_digest = inspect_outbox(store, outbox, event, SHOTCALLER_ID)["envelope_sha256"]
+        before = store.connection.total_changes
+        try:
+            reconcile_received_outbox(store, outbox, event, SHOTCALLER_ID, GAREN_RUNTIME, control_digest, "synthetic:control-read", clock.after(63))
+        except StorageRefusal as exc:
+            assert exc.code == "delivery_control_effect_required"
+        else:
+            raise AssertionError("control read was accepted as execution")
+        assert store.connection.total_changes == before
+        store.close()
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="league-transition-delivery-") as temporary:
         root = Path(temporary)
@@ -416,6 +493,7 @@ def main() -> None:
         test_closed_endpoint_durability_reconnect_and_watcher_ownership(root)
         test_direct_fallback_only_without_active_watcher(root)
         test_concurrent_source_transitions_commit_once(root)
+        test_explicit_recipient_read_recovers_only_exact_uncertain_delivery(root)
     print("PASS: Heimerdinger source binding, fair drain, duplicate effect suppression, concurrent transitions, close/reconnect, and watcher/direct ownership")
 
 

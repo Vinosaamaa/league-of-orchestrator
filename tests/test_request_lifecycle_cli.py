@@ -59,6 +59,8 @@ def test_help_inventory_and_schemas() -> None:
         "task.transition",
         "delivery.claim-outbox",
         "delivery.ack-outbox",
+        "delivery.inspect-outbox",
+        "delivery.reconcile-received",
         "hook.stop",
         "continuation.prepare",
         "continuation.reopen",

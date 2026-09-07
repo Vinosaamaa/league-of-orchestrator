@@ -3,11 +3,82 @@
 from __future__ import annotations
 
 import sqlite3
+import hashlib
+import json
 from typing import Any, Optional
 
 from .sqlite_request_ops import _time
 from .storage_outbox import OutboxDispatchIdentity
 from .storage_types import StorageRefusal
+
+
+def inspect_outbox(store: Any, outbox_id: str, event_id: str, recipient_agent_id: str) -> dict[str, Any]:
+    envelope = outbox_envelope(store, outbox_id, event_id, recipient_agent_id)
+    digest = hashlib.sha256(json.dumps(envelope, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    return {"envelope": envelope, "envelope_sha256": digest}
+
+
+def reconcile_received_outbox(
+    store: Any, outbox_id: str, event_id: str, recipient_agent_id: str,
+    runtime_instance_id: str, expected_envelope_sha256: str, receipt_reference: str, at: str,
+) -> dict[str, Any]:
+    """Record the recipient's explicit read, never infer a prior native effect."""
+    now = _time(at, "recipient read time")
+    if not receipt_reference or len(receipt_reference.encode()) > 2048:
+        raise StorageRefusal("invalid_delivery", "recipient read requires a bounded receipt reference")
+    with store._transaction():
+        inspected = inspect_outbox(store, outbox_id, event_id, recipient_agent_id)
+        if inspected["envelope_sha256"] != expected_envelope_sha256:
+            raise StorageRefusal("source_event_mismatch", "recipient read does not match the inspected envelope")
+        if inspected["envelope"]["event_type"] == "owner_stop_control":
+            raise StorageRefusal("delivery_control_effect_required", "reading a control does not prove it was executed")
+        effect_id = hashlib.sha256(json.dumps(
+            [runtime_instance_id, expected_envelope_sha256, receipt_reference], separators=(",", ":")
+        ).encode()).hexdigest()
+        existing = store.connection.execute(
+            "SELECT effect_kind,effect_id FROM recipient_receipts WHERE event_id=? AND recipient_agent_id=?",
+            (event_id, recipient_agent_id),
+        ).fetchone()
+        if existing is not None:
+            if existing["effect_kind"] != "recipient_read" or existing["effect_id"] != effect_id:
+                raise StorageRefusal("receipt_conflict", "an existing receipt proves a different effect")
+            return {"outbox_id": outbox_id, "state": "delivered", "effect_kind": "recipient_read", "idempotent": True}
+        runtime = store.connection.execute(
+            "SELECT r.actor_agent_id,a.version FROM runtime_instances r JOIN agent_instances a ON a.agent_id=r.actor_agent_id "
+            "WHERE r.runtime_instance_id=? AND r.actor_agent_id=? AND r.verified=1 "
+            "AND r.status IN ('active','idle') AND a.retired_at IS NULL AND a.role='shotcaller'",
+            (runtime_instance_id, recipient_agent_id),
+        ).fetchone()
+        if runtime is None:
+            raise StorageRefusal("runtime_unverified", "recipient read requires its exact live Shotcaller runtime")
+        row = store.connection.execute("SELECT state FROM delivery_outbox WHERE outbox_id=?", (outbox_id,)).fetchone()
+        if row["state"] != "awaiting_receipt":
+            raise StorageRefusal("delivery_conflict", "recipient read recovery requires an uncertain delivery")
+        lease = store.connection.execute("SELECT leased_until FROM outbox_dispatch_leases WHERE outbox_id=?", (outbox_id,)).fetchone()
+        if lease is not None and _time(lease["leased_until"], "dispatch expiry") > now:
+            raise StorageRefusal("delivery_claimed", "recipient read cannot replace an active dispatch")
+        store.connection.execute(
+            "INSERT INTO recipient_receipts(event_id,recipient_agent_id,received_at,effect_kind,effect_id) "
+            "VALUES(?,?,?,'recipient_read',?)", (event_id, recipient_agent_id, at, effect_id),
+        )
+        store.connection.execute(
+            "INSERT INTO events(event_id,agent_id,entity_version,event_type,update_text,occurred_at,"
+            "detail_json,aggregate_kind,aggregate_id,source_event_id) VALUES(?,?,?,'delivery_recipient_read',"
+            "'Recipient explicitly read an uncertain delivery',?,?,'agent',?,?)",
+            ("recipient-read:" + effect_id, recipient_agent_id, runtime["version"], at,
+             json.dumps({"outbox_id": outbox_id, "runtime_instance_id": runtime_instance_id,
+                         "envelope_sha256": expected_envelope_sha256, "receipt_reference": receipt_reference,
+                         "effect_id": effect_id}, sort_keys=True, separators=(",", ":")),
+             recipient_agent_id, event_id),
+        )
+        _reconcile_delivered(store, outbox_id, at)
+        store.connection.execute("UPDATE delivery_outbox SET last_outcome='recipient_read' WHERE outbox_id=?", (outbox_id,))
+        store.connection.execute(
+            "UPDATE obligations SET state='satisfied',updated_at=? WHERE kind='delivery' "
+            "AND aggregate_id=? AND owner_agent_id=? AND state='open'",
+            (at, outbox_id, recipient_agent_id),
+        )
+    return {"outbox_id": outbox_id, "state": "delivered", "effect_kind": "recipient_read", "effect_id": effect_id, "idempotent": False}
 
 
 def _reconcile_delivered(store: Any, outbox_id: str, received_at: str) -> None:

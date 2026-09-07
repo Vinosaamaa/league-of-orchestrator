@@ -26,6 +26,8 @@ from league.pi_session_migration import (  # noqa: E402
 )
 from league.real_cleanup import HerdrHarnessAdapter  # noqa: E402
 from league.storage import StorageRefusal  # noqa: E402
+from league.agent_adapters import builtin_agent_adapter_registry  # noqa: E402
+from league.multiplexer_adapters import builtin_multiplexer_adapter_registry  # noqa: E402
 from league.request_services import AssignmentSpec  # noqa: E402
 from request_lifecycle_fixture import LUX_ID, create_context  # noqa: E402
 from storage_fixture import REPOSITORY, SHOTCALLER_ID  # noqa: E402
@@ -812,6 +814,174 @@ def test_provider_mapping_and_role_placement(root: Path) -> None:
     store.close()
 
 
+def factory_adapter(store, clock, worktree, root, runner, *, project_code="LEAGUE"):
+    options = replace(_options(root), project_code=project_code)
+    routing = {
+        "decision_id": None, "provider": "codex", "model": options.model,
+        "effort": options.effort, "tier": "EXPLICIT",
+        "reason": "Explicit launch override.", "reason_code": "explicit_override",
+        "policy_version": None, "provider_config_version": None,
+        "explicit": {"runtime": True, "provider": True, "model": True, "effort": True},
+    }
+    multiplexer = builtin_multiplexer_adapter_registry(herdr_runner=runner).adapter("herdr")
+    adapter = builtin_agent_adapter_registry().adapter("pi").visible_launch(
+        store=store, options=options, multiplexer=multiplexer, startup_timeout_ms=1000,
+        launch={
+            "assignment_id": "assignment:factory", "project_code": project_code,
+            "worktree": str(worktree), "provider_kind": "codex",
+            "model": options.model, "effort": options.effort, "routing": routing,
+            "resolved_release_root": str(ROOT), "workspace_id": "w1",
+            "state_root": str(root / "state"), "session_mode": "create", "at": clock.now(),
+        },
+    )
+    return adapter, options, routing
+
+
+def test_registered_factory_preserves_explicit_routing(root: Path) -> None:
+    store, clock, worktree = _context(root, "factory")
+    runner = FakePiHerdr(root / "factory")
+    adapter, options, routing = factory_adapter(store, clock, worktree, root, runner)
+    spec = champion_spec(worktree, "factory")
+    try:
+        result = VisibleChampionLaunchService(
+            store, adapter, options, clock, issue_verifier=FakeIssueVerifier(store=store),
+        ).launch(spec)
+        assert result["state"] == "active", (result, store.assignment_launch_context(spec.assignment_id))
+        durable = store.assignment_launch_context(spec.assignment_id)
+        assert durable["acceptance_receipt"]["routing"] == routing
+        descriptor = store.provider_launch_descriptor("pi-launch:assignment:factory")["descriptor"]
+        assert descriptor["routing"] == routing
+        assert descriptor["project_code"] == "LEAGUE"
+        assert descriptor["task_label"] == "Tiny Gate"
+        assert runner.start_count == 1
+    finally:
+        store.close()
+
+
+def test_factory_preallocation_refusal_releases_only_own_reservation(root: Path) -> None:
+    for index, corrupt in enumerate((
+        lambda value: value.update(unexpected=True),
+        lambda value: value["routing"].update(provider="cursor"),
+        lambda value: value["routing"].update(model="foreign-model"),
+        lambda value: value["routing"]["explicit"].update(model="true"),
+        lambda value: value["routing"].update(unexpected=True),
+        lambda value: value["routing"].update(reason={"foreign": True}),
+    )):
+        suffix = f"factory-invalid-{index}"
+        store, clock, worktree = _context(root, suffix)
+        runner = FakePiHerdr(root / suffix)
+        adapter, options, _ = factory_adapter(store, clock, worktree, root, runner)
+        corrupt(adapter.descriptor)
+        spec = champion_spec(worktree, suffix)
+        before = [tuple(row) for row in store.connection.execute("SELECT * FROM callsign_assignments")]
+        owner_before = store.agent_status(SHOTCALLER_ID)
+        try:
+            result = VisibleChampionLaunchService(
+                store, adapter, options, clock, issue_verifier=FakeIssueVerifier(store=store),
+            ).launch(spec)
+            assert result["failure_class"] == "provider_launch_descriptor_invalid", result
+            assert result["state"] == "blocked" and result["cleanup_required"] is False, result
+            reservation = store.callsign_assignment_status(f"callsign-assignment:{spec.assignment_id}")
+            assert reservation["state"] == "rolled_back", reservation
+            after = [tuple(row) for row in store.connection.execute(
+                "SELECT * FROM callsign_assignments WHERE callsign_assignment_id != ?",
+                (f"callsign-assignment:{spec.assignment_id}",),
+            )]
+            assert after == before
+            assert store.agent_status(SHOTCALLER_ID) == owner_before
+            assert runner.start_count == 0 and not adapter.created_endpoint
+            assert all(call[1:3] == ("agent", "list") for call in runner.calls)
+            assert store.provider_launch_descriptor("pi-launch:assignment:factory") is None
+        finally:
+            store.close()
+
+
+def test_prior_descriptor_keeps_ambiguous_cleanup_fence(root: Path) -> None:
+    from league.worktree import exact_launch_cwd_binding
+
+    store, clock, worktree = _context(root, "factory-prior")
+    runner = FakePiHerdr(root / "factory-prior")
+    adapter, options, _ = factory_adapter(store, clock, worktree, root, runner)
+    spec = champion_spec(worktree, "factory-prior")
+    adapter.descriptor.update(
+        assignment_id=spec.assignment_id,
+        worktree_binding=exact_launch_cwd_binding(worktree, "champion"),
+    )
+    store.prepare_provider_launch(adapter.descriptor, clock.now())
+    adapter.descriptor["unexpected"] = True
+    try:
+        result = VisibleChampionLaunchService(
+            store, adapter, options, clock, issue_verifier=FakeIssueVerifier(store=store),
+        ).launch(spec)
+        assert result["failure_class"] == "provider_launch_descriptor_invalid", result
+        assert result["state"] == "cleanup_pending" and result["cleanup_required"] is True
+        assert store.callsign_assignment_status(
+            f"callsign-assignment:{spec.assignment_id}"
+        )["state"] == "reserved"
+        assert runner.start_count == 0
+    finally:
+        store.close()
+
+
+def test_factory_invalid_project_refuses_before_reservation(root: Path) -> None:
+    for index, code in enumerate((None, "", "league", "LEAGUE EXTRA", "A" * 17, "LEAGUE\n", 123)):
+        suffix = f"factory-project-{index}"
+        store, clock, worktree = _context(root, suffix)
+        runner = FakePiHerdr(root / suffix)
+        before = store.connection.total_changes
+        try:
+            try:
+                factory_adapter(store, clock, worktree, root, runner, project_code=code)
+            except StorageRefusal as exc:
+                assert exc.code == "launch_scope_invalid", exc.code
+            else:
+                raise AssertionError("invalid project code reached launch reservation boundary")
+            assert store.connection.total_changes == before
+            assert runner.calls == []
+        finally:
+            store.close()
+
+
+def test_factory_persisted_routing_ownership(root: Path) -> None:
+    from types import SimpleNamespace
+    from league.cli import _champion_launch_route
+    from league.routing import ModelRouter, load_routing_config
+
+    for foreign in (True, False):
+        suffix = f"factory-decision-{foreign}"
+        store, clock, worktree = _context(root, suffix)
+        runner = FakePiHerdr(root / suffix)
+        adapter, options, _ = factory_adapter(store, clock, worktree, root, runner)
+        subject = "R2" if foreign else "R3"
+        decision = ModelRouter(
+            load_routing_config(ROOT / "config/league-model-routing.example.json"), store,
+        ).choose(
+            decision_id=f"route:{suffix}", subject_kind="request", subject_id=subject,
+            role="champion", chosen_at=clock.now(), signals={"bounded_checkable": True},
+        )
+        spec = champion_spec(worktree, suffix)
+        routing = _champion_launch_route(store, SimpleNamespace(
+            runtime_kind="pi", provider_kind="codex", model=None, effort=None,
+            routing_decision_id=decision["decision_id"], request_id=subject,
+            task_id=spec.task_id, requires=[],
+        ), assignment_id=spec.assignment_id)
+        adapter.descriptor.update(routing=routing, model=routing["model"], effort=routing["effort"])
+        try:
+            result = VisibleChampionLaunchService(
+                store, adapter, options, clock, issue_verifier=FakeIssueVerifier(store=store),
+            ).launch(spec)
+            if foreign:
+                assert result["state"] == "blocked", result
+                assert result["failure_class"] == "provider_launch_routing_mismatch", result
+                assert runner.start_count == 0 and not adapter.created_endpoint
+            else:
+                assert result["state"] == "active", result
+                assert store.assignment_launch_context(spec.assignment_id)["acceptance_receipt"]["routing"] == routing
+                assert runner.start_count == 1
+        finally:
+            store.close()
+
+
 def test_pi_context_display_receipt_matches_shared_contract(root: Path) -> None:
     root = root.resolve()
     for provider in ("cursor", "codex"):
@@ -1023,6 +1193,11 @@ def test_pi_extension_enforces_herdr_token_limit() -> None:
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="league-pi-provider-") as directory:
         root = Path(directory).resolve()
+        test_registered_factory_preserves_explicit_routing(root)
+        test_factory_preallocation_refusal_releases_only_own_reservation(root)
+        test_prior_descriptor_keeps_ambiguous_cleanup_fence(root)
+        test_factory_invalid_project_refuses_before_reservation(root)
+        test_factory_persisted_routing_ownership(root)
         test_pi_context_display_receipt_matches_shared_contract(root)
         test_fork_metadata_restart_and_duplicate_suppression(root)
         test_provider_mapping_and_role_placement(root)

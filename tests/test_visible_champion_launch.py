@@ -3303,11 +3303,39 @@ def test_token_only_native_title_refresh_preserves_launch_identity(
     store.close()
 
 
+def test_token_only_without_project_refuses_provider_fallback(root: Path) -> None:
+    # The installed identity helper requires a nonempty project code. Do not
+    # invent one, spoof legacy ownership, or accept its native-title fallback.
+    for harness_kind in ("codex", "cursor"):
+        suffix = f"token-only-{harness_kind}-no-project"
+        store, clock, worktree = _context(root, suffix)
+        options = _options(root)
+        assert options.project_code is None
+        runner = TokenOnlyLaunchRunner(worktree, harness_kind)
+        service = VisibleChampionLaunchService(
+            store,
+            _adapter(options, runner, store, harness_kind=harness_kind),
+            options,
+            clock,
+        )
+        with patch.object(visible_launch.time, "sleep", lambda _: None):
+            result = service.launch(_spec(worktree, suffix))
+        assert result["state"] == "cleanup_pending"
+        assert result["failure_class"] == "launch_title_unverified"
+        assert runner.tokens["thread_title"] == "Launch handshake synthetic"
+        assert "launch_project_code" not in runner.tokens
+        assert not any(key.startswith("legacy_display_") for key in runner.tokens)
+        assert len(runner.contexts) == 1
+        assert "identity handshake" in runner.contexts[0]
+        store.close()
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="league-visible-launch-") as temporary:
         root = Path(temporary)
         test_token_only_native_title_refresh_preserves_launch_identity(root)
         test_token_only_native_title_refresh_preserves_launch_identity(root, "cursor")
+        test_token_only_without_project_refuses_provider_fallback(root)
         test_generated_task_labels_are_deterministic_two_word_names()
         test_legacy_display_command_exposes_exact_owner_cas_inputs()
         test_task_label_defaults_and_explicit_labels_stay_two_words(root)

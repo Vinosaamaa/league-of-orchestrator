@@ -316,6 +316,16 @@ already occupied fresh route, and `assign reconcile-runtime` does not activate a
 non-active assignment. There is no demonstrated supported adopt-partial-launch
 surface; recovery of a retained failed pane remains an explicit coordinator gate.
 
+The installed identity helper also requires a nonempty project code for its
+canonical Champion branch. With an absent or empty code it selects the native
+prompt even when the callsign and two-word task inputs are exact. League's
+optional-project naming contract cannot be represented by that helper without
+an owning-toolkit compatibility change. A fabricated project code would change
+the canonical name; legacy-reconciliation tokens would misrepresent ownership.
+Codex/Cursor no-project regression coverage therefore retains the truthful
+`launch_title_unverified` refusal and proves no work brief is delivered. This is
+a known availability blocker, not successful no-project launch support.
+
 ## Pi service-boundary follow-up
 
 The full visible-launch service reproduced `launch_receipt_unverified`: the Pi

@@ -122,7 +122,7 @@ def task_issue_semantic_binding_digest(
 def _issue_body_contract(body: str) -> tuple[str, str]:
     if not isinstance(body, str) or not body.strip() or len(body.encode("utf-8")) > MAX_ISSUE_BODY_BYTES:
         raise StorageRefusal("issue_scope_incomplete", "issue body is empty or exceeds its bound")
-    matches = list(re.finditer(r"(?m)^##\s+(.+?)\s*$", body))
+    matches = list(re.finditer(r"(?m)^#{1,2}\s+(.+?)\s*$", body))
     sections: dict[str, str] = {}
     for index, match in enumerate(matches):
         start = match.end()
@@ -130,17 +130,17 @@ def _issue_body_contract(body: str) -> tuple[str, str]:
         heading = normalize_issue_title(match.group(1))
         sections.setdefault(heading, body[start:end].strip())
     scope = next(
-        (sections[name] for name in ("objective", "scope", "what") if sections.get(name)),
+        (sections[name] for name in ("objective", "scope", "what", "goal") if sections.get(name)),
         None,
     )
     acceptance = next(
-        (sections[name] for name in ("acceptance", "verification") if sections.get(name)),
+        (sections[name] for name in ("acceptance", "verification", "acceptance criteria") if sections.get(name)),
         None,
     )
     authority = next(
         (
             sections[name]
-            for name in ("hard boundaries", "authority", "safety")
+            for name in ("hard boundaries", "authority", "safety", "boundaries")
             if sections.get(name)
         ),
         None,

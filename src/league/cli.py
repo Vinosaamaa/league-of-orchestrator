@@ -4558,8 +4558,15 @@ def main(
     sink = output or sys.stdout.buffer
     try:
         if command == "request.turn":
+            source = input_stream or sys.stdin.buffer
+            if source.isatty():
+                raise StorageRefusal(
+                    "triage_transport_unsupported",
+                    "request turn requires piped stdin; terminal line buffering can "
+                    "truncate JSON batches. Use one process with stdin=subprocess.PIPE "
+                    "and flush each newline-delimited batch before reading its receipt.",
+                )
             with _open(args) as store:
-                source = input_stream or sys.stdin.buffer
                 result, raw = _run_interactive_request_turn(
                     store, args, source, sink
                 )

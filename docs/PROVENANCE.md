@@ -1,5 +1,19 @@
 # Source provenance
 
+## Issue #66 request-turn pipe transport
+
+`request turn` now rejects terminal stdin with `triage_transport_unsupported`
+before opening storage, claiming a turn, or emitting intake. Previously a JSON
+line larger than a terminal's canonical input buffer could stall or truncate
+before reaching the existing payload-size check. A raw terminal is also refused:
+the supported adapter contract is one process with piped stdin, not terminal
+mode repair. The error describes the pipe and flush/read sequence.
+
+Focused request-turn coverage proves pre-storage refusal, an actual open PTY
+returning without input, and a complete one-process pipe turn with a decision
+line larger than common terminal buffer limits. These are synthetic local
+regressions, not installed native prompt, steering, or watcher acceptance.
+
 ## Issue #66 legacy acceptance issue compatibility (parent #23)
 
 The real cleanup gate reached its owner issue but rejected its existing

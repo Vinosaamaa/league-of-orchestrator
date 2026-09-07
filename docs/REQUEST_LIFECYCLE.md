@@ -18,6 +18,8 @@ teardown; issue #23 owns those gates.
   `awaiting_requester`, `deferred`, `answered`, or `cancelled`.
 - Repository initialization/writes, configuration writes, migrations,
   supervised tests, and long work require a visible Champion before mutation.
+  One shared League policy enforces that boundary at Codex `PreToolUse` and Pi
+  `tool_call`; provider adapters do not own or duplicate the decision.
   User-selected model, effort, and explicit route are recorded unchanged.
 - Shotcaller-owned intake is fenced by the stable Squad owner. A draining or
   superseded Shotcaller incarnation refuses new prompts; the atomic rollover
@@ -31,6 +33,10 @@ teardown; issue #23 owns those gates.
   database effect exactly once.
 - Request claims, outbox dispatch leases, and watcher registration leases have
   independent holders, fences, expiry, and recovery.
+- A committed bounded `request turn` may continue at the same prompt generation
+  only while that owner's captured untriaged backlog remains. Token replacement
+  is atomic; uncommitted turns still exclude competitors. This uses the normal
+  one-process-per-batch path without new intake or changing prompt generation.
 - Inspection and rollback exports cap prompt payload bodies at 16 MiB in
   addition to the record-count bound, refusing before payload rows are
   materialized when either budget is exceeded.

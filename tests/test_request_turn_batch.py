@@ -16,7 +16,7 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / "src"), str(ROOT / "tests")]
 
-from request_lifecycle_fixture import GAREN_RUNTIME, create_context  # noqa: E402
+from request_lifecycle_fixture import GAREN_RUNTIME, JARVAN_ID, JARVAN_RUNTIME, create_context  # noqa: E402
 from storage_fixture import SHOTCALLER_ID  # noqa: E402
 from league.cli import main as league_main  # noqa: E402
 from league.sqlite_store import SQLiteStorage  # noqa: E402
@@ -261,6 +261,54 @@ def test_turn_handler_never_spawns_a_second_process(root: Path) -> None:
     run.assert_not_called()
     phases = [json.loads(line)["result"]["phase"] for line in sink.getvalue().splitlines()]
     assert phases == ["intake", "begun", "committed"]
+
+
+def test_pr134_shaped_direct_implementation_refuses_before_completion(root: Path) -> None:
+    state, store, clock = create_context(root, "turn-pr134-delegation")
+    _capture(
+        store,
+        clock,
+        "prompt:pr134",
+        "Update AGENTS.md with an owner-address instruction and open a pull request.",
+    )
+    store.close()
+
+    process = _start_turn(state, clock.now())
+    assert process.stdin is not None and process.stdout is not None
+    intake = json.loads(process.stdout.readline())
+    begun = _submit_semantic(
+        process,
+        {
+            "candidate_inventory_digest": intake["result"]["candidate_inventory"]["digest"],
+            "decisions": [_semantic_decision("Implement the repository instruction change")],
+            "plans": [_external_semantic_plan()],
+        },
+    )
+    assert begun["result"]["routing"][0]["dispatch"]["execution_mode"] == "champion"
+    refused = _submit_semantic(
+        process,
+        {
+            "actions": [
+                {
+                    "kind": "answer",
+                    "request_index": 1,
+                    "content": "I changed the file and opened the pull request directly.",
+                    "resolution_summary": "Direct implementation claimed complete",
+                }
+            ]
+        },
+    )
+    assert process.wait(timeout=10) == 2
+    assert refused["error"]["code"] == "champion_delegation_required", refused
+    with SQLiteStorage(state) as observer:
+        request = observer.connection.execute(
+            "SELECT state,execution_mode,latest_result_id FROM requests WHERE summary=?",
+            ("Implement the repository instruction change",),
+        ).fetchone()
+        assert tuple(request) == ("in_progress", "champion", None)
+        assert observer.connection.execute(
+            "SELECT COUNT(*) FROM response_references"
+        ).fetchone()[0] == 0
 
 
 def test_batch_failure_is_atomic_and_exact_retry_is_idempotent(root: Path) -> None:
@@ -557,11 +605,154 @@ def test_turn_limit_refuses_before_intake(root: Path) -> None:
         assert observer.untriaged_intake(SHOTCALLER_ID)["returned_count"] == 1
 
 
+def test_two_limited_turns_drain_one_captured_generation(root: Path) -> None:
+    state, store, clock = create_context(root, "turn-same-generation")
+    expected = [f"prompt:batch:{ordinal:02}" for ordinal in range(10)]
+    for prompt_id in expected:
+        _capture(store, clock, prompt_id, f"Exact synthetic context {prompt_id}")
+    store.close()
+    accounted = []
+    scopes = []
+    for batch in range(2):
+        process = _start_turn(state, clock.now(), limit=5)
+        assert process.stdout is not None
+        try:
+            intake = json.loads(process.stdout.readline())
+            assert intake["ok"] and intake["result"]["phase"] == "intake", intake
+            prompts = intake["result"]["prompts"]
+            assert [row["prompt_id"] for row in prompts] == expected[batch * 5:(batch + 1) * 5]
+            assert all(row["body"] == f"Exact synthetic context {row['prompt_id']}" for row in prompts)
+            begun = _submit_semantic(process, {
+                "candidate_inventory_digest": intake["result"]["candidate_inventory"]["digest"],
+                "decisions": [{"items": [{"summary": row["body"], "disposition": "context"}]}
+                              for row in prompts],
+                "plans": [],
+            })
+            assert begun["result"]["phase"] == "begun"
+            with SQLiteStorage(state) as observer:
+                stop = observer.stop_decision(
+                    "watcher:Garen", SHOTCALLER_ID, f"terminal:batch:{batch}", clock.now()
+                )
+                assert stop["decision"] == "block" and stop["obligations"]["turn_commit_pending"] == 1
+            committed = _submit_semantic(process, {"actions": []})
+            assert process.wait(timeout=10) == 0 and committed["result"]["phase"] == "committed"
+            assert committed["result"]["unresolved"]["untriaged_prompt_count"] == 5 * (1 - batch)
+            accounted.extend(row["prompt_id"] for row in prompts)
+            with SQLiteStorage(state) as observer:
+                exported = json.loads(observer.export_bytes(
+                    format_name="json", purpose="rollback", max_records=10000
+                ))["tables"]
+                scopes.append(next(row for row in exported["watcher_scopes"]
+                                   if row["scope_id"] == "watcher:Garen"))
+                assert len(exported["prompts"]) == 10
+        finally:
+            if process.poll() is None:
+                process.communicate(timeout=10)
+    assert accounted == expected
+    assert scopes[0]["user_message_generation"] == scopes[1]["user_message_generation"]
+    first, second = [json.loads(row["metadata_json"])["shotcaller_turn"] for row in scopes]
+    assert first["token_digest"] != second["token_digest"]
+    assert second["active"] and second["committed"]
+    # Exhaustion does not create permission for unbounded empty continuations.
+    exhausted = _start_turn(state, clock.now(), limit=5)
+    output, _ = exhausted.communicate(timeout=10)
+    assert exhausted.returncode == 3
+    assert json.loads(output)["error"]["code"] == "shotcaller_turn_active"
+
+
+def test_competing_continuations_select_one_process_and_fence_old_token(root: Path) -> None:
+    state, store, clock = create_context(root, "turn-competing-continuations")
+    _capture(store, clock, "prompt:remaining", "Retained context for the next batch")
+    store.begin_shotcaller_turn(SHOTCALLER_ID, "turn:previous", clock.now())
+    store.commit_shotcaller_turn(SHOTCALLER_ID, "turn:previous", clock.now())
+    store.close()
+    contenders = [_start_turn(state, clock.now(), limit=1) for _ in range(2)]
+    try:
+        replies = [json.loads(process.stdout.readline()) for process in contenders]
+        assert sorted(reply["ok"] for reply in replies) == [False, True], replies
+        winner_index = next(index for index, reply in enumerate(replies) if reply["ok"])
+        loser = contenders[1 - winner_index]
+        assert loser.wait(timeout=10) == 3
+        assert replies[1 - winner_index]["error"]["code"] == "shotcaller_turn_active"
+        # Neither a competing begin nor a stale previous commit can release or
+        # settle the selected process while it waits for model-authored input.
+        with SQLiteStorage(state) as observer:
+            for operation in (observer.commit_shotcaller_turn, observer.abort_shotcaller_turn):
+                try:
+                    operation(SHOTCALLER_ID, "turn:previous", clock.now())
+                except StorageRefusal as exc:
+                    assert exc.code == "shotcaller_turn_conflict"
+                else:
+                    raise AssertionError("previous token changed the continuation")
+            assert observer.untriaged_intake(SHOTCALLER_ID)["returned_count"] == 1
+        winner = contenders[winner_index]
+        intake = replies[winner_index]["result"]
+        begun = _submit_semantic(winner, {
+            "candidate_inventory_digest": intake["candidate_inventory"]["digest"],
+            "decisions": [{"items": [{"summary": "Retained context", "disposition": "context"}]}],
+            "plans": [],
+        })
+        assert begun["result"]["phase"] == "begun"
+        committed = _submit_semantic(winner, {"actions": []})
+        assert winner.wait(timeout=10) == 0 and committed["result"]["phase"] == "committed"
+        with SQLiteStorage(state) as observer:
+            assert observer.untriaged_intake(SHOTCALLER_ID)["untriaged_prompt_count"] == 0
+    finally:
+        for process in contenders:
+            if process.poll() is None:
+                process.communicate(timeout=10)
+
+
+def test_uncommitted_turn_refuses_backlog_continuation_after_user_steering(root: Path) -> None:
+    _, store, clock = create_context(root, "turn-uncommitted-backlog")
+    _capture(store, clock, "prompt:retained", "Synthetic retained prompt")
+    active = store.begin_shotcaller_turn(SHOTCALLER_ID, "turn:uncommitted", clock.now())
+    for steered in (False, True):
+        if steered:
+            store.note_user_message(active["scope_id"], SHOTCALLER_ID, clock.now())
+        try:
+            store.begin_shotcaller_turn(SHOTCALLER_ID, "turn:competitor", clock.now())
+        except StorageRefusal as exc:
+            assert exc.code == "shotcaller_turn_active"
+        else:
+            raise AssertionError("uncommitted turn lost ownership to its backlog")
+        exact_retry = store.begin_shotcaller_turn(SHOTCALLER_ID, "turn:uncommitted", clock.now())
+        assert exact_retry["idempotent"] and not exact_retry["committed"]
+    store.abort_shotcaller_turn(SHOTCALLER_ID, "turn:uncommitted", clock.now())
+    assert store.untriaged_intake(SHOTCALLER_ID)["returned_count"] == 1
+    store.close()
+
+
+def test_foreign_backlog_cannot_unlock_turn_but_fresh_steering_can(root: Path) -> None:
+    _, store, clock = create_context(root, "turn-foreign-backlog")
+    store.intake_prompt(
+        "prompt:foreign-backlog", JARVAN_ID, JARVAN_RUNTIME, "codex",
+        "session:foreign", "source:foreign", "Other owner's captured context", clock.now(),
+    )
+    previous = store.begin_shotcaller_turn(SHOTCALLER_ID, "turn:committed", clock.now())
+    store.commit_shotcaller_turn(SHOTCALLER_ID, "turn:committed", clock.now())
+    try:
+        store.begin_shotcaller_turn(SHOTCALLER_ID, "turn:foreign-continuation", clock.now())
+    except StorageRefusal as exc:
+        assert exc.code == "shotcaller_turn_active"
+    else:
+        raise AssertionError("another owner's backlog unlocked a committed turn")
+    store.note_user_message(previous["scope_id"], SHOTCALLER_ID, clock.now())
+    fresh = store.begin_shotcaller_turn(SHOTCALLER_ID, "turn:fresh-steering", clock.now())
+    assert fresh["active"] and not fresh["committed"]
+    assert store.untriaged_intake(JARVAN_ID)["untriaged_prompt_count"] == 1
+    store.abort_shotcaller_turn(SHOTCALLER_ID, "turn:fresh-steering", clock.now())
+    store.close()
+
+
 def test_supervision_commit_failure_rolls_back_request_effect_and_aborts_turn(
     root: Path,
 ) -> None:
     state, store, clock = create_context(root, "turn-supervision-rollback")
     _capture(store, clock, "prompt:rollback", "Answer then inject supervisor commit failure")
+    # The failing turn continues an already-committed same-generation batch.
+    store.begin_shotcaller_turn(SHOTCALLER_ID, "turn:before-rollback", clock.now())
+    store.commit_shotcaller_turn(SHOTCALLER_ID, "turn:before-rollback", clock.now())
     candidate_digest = store.untriaged_intake(SHOTCALLER_ID)["candidate_inventory"][
         "digest"
     ]
@@ -621,6 +812,11 @@ def test_supervision_commit_failure_rolls_back_request_effect_and_aborts_turn(
         unresolved = observer.unresolved_requests(SHOTCALLER_ID)
         assert len(unresolved["requests"]) == 1
         assert unresolved["requests"][0]["state"] != "answered"
+        exported = json.loads(observer.export_bytes(
+            format_name="json", purpose="rollback", max_records=10000
+        ))["tables"]
+        assert len(exported["prompts"]) == len(exported["prompt_items"]) == 1
+        assert exported["response_references"] == []
         recovered = observer.begin_shotcaller_turn(
             SHOTCALLER_ID,
             "turn-token:rollback-recovery",
@@ -689,6 +885,7 @@ def main() -> None:
         root = Path(temporary)
         test_interactive_turn_uses_one_process_and_one_ordered_batch(root)
         test_turn_handler_never_spawns_a_second_process(root)
+        test_pr134_shaped_direct_implementation_refuses_before_completion(root)
         test_batch_failure_is_atomic_and_exact_retry_is_idempotent(root)
         test_partial_duplicate_or_reordered_decisions_refuse(root)
         test_one_process_persists_all_dispositions_without_minting_deferred_requests(root)
@@ -697,6 +894,10 @@ def main() -> None:
         test_truncated_candidates_fence_only_external_dispatch(root)
         test_changed_candidates_fence_external_dispatch(root)
         test_turn_limit_refuses_before_intake(root)
+        test_two_limited_turns_drain_one_captured_generation(root)
+        test_competing_continuations_select_one_process_and_fence_old_token(root)
+        test_uncommitted_turn_refuses_backlog_continuation_after_user_steering(root)
+        test_foreign_backlog_cannot_unlock_turn_but_fresh_steering_can(root)
         test_supervision_commit_failure_rolls_back_request_effect_and_aborts_turn(root)
     print(
         "PASS: one request-turn process emits exact intake, atomically begins ordered model "

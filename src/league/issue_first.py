@@ -7,10 +7,11 @@ import json
 import re
 import subprocess
 import tempfile
+import time
 import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Mapping, Protocol, Sequence
+from typing import Any, Iterator, Mapping, Protocol, Sequence
 
 from .privacy import validate_final_rendered_payload
 from .sqlite_project_ops import canonical_repository
@@ -365,9 +366,10 @@ class GitHubIssueSelectionService:
         refusal_code: str,
         *,
         input_value: Mapping[str, Any] | None = None,
+        timeout_seconds: int = 30,
     ) -> Any:
         if input_value is None:
-            completed = self.runner.run(arguments, timeout_seconds=30)
+            completed = self.runner.run(arguments, timeout_seconds=timeout_seconds)
         else:
             with tempfile.NamedTemporaryFile(
                 mode="w", encoding="utf-8", prefix="league-issue-", suffix=".json"
@@ -416,42 +418,71 @@ class GitHubIssueSelectionService:
             "state": state,
             "title": title.strip(),
             "body": body,
+            "body_digest": hashlib.sha256(body.encode("utf-8")).hexdigest(),
             "html_url": url,
         }
 
-    def _all_issues(self, owner: str, repository_name: str) -> list[dict[str, Any]]:
-        payload = self._run_json(
-            (
-                self.command,
-                "api",
-                "--method",
-                "GET",
-                "--paginate",
-                "--slurp",
-                f"repos/{owner}/{repository_name}/issues?state=all&per_page=100",
-            ),
-            "issue_selection_search_failed",
-        )
-        if not isinstance(payload, list):
-            raise StorageRefusal(
-                "issue_selection_search_failed", "GitHub issue search was not a bounded list"
+    def _all_issues(
+        self, owner: str, repository_name: str, normalized_title: str
+    ) -> Iterator[dict[str, Any]]:
+        # Bound each runner response before it reaches the output limit. PRs
+        # and unrelated issue bodies are never returned by the listing command.
+        # Use the raw page count (including PRs) to detect pagination exhaustion.
+        # Leave time inside the existing 120s scope lease for selection/creation.
+        deadline = time.monotonic() + 60
+
+        def search(arguments: Sequence[str]) -> Any:
+            remaining = int(deadline - time.monotonic())
+            if remaining < 1:
+                raise StorageRefusal("issue_selection_search_failed", "GitHub issue search exceeded its time bound")
+            result = self._run_json(arguments, "issue_selection_search_failed",
+                                    timeout_seconds=min(30, remaining))
+            if time.monotonic() >= deadline:
+                raise StorageRefusal("issue_selection_search_failed", "GitHub issue search exceeded its time bound")
+            return result
+
+        for page in range(1, 101):
+            payload = search(
+                (
+                    self.command, "api", "--method", "GET",
+                    f"repos/{owner}/{repository_name}/issues?state=all&per_page=100"
+                    f"&sort=created&direction=asc&page={page}",
+                    "--jq", "{count: length, issues: [.[] | select(.pull_request == null) | {number, title}]}",
+                ),
             )
-        pages = payload if payload and all(isinstance(page, list) for page in payload) else [payload]
-        if len(pages) > 100:
-            raise StorageRefusal(
-                "issue_selection_search_failed", "GitHub issue search exceeded its page bound"
-            )
-        issues: list[dict[str, Any]] = []
-        for page in pages:
-            for raw in page:
-                if not isinstance(raw, dict):
+            count = payload.get("count") if isinstance(payload, dict) else None
+            candidates = payload.get("issues") if isinstance(payload, dict) else None
+            if (type(count) is not int or not 0 <= count <= 100
+                    or not isinstance(candidates, list) or len(candidates) > count):
+                raise StorageRefusal(
+                    "issue_selection_search_failed", "GitHub issue search was not a bounded page"
+                )
+            for raw in candidates:
+                if (not isinstance(raw, dict) or type(raw.get("number")) is not int
+                        or raw["number"] < 1 or not isinstance(raw.get("title"), str)
+                        or not raw["title"].strip()):
                     raise StorageRefusal(
                         "issue_selection_search_failed", "GitHub issue search item was malformed"
                     )
-                if raw.get("pull_request") is not None:
+                if normalize_issue_title(raw["title"]) != normalized_title:
                     continue
-                issues.append(self._candidate(raw, owner, repository_name))
-        return issues
+                detail = search(
+                    (self.command, "api", "--method", "GET",
+                     f"repos/{owner}/{repository_name}/issues/{raw['number']}",
+                     "--jq", "{number, state, title, body, html_url}"),
+                )
+                if not isinstance(detail, dict):
+                    raise StorageRefusal("issue_selection_search_failed", "GitHub issue detail was malformed")
+                candidate = self._candidate(detail, owner, repository_name)
+                if (candidate["number"] != raw["number"]
+                        or normalize_issue_title(candidate["title"]) != normalized_title):
+                    raise StorageRefusal("issue_selection_search_failed", "GitHub issue changed during selection")
+                yield candidate
+            if count < 100:
+                return
+        raise StorageRefusal(
+            "issue_selection_search_failed", "GitHub issue search exceeded its page bound"
+        )
 
     def select(
         self,
@@ -520,11 +551,11 @@ class GitHubIssueSelectionService:
         version = int(acquired["version"])
         try:
             equivalents = []
-            for candidate in self._all_issues(owner, repository_name):
+            for candidate in self._all_issues(owner, repository_name, normalized_title):
                 if normalize_issue_title(candidate["title"]) != normalized_title:
                     continue
                 try:
-                    candidate_scope = semantic_scope_digest(candidate["body"])
+                    candidate_scope = semantic_scope_digest(candidate.pop("body"))
                 except StorageRefusal as exc:
                     if exc.code == "issue_scope_incomplete":
                         raise StorageRefusal(
@@ -637,9 +668,7 @@ class GitHubIssueSelectionService:
                     issue=int(selected["number"]),
                     issue_url=str(selected["html_url"]),
                     issue_title=str(selected["title"]),
-                    issue_body_digest=hashlib.sha256(
-                        str(selected["body"]).encode("utf-8")
-                    ).hexdigest(),
+                    issue_body_digest=str(selected["body_digest"]),
                     duplicate_matches=len(equivalents),
                     reopen_action_receipt_digest=reopen_digest,
                     at=at,

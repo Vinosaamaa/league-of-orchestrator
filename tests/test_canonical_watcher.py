@@ -1228,6 +1228,7 @@ def test_provider_pre_tool_policy_and_pi_stop_are_shared_and_fail_closed(
                 "turn_id": "turn:provider-hooks", "hook_event_name": "PreToolUse",
                 "tool_name": "Write", "tool_use_id": "tool:codex:write",
                 "tool_input": {"path": "synthetic.txt"},
+                "cwd": str(root.resolve()),
             },
             {
                 "session_id": "33333333-3333-4333-8333-333333333333",
@@ -1260,6 +1261,7 @@ def test_provider_pre_tool_policy_and_pi_stop_are_shared_and_fail_closed(
                 "session_path": str(root / "provider-hooks-pi" / "session.jsonl"),
                 "input_id": "input:provider-hooks", "hook_event_name": "PiToolCall",
                 "tool_name": "write", "tool_input": {"path": "synthetic.txt"},
+                "cwd": str(root.resolve()),
             },
             {
                 "session_id": "session:provider-hooks-pi",

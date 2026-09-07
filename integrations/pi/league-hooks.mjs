@@ -315,6 +315,7 @@ export function createLeagueHookBootstrap(options = {}) {
         "pi-pre-tool-hook",
         envelope(session, input.id, {
           hook_event_name: "PiToolCall",
+          cwd: ctx.cwd,
           tool_name: event.toolName,
           tool_input: event.input || {},
         }),

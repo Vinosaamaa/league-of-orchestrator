@@ -1788,10 +1788,21 @@ def begin_shotcaller_turn(
                         "committed": existing.get("committed") is True,
                         "idempotent": True,
                     }
-                if (
-                    existing.get("committed") is not True
-                    or current_generation
-                    <= int(existing.get("user_message_generation", current_generation))
+                previous_generation = int(existing.get("user_message_generation", current_generation))
+                # A limited batch may leave already-captured prompts behind.
+                # Roll its token forward under this same write transaction;
+                # never clear the owner-active fence or synthesize new intake.
+                captured_backlog = (
+                    existing.get("committed") is True
+                    and current_generation == previous_generation
+                    and store.connection.execute(
+                        "SELECT 1 FROM prompts WHERE current_owner_agent_id=? "
+                        "AND triage_state='untriaged' LIMIT 1",
+                        (actor_agent_id,),
+                    ).fetchone() is not None
+                )
+                if existing.get("committed") is not True or (
+                    current_generation <= previous_generation and not captured_backlog
                 ):
                     raise StorageRefusal(
                         "shotcaller_turn_active",

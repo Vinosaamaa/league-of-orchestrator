@@ -35,3 +35,7 @@
   on status, timestamp, and update text.
 - Teardown → fail closed unless every identity, Git, publication, deployment,
   smoke, resource, and archive gate required by the current schema is proven.
+
+## Engineering records
+
+- Every PR → follow `docs/engineering/README.md`, select one impact classification, and commit its exact numbered receipt before review.

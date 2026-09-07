@@ -42,3 +42,5 @@ repository-local store, command facade, and injected-adapter services. They do
 not cross #23's install, live import, hook, watcher-replacement, real canary, or
 cutover gates. The filesystem baseline remains live until one coherent release
 is separately authorized and verified.
+
+- [#217](https://github.com/Vinosaamaa/league-of-orchestrator/issues/217): require Engineering PR receipts and enable commit-pinned Journal publication.

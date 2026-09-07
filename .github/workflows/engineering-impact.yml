@@ -1,0 +1,32 @@
+name: Engineering impact
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited, ready_for_review]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  issues: read
+
+concurrency:
+  group: engineering-impact-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  engineering-impact:
+    name: Engineering impact
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Test Engineering gate
+        run: python3 -m unittest discover -s tests -p 'test_engineering_gate.py'
+      - name: Validate Engineering impact and receipt
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/validate-engineering-impact.py "$GITHUB_EVENT_PATH"

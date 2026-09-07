@@ -51,6 +51,74 @@ def _session_value(item: Mapping[str, Any]) -> Any:
     return session.get("value") if isinstance(session, Mapping) else None
 
 
+def _foreground_process(runner: CommandRunner, info: Any, agent: Mapping[str, Any]) -> dict[str, Any]:
+    """Bind current Herdr's PID inventory to OS start/parent/group evidence.
+
+    A Codex resume launcher may remain alongside its one direct Codex child.
+    Other multi-process layouts remain ambiguous; no process is terminated.
+    """
+    def refuse() -> None:
+        raise StorageRefusal("display_replay_process_ambiguous", "foreground process identity did not verify")
+
+    processes = info.get("foreground_processes") if isinstance(info, Mapping) else None
+    if not isinstance(processes, list) or not 1 <= len(processes) <= 2 or any(
+        not isinstance(p, Mapping) for p in processes
+    ):
+        refuse()
+    # Older adapters may already supply exact process-start evidence.
+    if len(processes) == 1 and isinstance(processes[0].get("process_start"), str) and processes[0]["process_start"]:
+        return dict(processes[0])
+    pids = [p.get("pid") for p in processes]
+    if any(type(pid) is not int or pid <= 0 for pid in pids) or len(set(pids)) != len(pids):
+        refuse()
+    group = info.get("foreground_process_group_id")
+    if type(group) is not int or group <= 0 or info.get("pane_id") != agent.get("pane_id"):
+        refuse()
+    try:
+        result = runner.run(("/bin/ps", "-p", ",".join(str(pid) for pid in sorted(pids)),
+                             "-o", "pid=,ppid=,pgid=,lstart=,comm="), timeout_seconds=3)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise StorageRefusal("display_replay_process_unavailable", "bounded OS process inspection failed") from exc
+    if result.returncode != 0 or not isinstance(result.stdout, str) or len(result.stdout) > 16384:
+        refuse()
+    records = {}
+    for line in result.stdout.splitlines():
+        fields = line.split(None, 8)
+        if len(fields) != 9 or any(not value.isdecimal() for value in fields[:3]):
+            refuse()
+        pid, parent, observed_group = map(int, fields[:3])
+        if pid not in pids or pid in records or observed_group != group:
+            refuse()
+        records[pid] = {"pid": pid, "parent": parent, "group": observed_group,
+                        "process_start": " ".join(fields[3:8]), "executable": fields[8]}
+    if set(records) != set(pids):
+        refuse()
+    for process in processes:
+        argv = process.get("argv")
+        if (not isinstance(argv, list) or not argv or any(not isinstance(arg, str) for arg in argv)
+            or not Path(argv[0]).is_absolute()
+            or records[process["pid"]]["executable"] != argv[0]):
+            refuse()
+    selected = processes[0]
+    if len(processes) == 2:
+        from ...provider_lifecycle import provider_lifecycle
+        session = _session_value(agent)
+        codex = [p for p in processes if Path(p["argv"][0]).name == "codex"]
+        if (agent.get("agent") != "codex" or not provider_lifecycle("codex").validate_session(session)
+            or len(codex) != 1):
+            refuse()
+        selected = codex[0]
+        launcher = next(p for p in processes if p["pid"] != selected["pid"])
+        if (Path(launcher["argv"][0]).name not in {"sh", "bash", "zsh"}
+            or len(launcher["argv"]) < 4 or Path(launcher["argv"][1]).name != "codex"
+            or launcher["pid"] != group
+            or records[selected["pid"]]["parent"] != launcher["pid"]
+            or any(p["argv"][-2:] != ["resume", session] for p in processes)):
+            refuse()
+    return {**selected, "process_start": records[selected["pid"]]["process_start"],
+            "process_group_proof": [records[pid] for pid in sorted(records)]}
+
+
 def _reject_nonfinite_json_constant(_constant: str) -> Any:
     raise ValueError("non-finite JSON constants are not accepted")
 
@@ -342,13 +410,7 @@ class HerdrMultiplexerAdapter:
             (self.binary, "pane", "process-info", "--pane", endpoint.pane_id),
             "Herdr restored process inspection",
         ).get("process_info")
-        processes = info.get("foreground_processes") if isinstance(info, Mapping) else None
-        if not isinstance(processes, list) or len(processes) != 1 or not isinstance(processes[0], Mapping):
-            raise StorageRefusal(
-                "display_replay_process_ambiguous",
-                "restored pane does not have one exact foreground process",
-            )
-        process = dict(processes[0])
+        process = _foreground_process(self.runner, info, agent)
         if (
             agent.get("workspace_id") != endpoint.workspace_id
             or agent.get("tab_id") != endpoint.tab_id

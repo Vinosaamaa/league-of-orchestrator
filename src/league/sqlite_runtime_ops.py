@@ -243,12 +243,117 @@ def reconcile_restored_runtime(
     }
 
 
+def repaired_bootstrap_publication(store: Any, publication: Mapping[str, Any],
+                                  row: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Translate an immutable legacy receipt only through its exact repair event."""
+    if publication.get("session_identity") == row.get("session_ref"):
+        return publication
+    repairs = store.connection.execute(
+        """SELECT detail_json FROM events WHERE aggregate_kind='runtime' AND aggregate_id=?
+             AND agent_id=? AND event_type='runtime_identity_repaired' LIMIT 2""",
+        (row["runtime_instance_id"], row["agent_id"]),
+    ).fetchall()
+    for repair in repairs:
+        request = json.loads(repair["detail_json"])["request"]
+        if (request["expected_session_ref"] == publication.get("session_identity")
+            and request["thread_id"] == row.get("session_ref") == row.get("thread_id")):
+            return {**publication, "session_identity": request["thread_id"]}
+    return publication
+
+
+def repair_shotcaller_identity(store: Any, request: dict[str, Any], generation: str,
+                              proof: dict[str, Any], at: str) -> dict[str, Any]:
+    """CAS a malformed imported identity, keeping ownership and historical receipts intact."""
+    from .provider_lifecycle import provider_lifecycle
+
+    _time(at, "identity repair time", "runtime_identity_repair_refused")
+    profile = provider_lifecycle("codex")
+    if (
+        set(request) != {"agent_id", "runtime_instance_id", "expected_version", "expected_session_ref",
+                         "expected_generation", "endpoint", "thread_id"}
+        or type(request["expected_version"]) is not int or request["expected_version"] < 1
+        or request["agent_id"] != request["thread_id"]
+        or not profile.validate_session(request["thread_id"])
+        or profile.validate_session(request["expected_session_ref"])
+        or not all(isinstance(value, str) and value for key, value in request.items() if key != "expected_version")
+        or proof.get("stable_readbacks") != 2 or proof.get("session_source") != "herdr:codex"
+        or not all(isinstance(proof.get(key), str) and proof[key] for key in ("terminal_id", "process_fingerprint", "cwd"))
+    ):
+        raise StorageRefusal("runtime_identity_repair_refused", "identity recovery evidence is incomplete or not legacy")
+    from .restored_agent import restored_runtime_generation
+    if generation != restored_runtime_generation("herdr", proof["terminal_id"], request["thread_id"]):
+        raise StorageRefusal("runtime_identity_repair_refused", "native generation evidence differs")
+    event_id = "runtime:identity-repair:" + hashlib.sha256(_json(request).encode()).hexdigest()
+    with store._transaction():
+        row = store.connection.execute(
+            """SELECT r.*,a.thread_id,a.address,a.kind,a.backend,a.role,a.retired_at,a.version
+                 FROM runtime_instances r JOIN agent_instances a ON a.agent_id=r.actor_agent_id
+                WHERE r.runtime_instance_id=? AND a.agent_id=?""",
+            (request["runtime_instance_id"], request["agent_id"]),
+        ).fetchone()
+        if (row is None or row["role"] != "shotcaller" or row["retired_at"] is not None
+            or row["kind"] != "codex-thread" or row["harness_kind"].removesuffix("-thread") != "codex"
+            or row["backend"] != "herdr" or row["backend_kind"] != "herdr"
+            or row["status"] not in {"active", "idle"} or not row["verified"]
+            or row["address"] != request["endpoint"] or row["endpoint"] != request["endpoint"]):
+            raise StorageRefusal("runtime_identity_repair_refused", "canonical owner or runtime no longer matches")
+        receipt = {"event_id": event_id, "actor_agent_id": request["agent_id"],
+                   "runtime_instance_id": request["runtime_instance_id"], "endpoint": request["endpoint"],
+                   "session_ref": request["thread_id"], "runtime_generation": generation}
+        recovery = store.connection.execute(
+            "SELECT details_json FROM obligations WHERE dedupe_key=? AND state='open'",
+            ("runtime-restore:" + request["runtime_instance_id"],),
+        ).fetchone()
+        if recovery is not None and json.loads(recovery["details_json"]).get("next_action") != (
+            "retry runtime repair-shotcaller-identity with the exact original arguments"
+        ):
+            raise StorageRefusal("runtime_identity_repair_conflict", "an unrelated runtime recovery must be preserved")
+        collision = store.connection.execute(
+            """SELECT 1 FROM runtime_instances WHERE runtime_instance_id<>? AND status IN ('active','idle')
+                 AND verified=1 AND (actor_agent_id=? OR (backend_kind='herdr' AND endpoint=?) OR session_ref=?) LIMIT 1""",
+            (request["runtime_instance_id"], request["agent_id"], request["endpoint"], request["thread_id"]),
+        ).fetchone()
+        if collision is not None:
+            raise StorageRefusal("runtime_identity_repair_conflict", "another runtime occupies the owner, pane or session")
+        previous = store.connection.execute("SELECT detail_json FROM events WHERE event_id=?", (event_id,)).fetchone()
+        if previous is not None:
+            detail = json.loads(previous["detail_json"])
+            if (detail["request"] != request or row["thread_id"] != request["thread_id"]
+                or row["session_ref"] != request["thread_id"] or row["runtime_generation"] != generation):
+                raise StorageRefusal("runtime_identity_repair_conflict", "completed repair no longer matches live state")
+            return {**receipt, "idempotent": True}
+        if (row["version"] != request["expected_version"] or row["thread_id"] != request["expected_session_ref"]
+            or row["session_ref"] != request["expected_session_ref"] or row["runtime_generation"] != request["expected_generation"]):
+            raise StorageRefusal("runtime_identity_repair_conflict", "expected identity or version changed")
+        store.connection.execute(
+            "UPDATE runtime_instances SET session_ref=?,runtime_generation=?,last_seen_at=? WHERE runtime_instance_id=?",
+            (request["thread_id"], generation, at, request["runtime_instance_id"]),
+        )
+        store.connection.execute(
+            "UPDATE agent_instances SET thread_id=?,version=version+1,updated_at=?,update_text='legacy runtime identity repaired' WHERE agent_id=?",
+            (request["thread_id"], at, request["agent_id"]),
+        )
+        store.connection.execute(
+            """INSERT INTO events (event_id,agent_id,entity_version,event_type,status,update_text,occurred_at,
+                                  detail_json,aggregate_kind,aggregate_id)
+               VALUES(?,?,?,'runtime_identity_repaired','active','legacy runtime identity repaired',?,?,'runtime',?)""",
+            (event_id, request["agent_id"], request["expected_version"] + 1, at,
+             _json({"request": request, "proof": proof, "receipt": receipt}), request["runtime_instance_id"]),
+        )
+        # A crash between this commit and native watcher rebinding must remain visible.
+        record_restored_runtime_recovery(store, request["runtime_instance_id"], request["agent_id"],
+            "runtime_identity_repair_pending", at,
+            next_action="retry runtime repair-shotcaller-identity with the exact original arguments")
+        return {**receipt, "idempotent": False}
+
+
 def record_restored_runtime_recovery(
     store: Any,
     runtime_instance_id: str,
     actor_agent_id: str,
     failure_code: str,
     at: str,
+    *, next_action: str = "retry runtime reconcile-restored-agent with the same multiplexer",
 ) -> dict[str, Any]:
     """Persist one retry obligation after a restore effect crossed its CAS boundary."""
 
@@ -291,7 +396,7 @@ def record_restored_runtime_recovery(
                 "schema": "league.runtime-restore-recovery.v1",
                 "runtime_instance_id": runtime_instance_id,
                 "failure_code": failure_code,
-                "next_action": "retry runtime reconcile-restored-agent with the same multiplexer",
+                "next_action": next_action,
             }
         )
         existing = store.connection.execute(

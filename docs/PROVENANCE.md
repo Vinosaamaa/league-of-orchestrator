@@ -1,5 +1,26 @@
 # Source provenance
 
+## Issue #66 legacy Shotcaller identity recovery
+
+The native runtime-registration CLI now validates the provider session and its
+agreement with the bound agent before accepting `verified`. A terminal session
+name cannot serve as a Codex thread ID. The storage contract remains opaque for
+synthetic adapters; native bootstrap already uses provider-owned validation.
+The legacy import boundary now rejects malformed Codex Shotcaller threads too;
+previously its UUID check covered Champions only.
+
+`runtime repair-shotcaller-identity` is an explicit owner-authorized, same-pane
+repair for malformed legacy Codex identities whose actor ID independently equals
+the live provider UUID. It verifies the native session and process twice, compares
+the expected canonical version/session/generation, and updates the agent/runtime
+atomically. It never replaces a valid thread, changes ownership, triages prompts,
+or starts/stops a process. Exact retries preserve the original event; a watcher
+failure remains a visible recovery obligation. Restored-display reads use that
+event to translate the old bootstrap session without rewriting its receipt.
+
+Focused coverage: `tests/test_runtime_identity.py`. No hook invokes this repair
+automatically, and these source tests do not certify installation or live recovery.
+
 ## Schema-16 release compatibility repair
 
 Issue #90 restores the already-canonical schema-16 migration omitted from the
@@ -1899,3 +1920,16 @@ compatibility, delayed replies, control-lane progress, and bounded admission.
 The launchd adapter also verifies asynchronous job removal before returning
 from bootout; a bounded failure preserves the refusal instead of claiming a
 completed rollback. The service tests cover delayed removal and timeout.
+The candidate also retains watcher startup stderr in a state-root-local log
+because launchd startup failures otherwise expose only a generic timeout.
+Rendering remains compatible with prior templates for exact rollback. The
+focused service suite verifies the log path. Local candidate installation and
+same-pane identity recovery subsequently verified, with all three watcher
+bindings live and no remaining identity-recovery obligation. This candidate
+is not a merged release; the earlier intermittent startup timeout remains
+unexplained and the new log was empty during the successful starts.
+Herdr process verification additionally supports one resumed Codex child and
+its launcher shell, using bounded OS PID/start-time, executable, parent, and
+foreground-group readbacks. A second Codex process, unrelated child, changed
+session, missing PID, or mismatched executable remains a refusal. Synthetic
+native-shaped fixtures cover this case; no process is started or terminated.

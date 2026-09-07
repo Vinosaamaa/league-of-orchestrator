@@ -738,6 +738,11 @@ def _add_task_commands(groups: argparse._SubParsersAction) -> None:
 def _add_runtime_commands(groups: argparse._SubParsersAction) -> None:
     runtime = groups.add_parser("runtime", help="Inspect registered harness/backend capabilities.")
     commands = runtime.add_subparsers(dest="action", required=True)
+    repair = commands.add_parser("repair-shotcaller-identity", help="Repair one malformed legacy Codex identity in the calling Herdr pane; never rollover.")
+    for name in ("agent-id", "runtime-instance-id", "expected-session-ref", "expected-generation", "endpoint", "thread-id", "at"):
+        repair.add_argument(f"--{name}", required=True)
+    repair.add_argument("--expected-version", required=True, type=int)
+    repair.add_argument("--owner-authorized", action="store_true")
     commands.add_parser("matrix", help="Report supported, unsupported, and unverified adapter operations.")
     resume_launch = commands.add_parser(
         "resume-launch",
@@ -2275,6 +2280,17 @@ def _runtime_replay_restored_display(
     ), None
 
 
+def _runtime_repair_shotcaller_identity(store: Storage, args: argparse.Namespace) -> CommandResult:
+    from .runtime_identity import repair_shotcaller_identity
+    request = {name: getattr(args, name) for name in (
+        "agent_id", "runtime_instance_id", "expected_version", "expected_session_ref",
+        "expected_generation", "endpoint", "thread_id",
+    )}
+    multiplexer = builtin_multiplexer_adapter_registry().adapter("herdr")
+    return repair_shotcaller_identity(store, request, multiplexer=multiplexer,
+        cwd=str(Path.cwd().resolve()), at=args.at, owner_authorized=args.owner_authorized), None
+
+
 def _runtime_reconcile_restored_agent(
     store: Storage, args: argparse.Namespace
 ) -> CommandResult:
@@ -3756,21 +3772,22 @@ def _delivery_dispatch(store: Storage, args: argparse.Namespace) -> CommandResul
 
 
 def _hook_register_runtime(store: Storage, args: argparse.Namespace) -> CommandResult:
-    return store.register_runtime(
-        RuntimeRegistrationCommand(
-            runtime_instance_id=args.runtime_instance_id,
-            actor_agent_id=args.actor_agent_id,
-            harness_kind=args.harness_kind,
-            backend_kind=args.backend_kind,
-            session_ref=args.session_ref,
-            endpoint=args.endpoint,
-            runtime_generation=args.runtime_generation,
-            status=args.status,
-            verified=args.verified,
-            at=args.at,
-            capabilities=None if args.capability is None else tuple(args.capability),
-        )
-    ), None
+    from .runtime_identity import validate_registration
+    command = RuntimeRegistrationCommand(
+        runtime_instance_id=args.runtime_instance_id,
+        actor_agent_id=args.actor_agent_id,
+        harness_kind=args.harness_kind,
+        backend_kind=args.backend_kind,
+        session_ref=args.session_ref,
+        endpoint=args.endpoint,
+        runtime_generation=args.runtime_generation,
+        status=args.status,
+        verified=args.verified,
+        at=args.at,
+        capabilities=None if args.capability is None else tuple(args.capability),
+    )
+    validate_registration(store, command)
+    return store.register_runtime(command), None
 
 
 def _hook_register_watcher(store: Storage, args: argparse.Namespace) -> CommandResult:
@@ -3979,6 +3996,7 @@ HANDLERS: dict[str, CommandHandler] = {
     "runtime.migrate-pi-session": _runtime_migrate_pi_session,
     "runtime.replay-restored-display": _runtime_replay_restored_display,
     "runtime.reconcile-restored-agent": _runtime_reconcile_restored_agent,
+    "runtime.repair-shotcaller-identity": _runtime_repair_shotcaller_identity,
     "runtime.retire-stopped-agent": _runtime_retire_stopped_agent,
     "routing.choose": _routing_choose,
     "routing.escalate": _routing_escalate,

@@ -68,6 +68,8 @@ def _shotcaller_publication(
             "display_replay_project_unproven",
             f"Shotcaller bootstrap publication is missing; {diagnostic}",
         )
+    from .sqlite_runtime_ops import repaired_bootstrap_publication
+    publication = repaired_bootstrap_publication(store, publication, row)
     if (
         publication.get("assignment_id") != assignment_id
         or publication.get("agent_id") != row.get("agent_id")

@@ -195,12 +195,16 @@ class RuntimeBindingStorage(Protocol):
         at: str,
     ) -> dict[str, Any]: ...
 
+    def repair_shotcaller_identity(self, request: dict[str, Any], generation: str,
+                                  proof: dict[str, Any], at: str) -> dict[str, Any]: ...
+
     def record_restored_runtime_recovery(
         self,
         runtime_instance_id: str,
         actor_agent_id: str,
         failure_code: str,
         at: str,
+        *, next_action: str = "retry runtime reconcile-restored-agent with the same multiplexer",
     ) -> dict[str, Any]: ...
 
     def satisfy_restored_runtime_recovery(

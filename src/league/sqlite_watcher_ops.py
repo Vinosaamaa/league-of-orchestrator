@@ -130,6 +130,7 @@ def _stop_obligation_summaries(
         "pending_assignments": ("pending assignment", "pending assignments"),
         "pending_deliveries": ("pending delivery", "pending deliveries"),
         "cleanup_obligations": ("cleanup obligation", "cleanup obligations"),
+        "runtime_recovery": ("runtime recovery pending", "runtime recoveries pending"),
         "decision_tasks": ("task awaiting owner action", "tasks awaiting owner action"),
         "failed_deliveries": ("failed delivery", "failed deliveries"),
         "cleanup_decisions": ("cleanup decision", "cleanup decisions"),
@@ -2880,9 +2881,11 @@ def obligation_counts(store: Any, actor_agent_id: str) -> dict[str, int]:
               AND state IN ('pending','in_flight','awaiting_receipt')) pending_deliveries,
           (SELECT COUNT(*) FROM cleanup_obligations c JOIN tasks t ON t.task_id=c.task_id
             WHERE t.coordinator_agent_id=?
-              AND c.cleanup_state NOT IN ('completed','cleanup_completed')) cleanup_obligations
+              AND c.cleanup_state NOT IN ('completed','cleanup_completed')) cleanup_obligations,
+          (SELECT COUNT(*) FROM obligations WHERE owner_agent_id=? AND kind='runtime_restore'
+              AND state='open') runtime_recovery
         """,
-        (actor_agent_id,) * 8,
+        (actor_agent_id,) * 9,
     ).fetchone()
     return {name: int(row[name]) for name in row.keys()}
 
@@ -2913,9 +2916,11 @@ def _owner_actionable_counts(store: Any, actor_agent_id: str) -> dict[str, int]:
               AND last_outcome!='calm_silent') failed_deliveries,
           (SELECT COUNT(*) FROM cleanup_obligations c JOIN tasks t ON t.task_id=c.task_id
             WHERE t.coordinator_agent_id=?
-              AND c.cleanup_state IN ('awaiting_authority','blocked')) cleanup_decisions
+              AND c.cleanup_state IN ('awaiting_authority','blocked')) cleanup_decisions,
+          (SELECT COUNT(*) FROM obligations WHERE owner_agent_id=? AND kind='runtime_restore'
+              AND state='open') runtime_recovery
         """,
-        (actor_agent_id,) * 5,
+        (actor_agent_id,) * 6,
     ).fetchone()
     return {name: int(row[name]) for name in row.keys()}
 

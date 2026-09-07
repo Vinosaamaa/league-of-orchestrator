@@ -59,7 +59,7 @@ def shotcallers(store, *, existing_squad=None):
     return {"successor": successor}
 
 
-def fixture(root: Path, *, retired_count=1, live_count=0):
+def fixture(root: Path, *, retired_count=1, live_count=0, failed_attempt=False):
     # AssignmentService produces real issue/assignment/runtime acceptance.
     store, clock, assignment, agent, task, worktree = active_fixture(root, "codex", "codex")
     context = shotcallers(store)
@@ -98,6 +98,22 @@ def fixture(root: Path, *, retired_count=1, live_count=0):
         mux = FakeMultiplexer()
         mux.native[original_agent["agent_id"]] = dict(agent_id=original_agent["agent_id"], runtime_instance_id=runtime["runtime_instance_id"], session_ref=runtime["session_ref"], endpoint=runtime["endpoint"], runtime_generation=runtime["runtime_generation"], cwd=original_agent["worktree"], routing_name=original_agent["routing_name"], provider_kind="codex", adapter_kind="codex")
         service, *_ = service_fixture(store, clock, mux)
+        if failed_attempt:
+            failed = replacement_spec(original_assignment, original_agent, original_task,
+                original_worktree, "codex", "codex", f"failed-original-{index}")
+            mux.fail_retirement = True
+            rolled_back = service.replace(failed)
+            assert rolled_back["state"] == "rolled_back", rolled_back
+            assert mux.route_rollbacks == 1
+            assert failed.request["successor_agent_id"] not in mux.native
+            assert mux.native[original_agent["agent_id"]]["routing_name"] == original_agent["routing_name"]
+            mux.fail_retirement = False
+            original_assignment = dict(store.connection.execute("SELECT * FROM task_assignments WHERE task_assignment_id=?",
+                (original_assignment["task_assignment_id"],)).fetchone())
+            original_agent = dict(store.connection.execute("SELECT * FROM agent_instances WHERE agent_id=?",
+                (original_agent["agent_id"],)).fetchone())
+            original_task = dict(store.connection.execute("SELECT * FROM tasks WHERE task_id=?",
+                (original_task["task_id"],)).fetchone())
         spec = replacement_spec(original_assignment, original_agent, original_task, original_worktree, "codex", "codex", f"retired-original-{index}")
         result = service.replace(spec)
         assert result["state"] == "completed", result
@@ -128,6 +144,46 @@ def test_completed_replacement_preserves_frozen_original(root: Path) -> None:
         assert protected_identity(store) == identities
     finally:
         store.close()
+
+
+def test_failed_then_completed_replacement(root):
+    store, prepared, switched, agent, _ = fixture(root, failed_attempt=True)
+    try:
+        identities = protected_identity(store)
+        inputs = refresh_inputs(prepared, switched)
+        service = RolloverSnapshotRefreshService(store, ExactSnapshotInventory())
+        result = service.refresh(**inputs)
+        marker = result["progress_bindings"][0]
+        assert marker["state"] == "retired_handoff_satisfied"
+        assert marker["champion_agent_id"] == agent["agent_id"]
+        assert marker["reconciliation_id"] == "replacement:retired-original-0"
+        assert protected_identity(store) == identities
+        before = dump(store)
+        assert service.refresh(**inputs)["idempotent"]
+        assert dump(store) == before
+    finally:
+        store.close()
+
+
+def test_competing_replacement_still_refuses(root):
+    for state in ("completed", "recovery_required"):
+        case = root / state
+        case.mkdir()
+        store, prepared, switched, *_ = fixture(case, failed_attempt=True)
+        try:
+            # Start with genuine compensated/successful producer receipts, then
+            # adversarially claim the prior attempt remains a competing handoff.
+            store.connection.execute("UPDATE runtime_replacements SET state=? WHERE operation_id='replacement:failed-original-0'", (state,))
+            before = dump(store)
+            try:
+                store.rollover_snapshot_refresh_target(**refresh_inputs(prepared, switched))
+            except StorageRefusal as exc:
+                assert exc.code == "snapshot_terminal_proof_invalid", exc.code
+            else:
+                raise AssertionError(state)
+            assert dump(store) == before
+        finally:
+            store.close()
 
 
 def refresh_inputs(prepared, switched):
@@ -257,8 +313,10 @@ def test_two_retired_mixed_and_retry(root):
 
 def test_tamper_and_stale_refuse_without_writes(root):
     cases = (
+        ("replacement-runtime", "UPDATE runtime_replacements SET predecessor_runtime_instance_id='runtime:garen:one'", ()),
         ("intent", "UPDATE runtime_replacements SET intent_digest=?", ("0" * 64,)),
         ("completion", "UPDATE runtime_replacements SET completion_receipt_json='{}'", ()),
+        ("completed-rollback", "UPDATE runtime_replacements SET rollback_receipt_json='{}'", ()),
         ("retirement", "UPDATE runtime_replacements SET retirement_receipt_json='{}'", ()),
         ("incomplete", "UPDATE runtime_replacements SET state='retiring'", ()),
         ("old-generation", "UPDATE runtime_instances SET runtime_generation='foreign' WHERE actor_agent_id=?", ("55555555-5555-4555-8555-555555555555",)),
@@ -406,7 +464,8 @@ def main() -> None:
         for test in (test_completed_replacement_preserves_frozen_original, test_two_retired_mixed_and_retry,
                      test_tamper_and_stale_refuse_without_writes, test_terminal_cas_and_rollback,
                      test_supported_continuation_terminal_proof, test_continuation_tamper_refuses,
-                     test_stale_scope_and_retired_reconcile_refuse):
+                     test_stale_scope_and_retired_reconcile_refuse,
+                     test_failed_then_completed_replacement, test_competing_replacement_still_refuses):
             case = root / test.__name__
             case.mkdir()
             test(case)

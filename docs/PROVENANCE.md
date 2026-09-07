@@ -2085,6 +2085,14 @@ paths. Its incomplete `SimpleNamespace` failed current launch validation before
 the Codex-to-Cursor matrix pair could run. Production validation, other namespace
 fixtures, every matrix pair, and all assertions remain unchanged.
 
+PR #207 review regressions cover a real failed/compensated replacement followed
+by a successful replacement. Terminal proof excludes only rolled-back attempts;
+incomplete or multiple remaining attempts still refuse. The replacement row's
+predecessor runtime must equal both its immutable request and intent snapshot.
+Foreign-runtime, competing-attempt, and completed-with-rollback evidence refuse
+without writes. Both transactional proof checks and full synthetic rollback
+comparisons remain intact.
+
 ## Issue #84: Pi initial startup transport and safe native diagnostics
 
 The post-PR #202 launch reached an allocated shell pane but never verified a Pi

@@ -46,8 +46,11 @@ def retired_original(
     store: Any, operation: Mapping[str, Any], frozen: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Bind a completed replacement's immutable intent to the frozen row."""
+    # Compensated attempts are history, not competing handoff proofs. Keep
+    # incomplete attempts in this bounded set so ambiguity still fails closed.
     rows = store.connection.execute(
-        "SELECT * FROM runtime_replacements WHERE predecessor_agent_id=? LIMIT 2",
+        """SELECT * FROM runtime_replacements
+            WHERE predecessor_agent_id=? AND state!='rolled_back' LIMIT 2""",
         (frozen["champion_agent_id"],),
     ).fetchall()
     if not rows:
@@ -66,6 +69,9 @@ def retired_original(
             and replacement["rollback_receipt_json"] is None
             and digest(intent) == replacement["intent_digest"]
             and intent["request"]["operation_id"] == replacement["operation_id"]
+            and replacement["predecessor_runtime_instance_id"]
+            == intent["request"]["predecessor_runtime_instance_id"]
+            == old_runtime["runtime_instance_id"]
             and old_agent["agent_id"] == frozen["champion_agent_id"]
             and old_agent["task_id"] == replacement["task_id"] == frozen["task_id"]
             and old_agent["callsign"] == frozen["callsign"]

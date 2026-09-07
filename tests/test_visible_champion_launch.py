@@ -10,6 +10,7 @@ import tempfile
 from dataclasses import replace
 from pathlib import Path
 import sys
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -985,6 +986,64 @@ def test_real_adapter_one_command_success_and_retry(root: Path) -> None:
         "assignment_context",
     )
     assert activation_delivery["effect_id"] == result["context_delivery"]["effect_sha256"]
+    store.close()
+
+
+def test_base_delivered_context_retry_is_recognized_without_redelivery(root: Path) -> None:
+    # Frozen context bytes from main d49b615, before presentation hints existed.
+    # Only the old producer is substituted; candidate retry uses real code.
+    def base_context(spec, receipt, options):
+        return "\n".join((
+            f"League assignment: {spec.task_summary}",
+            f"Callsign: {spec.callsign}",
+            f"Agent ID: {spec.champion_agent_id}",
+            f"Task ID: {spec.task_id}",
+            f"Assignment ID: {spec.assignment_id}",
+            f"Runtime ID: {receipt['runtime_instance_id']}",
+            f"Shotcaller agent ID: {spec.coordinator_agent_id}",
+            f"Repository: {spec.repository}",
+            f"Issue: {spec.issue}",
+            f"Branch: {spec.branch}",
+            f"Worktree: {spec.worktree}",
+            f"League command: {options.league_command}",
+            f"League state root: {options.state_root}",
+            "Use only the stable League SQLite commands for status, task transitions, delivery, and cleanup.",
+            "Use league assign run for launch and canonical task/cleanup commands for lifecycle writes.",
+            "First record a working task transition with the exact runtime ID, then perform only this bounded assignment.",
+        ))
+
+    store, clock, worktree = _context(root, "base-context-retry")
+    options = _options(root)
+    runner = FakeHerdrRunner(worktree)
+    spec = _spec(worktree, "base-context-retry")
+    with patch.object(visible_launch, "render_launch_context", base_context):
+        created = VisibleChampionLaunchService(
+            store, _adapter(options, runner, store), options, clock
+        ).launch(spec)
+    assert "Project code:" not in runner.contexts[0]
+    delivered = store.assignment_launch_context(spec.assignment_id)["context_delivery"]
+    before = len(runner.calls)
+    retried = VisibleChampionLaunchService(
+        store, _adapter(options, runner, store), options, clock
+    ).launch(spec)
+    assert retried["state"] == "active" and retried["idempotent"] is True
+    assert retried["context_delivery"] == delivered
+    assert retried["runtime_instance_id"] == created["runtime_instance_id"]
+    assert len(runner.contexts) == 1
+    assert all(call[:3] in {("herdr", "agent", "get"), ("herdr", "agent", "list")}
+               for call in runner.calls[before:])
+    assert store.assignment_launch_context(spec.assignment_id)["context_delivery"] == delivered
+    # Legacy recognition is exact, not permission to accept changed context.
+    changed = replace(options, league_command=sys.executable)
+    try:
+        VisibleChampionLaunchService(
+            store, _adapter(changed, runner, store), changed, clock
+        ).launch(spec)
+    except StorageRefusal as exc:
+        assert exc.code == "assignment_context_conflict"
+    else:
+        raise AssertionError("legacy retry accepted changed command authority")
+    assert len(runner.contexts) == 1
     store.close()
 
 
@@ -3153,6 +3212,7 @@ def main() -> None:
         test_immediate_resume_session_still_requires_exact_process_identity(root)
         test_resume_retry_reconciles_owned_endpoint_without_second_launch(root)
         test_real_adapter_one_command_success_and_retry(root)
+        test_base_delivered_context_retry_is_recognized_without_redelivery(root)
         test_live_multiplexer_names_fence_stale_available_callsigns(root)
         test_active_retry_requires_migration18_issue_binding(root)
         test_active_retry_refuses_changed_owner_issue_before_title_read(root)

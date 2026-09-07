@@ -1819,7 +1819,9 @@ def record_shotcaller_bootstrap(
     return result
 
 
-def shotcaller_bootstrap_status(store: Any, assignment_id: str) -> Optional[dict[str, Any]]:
+def shotcaller_bootstrap_status(
+    store: Any, assignment_id: str, *, include_display_ownership: bool = False
+) -> Optional[dict[str, Any]]:
     """Return only a complete durable Shotcaller creation receipt."""
 
     assignment = store.connection.execute(
@@ -1846,7 +1848,10 @@ def shotcaller_bootstrap_status(store: Any, assignment_id: str) -> Optional[dict
         "acceptance_digest": assignment["acceptance_digest"],
         "placement": "existing-current-pane",
     }
-    role_owned = detail.get(ORCHESTRATOR_ROLE_TOKEN) == "shotcaller"
+    role_owned = (
+        isinstance(detail, dict)
+        and detail.get(ORCHESTRATOR_ROLE_TOKEN) == "shotcaller"
+    )
     exact = (
         assignment["role"] == "shotcaller"
         and assignment["scope_kind"] == "shotcaller"
@@ -1875,6 +1880,9 @@ def shotcaller_bootstrap_status(store: Any, assignment_id: str) -> Optional[dict
     # Re-read callers have already passed the exact live-assignment checks;
     # expose canonical role metadata even for pre-token receipts.
     result[ORCHESTRATOR_ROLE_TOKEN] = "shotcaller"
+    if include_display_ownership:
+        # Internal retry proof, not inferred from the current pane's token.
+        result["role_owned"] = role_owned
     return result
 
 

@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from .agent_adapters import builtin_agent_adapter_registry
-from .sqlite_callsign_ops import digest
+from .sqlite_callsign_ops import capabilities, digest
 from .presentation import ORCHESTRATOR_ROLE_TOKEN, canonical_display_metadata
 from .storage import Storage, StorageRefusal
 from .visible_launch import CommandRunner, SubprocessRunner
@@ -940,7 +940,11 @@ class HerdrShotcallerBootstrapAdapter:
         )
 
     def ensure_active_presentation(
-        self, spec: ShotcallerBootstrapSpec, callsign: str
+        self,
+        spec: ShotcallerBootstrapSpec,
+        callsign: str,
+        *,
+        completed: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Reverify or restore only the exact bootstrap-owned live display."""
 
@@ -949,11 +953,29 @@ class HerdrShotcallerBootstrapAdapter:
         source = self._presentation_source(agent)
         authority = _session_source(agent)
         route = self._routing_name(agent)
+        if completed is not None:
+            receipt = self._receipt(spec, callsign)
+            receipt["capabilities"] = list(capabilities(spec.capabilities))
+            if digest(receipt) != completed.get("receipt_digest"):
+                raise StorageRefusal(
+                    "receipt_conflict", "completed Shotcaller retry changed runtime acceptance"
+                )
+        # Only exact historical completion plus unchanged owned presentation
+        # permits the missing-token upgrade; modern token loss still refuses.
+        legacy_role = bool(
+            completed is not None
+            and completed.get("role_owned") is False
+            and isinstance(tokens, Mapping)
+            and ORCHESTRATOR_ROLE_TOKEN not in tokens
+            and tokens.get("sidebar_name") == callsign
+            and tokens.get("thread_title") == callsign
+            and self._presentation_title(agent) == callsign
+        )
         ownership_exact = bool(
             isinstance(tokens, Mapping)
             and tokens.get(TITLE_OWNER_TOKEN) == self._title_owner(spec)
             and tokens.get(TITLE_SOURCE_TOKEN) == self._title_source(spec)
-            and tokens.get(ORCHESTRATOR_ROLE_TOKEN) == "shotcaller"
+            and (tokens.get(ORCHESTRATOR_ROLE_TOKEN) == "shotcaller" or legacy_role)
         )
         published_exact = self._published_exact(spec, callsign, pane, agent)
         if (
@@ -1385,7 +1407,9 @@ class ShotcallerBootstrapService:
 
     def bootstrap(self, spec: ShotcallerBootstrapSpec, *, fault: Any = None) -> dict[str, Any]:
         existing = self.store.callsign_assignment_status(spec.assignment_id)
-        completed = self.store.shotcaller_bootstrap_status(spec.assignment_id)
+        completed = self.store.shotcaller_bootstrap_status(
+            spec.assignment_id, include_display_ownership=True
+        )
         baseline = (
             self.store.shotcaller_bootstrap_baseline(spec.assignment_id)
             if existing is not None
@@ -1439,7 +1463,7 @@ class ShotcallerBootstrapService:
             )
         if completed is not None:
             receipt = self.adapter.ensure_active_presentation(
-                spec, str(completed["callsign"])
+                spec, str(completed["callsign"]), completed=completed
             )
             return self.store.record_shotcaller_bootstrap(
                 spec.assignment_id, 1, receipt, self.clock.now()

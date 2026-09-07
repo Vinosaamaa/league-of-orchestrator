@@ -1161,6 +1161,8 @@ def render_launch_context(
     spec: AssignmentSpec,
     receipt: Mapping[str, Any],
     options: VisibleLaunchOptions,
+    *,
+    include_display_hints: bool = True,
 ) -> str:
     text = "\n".join(
         (
@@ -1175,8 +1177,11 @@ def render_launch_context(
             f"Issue: {spec.issue}",
             f"Branch: {spec.branch}",
             f"Worktree: {spec.worktree}",
-            f"Project code: {options.project_code or 'none'}",
-            f"Display task: {options.task_label}",
+            *(
+                (f"Project code: {options.project_code or 'none'}",
+                 f"Display task: {options.task_label}")
+                if include_display_hints else ()
+            ),
             f"League command: {options.league_command}",
             f"League state root: {options.state_root}",
             "Use only the stable League SQLite commands for status, task transitions, delivery, and cleanup.",
@@ -1245,7 +1250,18 @@ class VisibleChampionLaunchService:
                 self.options,
             )
             digest = _sha256(context.encode("utf-8"))
-            if prior["context_delivery"]["context_sha256"] != digest:
+            delivered_digest = prior["context_delivery"]["context_sha256"]
+            if delivered_digest != digest:
+                # Recognize only the exact pre-display-hints producer.  Keep its
+                # durable receipt and never deliver either context again.
+                legacy_context = render_launch_context(
+                    AssignmentSpec(**{**vars(spec), "callsign": prior["callsign"]}),
+                    receipt,
+                    self.options,
+                    include_display_hints=False,
+                )
+                digest = _sha256(legacy_context.encode("utf-8"))
+            if delivered_digest != digest:
                 raise StorageRefusal(
                     "assignment_context_conflict",
                     "assignment retry produced different bounded context",

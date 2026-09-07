@@ -11,6 +11,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from typing import Mapping
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -1618,6 +1619,165 @@ def test_preexisting_reserved_bootstrap_rejects_residual_metadata_without_baseli
         tokens={"sidebar_name": "Partial", "thread_title": "Partial"},
         title="Partial",
     )
+
+
+class PreRoleBootstrapAdapter(HerdrShotcallerBootstrapAdapter):
+    """Frozen pre-role publisher/observer contract from main d49b615."""
+
+    def _report_title(self, spec, callsign, agent):
+        authority_source = agent["agent_session"]["source"]
+        self._published_source = self._title_source(spec)
+        self._expected_published_sequence = agent["state_change_seq"]
+        self._run((
+            "herdr", "pane", "report-metadata", self.options.pane_id,
+            "--source", self._title_source(spec),
+            "--applies-to-source", authority_source,
+            "--agent", self.options.runtime_kind,
+            "--display-agent", self.options.provider_kind,
+            "--title", callsign,
+            "--token", f"sidebar_name={callsign}",
+            "--token", f"thread_title={callsign}",
+            "--token", f"shotcaller_title_owner={self._title_owner(spec)}",
+            "--token", f"shotcaller_title_source={self._title_source(spec)}",
+        ), "Herdr Shotcaller metadata", silent=True)
+
+    def _published_exact(self, spec, callsign, pane, agent):
+        tokens = agent.get("tokens")
+        source = self._presentation_source(agent)
+        authority = agent["agent_session"]["source"]
+        ownership_exact = bool(
+            isinstance(tokens, Mapping)
+            and tokens.get("shotcaller_title_owner") == self._title_owner(spec)
+            and tokens.get("shotcaller_title_source") == self._title_source(spec)
+        )
+        return bool(
+            self._exact(spec, pane, agent)
+            and self._routing_name(agent) == callsign.lower()
+            and ownership_exact
+            and (source in {self._title_source(spec), authority}
+                 or (source is None and ownership_exact))
+            and tokens.get("sidebar_name") == callsign
+            and tokens.get("thread_title") == callsign
+            and self._presentation_title(agent) == callsign
+        )
+
+
+def test_pre_role_completed_bootstrap_retries_exact_live_base_presentation(root: Path) -> None:
+    for runtime_kind in ("codex", "cursor", "pi"):
+        name = f"pre-role-completed-{runtime_kind}"
+        state, _ = migrated_state(root, name)
+        worktree = root / name / "worktree"
+        worktree.mkdir()
+        clock = FakeClock()
+        runner = RecordingHerdr(worktree, agent_kind=runtime_kind)
+        options = ShotcallerBootstrapOptions(
+            workspace_id="w1", tab_id="w1:t1", pane_id="w1:p1",
+            worktree=str(worktree), runtime_kind=runtime_kind,
+            provider_kind=runtime_kind if runtime_kind != "pi" else "codex",
+        )
+        environment = {"HERDR_ENV": "1", "HERDR_WORKSPACE_ID": "w1",
+                       "HERDR_TAB_ID": "w1:t1", "HERDR_PANE_ID": "w1:p1"}
+        with SQLiteStorage(state) as store:
+            _seed_available_ashe(store, clock)
+            created = ShotcallerBootstrapService(
+                store, PreRoleBootstrapAdapter(options, runner, environment=environment), clock
+            ).bootstrap(_spec())
+            event_id = f"shotcaller:{_spec().assignment_id}:created"
+            detail = json.loads(store.connection.execute(
+                "SELECT detail_json FROM events WHERE event_id=?", (event_id,)
+            ).fetchone()[0])
+            before = len(runner.calls)
+            try:
+                ShotcallerBootstrapService(
+                    store, HerdrShotcallerBootstrapAdapter(options, runner, environment=environment), clock
+                ).bootstrap(_spec())
+            except StorageRefusal as exc:
+                assert exc.code == "shotcaller_metadata_unverified"
+            else:
+                raise AssertionError("modern completion accepted a missing owned role token")
+            assert not any(call[:3] == ("herdr", "pane", "report-metadata")
+                           for call in runner.calls[before:])
+            detail.pop("orchestrator_role")
+            legacy_detail = json.dumps(detail, sort_keys=True, separators=(",", ":"))
+            store.connection.execute("UPDATE events SET detail_json=? WHERE event_id=?",
+                                     (legacy_detail, event_id))
+            assert "orchestrator_role" not in runner.tokens
+            runner.tokens["user_badge"] = "favorite"
+            prior_tokens = dict(runner.tokens)
+            prior_source, prior_title = runner.metadata_source, runner.title
+            for field, value in (
+                ("orchestrator_role", "champion"),
+                ("orchestrator_role", ""),
+                ("shotcaller_title_owner", "foreign"),
+                ("shotcaller_title_source", "foreign"),
+                ("sidebar_name", "Provider refreshed sidebar"),
+                ("thread_title", "Provider refreshed thread"),
+                ("metadata_source", "user-selected"),
+                ("title", "Provider refreshed title"),
+                ("terminal_id", "terminal:changed"),
+                ("agent_status", []),
+            ):
+                if field in {"metadata_source", "title", "terminal_id", "agent_status"}:
+                    setattr(runner, field, value)
+                else:
+                    runner.tokens[field] = value
+                before = len(runner.calls)
+                observed_tokens = dict(runner.tokens)
+                try:
+                    ShotcallerBootstrapService(
+                        store, HerdrShotcallerBootstrapAdapter(options, runner, environment=environment), clock
+                    ).bootstrap(_spec())
+                except StorageRefusal as exc:
+                    assert exc.code in {"shotcaller_metadata_unverified", "shotcaller_identity_unverified", "receipt_conflict", "bootstrap_baseline_unverified"}, (field, exc.code)
+                else:
+                    raise AssertionError(f"pre-token retry accepted changed {field}")
+                assert runner.tokens == observed_tokens
+                assert not any(call[:3] in {
+                    ("herdr", "pane", "report-metadata"), ("herdr", "agent", "rename"),
+                    ("herdr", "agent", "prompt"), ("herdr", "agent", "start"),
+                    ("herdr", "tab", "create"), ("herdr", "pane", "split"),
+                } for call in runner.calls[before:])
+                assert store.callsign_assignment_status(_spec().assignment_id)["state"] == "active"
+                runner.tokens = dict(prior_tokens)
+                runner.metadata_source, runner.title = prior_source, prior_title
+                runner.terminal_id, runner.agent_status = "terminal:1", "working"
+            before = len(runner.calls)
+            changed_spec = ShotcallerBootstrapSpec(
+                **{**vars(_spec()), "runtime_instance_id": "runtime:foreign"}
+            )
+            try:
+                ShotcallerBootstrapService(
+                    store, HerdrShotcallerBootstrapAdapter(options, runner, environment=environment), clock
+                ).bootstrap(changed_spec)
+            except StorageRefusal as exc:
+                assert exc.code == "receipt_conflict"
+            else:
+                raise AssertionError("pre-token retry accepted a foreign runtime receipt")
+            assert not any(call[:3] == ("herdr", "pane", "report-metadata")
+                           for call in runner.calls[before:])
+            before = len(runner.calls)
+            service = ShotcallerBootstrapService(
+                store, HerdrShotcallerBootstrapAdapter(options, runner, environment=environment), clock
+            )
+            retried = service.bootstrap(_spec())
+            assert retried == {**created, "idempotent": True}
+            assert retried["orchestrator_role"] == runner.tokens["orchestrator_role"] == "shotcaller"
+            assert runner.tokens["user_badge"] == "favorite"
+            assert runner.title == runner.tokens["sidebar_name"] == runner.tokens["thread_title"] == "Ashe"
+            assert sum(call[:3] == ("herdr", "pane", "report-metadata")
+                       for call in runner.calls[before:]) == 1
+            assert not any(call[:3] in {
+                ("herdr", "agent", "rename"), ("herdr", "agent", "start"),
+                ("herdr", "agent", "prompt"), ("herdr", "pane", "split"),
+                ("herdr", "tab", "create"),
+            } for call in runner.calls[before:])
+            before = len(runner.calls)
+            assert service.bootstrap(_spec()) == retried
+            assert not any(call[:3] == ("herdr", "pane", "report-metadata")
+                           for call in runner.calls[before:])
+            assert store.connection.execute(
+                "SELECT detail_json FROM events WHERE event_id=?", (event_id,)
+            ).fetchone()[0] == legacy_detail
 
 
 def test_completed_bootstrap_retry_restores_provider_refreshed_title_without_prompt(
@@ -4581,6 +4741,7 @@ def main() -> None:
         test_preexisting_reserved_bootstrap_requires_durable_baseline_when_alias_empty(root)
         test_preexisting_reserved_bootstrap_rejects_residual_metadata_without_baseline(root)
         test_completed_bootstrap_retry_restores_provider_refreshed_title_without_prompt(root)
+        test_pre_role_completed_bootstrap_retries_exact_live_base_presentation(root)
         test_completed_bootstrap_retry_refuses_newer_user_title_with_stale_tokens(root)
         test_completed_bootstrap_retry_refuses_malformed_agent_status_closed(root)
         test_bootstrap_metadata_and_atomic_finalization_failures_restore_exact_state(root)

@@ -23,6 +23,7 @@ from league.issue_first import (  # noqa: E402
     IssueSelectionSpec,
     build_issue_receipt,
     validate_issue_receipt,
+    semantic_scope_digest,
 )
 from league.request_services import AssignmentService, AssignmentSpec  # noqa: E402
 from league.sqlite_store import SQLiteStorage  # noqa: E402
@@ -612,7 +613,23 @@ def test_many_matching_candidates_do_not_retain_all_bodies(root: Path) -> None:
     store.close()
 
 
+def test_legacy_issue_headings_keep_required_sections() -> None:
+    legacy = BODY.replace('## Objective', '# Goal').replace(
+        '## Verification', '## Acceptance criteria'
+    ).replace('## Hard boundaries', '## Boundaries')
+    assert semantic_scope_digest(legacy) == semantic_scope_digest(BODY)
+    for heading in ('# Goal', '## Acceptance criteria', '## Boundaries'):
+        incomplete = legacy.replace(heading, '## Unrelated section')
+        try:
+            semantic_scope_digest(incomplete)
+        except StorageRefusal as exc:
+            assert exc.code == 'issue_scope_incomplete'
+        else:
+            raise AssertionError('missing required issue section accepted')
+
+
 def main() -> None:
+    test_legacy_issue_headings_keep_required_sections()
     with tempfile.TemporaryDirectory(prefix="league-issue-selection-") as temporary:
         root = Path(temporary)
         test_open_match_reuse_and_distinct_scope_creation(root)

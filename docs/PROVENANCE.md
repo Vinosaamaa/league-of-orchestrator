@@ -1,5 +1,14 @@
 # Source provenance
 
+## Issue #66 legacy acceptance issue compatibility (parent #23)
+
+The real cleanup gate reached its owner issue but rejected its existing
+`# Goal`, `## Acceptance criteria`, and `## Boundaries` headings. Issue selection
+now recognizes those equivalent headings at levels one and two. It still
+requires nonempty scope, acceptance, and authority sections; exact issue
+identity, semantic-scope matching, and selection receipts remain mandatory.
+Focused tests prove equivalent scope digests and reject each missing section.
+
 ## Issue #66 live cleanup acceptance proof (parent #23)
 
 The disposable Codex canary now uses Astra high, leaves native directory trust

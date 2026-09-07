@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -17,6 +18,7 @@ from league.pi_launch import (  # noqa: E402
     HerdrPiLaunchAdapter,
     deterministic_pi_session_id,
     pi_metadata_source,
+    pi_launch_environment,
     pi_start_arguments,
     resume_pi_after_restart,
 )
@@ -26,6 +28,8 @@ from league.pi_session_migration import (  # noqa: E402
 )
 from league.real_cleanup import HerdrHarnessAdapter  # noqa: E402
 from league.storage import StorageRefusal  # noqa: E402
+from league.agent_adapters import builtin_agent_adapter_registry  # noqa: E402
+from league.multiplexer_adapters import builtin_multiplexer_adapter_registry  # noqa: E402
 from league.request_services import AssignmentSpec  # noqa: E402
 from request_lifecycle_fixture import LUX_ID, create_context  # noqa: E402
 from storage_fixture import REPOSITORY, SHOTCALLER_ID  # noqa: E402
@@ -59,6 +63,8 @@ class FakePiHerdr:
         self.session_path = ""
         self.parent_path: str | None = None
         self.start_count = 0
+        self.start_failure = None
+        self.start_environment_override = {}
         self.calls: list[tuple[str, ...]] = []
         self.native_title_reads_remaining = 0
         self.agent_get_count = 0
@@ -205,6 +211,9 @@ class FakePiHerdr:
                 },
             )
         if arguments[1:3] == ["agent", "start"]:
+            if self.start_failure is not None:
+                return subprocess.CompletedProcess(arguments, 1, "", self.start_failure)
+            self.env.update(self.start_environment_override)
             self.start_count += 1
             self.pi_arguments = arguments[arguments.index("--") + 1 :]
             explicit = {
@@ -812,6 +821,286 @@ def test_provider_mapping_and_role_placement(root: Path) -> None:
     store.close()
 
 
+def test_native_start_failure_preserves_safe_code(root: Path) -> None:
+    store, clock, worktree = _context(root, "native-start-failure")
+    runner = FakePiHerdr(root / "native-start-failure")
+    runner.start_failure = json.dumps({
+        "id": "cli:agent:start", "error": {
+            "code": "timeout", "message": "SENSITIVE_DIAGNOSTIC_MUST_NOT_ESCAPE",
+            "data": {"private": "SENSITIVE_DIAGNOSTIC_MUST_NOT_ESCAPE"},
+        },
+    })
+    adapter, options, _ = factory_adapter(store, clock, worktree, root, runner)
+    spec = champion_spec(worktree, "native-start-failure")
+    try:
+        result = VisibleChampionLaunchService(
+            store, adapter, options, clock, issue_verifier=FakeIssueVerifier(store=store),
+        ).launch(spec)
+        assert result["failure_class"] == "launch_native_timeout", result
+        assert result["state"] == "blocked" and result["cleanup_proven"] is True
+        assert "SENSITIVE_DIAGNOSTIC_MUST_NOT_ESCAPE" not in json.dumps(result)
+        assert runner.start_count == 0 and not adapter.created_endpoint
+    finally:
+        store.close()
+
+
+def test_native_start_failure_rejects_unsafe_diagnostics(root: Path) -> None:
+    failures = (
+        "SENSITIVE_DIAGNOSTIC_MUST_NOT_ESCAPE",
+        '{"error":{"code":"SENSITIVE_DIAGNOSTIC_MUST_NOT_ESCAPE"}}',
+        '{"error":{"code":"timeout"},"result":{}}',
+        '{"error":{"code":"other","code":"timeout"}}',
+        '{"error":{"code":"timeout","data":NaN}}',
+        '{"error":{"code":"timeout","message":"' + "x" * 16_384 + '"}}',
+        '{"error":{"code":["timeout"]}}',
+    )
+    for index, failure in enumerate(failures):
+        suffix = f"native-unsafe-{index}"
+        store, clock, worktree = _context(root, suffix)
+        runner = FakePiHerdr(root / suffix)
+        runner.start_failure = failure
+        adapter, options, _ = factory_adapter(store, clock, worktree, root, runner)
+        try:
+            result = VisibleChampionLaunchService(
+                store, adapter, options, clock, issue_verifier=FakeIssueVerifier(store=store),
+            ).launch(champion_spec(worktree, suffix))
+            assert result["failure_class"] == "launch_adapter_failed", result
+            assert result["state"] == "blocked" and result["cleanup_proven"] is True
+            assert "SENSITIVE_DIAGNOSTIC_MUST_NOT_ESCAPE" not in json.dumps(result)
+            assert runner.start_count == 0 and not adapter.created_endpoint
+        finally:
+            store.close()
+
+
+def test_initial_placement_environment_remains_identity_guarded(root: Path) -> None:
+    store, clock, worktree = _context(root, "initial-env-mismatch")
+    runner = FakePiHerdr(root / "initial-env-mismatch")
+    runner.start_environment_override = {"LEAGUE_CALLSIGN": "Foreign"}
+    adapter, options, _ = factory_adapter(store, clock, worktree, root, runner)
+    try:
+        result = VisibleChampionLaunchService(
+            store, adapter, options, clock, issue_verifier=FakeIssueVerifier(store=store),
+        ).launch(champion_spec(worktree, "initial-env-mismatch"))
+        assert result["state"] == "blocked" and result["cleanup_proven"] is True, result
+        assert result["failure_class"] == "launch_identity_unverified"
+        assert not any(call[1:3] == ("agent", "prompt") for call in runner.calls)
+        descriptor = adapter.descriptor
+        try:
+            pi_start_arguments(descriptor, placement_environment=())
+        except StorageRefusal as exc:
+            assert exc.code == "launch_scope_invalid"
+        else:
+            raise AssertionError("unproven placement environment was accepted")
+        try:
+            pi_start_arguments(descriptor, restart=True, placement_environment=pi_launch_environment(
+                descriptor, descriptor["descriptor_digest"]
+            ))
+        except StorageRefusal as exc:
+            assert exc.code == "launch_scope_invalid"
+        else:
+            raise AssertionError("restart accepted initial-only environment transport")
+    finally:
+        store.close()
+
+
+def factory_adapter(store, clock, worktree, root, runner, *, project_code="LEAGUE"):
+    options = replace(_options(root), project_code=project_code)
+    routing = {
+        "decision_id": None, "provider": "codex", "model": options.model,
+        "effort": options.effort, "tier": "EXPLICIT",
+        "reason": "Explicit launch override.", "reason_code": "explicit_override",
+        "policy_version": None, "provider_config_version": None,
+        "explicit": {"runtime": True, "provider": True, "model": True, "effort": True},
+    }
+    multiplexer = builtin_multiplexer_adapter_registry(herdr_runner=runner).adapter("herdr")
+    adapter = builtin_agent_adapter_registry().adapter("pi").visible_launch(
+        store=store, options=options, multiplexer=multiplexer, startup_timeout_ms=1000,
+        launch={
+            "assignment_id": "assignment:factory", "project_code": project_code,
+            "worktree": str(worktree), "provider_kind": "codex",
+            "model": options.model, "effort": options.effort, "routing": routing,
+            "resolved_release_root": str(ROOT), "workspace_id": "w1",
+            "state_root": str(root / "state"), "session_mode": "create", "at": clock.now(),
+        },
+    )
+    return adapter, options, routing
+
+
+def test_registered_factory_preserves_explicit_routing(root: Path) -> None:
+    store, clock, worktree = _context(root, "factory")
+    runner = FakePiHerdr(root / "factory")
+    adapter, options, routing = factory_adapter(store, clock, worktree, root, runner)
+    spec = champion_spec(worktree, "factory")
+    try:
+        result = VisibleChampionLaunchService(
+            store, adapter, options, clock, issue_verifier=FakeIssueVerifier(store=store),
+        ).launch(spec)
+        assert result["state"] == "active", (result, store.assignment_launch_context(spec.assignment_id))
+        durable = store.assignment_launch_context(spec.assignment_id)
+        assert durable["acceptance_receipt"]["routing"] == routing
+        descriptor = store.provider_launch_descriptor("pi-launch:assignment:factory")["descriptor"]
+        assert descriptor["routing"] == routing
+        assert descriptor["project_code"] == "LEAGUE"
+        assert descriptor["task_label"] == "Tiny Gate"
+        assert runner.start_count == 1
+        placement = next(call for call in runner.calls if call[1:3] == ("tab", "create"))
+        expected_env = pi_launch_environment(descriptor, adapter.descriptor["descriptor_digest"])
+        actual_env = tuple(item for index, item in enumerate(placement)
+                           if item == "--env" or index > 0 and placement[index - 1] == "--env")
+        assert actual_env == expected_env
+        # Placement already supplies these bytes; only pane ID remains explicit.
+        league_flags = [item for item in runner.pi_arguments if item.startswith("--league-")]
+        assert league_flags == ["--league-pane-id"], league_flags
+        full_argv = pi_start_arguments(adapter.descriptor)
+        assert len(shlex.join(["pi", *runner.pi_arguments]).encode()) < len(shlex.join(["pi", *full_argv]).encode())
+        assert runner.pi_arguments[runner.pi_arguments.index("--session-id") + 1] == descriptor["requested_session_id"]
+    finally:
+        store.close()
+
+
+def test_factory_preallocation_refusal_releases_only_own_reservation(root: Path) -> None:
+    for index, corrupt in enumerate((
+        lambda value: value.update(unexpected=True),
+        lambda value: value["routing"].update(provider="cursor"),
+        lambda value: value["routing"].update(model="foreign-model"),
+        lambda value: value["routing"]["explicit"].update(model="true"),
+        lambda value: value["routing"].update(unexpected=True),
+        lambda value: value["routing"].update(reason={"foreign": True}),
+    )):
+        suffix = f"factory-invalid-{index}"
+        store, clock, worktree = _context(root, suffix)
+        runner = FakePiHerdr(root / suffix)
+        adapter, options, _ = factory_adapter(store, clock, worktree, root, runner)
+        corrupt(adapter.descriptor)
+        spec = champion_spec(worktree, suffix)
+        before = [tuple(row) for row in store.connection.execute("SELECT * FROM callsign_assignments")]
+        owner_before = store.agent_status(SHOTCALLER_ID)
+        try:
+            result = VisibleChampionLaunchService(
+                store, adapter, options, clock, issue_verifier=FakeIssueVerifier(store=store),
+            ).launch(spec)
+            assert result["failure_class"] == "provider_launch_descriptor_invalid", result
+            assert result["state"] == "blocked" and result["cleanup_required"] is False, result
+            reservation = store.callsign_assignment_status(f"callsign-assignment:{spec.assignment_id}")
+            assert reservation["state"] == "rolled_back", reservation
+            after = [tuple(row) for row in store.connection.execute(
+                "SELECT * FROM callsign_assignments WHERE callsign_assignment_id != ?",
+                (f"callsign-assignment:{spec.assignment_id}",),
+            )]
+            assert after == before
+            assert store.agent_status(SHOTCALLER_ID) == owner_before
+            assert runner.start_count == 0 and not adapter.created_endpoint
+            assert all(call[1:3] == ("agent", "list") for call in runner.calls)
+            assert store.provider_launch_descriptor("pi-launch:assignment:factory") is None
+        finally:
+            store.close()
+
+
+def test_prior_descriptor_keeps_ambiguous_cleanup_fence(root: Path) -> None:
+    from league.worktree import exact_launch_cwd_binding
+
+    store, clock, worktree = _context(root, "factory-prior")
+    runner = FakePiHerdr(root / "factory-prior")
+    adapter, options, _ = factory_adapter(store, clock, worktree, root, runner)
+    spec = champion_spec(worktree, "factory-prior")
+    adapter.descriptor.update(
+        assignment_id=spec.assignment_id,
+        worktree_binding=exact_launch_cwd_binding(worktree, "champion"),
+    )
+    store.prepare_provider_launch(adapter.descriptor, clock.now())
+    adapter.descriptor["unexpected"] = True
+    try:
+        result = VisibleChampionLaunchService(
+            store, adapter, options, clock, issue_verifier=FakeIssueVerifier(store=store),
+        ).launch(spec)
+        assert result["failure_class"] == "provider_launch_descriptor_invalid", result
+        assert result["state"] == "cleanup_pending" and result["cleanup_required"] is True
+        assert store.callsign_assignment_status(
+            f"callsign-assignment:{spec.assignment_id}"
+        )["state"] == "reserved"
+        assert runner.start_count == 0
+    finally:
+        store.close()
+
+
+def test_factory_invalid_project_refuses_before_reservation(root: Path) -> None:
+    for index, code in enumerate((None, "", "league", "LEAGUE EXTRA", "A" * 17, "LEAGUE\n", 123)):
+        suffix = f"factory-project-{index}"
+        store, clock, worktree = _context(root, suffix)
+        runner = FakePiHerdr(root / suffix)
+        before = store.connection.total_changes
+        try:
+            try:
+                factory_adapter(store, clock, worktree, root, runner, project_code=code)
+            except StorageRefusal as exc:
+                assert exc.code == "launch_scope_invalid", exc.code
+            else:
+                raise AssertionError("invalid project code reached launch reservation boundary")
+            assert store.connection.total_changes == before
+            assert runner.calls == []
+        finally:
+            store.close()
+
+
+def test_factory_persisted_routing_ownership(root: Path) -> None:
+    from types import SimpleNamespace
+    from league.cli import _champion_launch_route
+    from league.routing import ModelRouter, load_routing_config
+
+    for scenario in ("foreign", "valid", "invalid-json", "null", "mixed", "object"):
+        foreign = scenario == "foreign"
+        malformed = {
+            "invalid-json": "[", "null": "null", "mixed": '[1,"write"]', "object": "{}",
+        }.get(scenario)
+        suffix = f"factory-decision-{scenario}"
+        store, clock, worktree = _context(root, suffix)
+        runner = FakePiHerdr(root / suffix)
+        adapter, options, _ = factory_adapter(store, clock, worktree, root, runner)
+        subject = "R2" if foreign else "R3"
+        decision = ModelRouter(
+            load_routing_config(ROOT / "config/league-model-routing.example.json"), store,
+        ).choose(
+            decision_id=f"route:{suffix}", subject_kind="request", subject_id=subject,
+            role="champion", chosen_at=clock.now(), signals={"bounded_checkable": True},
+        )
+        spec = champion_spec(worktree, suffix)
+        routing = _champion_launch_route(store, SimpleNamespace(
+            runtime_kind="pi", provider_kind="codex", model=None, effort=None,
+            routing_decision_id=decision["decision_id"], request_id=subject,
+            task_id=spec.task_id, requires=[],
+        ), assignment_id=spec.assignment_id)
+        if malformed is not None:
+            # The canonical TEXT column and storage API accept malformed JSON.
+            # Persist it through the real API, not a mocked validator/read result.
+            bad_id = f"route:{suffix}:malformed"
+            store.record_routing_decision({
+                **store.routing_decision(decision["decision_id"]),
+                "decision_id": bad_id, "required_capabilities_json": malformed,
+            })
+            routing["decision_id"] = bad_id
+        adapter.descriptor.update(routing=routing, model=routing["model"], effort=routing["effort"])
+        try:
+            result = VisibleChampionLaunchService(
+                store, adapter, options, clock, issue_verifier=FakeIssueVerifier(store=store),
+            ).launch(spec)
+            if foreign or malformed is not None:
+                assert result["state"] == "blocked", result
+                assert result["failure_class"] == "provider_launch_routing_mismatch", result
+                assert result["cleanup_required"] is False
+                assert runner.start_count == 0 and not adapter.created_endpoint
+                assert all(call[1:3] == ("agent", "list") for call in runner.calls)
+                assert store.provider_launch_descriptor("pi-launch:assignment:factory") is None
+                assert store.callsign_assignment_status(
+                    f"callsign-assignment:{spec.assignment_id}"
+                )["state"] == "rolled_back"
+            else:
+                assert result["state"] == "active", result
+                assert store.assignment_launch_context(spec.assignment_id)["acceptance_receipt"]["routing"] == routing
+                assert runner.start_count == 1
+        finally:
+            store.close()
+
+
 def test_pi_context_display_receipt_matches_shared_contract(root: Path) -> None:
     root = root.resolve()
     for provider in ("cursor", "codex"):
@@ -1023,6 +1312,14 @@ def test_pi_extension_enforces_herdr_token_limit() -> None:
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="league-pi-provider-") as directory:
         root = Path(directory).resolve()
+        test_native_start_failure_preserves_safe_code(root)
+        test_native_start_failure_rejects_unsafe_diagnostics(root)
+        test_initial_placement_environment_remains_identity_guarded(root)
+        test_registered_factory_preserves_explicit_routing(root)
+        test_factory_preallocation_refusal_releases_only_own_reservation(root)
+        test_prior_descriptor_keeps_ambiguous_cleanup_fence(root)
+        test_factory_invalid_project_refuses_before_reservation(root)
+        test_factory_persisted_routing_ownership(root)
         test_pi_context_display_receipt_matches_shared_contract(root)
         test_fork_metadata_restart_and_duplicate_suppression(root)
         test_provider_mapping_and_role_placement(root)

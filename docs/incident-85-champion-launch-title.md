@@ -291,6 +291,41 @@ last-window fixture models Herdr's real per-source sequence rule and proves the
 League overlay is cleared while the newer user title/source and unrelated
 tokens survive.
 
+## Token-only direct-provider launch follow-up
+
+A preserved pre-acceptance Codex launch exposed a second presentation surface:
+Herdr omitted top-level `metadata_source`, retained the native handshake OSC
+title, and exposed `identity_title_mode=tokens-only`. The installed identity
+helper prioritizes explicit `launch_*` inputs; without them its refresh replaced
+generic callsign/thread/task tokens with the native prompt. League's owner tokens
+alone therefore did not prove a correct visible title.
+
+The direct Codex/Cursor adapter publishes those explicit canonical inputs and,
+only for the exact token-only profile, the identity title consumed by the status
+renderer. It waits for the actual rendered title and complete owned display
+envelope at a stable source/sequence. It does not rename the native provider
+session or claim that an unchanged OSC title was repaired. Native prompt refresh
+cannot supply the canonical launch inputs. Missing ownership, changed identity,
+foreign/null source, or changed user presentation refuses without restoration.
+
+The focused synthetic test begins without a session, accepts one READY handshake,
+refreshes the native prompt after context, and verifies receipt-identical retry
+without a second launch, prompt, or metadata write. A failed pre-acceptance fresh
+launch is not covered by active-title revalidation: `assign run` refuses an
+already occupied fresh route, and `assign reconcile-runtime` does not activate a
+non-active assignment. There is no demonstrated supported adopt-partial-launch
+surface; recovery of a retained failed pane remains an explicit coordinator gate.
+
+The installed identity helper also requires a nonempty project code for its
+canonical Champion branch. With an absent or empty code it selects the native
+prompt even when the callsign and two-word task inputs are exact. League's
+optional-project naming contract cannot be represented by that helper without
+an owning-toolkit compatibility change. A fabricated project code would change
+the canonical name; legacy-reconciliation tokens would misrepresent ownership.
+Codex/Cursor no-project regression coverage therefore retains the truthful
+`launch_title_unverified` refusal and proves no work brief is delivered. This is
+a known availability blocker, not successful no-project launch support.
+
 ## Pi service-boundary follow-up
 
 The full visible-launch service reproduced `launch_receipt_unverified`: the Pi

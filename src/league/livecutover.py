@@ -13,7 +13,14 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__
-from .acceptance import _atomic_write, _stage_release_bytes, _switch_symlink
+from .acceptance import (
+    NAMESPACE_PATTERN,
+    _atomic_write,
+    _stage_release_bytes,
+    _switch_symlink,
+)
+from .agent_adapters import builtin_agent_adapter_registry
+from .provider_hooks import install_provider_hook_bootstrap
 from .precutover import _integrated_lifecycle, _read_only_shadow, _snapshot, _validate_plan
 from .sqlite_store import SQLiteStorage
 from .storage import StorageRefusal
@@ -79,82 +86,122 @@ def _backup(plan: dict[str, Any], backup_root: Path) -> list[dict[str, Any]]:
 def _restore(receipts: list[dict[str, Any]], backup_root: Path) -> None:
     for item in reversed(receipts):
         target = Path(item["path"])
+        if _snapshot(target) == item["before"]:
+            continue
         _remove_node(target)
         if item["before"]["exists"]:
             _copy_node(backup_root / "targets" / item["target_id"], target)
-            if _snapshot(target)["sha256"] != item["before"]["sha256"]:
-                raise StorageRefusal("cutover_rollback_failed", "restored target hash differs")
+        if _snapshot(target) != item["before"]:
+            raise StorageRefusal("cutover_rollback_failed", "restored target differs")
 
 
-def _install_hook_routes(plan: dict[str, Any]) -> list[dict[str, Any]]:
-    stable_watcher = str(plan["proposed"]["watcher_launcher"])
+def _lexists(path: Path) -> bool:
+    return os.path.lexists(path)
+
+
+def _preflight_live_cutover(
+    temporary_root: Path, namespace: str, plan: dict[str, Any]
+) -> tuple[Path, Path, Path]:
+    supplied_root = Path(temporary_root)
+    if (
+        not supplied_root.is_absolute()
+        or not supplied_root.is_dir()
+        or supplied_root.is_symlink()
+    ):
+        raise StorageRefusal(
+            "invalid_temporary_root",
+            "temporary root must be an explicit directory",
+        )
+    temporary = supplied_root.resolve(strict=True)
+    if temporary == Path("/"):
+        raise StorageRefusal(
+            "invalid_temporary_root",
+            "temporary root must be an explicit directory",
+        )
+    if not NAMESPACE_PATTERN.fullmatch(namespace):
+        raise StorageRefusal("invalid_namespace", "live cutover namespace is invalid")
+
+    proposed = plan["proposed"]
+    root = temporary / f"league-{namespace}-cutover"
+    release = Path(proposed["release_prefix"]) / "releases" / __version__
+    release_bundle = root / "release-bundle" / __version__
+    if _lexists(release) or _lexists(release_bundle):
+        raise StorageRefusal(
+            "cutover_release_identity_exists",
+            "the candidate release identity is already allocated",
+        )
+    if _lexists(root):
+        raise StorageRefusal(
+            "cutover_attempt_exists",
+            "the live cutover attempt namespace is already allocated",
+        )
+    if _lexists(Path(proposed["backup_root"])):
+        raise StorageRefusal("cutover_backup_exists", "cutover backup root must be absent")
+    if _lexists(Path(proposed["state_root"])):
+        raise StorageRefusal(
+            "cutover_target_exists", "canonical SQLite state already exists"
+        )
+    if _lexists(Path(proposed["archive_root"])):
+        raise StorageRefusal("legacy_archive_exists", "legacy archive root must be absent")
+    return root, release, release_bundle
+
+
+def _reserve_release_identity(release: Path, release_bundle: Path) -> None:
+    reserved: list[Path] = []
+    try:
+        release_bundle.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        release_bundle.mkdir(mode=0o700)
+        reserved.append(release_bundle)
+        release.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        release.mkdir(mode=0o700)
+        reserved.append(release)
+    except FileExistsError as exc:
+        for candidate in reversed(reserved):
+            try:
+                candidate.rmdir()
+            except OSError:
+                pass
+        raise StorageRefusal(
+            "cutover_release_identity_exists",
+            "the candidate release identity was allocated concurrently",
+        ) from exc
+
+
+def _install_hook_routes(
+    plan: dict[str, Any], *, source_root: Path
+) -> list[dict[str, Any]]:
+    stable_watcher = Path(plan["proposed"]["watcher_launcher"])
     receipts: list[dict[str, Any]] = []
+    adapters = builtin_agent_adapter_registry()
     for hook in sorted(plan["proposed"]["hooks"], key=lambda item: item["harness"]):
         path = Path(hook["target"])
         before = _snapshot(path)
-        document = _load(path)
         harness = hook["harness"]
-        hooks = document.get("hooks")
-        if not isinstance(hooks, dict):
-            raise StorageRefusal("cutover_hook_invalid", "hook configuration is malformed")
-        added: list[str] = []
-        if harness == "codex":
-            wanted = {
-                "UserPromptSubmit": f"{stable_watcher} codex-user-prompt-hook",
-                "Stop": f"{stable_watcher} codex-stop-hook",
-            }
-            for event, command in wanted.items():
-                groups = hooks.setdefault(event, [])
-                if not isinstance(groups, list):
-                    raise StorageRefusal("cutover_hook_invalid", "Codex hook event is malformed")
-                matches = [
-                    handler
-                    for group in groups
-                    if isinstance(group, dict)
-                    for handler in group.get("hooks", [])
-                    if isinstance(handler, dict) and handler.get("command") == command
-                ]
-                if len(matches) > 1:
-                    raise StorageRefusal("cutover_hook_ambiguous", "Codex League hook is duplicated")
-                if not matches:
-                    groups.append(
-                        {"hooks": [{"type": "command", "command": command, "timeout": 5}]}
-                    )
-                    added.append(event)
-        elif harness == "cursor":
-            if document.get("version") != 1:
-                raise StorageRefusal("cutover_hook_invalid", "Cursor hook version is unsupported")
-            wanted = {
-                "beforeSubmitPrompt": f"{stable_watcher} cursor-before-submit-hook",
-                "stop": f"{stable_watcher} cursor-stop-hook",
-            }
-            for event, command in wanted.items():
-                handlers = hooks.setdefault(event, [])
-                if not isinstance(handlers, list):
-                    raise StorageRefusal("cutover_hook_invalid", "Cursor hook event is malformed")
-                matches = [
-                    item
-                    for item in handlers
-                    if isinstance(item, dict) and item.get("command") == command
-                ]
-                if len(matches) > 1:
-                    raise StorageRefusal("cutover_hook_ambiguous", "Cursor League hook is duplicated")
-                if not matches:
-                    handlers.append({"command": command})
-                    added.append(event)
-        else:
-            raise StorageRefusal("cutover_hook_invalid", "unsupported cutover hook harness")
-        if added:
-            _atomic_write(path, _stable(document))
+        try:
+            installed = install_provider_hook_bootstrap(
+                adapters,
+                str(harness),
+                source_root=source_root,
+                target=path,
+                stable_watcher=stable_watcher,
+            )
+        except StorageRefusal as exc:
+            if exc.code == "hook_bootstrap_ambiguous":
+                raise StorageRefusal(
+                    "cutover_hook_ambiguous", "League hook bootstrap is duplicated"
+                ) from exc
+            raise StorageRefusal(
+                "cutover_hook_invalid", "provider hook bootstrap installation failed"
+            ) from exc
         after = _snapshot(path)
         receipts.append(
             {
                 "harness": harness,
                 "path": str(path),
-                "added": added,
+                "added": list(installed["added"]),
                 "before_sha256": before["sha256"],
                 "after_sha256": after["sha256"],
-                "stable_watcher": stable_watcher,
+                "stable_watcher": str(stable_watcher),
             }
         )
     return receipts
@@ -381,8 +428,9 @@ def run_live_cutover(
         or mutation.get("applied") is not False
     ):
         raise StorageRefusal("cutover_authority_invalid", "cutover authority digest or state differs")
-    root = temporary_root.resolve(strict=True) / f"league-{namespace}-cutover"
-    root.mkdir(mode=0o700)
+    root, release, release_bundle = _preflight_live_cutover(
+        temporary_root, namespace, plan
+    )
     proposed = plan["proposed"]
     lock_path = Path(proposed["writer_pointer"]).with_name("league-cutover.lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -394,12 +442,17 @@ def run_live_cutover(
         except BlockingIOError as exc:
             raise StorageRefusal("cutover_locked", "another live cutover holds the global lock") from exc
         try:
+            # Recheck under the global lock before creating any cutover target,
+            # backup, or attempt directory.
+            locked_paths = _preflight_live_cutover(temporary_root, namespace, plan)
+            if locked_paths != (root, release, release_bundle):
+                raise StorageRefusal(
+                    "cutover_preflight_changed", "live cutover candidate paths changed"
+                )
+            root.mkdir(mode=0o700)
             receipts = _backup(plan, backup_root)
             shadow = _read_only_shadow(root, plan)
-            release = Path(proposed["release_prefix"]) / "releases" / __version__
-            release_bundle = root / "release-bundle" / __version__
-            release_bundle.mkdir(parents=True, mode=0o700)
-            release.mkdir(parents=True, mode=0o700)
+            _reserve_release_identity(release, release_bundle)
             source_hashes, release_hashes, installed_hashes = _stage_release_bytes(
                 source_root, release_bundle, release, (str(source_root).encode(), str(root).encode())
             )
@@ -423,7 +476,7 @@ def run_live_cutover(
             pointer = pointer_operation["after"]["pointer"]
             writer_pointer = Path(proposed["writer_pointer"])
             _atomic_write(writer_pointer, _stable(pointer))
-            hooks = _install_hook_routes(plan)
+            hooks = _install_hook_routes(plan, source_root=release)
             watcher_smoke = _live_watcher_smoke(
                 state_root, Path(proposed["watcher_launcher"]), writer_pointer
             )

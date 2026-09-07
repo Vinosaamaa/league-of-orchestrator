@@ -15,6 +15,7 @@ from .cleanup import (
     CleanupExecutor,
     cleanup_action_digest,
 )
+from .continuation import GitHubIssueAdapter, IssueCommandRunner
 from .real_cleanup import (
     CallsignAdapter,
     CommandRunner,
@@ -22,6 +23,11 @@ from .real_cleanup import (
     HerdrBackendAdapter,
     HerdrHarnessAdapter,
     SubprocessRunner,
+)
+from .provider_lifecycle import profile_for_runtime_kind
+from .multiplexer_adapters import (
+    MultiplexerAdapterRegistry,
+    builtin_multiplexer_adapter_registry,
 )
 from .storage import Storage, StorageRefusal
 
@@ -162,6 +168,20 @@ class SharedLeaseAdapter(_BaseAdapter):
         return self.store.release_resource_lease_for_cleanup(self._expected(action))
 
 
+PRODUCTION_CLEANUP_ADAPTER_KINDS = frozenset(
+    {
+        CanonicalArchiveAdapter.kind,
+        HerdrHarnessAdapter.kind,
+        HerdrBackendAdapter.kind,
+        GitAdapter.kind,
+        CallsignAdapter.kind,
+        ExactProcessAdapter.kind,
+        SharedLeaseAdapter.kind,
+        GitHubIssueAdapter.kind,
+    }
+)
+
+
 def _one(actions: Sequence[Mapping[str, Any]], action_kind: str) -> Mapping[str, Any]:
     matches = [action for action in actions if action.get("action_kind") == action_kind]
     if len(matches) != 1:
@@ -171,7 +191,11 @@ def _one(actions: Sequence[Mapping[str, Any]], action_kind: str) -> Mapping[str,
     return matches[0]
 
 
-def _validate_runtime_context(context: Mapping[str, Any], actions: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+def _validate_runtime_context(
+    context: Mapping[str, Any],
+    actions: Sequence[Mapping[str, Any]],
+    multiplexers: Optional[MultiplexerAdapterRegistry] = None,
+) -> dict[str, Any]:
     harness_action = _one(actions, "session_exit")
     backend_action = _one(actions, "endpoint_close")
     harness = harness_action.get("expected_identity")
@@ -197,9 +221,23 @@ def _validate_runtime_context(context: Mapping[str, Any], actions: Sequence[Mapp
     if len(matches) != 1:
         raise StorageRefusal("cleanup_identity_mismatch", "canonical runtime identity is missing or ambiguous")
     runtime = matches[0]
+    try:
+        profile = profile_for_runtime_kind(str(runtime["harness_kind"]))
+    except StorageRefusal as exc:
+        raise StorageRefusal(
+            "cleanup_adapter_unsupported",
+            "canonical runtime has no supported production harness cleanup policy",
+        ) from exc
+    selected_multiplexers = multiplexers or builtin_multiplexer_adapter_registry()
+    try:
+        multiplexer = selected_multiplexers.adapter(str(runtime["backend_kind"]))
+    except StorageRefusal as exc:
+        raise StorageRefusal(
+            "cleanup_adapter_unsupported",
+            "canonical runtime has no registered production multiplexer cleanup policy",
+        ) from exc
     if (
-        runtime["harness_kind"] != "codex"
-        or runtime["backend_kind"] != "herdr"
+        "production_cleanup" not in multiplexer.capabilities
         or runtime["session_ref"] != harness["session_id"]
         or runtime["endpoint"] != backend["pane_id"]
         or runtime["runtime_generation"] != backend["runtime_generation"]
@@ -208,19 +246,18 @@ def _validate_runtime_context(context: Mapping[str, Any], actions: Sequence[Mapp
     ):
         raise StorageRefusal(
             "cleanup_adapter_unsupported",
-            "canonical runtime is not the supported verified Codex+Herdr cleanup policy",
+            "canonical runtime is not a supported verified provider+multiplexer cleanup policy",
         )
-    workspace_id = str(backend["pane_id"]).split(":", 1)[0]
-    if not workspace_id or workspace_id == backend["pane_id"]:
-        raise StorageRefusal("cleanup_identity_mismatch", "Herdr workspace identity is incomplete")
     return {
         "agent_name": harness["agent_name"],
-        "workspace_id": workspace_id,
         "pane_id": backend["pane_id"],
         "terminal_id": backend["terminal_id"],
         "session_id": harness["session_id"],
         "runtime_instance_id": backend["runtime_instance_id"],
         "runtime_generation": backend["runtime_generation"],
+        "backend_kind": str(runtime["backend_kind"]),
+        "provider_kind": profile.kind,
+        "exit_prompt": profile.exit_prompt,
     }
 
 
@@ -231,6 +268,9 @@ def production_cleanup_registry(
     at: str,
     runner: Optional[CommandRunner] = None,
     process_port: Optional[ProcessPort] = None,
+    issue_runner: Optional[IssueCommandRunner] = None,
+    issue_executable: Optional[str] = None,
+    multiplexer_registry: Optional[MultiplexerAdapterRegistry] = None,
 ) -> CleanupAdapterRegistry:
     """Validate every persisted adapter policy before returning executable drivers."""
 
@@ -239,20 +279,27 @@ def production_cleanup_registry(
     if not isinstance(actions, list):
         raise StorageRefusal("cleanup_operation_invalid", "canonical action plan is malformed")
     declared = {str(action.get("adapter_kind")) for action in actions}
-    supported = {"archive", "harness", "backend", "git", "callsign", "process", "lease"}
-    unknown = declared - supported
+    unknown = declared - PRODUCTION_CLEANUP_ADAPTER_KINDS
     if unknown:
         raise StorageRefusal(
             "cleanup_adapter_unsupported",
             "canonical cleanup plan names an unsupported production adapter",
         )
     command_runner = runner or SubprocessRunner()
+    multiplexers = multiplexer_registry or builtin_multiplexer_adapter_registry()
     registry = CleanupAdapterRegistry()
     archive = _one(actions, "archive_identity_evidence")
     registry.register(CanonicalArchiveAdapter(archive["intended_state"]))
-    runtime_identity = _validate_runtime_context(context, actions)
-    registry.register(HerdrHarnessAdapter(runtime_identity, command_runner))
-    registry.register(HerdrBackendAdapter(store, runtime_identity, command_runner, at))
+    runtime_identity = _validate_runtime_context(context, actions, multiplexers)
+    multiplexer = multiplexers.adapter(runtime_identity["backend_kind"])
+    harness_driver, backend_driver = multiplexer.cleanup_drivers(
+        store=store,
+        identity=runtime_identity,
+        runner=command_runner,
+        at=at,
+    )
+    registry.register(harness_driver)
+    registry.register(backend_driver)
     if "git" in declared:
         worktree = _one(actions, "worktree_remove")["expected_identity"]
         branch = _one(actions, "branch_delete")["expected_identity"]
@@ -271,6 +318,10 @@ def production_cleanup_registry(
         registry.register(ExactProcessAdapter(process_port or SystemProcessPort(command_runner)))
     if "lease" in declared:
         registry.register(SharedLeaseAdapter(store))
+    if "issue" in declared:
+        registry.register(
+            GitHubIssueAdapter(issue_runner, executable=issue_executable)
+        )
     return registry
 
 
@@ -300,10 +351,14 @@ class ProductionCleanup:
         *,
         runner: Optional[CommandRunner] = None,
         process_port: Optional[ProcessPort] = None,
+        issue_runner: Optional[IssueCommandRunner] = None,
+        issue_executable: Optional[str] = None,
     ) -> None:
         self.store = store
         self.runner = runner
         self.process_port = process_port
+        self.issue_runner = issue_runner
+        self.issue_executable = issue_executable
 
     def execute(
         self,
@@ -322,6 +377,8 @@ class ProductionCleanup:
             at=at,
             runner=self.runner,
             process_port=self.process_port,
+            issue_runner=self.issue_runner,
+            issue_executable=self.issue_executable,
         )
         execution = CleanupExecutor(self.store, registry).execute(
             operation_id,
@@ -379,4 +436,5 @@ __all__ = [
     "SharedLeaseAdapter",
     "SystemProcessPort",
     "production_cleanup_registry",
+    "PRODUCTION_CLEANUP_ADAPTER_KINDS",
 ]

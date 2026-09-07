@@ -10,17 +10,28 @@ from __future__ import annotations
 import hashlib
 import os
 import sqlite3
+import stat
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Optional, Sequence
+from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
 
+from . import sqlite_cursor_steering_ops
+from . import sqlite_provider_launch_ops
+from . import sqlite_runtime_replacement_ops
+from . import sqlite_pi_session_migration_ops
 from . import sqlite_runtime_ops
+from . import sqlite_stopped_retirement_ops
+from . import sqlite_mode_ops
+from . import sqlite_issue_ops
+from . import sqlite_continuation_ops
+from . import sqlite_startup_ops
 from .sqlite_artifact_ops import declare as declare_repository_artifact_operation
 from .sqlite_artifact_ops import publish as record_repository_publication_operation
 from .sqlite_artifact_ops import status as task_artifacts_operation
 from .sqlite_artifact_ops import unresolved as unresolved_repository_publications_operation
 from .sqlite_core import SQLiteTransactionCore
+from . import sqlite_assignment_ops
 from .sqlite_assignment_ops import activate_assignment as activate_assignment_operation
 from .sqlite_assignment_ops import block_assignment as block_assignment_operation
 from .sqlite_assignment_ops import finish_hidden_assignment as finish_hidden_assignment_operation
@@ -29,6 +40,24 @@ from .sqlite_assignment_ops import prepare_assignment as prepare_assignment_oper
 from .sqlite_assignment_ops import reconcile_assignment_runtime as reconcile_assignment_runtime_operation
 from .sqlite_assignment_ops import transition_task as transition_task_operation
 from .sqlite_callsign_ops import activate_callsign as activate_callsign_operation
+from .sqlite_callsign_ops import callsign_assignment_status as callsign_assignment_status_operation
+from .sqlite_callsign_ops import record_shotcaller_bootstrap as record_shotcaller_bootstrap_operation
+from .sqlite_callsign_ops import (
+    record_shotcaller_bootstrap_baseline as record_shotcaller_bootstrap_baseline_operation,
+)
+from .sqlite_callsign_ops import (
+    record_shotcaller_bootstrap_publication as record_shotcaller_bootstrap_publication_operation,
+)
+from .sqlite_callsign_ops import (
+    shotcaller_bootstrap_baseline as shotcaller_bootstrap_baseline_operation,
+)
+from .sqlite_callsign_ops import (
+    shotcaller_bootstrap_publication as shotcaller_bootstrap_publication_operation,
+)
+from .sqlite_callsign_ops import (
+    bind_shotcaller_bootstrap_runtime as bind_shotcaller_bootstrap_runtime_operation,
+)
+from .sqlite_callsign_ops import shotcaller_bootstrap_status as shotcaller_bootstrap_status_operation
 from .sqlite_callsign_ops import allocate_callsign as allocate_callsign_operation
 from .sqlite_callsign_ops import callsign_status as callsign_status_operation
 from .sqlite_callsign_ops import initialize_imported_callsign_state
@@ -49,12 +78,36 @@ from .sqlite_project_ops import put_project as put_project_operation
 from .sqlite_project_ops import resolve_project as resolve_project_operation
 from .sqlite_project_ops import set_project_suggestions as set_project_suggestions_operation
 from .sqlite_outbox_ops import acknowledge_outbox as acknowledge_outbox_operation
+from .sqlite_outbox_ops import await_outbox_receipt as await_outbox_receipt_operation
 from .sqlite_outbox_ops import claim_outbox as claim_outbox_operation
 from .sqlite_outbox_ops import delivery_target as delivery_target_operation
+from .sqlite_outbox_ops import direct_delivery_target as direct_delivery_target_operation
 from .sqlite_outbox_ops import fail_outbox as fail_outbox_operation
 from .sqlite_outbox_ops import outbox_envelope as outbox_envelope_operation
 from .sqlite_outbox_ops import pending_backlog as pending_backlog_operation
+from .sqlite_watcher_ops import release_watcher as release_watcher_operation
+from .sqlite_watcher_ops import supervisor_binding as supervisor_binding_operation
+from .sqlite_watcher_ops import supervisor_bindings as supervisor_bindings_operation
+from .sqlite_watcher_ops import resolve_supervisor_scope as resolve_supervisor_scope_operation
+from .sqlite_watcher_ops import supervision_owner as supervision_owner_operation
+from .sqlite_watcher_ops import begin_shotcaller_turn as begin_shotcaller_turn_operation
+from .sqlite_watcher_ops import commit_shotcaller_turn as commit_shotcaller_turn_operation
+from .sqlite_watcher_ops import abort_shotcaller_turn as abort_shotcaller_turn_operation
+from .sqlite_watcher_ops import watcher_registration as watcher_registration_operation
+from .sqlite_watcher_ops import watcher_registrations as watcher_registrations_operation
+from .sqlite_watcher_ops import apply_supervision_delivery_policy as apply_supervision_delivery_policy_operation
+from .sqlite_watcher_ops import champion_stop_decision as champion_stop_decision_operation
+from .sqlite_watcher_ops import configure_supervision_policy as configure_supervision_policy_operation
+from .sqlite_watcher_ops import set_supervision_attachment as set_supervision_attachment_operation
+from .sqlite_watcher_ops import record_supervision_fault as record_supervision_fault_operation
+from .sqlite_watcher_ops import runtime_monitor_candidates as runtime_monitor_candidates_operation
+from .sqlite_watcher_ops import silent_supervision_updates as silent_supervision_updates_operation
+from .sqlite_watcher_ops import supervision_policy as supervision_policy_operation
+from .sqlite_watcher_ops import (
+    persistent_supervision_required as persistent_supervision_required_operation,
+)
 from .sqlite_request_ops import answer_request as answer_request_operation
+from .sqlite_request_ops import accept_routed_delivery as accept_routed_delivery_operation
 from .sqlite_request_ops import claim_request as claim_request_operation
 from .sqlite_request_ops import dispatch_request as dispatch_request_operation
 from .sqlite_request_ops import intake_prompt as intake_prompt_operation
@@ -64,6 +117,7 @@ from .sqlite_request_ops import route_request as route_request_operation
 from .sqlite_request_ops import set_request_state as set_request_state_operation
 from .sqlite_request_ops import triage_prompt as triage_prompt_operation
 from .sqlite_request_ops import unresolved_requests as unresolved_requests_operation
+from .sqlite_request_ops import untriaged_intake as untriaged_intake_operation
 from .sqlite_progress_ops import emit_request_progress as emit_request_progress_operation
 from .sqlite_progress_ops import reconcile_request_progress as reconcile_request_progress_operation
 from .sqlite_rollover_ops import abort_rollover as abort_rollover_operation
@@ -71,9 +125,23 @@ from .sqlite_rollover_ops import acknowledge_rollover as acknowledge_rollover_op
 from .sqlite_rollover_ops import commit_rollover as commit_rollover_operation
 from .sqlite_rollover_ops import complete_rollover_drain as complete_rollover_drain_operation
 from .sqlite_rollover_ops import prepare_rollover as prepare_rollover_operation
+from .sqlite_rollover_ops import (
+    reconcile_rollover_descendant as reconcile_rollover_descendant_operation,
+)
+from .sqlite_rollover_ops import reconcile_rollover_intake as reconcile_rollover_intake_operation
+from .sqlite_rollover_ops import rollover_intake_plan as rollover_intake_plan_operation
 from .sqlite_rollover_ops import rollover_bindings as rollover_bindings_operation
 from .sqlite_rollover_ops import rollover_status as rollover_status_operation
 from .sqlite_rollover_ops import rollover_cleanup_target as rollover_cleanup_target_operation
+from .sqlite_rollover_ops import (
+    rollover_descendant_target as rollover_descendant_target_operation,
+)
+from .sqlite_rollover_snapshot_ops import (
+    refresh as refresh_rollover_snapshot_operation,
+)
+from .sqlite_rollover_snapshot_ops import (
+    refresh_target as rollover_snapshot_refresh_target_operation,
+)
 from .sqlite_roster_ops import roster_snapshot as roster_snapshot_operation
 from .sqlite_report_ops import generate_report as generate_report_operation
 from .sqlite_report_ops import record_activity_evidence as record_activity_evidence_operation
@@ -87,17 +155,28 @@ from .sqlite_transfer_ops import (
     export_bytes as export_operation,
 )
 from .sqlite_watcher_ops import note_user_message as note_user_message_operation
+from .sqlite_watcher_ops import consume_stop_feedback as consume_stop_feedback_operation
 from .sqlite_watcher_ops import rearm_wait as rearm_wait_operation
 from .sqlite_watcher_ops import register_runtime as register_runtime_operation
 from .sqlite_watcher_ops import register_watcher as register_watcher_operation
 from .sqlite_watcher_ops import set_allow_stop_once as set_allow_stop_once_operation
+from .sqlite_watcher_ops import prepare_owner_stop_control as prepare_owner_stop_control_operation
+from .sqlite_watcher_ops import pending_owner_stop_controls as pending_owner_stop_controls_operation
+from .sqlite_watcher_ops import finalize_owner_stop_control as finalize_owner_stop_control_operation
+from .sqlite_watcher_ops import fail_owner_stop_control as fail_owner_stop_control_operation
 from .sqlite_watcher_ops import stop_decision as stop_decision_operation
 from .storage import ConnectionPolicy, FaultInjector, ImportPlan, StorageRefusal
-from .storage_assignment import FinishHiddenAssignmentCommand, PrepareAssignmentCommand
+from .storage_assignment import (
+    FinishHiddenAssignmentCommand,
+    LegacyDisplayReconciliationCommand,
+    PrepareAssignmentCommand,
+)
 from .storage_outbox import OutboxDispatchIdentity
 from .storage_request import (
     AnswerRequestCommand,
     DispatchRequestCommand,
+    OwnerStopControl,
+    ReconcileDuplicateRequestCommand,
     RequestProgressCommand,
     RequestResultCommand,
 )
@@ -107,10 +186,70 @@ from .sqlite_handoff_schema import MIGRATION_NAME as HANDOFF_MIGRATION_NAME
 from .sqlite_handoff_schema import STATEMENTS as HANDOFF_MIGRATION_STATEMENTS
 from .sqlite_routing_policy_schema import MIGRATION_NAME as ROUTING_POLICY_MIGRATION_NAME
 from .sqlite_routing_policy_schema import STATEMENTS as ROUTING_POLICY_MIGRATION_STATEMENTS
+from .sqlite_rollover_reconciliation_schema import (
+    MIGRATION_NAME as ROLLOVER_RECONCILIATION_MIGRATION_NAME,
+)
+from .sqlite_rollover_reconciliation_schema import (
+    STATEMENTS as ROLLOVER_RECONCILIATION_MIGRATION_STATEMENTS,
+)
+from .sqlite_shotcaller_bootstrap_schema import (
+    MIGRATION_NAME as SHOTCALLER_BOOTSTRAP_MIGRATION_NAME,
+)
+from .sqlite_shotcaller_bootstrap_schema import (
+    STATEMENTS as SHOTCALLER_BOOTSTRAP_MIGRATION_STATEMENTS,
+)
+from .sqlite_prompt_owner_schema import MIGRATION_NAME as PROMPT_OWNER_MIGRATION_NAME
+from .sqlite_prompt_owner_schema import STATEMENTS as PROMPT_OWNER_MIGRATION_STATEMENTS
+from .sqlite_stop_feedback_schema import MIGRATION_NAME as STOP_FEEDBACK_MIGRATION_NAME
+from .sqlite_stop_feedback_schema import STATEMENTS as STOP_FEEDBACK_MIGRATION_STATEMENTS
+from .sqlite_continuation_schema import MIGRATION_NAME as CONTINUATION_MIGRATION_NAME
+from .sqlite_continuation_schema import STATEMENTS as CONTINUATION_MIGRATION_STATEMENTS
+from .sqlite_cursor_steering_schema import MIGRATION_NAME as CURSOR_STEERING_MIGRATION_NAME
+from .sqlite_cursor_steering_schema import STATEMENTS as CURSOR_STEERING_MIGRATION_STATEMENTS
+from .sqlite_provider_launch_schema import MIGRATION_NAME as PROVIDER_LAUNCH_MIGRATION_NAME
+from .sqlite_provider_launch_schema import STATEMENTS as PROVIDER_LAUNCH_MIGRATION_STATEMENTS
+from .sqlite_runtime_replacement_schema import (
+    MIGRATION_NAME as RUNTIME_REPLACEMENT_MIGRATION_NAME,
+)
+from .sqlite_runtime_replacement_schema import (
+    STATEMENTS as RUNTIME_REPLACEMENT_MIGRATION_STATEMENTS,
+)
+from .sqlite_rollover_snapshot_schema import (
+    MIGRATION_NAME as ROLLOVER_SNAPSHOT_MIGRATION_NAME,
+)
+from .sqlite_rollover_snapshot_schema import (
+    STATEMENTS as ROLLOVER_SNAPSHOT_MIGRATION_STATEMENTS,
+)
+from .sqlite_autonomous_schema import MIGRATION_NAME as AUTONOMOUS_MIGRATION_NAME
+from .sqlite_autonomous_schema import STATEMENTS as AUTONOMOUS_MIGRATION_STATEMENTS
+from .storage_issue import BeginIssueSelectionCommand, CompleteIssueSelectionCommand
+from .storage_mode import (
+    BeginProtectedGateCommand,
+    SettleModeActionCommand,
+    SettleProtectedGateCommand,
+)
+from .sqlite_request_reconciliation_schema import (
+    MIGRATION_NAME as REQUEST_RECONCILIATION_MIGRATION_NAME,
+)
+from .sqlite_request_reconciliation_schema import (
+    STATEMENTS as REQUEST_RECONCILIATION_MIGRATION_STATEMENTS,
+)
+from .sqlite_protected_gate_schema import (
+    MIGRATION_NAME as PROTECTED_GATE_MIGRATION_NAME,
+)
+from .sqlite_stopped_retirement_schema import (
+    MIGRATION_NAME as STOPPED_RETIREMENT_MIGRATION_NAME,
+)
+from .sqlite_stopped_retirement_schema import (
+    STATEMENTS as STOPPED_RETIREMENT_MIGRATION_STATEMENTS,
+)
+from .sqlite_protected_gate_schema import (
+    STATEMENTS as PROTECTED_GATE_MIGRATION_STATEMENTS,
+)
 
 
 WAL_MINIMUM = (3, 51, 3)
-CURRENT_SCHEMA_VERSION = 11
+CURRENT_SCHEMA_VERSION = 24
 DATABASE_NAME = "league.sqlite3"
 DEFAULT_BUSY_TIMEOUT_MS = 500
 MAX_BUSY_TIMEOUT_MS = 10_000
@@ -1104,6 +1243,59 @@ MIGRATIONS = (
             "ALTER TABLE prompt_quarantine ADD COLUMN wake_committed INTEGER NOT NULL DEFAULT 0 CHECK (wake_committed IN (0,1))",
         ),
     ),
+    Migration(
+        12,
+        ROLLOVER_RECONCILIATION_MIGRATION_NAME,
+        ROLLOVER_RECONCILIATION_MIGRATION_STATEMENTS,
+        rebuilds_foreign_keys=True,
+    ),
+    Migration(
+        13,
+        SHOTCALLER_BOOTSTRAP_MIGRATION_NAME,
+        SHOTCALLER_BOOTSTRAP_MIGRATION_STATEMENTS,
+        rebuilds_foreign_keys=True,
+    ),
+    Migration(14, PROMPT_OWNER_MIGRATION_NAME, PROMPT_OWNER_MIGRATION_STATEMENTS),
+    Migration(15, STOP_FEEDBACK_MIGRATION_NAME, STOP_FEEDBACK_MIGRATION_STATEMENTS),
+    Migration(16, CONTINUATION_MIGRATION_NAME, CONTINUATION_MIGRATION_STATEMENTS),
+    Migration(
+        17,
+        ROLLOVER_SNAPSHOT_MIGRATION_NAME,
+        ROLLOVER_SNAPSHOT_MIGRATION_STATEMENTS,
+        rebuilds_foreign_keys=True,
+    ),
+    Migration(18, AUTONOMOUS_MIGRATION_NAME, AUTONOMOUS_MIGRATION_STATEMENTS),
+    Migration(
+        19,
+        REQUEST_RECONCILIATION_MIGRATION_NAME,
+        REQUEST_RECONCILIATION_MIGRATION_STATEMENTS,
+    ),
+    Migration(
+        20,
+        PROTECTED_GATE_MIGRATION_NAME,
+        PROTECTED_GATE_MIGRATION_STATEMENTS,
+    ),
+    Migration(
+        21,
+        CURSOR_STEERING_MIGRATION_NAME,
+        CURSOR_STEERING_MIGRATION_STATEMENTS,
+    ),
+    Migration(
+        22,
+        PROVIDER_LAUNCH_MIGRATION_NAME,
+        PROVIDER_LAUNCH_MIGRATION_STATEMENTS,
+    ),
+    Migration(
+        23,
+        RUNTIME_REPLACEMENT_MIGRATION_NAME,
+        RUNTIME_REPLACEMENT_MIGRATION_STATEMENTS,
+        rebuilds_foreign_keys=True,
+    ),
+    Migration(
+        24,
+        STOPPED_RETIREMENT_MIGRATION_NAME,
+        STOPPED_RETIREMENT_MIGRATION_STATEMENTS,
+    ),
 )
 
 
@@ -1253,6 +1445,65 @@ _IMPORT_COLUMNS: dict[str, tuple[str, ...]] = {
         "from_inclusive", "scope_kind", "scope_id", "event_watermark", "source_watermark", "created_at",
         "spec_hash", "content_hash", "fact_count",
     ),
+    "authorization_grants": (
+        "grant_id", "goal_id", "revision", "issuer_kind", "issuer_id",
+        "shotcaller_agent_id", "exact_goal", "scope_json", "allowed_actions_json",
+        "exclusions_json", "sensitive_inclusions_json", "resource_boundary_json",
+        "starts_at", "expires_at", "limits_json", "canonical_digest", "version",
+        "created_at",
+    ),
+    "delivery_goals": (
+        "goal_id", "active_grant_id", "state", "next_irreversible_action",
+        "attempts_used", "cost_microunits_used", "changed_files_used",
+        "duration_seconds_used", "in_progress_actions", "version", "created_at",
+        "updated_at",
+    ),
+    "authorization_revocations": (
+        "grant_id", "revoked_by", "reason", "revoked_at", "receipt_digest",
+    ),
+    "autonomous_action_uses": (
+        "action_use_id", "idempotency_key", "goal_id", "grant_id",
+        "grant_revision", "external_owner_agent_id", "action_kind",
+        "action_scope_json", "risk_categories_json", "sensitive_categories_json",
+        "resource_use_json", "attempt_count", "cost_microunits", "changed_files",
+        "duration_seconds", "state", "use_receipt_digest", "result_receipt_digest",
+        "failure_class", "started_at", "settled_at", "goal_version_at_use",
+    ),
+    "protected_gate_uses": (
+        "action_use_id", "gate_name", "action_kind", "gate_scope_digest",
+        "use_receipt_digest", "binding_digest", "started_at",
+    ),
+    "protected_gate_settlements": (
+        "action_use_id", "outcome", "result_receipt_digest", "failure_class",
+        "settlement_digest", "settled_at",
+    ),
+    "autonomous_repair_obligations": (
+        "repair_id", "goal_id", "failed_action_use_id", "state", "attempts_used",
+        "max_attempts", "failure_class", "version", "created_at", "updated_at",
+    ),
+    "repository_issue_selection_leases": (
+        "selection_key", "repository", "repository_key", "normalized_title",
+        "semantic_scope_digest", "state", "owner_attempt_id", "current_task_id",
+        "current_task_summary", "current_coordinator_agent_id", "lease_expires_at",
+        "version", "created_at", "updated_at",
+    ),
+    "repository_issue_selection_receipts": (
+        "selection_receipt_id", "selection_key", "selection_version", "task_id",
+        "task_summary", "coordinator_agent_id", "repository", "repository_key",
+        "normalized_title", "semantic_scope_digest", "decision", "issue",
+        "issue_url", "issue_state", "issue_title", "issue_body_digest",
+        "duplicate_matches", "prior_task_id", "prior_assignment_id",
+        "prior_champion_agent_id", "prior_runtime_instance_id", "prior_session_ref",
+        "reopen_action_receipt_digest", "task_scope_digest", "receipt_digest",
+        "created_at",
+    ),
+    "repository_issue_bindings": (
+        "task_id", "assignment_id", "request_id", "repository", "issue",
+        "issue_url", "issue_state", "issue_title", "issue_body_digest",
+        "semantic_binding_digest", "task_scope_digest", "issue_selection_receipt_digest",
+        "reopen_action_receipt_digest", "verifier_kind", "verified_at",
+        "receipt_digest",
+    ),
 }
 
 _IMPORT_ORDER = tuple(_IMPORT_COLUMNS)
@@ -1293,6 +1544,7 @@ _EXPORT_TABLES = (
     "prompt_items",
     "requests",
     "request_sources",
+    "request_reconciliations",
     "request_claims",
     "request_dispatches",
     "request_results",
@@ -1307,6 +1559,12 @@ _EXPORT_TABLES = (
     "delivery_outbox",
     "outbox_dispatch_leases",
     "delivery_attempts",
+    "cursor_steering_effects",
+    "provider_launch_descriptors",
+    "provider_restart_effects",
+    "pi_session_migrations",
+    "runtime_replacements",
+    "stopped_agent_retirements",
     "recipient_receipts",
     "watcher_registrations",
     "obligations",
@@ -1324,6 +1582,16 @@ _EXPORT_TABLES = (
     "activity_evidence",
     "report_specs",
     "repository_artifacts",
+    "authorization_grants",
+    "delivery_goals",
+    "authorization_revocations",
+    "autonomous_action_uses",
+    "protected_gate_uses",
+    "protected_gate_settlements",
+    "autonomous_repair_obligations",
+    "repository_issue_selection_leases",
+    "repository_issue_selection_receipts",
+    "repository_issue_bindings",
 )
 
 _EXPORT_ORDER = {
@@ -1363,6 +1631,7 @@ _EXPORT_ORDER = {
     "prompt_items": "prompt_id,ordinal,prompt_item_id",
     "requests": "created_at,request_id",
     "request_sources": "request_id,prompt_item_id",
+    "request_reconciliations": "reconciled_at,duplicate_request_id",
     "request_claims": "request_id",
     "request_dispatches": "decided_at,dispatch_id",
     "request_results": "created_at,result_id",
@@ -1377,6 +1646,12 @@ _EXPORT_ORDER = {
     "delivery_outbox": "available_at,outbox_id",
     "outbox_dispatch_leases": "outbox_id",
     "delivery_attempts": "started_at,attempt_id",
+    "cursor_steering_effects": "created_at,outbox_id",
+    "provider_launch_descriptors": "created_at,descriptor_id",
+    "provider_restart_effects": "created_at,descriptor_id,restart_id",
+    "pi_session_migrations": "created_at,migration_id",
+    "runtime_replacements": "created_at,operation_id",
+    "stopped_agent_retirements": "completed_at,operation_id",
     "recipient_receipts": "received_at,event_id,recipient_agent_id",
     "watcher_registrations": "actor_agent_id,watcher_id",
     "obligations": "created_at,obligation_id",
@@ -1394,6 +1669,16 @@ _EXPORT_ORDER = {
     "activity_evidence": "occurred_at,evidence_id",
     "report_specs": "created_at,report_id",
     "repository_artifacts": "task_id,artifact_id",
+    "authorization_grants": "goal_id,revision,grant_id",
+    "delivery_goals": "goal_id",
+    "authorization_revocations": "revoked_at,grant_id",
+    "autonomous_action_uses": "started_at,action_use_id",
+    "protected_gate_uses": "started_at,action_use_id",
+    "protected_gate_settlements": "settled_at,action_use_id",
+    "autonomous_repair_obligations": "created_at,repair_id",
+    "repository_issue_selection_leases": "repository_key,normalized_title,selection_key",
+    "repository_issue_selection_receipts": "created_at,selection_receipt_id",
+    "repository_issue_bindings": "repository,issue,task_id",
 }
 
 _INSPECTION_REDACTIONS = {
@@ -1449,6 +1734,59 @@ _INSPECTION_REDACTIONS = {
     "rollover_operations": {"plan_json"},
     "task_transitions": {"update_text", "next_action", "blocker"},
     "delivery_attempts": {"outcome"},
+    "cursor_steering_effects": {
+        "runtime_generation",
+        "pane_id",
+        "session_ref",
+        "intent_json",
+        "receipt_json",
+    },
+    "provider_launch_descriptors": {
+        "cwd",
+        "parent_session_id",
+        "parent_session_path",
+        "session_id",
+        "session_path",
+        "workspace_id",
+        "tab_id",
+        "pane_id",
+        "terminal_id",
+        "descriptor_json",
+        "launch_receipt_json",
+    },
+    "provider_restart_effects": {
+        "pane_id",
+        "session_id",
+        "session_path",
+        "receipt_json",
+    },
+    "pi_session_migrations": {
+        "source_session_path",
+        "destination_session_path",
+        "parent_session_id",
+        "parent_session_path",
+        "cwd",
+        "pane_id",
+        "intent_json",
+        "receipt_json",
+    },
+    "stopped_agent_retirements": {
+        "session_ref",
+        "endpoint",
+        "runtime_generation",
+        "proof_json",
+        "receipt_json",
+    },
+    "runtime_replacements": {
+        "canonical_routing_name",
+        "staging_routing_name",
+        "intent_json",
+        "successor_receipt_json",
+        "route_receipt_json",
+        "retirement_receipt_json",
+        "completion_receipt_json",
+        "rollback_receipt_json",
+    },
     "watcher_registrations": {"wake_locator"},
     "obligations": {"details_json"},
     "runtime_bindings": {
@@ -1466,6 +1804,41 @@ _INSPECTION_REDACTIONS = {
     "cleanup_action_receipts": {"before_json", "after_json", "adapter_receipt_json"},
     "activity_evidence": {"local_evidence_ref", "local_evidence_json"},
     "repository_artifacts": {"worktree"},
+    "authorization_grants": {
+        "issuer_id",
+        "exact_goal",
+        "scope_json",
+        "resource_boundary_json",
+    },
+    "authorization_revocations": {"revoked_by", "reason"},
+    "autonomous_action_uses": {
+        "action_scope_json",
+        "risk_categories_json",
+        "sensitive_categories_json",
+        "resource_use_json",
+        "failure_class",
+    },
+    "autonomous_repair_obligations": {"failure_class"},
+    "repository_issue_selection_leases": {
+        "repository",
+        "current_task_id",
+        "current_task_summary",
+        "current_coordinator_agent_id",
+        "owner_attempt_id",
+    },
+    "repository_issue_selection_receipts": {
+        "task_id",
+        "task_summary",
+        "coordinator_agent_id",
+        "repository",
+        "issue_title",
+        "prior_task_id",
+        "prior_assignment_id",
+        "prior_champion_agent_id",
+        "prior_runtime_instance_id",
+        "prior_session_ref",
+    },
+    "repository_issue_bindings": {"issue_title"},
 }
 
 
@@ -1511,7 +1884,16 @@ class SQLiteStorage(SQLiteTransactionCore):
         root = Path(state_root)
         if not root.is_absolute():
             raise StorageRefusal("invalid_root", "state root must be an explicit absolute path")
-        if not root.is_dir():
+        try:
+            root_mode = root.stat().st_mode
+        except PermissionError as exc:
+            raise StorageRefusal(
+                "state_root_unavailable",
+                "League state root is not accessible to this runtime; grant only the exact canonical root or use a trusted broker",
+            ) from exc
+        except FileNotFoundError as exc:
+            raise StorageRefusal("invalid_root", "state root must be an existing directory") from exc
+        if not stat.S_ISDIR(root_mode):
             raise StorageRefusal("invalid_root", "state root must be an existing directory")
         if root.is_symlink():
             raise StorageRefusal("invalid_root", "state root cannot be a symbolic link")
@@ -1525,8 +1907,18 @@ class SQLiteStorage(SQLiteTransactionCore):
         self.database = self.state_root / DATABASE_NAME
         if self.database.is_symlink():
             raise StorageRefusal("invalid_root", "League database cannot be a symbolic link")
-        if not allow_create and not self.database.is_file():
-            raise StorageRefusal("store_missing", "League storage has not been migrated")
+        if not allow_create:
+            try:
+                database_mode = self.database.stat().st_mode
+            except PermissionError as exc:
+                raise StorageRefusal(
+                    "state_root_unavailable",
+                    "League database is not accessible to this runtime; grant only the exact canonical root or use a trusted broker",
+                ) from exc
+            except FileNotFoundError as exc:
+                raise StorageRefusal("store_missing", "League storage has not been migrated") from exc
+            if not stat.S_ISREG(database_mode):
+                raise StorageRefusal("store_missing", "League storage is not a regular file")
         self._database_existed = self.database.exists()
         try:
             self.connection = sqlite3.connect(
@@ -1551,15 +1943,50 @@ class SQLiteStorage(SQLiteTransactionCore):
             if not self._database_existed:
                 os.chmod(self.database, 0o600)
             loaded = tuple(int(item) for item in sqlite3.sqlite_version_info[:3])
-            requested_mode, refusal = journal_policy(loaded, request_wal=request_wal)
             self.connection.execute("PRAGMA foreign_keys=ON")
             self.connection.execute(f"PRAGMA busy_timeout={int(busy_timeout_ms)}")
-            actual_mode = str(
-                self.connection.execute(f"PRAGMA journal_mode={requested_mode}").fetchone()[0]
-            ).upper()
+            if allow_create:
+                requested_mode, refusal = journal_policy(
+                    loaded, request_wal=request_wal
+                )
+                actual_mode = str(
+                    self.connection.execute(
+                        f"PRAGMA journal_mode={requested_mode}"
+                    ).fetchone()[0]
+                ).upper()
+                wal_allowed = requested_mode == "WAL"
+            else:
+                actual_mode = str(
+                    self.connection.execute("PRAGMA journal_mode").fetchone()[0]
+                ).upper()
+                if actual_mode not in {"DELETE", "WAL"}:
+                    raise StorageRefusal(
+                        "journal_mode_unsupported",
+                        f"established canonical journal mode {actual_mode} is unsupported",
+                    )
+                if actual_mode == "WAL" and loaded < WAL_MINIMUM:
+                    raise StorageRefusal(
+                        "wal_runtime_unsupported",
+                        "established WAL mode requires SQLite 3.51.3 or newer",
+                    )
+                wal_allowed = actual_mode == "WAL"
+                refusal = None if wal_allowed else "canonical_delete_mode"
             self.connection.execute("PRAGMA synchronous=FULL")
             foreign_keys = bool(self.connection.execute("PRAGMA foreign_keys").fetchone()[0])
             synchronous = int(self.connection.execute("PRAGMA synchronous").fetchone()[0])
+        except StorageRefusal:
+            if hasattr(self, "connection"):
+                self.connection.close()
+            raise
+        except sqlite3.OperationalError as exc:
+            if hasattr(self, "connection"):
+                self.connection.close()
+            if "unable to open database file" in str(exc).lower():
+                raise StorageRefusal(
+                    "state_root_unavailable",
+                    "League database is not accessible to this runtime; grant only the exact canonical root or use a trusted broker",
+                ) from exc
+            raise self._translate_database_error(exc, "storage open failed") from exc
         except sqlite3.DatabaseError as exc:
             if hasattr(self, "connection"):
                 self.connection.close()
@@ -1567,7 +1994,7 @@ class SQLiteStorage(SQLiteTransactionCore):
         if not foreign_keys:
             self.connection.close()
             raise StorageRefusal("foreign_keys_unavailable", "foreign-key enforcement could not be enabled")
-        if actual_mode != requested_mode:
+        if allow_create and actual_mode != requested_mode:
             self.connection.close()
             raise StorageRefusal(
                 "journal_mode_refused",
@@ -1579,7 +2006,7 @@ class SQLiteStorage(SQLiteTransactionCore):
         self.policy = ConnectionPolicy(
             loaded_runtime=loaded,
             journal_mode=actual_mode,
-            wal_allowed=requested_mode == "WAL",
+            wal_allowed=wal_allowed,
             wal_refusal=refusal,
             busy_timeout_ms=busy_timeout_ms,
             foreign_keys=True,
@@ -1837,6 +2264,92 @@ class SQLiteStorage(SQLiteTransactionCore):
         receipt["policy"] = self._policy_result()
         return receipt
 
+    def authorize_mode(
+        self, grant: dict[str, Any], expected_goal_version: int, at: str
+    ) -> dict[str, Any]:
+        return sqlite_mode_ops.authorize_mode(
+            self, grant, expected_goal_version, at
+        )
+
+    def mode_status(self, goal_id: str, at: str) -> dict[str, Any]:
+        return sqlite_mode_ops.mode_status(self, goal_id, at)
+
+    def use_mode_action(
+        self, action: dict[str, Any], expected_goal_version: int, at: str
+    ) -> dict[str, Any]:
+        return sqlite_mode_ops.use_mode_action(
+            self, action, expected_goal_version, at
+        )
+
+    def settle_mode_action(self, command: SettleModeActionCommand) -> dict[str, Any]:
+        return sqlite_mode_ops.settle_mode_action(self, command)
+
+    def begin_protected_gate(
+        self, command: BeginProtectedGateCommand
+    ) -> dict[str, Any]:
+        return sqlite_mode_ops.begin_protected_gate(self, command)
+
+    def settle_protected_gate(
+        self, command: SettleProtectedGateCommand
+    ) -> dict[str, Any]:
+        return sqlite_mode_ops.settle_protected_gate(self, command)
+
+    def transition_mode_goal(
+        self, goal_id: str, expected_goal_version: int, state: str, at: str
+    ) -> dict[str, Any]:
+        return sqlite_mode_ops.transition_mode_goal(
+            self, goal_id, expected_goal_version, state, at
+        )
+
+    def revoke_mode_grant(
+        self,
+        grant_id: str,
+        revoked_by: str,
+        reason: str,
+        expected_goal_version: int,
+        at: str,
+    ) -> dict[str, Any]:
+        return sqlite_mode_ops.revoke_mode_grant(
+            self,
+            grant_id,
+            revoked_by,
+            reason,
+            expected_goal_version,
+            at,
+        )
+
+    def begin_issue_selection(
+        self, command: BeginIssueSelectionCommand
+    ) -> dict[str, Any]:
+        return sqlite_issue_ops.begin_issue_selection(self, command)
+
+    def complete_issue_selection(
+        self, command: CompleteIssueSelectionCommand
+    ) -> dict[str, Any]:
+        return sqlite_issue_ops.complete_issue_selection(self, command)
+
+    def release_issue_selection(
+        self,
+        selection_key: str,
+        owner_attempt_id: str,
+        expected_version: int,
+        at: str,
+    ) -> dict[str, Any]:
+        return sqlite_issue_ops.release_issue_selection(
+            self, selection_key, owner_attempt_id, expected_version, at
+        )
+
+    def verify_issue_reopen_authority(
+        self,
+        receipt_digest: str,
+        coordinator_agent_id: str,
+        repository: str,
+        issue: int,
+    ) -> dict[str, Any]:
+        return sqlite_issue_ops.verify_issue_reopen_authority(
+            self, receipt_digest, coordinator_agent_id, repository, issue
+        )
+
     def agent_status(self, agent_id: str) -> Optional[dict[str, Any]]:
         return agent_status_operation(self, agent_id)
 
@@ -1890,6 +2403,9 @@ class SQLiteStorage(SQLiteTransactionCore):
         at: str,
         *,
         fault: Optional[FaultInjector] = None,
+        recovery_baseline: Optional[Mapping[str, Any]] = None,
+        recovery_thread_id: Optional[str] = None,
+        expected_callsign: Optional[str] = None,
     ) -> dict[str, Any]:
         return allocate_callsign_operation(
             self,
@@ -1901,6 +2417,61 @@ class SQLiteStorage(SQLiteTransactionCore):
             required_capabilities,
             at,
             fault=fault,
+            recovery_baseline=recovery_baseline,
+            recovery_thread_id=recovery_thread_id,
+            expected_callsign=expected_callsign,
+        )
+
+    def callsign_assignment_status(self, assignment_id: str) -> Optional[dict[str, Any]]:
+        return callsign_assignment_status_operation(self, assignment_id)
+
+    def record_shotcaller_bootstrap(
+        self,
+        assignment_id: str,
+        expected_version: int,
+        receipt: dict[str, Any],
+        at: str,
+        *,
+        fault: Optional[FaultInjector] = None,
+    ) -> dict[str, Any]:
+        return record_shotcaller_bootstrap_operation(
+            self, assignment_id, expected_version, receipt, at, fault=fault
+        )
+
+    def shotcaller_bootstrap_status(
+        self, assignment_id: str, *, include_display_ownership: bool = False
+    ) -> Optional[dict[str, Any]]:
+        return shotcaller_bootstrap_status_operation(
+            self, assignment_id, include_display_ownership=include_display_ownership
+        )
+
+    def record_shotcaller_bootstrap_baseline(
+        self, assignment_id: str, expected_version: int, baseline: dict[str, Any]
+    ) -> dict[str, Any]:
+        return record_shotcaller_bootstrap_baseline_operation(
+            self, assignment_id, expected_version, baseline
+        )
+
+    def shotcaller_bootstrap_baseline(self, assignment_id: str) -> Optional[dict[str, Any]]:
+        return shotcaller_bootstrap_baseline_operation(self, assignment_id)
+
+    def record_shotcaller_bootstrap_publication(
+        self, assignment_id: str, expected_version: int, publication: dict[str, Any]
+    ) -> dict[str, Any]:
+        return record_shotcaller_bootstrap_publication_operation(
+            self, assignment_id, expected_version, publication
+        )
+
+    def shotcaller_bootstrap_publication(
+        self, assignment_id: str
+    ) -> Optional[dict[str, Any]]:
+        return shotcaller_bootstrap_publication_operation(self, assignment_id)
+
+    def bind_shotcaller_bootstrap_runtime(
+        self, assignment_id: str, expected_version: int, runtime_instance_id: str
+    ) -> dict[str, Any]:
+        return bind_shotcaller_bootstrap_runtime_operation(
+            self, assignment_id, expected_version, runtime_instance_id
         )
 
     def activate_callsign(
@@ -1990,6 +2561,71 @@ class SQLiteStorage(SQLiteTransactionCore):
             self, operation_id, at, cursor=cursor, limit=limit
         )
 
+    def rollover_snapshot_refresh_target(
+        self,
+        operation_id: str,
+        refresh_id: str,
+        squad_id: str,
+        predecessor_agent_id: str,
+        successor_agent_id: str,
+        expected_rollover_version: int,
+        expected_snapshot_version: int,
+        expected_snapshot_digest: str,
+        expires_at: str,
+        at: str,
+    ) -> dict[str, Any]:
+        return rollover_snapshot_refresh_target_operation(
+            self,
+            operation_id,
+            refresh_id,
+            squad_id,
+            predecessor_agent_id,
+            successor_agent_id,
+            expected_rollover_version,
+            expected_snapshot_version,
+            expected_snapshot_digest,
+            expires_at,
+            at,
+        )
+
+    def refresh_rollover_snapshot(
+        self,
+        operation_id: str,
+        refresh_id: str,
+        squad_id: str,
+        predecessor_agent_id: str,
+        successor_agent_id: str,
+        expected_rollover_version: int,
+        expected_snapshot_version: int,
+        expected_snapshot_digest: str,
+        expires_at: str,
+        at: str,
+        canonical_digest: str,
+        observations: Sequence[dict[str, Any]],
+        final_observer: Callable[
+            [list[dict[str, Any]]], Sequence[Mapping[str, Any]]
+        ],
+        *,
+        fault: Optional[FaultInjector] = None,
+    ) -> dict[str, Any]:
+        return refresh_rollover_snapshot_operation(
+            self,
+            operation_id,
+            refresh_id,
+            squad_id,
+            predecessor_agent_id,
+            successor_agent_id,
+            expected_rollover_version,
+            expected_snapshot_version,
+            expected_snapshot_digest,
+            expires_at,
+            at,
+            canonical_digest,
+            observations,
+            final_observer,
+            fault=fault,
+        )
+
     def acknowledge_rollover(
         self,
         operation_id: str,
@@ -2037,6 +2673,107 @@ class SQLiteStorage(SQLiteTransactionCore):
             fault=fault,
         )
 
+    def reconcile_rollover_descendant(
+        self,
+        operation_id: str,
+        reconciliation_id: str,
+        champion_agent_id: str,
+        task_id: str,
+        runtime_instance_id: str,
+        snapshot_digest: str,
+        snapshot_row_digest: str,
+        expected_rollover_version: int,
+        expected_agent_version: int,
+        expected_task_version: int,
+        expected_assignment_version: int,
+        expected_callsign_assignment_version: int,
+        runtime_receipt: Optional[dict[str, Any]],
+        pending_outbox_ids: Sequence[str],
+        at: str,
+        *,
+        fault: Optional[FaultInjector] = None,
+    ) -> dict[str, Any]:
+        return reconcile_rollover_descendant_operation(
+            self,
+            operation_id,
+            reconciliation_id,
+            champion_agent_id,
+            task_id,
+            runtime_instance_id,
+            snapshot_digest,
+            snapshot_row_digest,
+            expected_rollover_version,
+            expected_agent_version,
+            expected_task_version,
+            expected_assignment_version,
+            expected_callsign_assignment_version,
+            runtime_receipt,
+            pending_outbox_ids,
+            at,
+            fault=fault,
+        )
+
+    def rollover_descendant_target(
+        self,
+        operation_id: str,
+        reconciliation_id: str,
+        champion_agent_id: str,
+        task_id: str,
+        snapshot_digest: str,
+        snapshot_row_digest: str,
+        expected_rollover_version: int,
+        expected_agent_version: int,
+        expected_task_version: int,
+        expected_assignment_version: int,
+        expected_callsign_assignment_version: int,
+    ) -> dict[str, Any]:
+        return rollover_descendant_target_operation(
+            self,
+            operation_id,
+            reconciliation_id,
+            champion_agent_id,
+            task_id,
+            snapshot_digest,
+            snapshot_row_digest,
+            expected_rollover_version,
+            expected_agent_version,
+            expected_task_version,
+            expected_assignment_version,
+            expected_callsign_assignment_version,
+        )
+
+    def reconcile_rollover_intake(
+        self,
+        operation_id: str,
+        reconciliation_id: str,
+        snapshot_digest: str,
+        expected_rollover_version: int,
+        plan: dict[str, Any],
+        at: str,
+    ) -> dict[str, Any]:
+        return reconcile_rollover_intake_operation(
+            self,
+            operation_id,
+            reconciliation_id,
+            snapshot_digest,
+            expected_rollover_version,
+            plan,
+            at,
+        )
+
+    def rollover_intake_plan(
+        self,
+        operation_id: str,
+        snapshot_digest: str,
+        expected_rollover_version: int,
+    ) -> dict[str, Any]:
+        return rollover_intake_plan_operation(
+            self,
+            operation_id,
+            snapshot_digest,
+            expected_rollover_version,
+        )
+
     def abort_rollover(
         self,
         operation_id: str,
@@ -2061,6 +2798,12 @@ class SQLiteStorage(SQLiteTransactionCore):
 
     def rollover_status(self, operation_id: str) -> Optional[dict[str, Any]]:
         return rollover_status_operation(self, operation_id)
+
+    def startup_context(self, agent_id: str, runtime_instance_id: str, at: str) -> dict[str, Any]:
+        return sqlite_startup_ops.startup_context(self, agent_id, runtime_instance_id, at)
+
+    def rollover_run_context(self, manifest: Mapping[str, Any]) -> dict[str, Any]:
+        return sqlite_startup_ops.rollover_run_context(self, manifest)
 
     def rollover_cleanup_target(self, operation_id: str) -> Optional[dict[str, Any]]:
         return rollover_cleanup_target_operation(self, operation_id)
@@ -2318,6 +3061,7 @@ class SQLiteStorage(SQLiteTransactionCore):
         at: str,
         *,
         wake_scope_id: Optional[str] = None,
+        wake: bool = True,
     ) -> dict[str, Any]:
         return intake_prompt_operation(
             self,
@@ -2330,12 +3074,94 @@ class SQLiteStorage(SQLiteTransactionCore):
             body,
             at,
             wake_scope_id=wake_scope_id,
+            wake=wake,
         )
 
     def triage_prompt(
         self, prompt_id: str, items: list[dict[str, Any]], at: str
     ) -> dict[str, Any]:
         return triage_prompt_operation(self, prompt_id, items, at)
+
+    def triage_prompt_batch(
+        self,
+        owner_agent_id: str,
+        expected_prompt_ids: tuple[str, ...],
+        decisions: list[dict[str, Any]],
+        at: str,
+    ) -> dict[str, Any]:
+        from .sqlite_request_ops import triage_prompt_batch
+
+        return triage_prompt_batch(
+            self, owner_agent_id, expected_prompt_ids, decisions, at
+        )
+
+    def begin_request_turn(
+        self,
+        owner_agent_id: str,
+        expected_prompt_ids: tuple[str, ...],
+        decisions: list[dict[str, Any]],
+        plans: tuple[Any, ...],
+        at: str,
+        *,
+        expected_candidate_digest: Optional[str] = None,
+        candidate_limit: int = 12,
+        candidate_max_bytes: int = 24_576,
+    ) -> dict[str, Any]:
+        from .sqlite_request_ops import begin_request_turn
+
+        return begin_request_turn(
+            self,
+            owner_agent_id,
+            expected_prompt_ids,
+            decisions,
+            plans,
+            at,
+            expected_candidate_digest=expected_candidate_digest,
+            candidate_limit=candidate_limit,
+            candidate_max_bytes=candidate_max_bytes,
+        )
+
+    def commit_request_turn(
+        self,
+        owner_agent_id: str,
+        actions: tuple[Any, ...],
+        at: str,
+    ) -> dict[str, Any]:
+        from .sqlite_request_ops import commit_request_turn
+
+        return commit_request_turn(self, owner_agent_id, actions, at)
+
+    def commit_interactive_request_turn(
+        self,
+        owner_agent_id: str,
+        turn_token: str,
+        actions: tuple[Any, ...],
+        at: str,
+        *,
+        owner_controls: tuple[OwnerStopControl, ...] = (),
+    ) -> dict[str, Any]:
+        from .sqlite_request_ops import commit_interactive_request_turn
+
+        return commit_interactive_request_turn(
+            self,
+            owner_agent_id,
+            turn_token,
+            actions,
+            at,
+            owner_controls=owner_controls,
+        )
+
+    def request_turn_boundary(self, owner_agent_id: str) -> dict[str, Any]:
+        from .sqlite_request_ops import request_turn_boundary
+
+        return request_turn_boundary(self, owner_agent_id)
+
+    def reconcile_duplicate_request(
+        self, command: ReconcileDuplicateRequestCommand
+    ) -> dict[str, Any]:
+        from .sqlite_request_ops import reconcile_duplicate_request
+
+        return reconcile_duplicate_request(self, command)
 
     def quarantine_prompt(
         self,
@@ -2364,6 +3190,7 @@ class SQLiteStorage(SQLiteTransactionCore):
         at: str,
         *,
         wake_scope_id: Optional[str] = None,
+        wake: bool = True,
     ) -> dict[str, Any]:
         from .sqlite_request_ops import bind_quarantined_prompt
 
@@ -2374,6 +3201,7 @@ class SQLiteStorage(SQLiteTransactionCore):
             runtime_instance_id,
             at,
             wake_scope_id=wake_scope_id,
+            wake=wake,
         )
 
     def claim_request(
@@ -2386,6 +3214,23 @@ class SQLiteStorage(SQLiteTransactionCore):
     ) -> dict[str, Any]:
         return claim_request_operation(
             self, request_id, runtime_instance_id, claim_token, leased_until, at
+        )
+
+    def accept_routed_delivery(
+        self,
+        event_id: str,
+        recipient_agent_id: str,
+        runtime_instance_id: str,
+        leased_until: str,
+        at: str,
+    ) -> dict[str, Any]:
+        return accept_routed_delivery_operation(
+            self,
+            event_id,
+            recipient_agent_id,
+            runtime_instance_id,
+            leased_until,
+            at,
         )
 
     def release_request_claim(
@@ -2486,6 +3331,33 @@ class SQLiteStorage(SQLiteTransactionCore):
             self, owner_agent_id, limit=limit, before_action=before_action
         )
 
+    def untriaged_intake(
+        self,
+        owner_agent_id: str,
+        *,
+        limit: int = 20,
+        max_bytes: int = 1_000_000,
+        candidate_limit: int = 12,
+        candidate_max_bytes: int = 24_576,
+        candidate_after: Optional[str] = None,
+        candidate_page: bool = False,
+    ) -> dict[str, Any]:
+        return untriaged_intake_operation(
+            self,
+            owner_agent_id,
+            limit=limit,
+            max_bytes=max_bytes,
+            candidate_limit=candidate_limit,
+            candidate_max_bytes=candidate_max_bytes,
+            candidate_after=candidate_after,
+            candidate_page=candidate_page,
+        )
+
+    def semantic_recovery_backlog(self, *, limit: int = 20) -> dict[str, Any]:
+        from .sqlite_request_ops import semantic_recovery_backlog
+
+        return semantic_recovery_backlog(self, limit=limit)
+
     def prepare_assignment(self, command: PrepareAssignmentCommand) -> dict[str, Any]:
         return prepare_assignment_operation(self, command)
 
@@ -2553,6 +3425,7 @@ class SQLiteStorage(SQLiteTransactionCore):
         outbox_id: str,
         recipient_agent_id: str,
         at: str,
+        attention_required: bool = False,
     ) -> dict[str, Any]:
         return transition_task_operation(
             self,
@@ -2569,6 +3442,7 @@ class SQLiteStorage(SQLiteTransactionCore):
             outbox_id,
             recipient_agent_id,
             at,
+            attention_required,
         )
 
     def claim_outbox(
@@ -2596,6 +3470,18 @@ class SQLiteStorage(SQLiteTransactionCore):
             effect_kind,
             effect_id,
             at,
+        )
+
+    def await_outbox_receipt(
+        self,
+        identity: OutboxDispatchIdentity,
+        fence: int,
+        adapter_kind: str,
+        reason: str,
+        at: str,
+    ) -> dict[str, Any]:
+        return await_outbox_receipt_operation(
+            self, identity, fence, adapter_kind, reason, at
         )
 
     def fail_outbox(
@@ -2638,12 +3524,37 @@ class SQLiteStorage(SQLiteTransactionCore):
     ) -> Optional[dict[str, Any]]:
         return delivery_target_operation(self, recipient_agent_id, at)
 
+    def direct_delivery_target(
+        self, recipient_agent_id: str, at: str
+    ) -> Optional[dict[str, Any]]:
+        return direct_delivery_target_operation(self, recipient_agent_id, at)
+
     def outbox_envelope(
         self, outbox_id: str, event_id: str, recipient_agent_id: str
     ) -> dict[str, Any]:
         return outbox_envelope_operation(
             self, outbox_id, event_id, recipient_agent_id
         )
+
+    def begin_cursor_steering(
+        self, intent: Mapping[str, Any], at: str
+    ) -> dict[str, Any]:
+        return sqlite_cursor_steering_ops.begin_cursor_steering(self, intent, at)
+
+    def record_cursor_steering_phase(
+        self,
+        outbox_id: str,
+        intent_digest: str,
+        state: str,
+        receipt: Mapping[str, Any],
+        at: str,
+    ) -> dict[str, Any]:
+        return sqlite_cursor_steering_ops.record_cursor_steering_phase(
+            self, outbox_id, intent_digest, state, receipt, at
+        )
+
+    def cursor_steering_effect(self, outbox_id: str) -> Optional[dict[str, Any]]:
+        return sqlite_cursor_steering_ops.cursor_steering_effect(self, outbox_id)
 
     def register_runtime(self, command: RuntimeRegistrationCommand) -> dict[str, Any]:
         return register_runtime_operation(self, command)
@@ -2660,6 +3571,8 @@ class SQLiteStorage(SQLiteTransactionCore):
         at: str,
         *,
         block_on_obligations: bool = True,
+        expected_watcher_id: str | None = None,
+        expected_fence: int | None = None,
     ) -> dict[str, Any]:
         return register_watcher_operation(
             self,
@@ -2672,12 +3585,231 @@ class SQLiteStorage(SQLiteTransactionCore):
             fence,
             at,
             block_on_obligations=block_on_obligations,
+            expected_watcher_id=expected_watcher_id,
+            expected_fence=expected_fence,
+        )
+
+    def supervisor_binding(self, callsign: Optional[str] = None) -> dict[str, Any]:
+        return supervisor_binding_operation(self, callsign)
+
+    def supervisor_bindings(
+        self, *, limit: int = 64
+    ) -> tuple[dict[str, Any], ...]:
+        return supervisor_bindings_operation(self, limit=limit)
+
+    def resolve_supervisor_scope(
+        self, actor_agent_id: str, callsign: Optional[str] = None
+    ) -> dict[str, Any]:
+        return resolve_supervisor_scope_operation(self, actor_agent_id, callsign)
+
+    def supervision_owner(self, actor_agent_id: str) -> Optional[str]:
+        return supervision_owner_operation(self, actor_agent_id)
+
+    def begin_shotcaller_turn(
+        self, actor_agent_id: str, turn_token: str, at: str
+    ) -> dict[str, Any]:
+        return begin_shotcaller_turn_operation(self, actor_agent_id, turn_token, at)
+
+    def commit_shotcaller_turn(
+        self, actor_agent_id: str, turn_token: str, at: str
+    ) -> dict[str, Any]:
+        return commit_shotcaller_turn_operation(self, actor_agent_id, turn_token, at)
+
+    def abort_shotcaller_turn(
+        self, actor_agent_id: str, turn_token: str, at: str
+    ) -> dict[str, Any]:
+        return abort_shotcaller_turn_operation(self, actor_agent_id, turn_token, at)
+
+    def watcher_registration(
+        self, actor_agent_id: str
+    ) -> Optional[dict[str, Any]]:
+        return watcher_registration_operation(self, actor_agent_id)
+
+    def watcher_registrations(
+        self, actor_agent_ids: tuple[str, ...], *, limit: int = 64
+    ) -> dict[str, dict[str, Any]]:
+        return watcher_registrations_operation(
+            self, actor_agent_ids, limit=limit
+        )
+
+    def watcher_readiness(
+        self, actor_agent_id: str
+    ) -> Optional[dict[str, Any]]:
+        from .sqlite_watcher_ops import watcher_readiness
+
+        return watcher_readiness(self, actor_agent_id)
+
+    def supervision_policy(self, actor_agent_id: str) -> dict[str, Any]:
+        return supervision_policy_operation(self, actor_agent_id)
+
+    def persistent_supervision_required(self, actor_agent_id: str) -> bool:
+        return persistent_supervision_required_operation(self, actor_agent_id)
+
+    def runtime_monitor_candidates(
+        self, owner_agent_id: str, *, limit: int = 50
+    ) -> dict[str, Any]:
+        return runtime_monitor_candidates_operation(self, owner_agent_id, limit=limit)
+
+    def record_supervision_fault(
+        self,
+        owner_agent_id: str,
+        fault_kind: str,
+        fault_key: str,
+        at: str,
+    ) -> dict[str, Any]:
+        return record_supervision_fault_operation(
+            self, owner_agent_id, fault_kind, fault_key, at
+        )
+
+    def configure_supervision_policy(
+        self,
+        scope_id: str,
+        actor_agent_id: str,
+        mode: str,
+        unreachable_grace_seconds: int,
+        at: str,
+    ) -> dict[str, Any]:
+        return configure_supervision_policy_operation(
+            self,
+            scope_id,
+            actor_agent_id,
+            mode,
+            unreachable_grace_seconds,
+            at,
+        )
+
+    def set_supervision_attachment(
+        self,
+        scope_id: str,
+        actor_agent_id: str,
+        mode: str,
+        at: str,
+        *,
+        expected_watcher_id: str | None = None,
+        expected_fence: int | None = None,
+    ) -> dict[str, Any]:
+        return set_supervision_attachment_operation(
+            self,
+            scope_id,
+            actor_agent_id,
+            mode,
+            at,
+            expected_watcher_id=expected_watcher_id,
+            expected_fence=expected_fence,
+        )
+
+    def apply_supervision_delivery_policy(
+        self,
+        outbox_id: str,
+        event_id: str,
+        recipient_agent_id: str,
+        at: str,
+    ) -> dict[str, Any]:
+        return apply_supervision_delivery_policy_operation(
+            self, outbox_id, event_id, recipient_agent_id, at
+        )
+
+    def silent_supervision_updates(
+        self,
+        actor_agent_id: str,
+        *,
+        after_event_seq: Optional[int] = None,
+        limit: int = 20,
+        advance_cursor: bool = False,
+        at: Optional[str] = None,
+    ) -> dict[str, Any]:
+        return silent_supervision_updates_operation(
+            self,
+            actor_agent_id,
+            after_event_seq=after_event_seq,
+            limit=limit,
+            advance_cursor=advance_cursor,
+            at=at,
+        )
+
+    def pause_calm_supervision(
+        self,
+        actor_agent_id: str,
+        watcher_id: str,
+        fence: int,
+        at: str,
+    ) -> dict[str, Any]:
+        """Deprecated exact-fence alias for model detachment."""
+
+        policy = self.supervision_policy(actor_agent_id)
+        if policy["scope_id"] is None:
+            raise StorageRefusal(
+                "supervisor_unavailable",
+                "attachment changes require one verified live persistent watcher",
+            )
+        return set_supervision_attachment_operation(
+            self,
+            str(policy["scope_id"]),
+            actor_agent_id,
+            "detached",
+            at,
+            expected_watcher_id=watcher_id,
+            expected_fence=fence,
+        )
+
+    def resume_calm_supervision(
+        self,
+        actor_agent_id: str,
+        watcher_id: str,
+        fence: int,
+        at: str,
+    ) -> dict[str, Any]:
+        """Deprecated exact-fence alias for model attachment."""
+
+        policy = self.supervision_policy(actor_agent_id)
+        if policy["scope_id"] is None:
+            raise StorageRefusal(
+                "supervisor_unavailable",
+                "attachment changes require one verified live persistent watcher",
+            )
+        return set_supervision_attachment_operation(
+            self,
+            str(policy["scope_id"]),
+            actor_agent_id,
+            "attached",
+            at,
+            expected_watcher_id=watcher_id,
+            expected_fence=fence,
+        )
+
+    def champion_stop_decision(
+        self, champion_agent_id: str, terminal_generation: str, at: str
+    ) -> dict[str, Any]:
+        return champion_stop_decision_operation(
+            self, champion_agent_id, terminal_generation, at
+        )
+
+    def release_watcher(
+        self,
+        watcher_id: str,
+        actor_agent_id: str,
+        fence: int,
+        at: str,
+    ) -> dict[str, Any]:
+        return release_watcher_operation(
+            self, watcher_id, actor_agent_id, fence, at
         )
 
     def note_user_message(
         self, scope_id: str, actor_agent_id: str, at: str
     ) -> dict[str, Any]:
         return note_user_message_operation(self, scope_id, actor_agent_id, at)
+
+    def consume_stop_feedback(
+        self,
+        scope_id: str,
+        actor_agent_id: str,
+        terminal_generation: str | None,
+        body: str,
+    ) -> bool:
+        return consume_stop_feedback_operation(
+            self, scope_id, actor_agent_id, terminal_generation, body
+        )
 
     def rearm_wait(
         self, scope_id: str, actor_agent_id: str, event_id: str, at: str
@@ -2689,15 +3821,58 @@ class SQLiteStorage(SQLiteTransactionCore):
     ) -> dict[str, Any]:
         return set_allow_stop_once_operation(self, scope_id, actor_agent_id)
 
+    def prepare_owner_stop_control(
+        self,
+        actor_agent_id: str,
+        control_id: str,
+        prompt_id: str,
+        interrupt_delegates: bool,
+        at: str,
+    ) -> dict[str, Any]:
+        return prepare_owner_stop_control_operation(
+            self,
+            actor_agent_id,
+            control_id,
+            prompt_id,
+            interrupt_delegates,
+            at,
+        )
+
+    def pending_owner_stop_controls(
+        self, scope_ids: tuple[str, ...], *, limit: int = 64
+    ) -> tuple[dict[str, Any], ...]:
+        return pending_owner_stop_controls_operation(self, scope_ids, limit=limit)
+
+    def finalize_owner_stop_control(
+        self, actor_agent_id: str, control_id: str, at: str
+    ) -> dict[str, Any]:
+        return finalize_owner_stop_control_operation(
+            self, actor_agent_id, control_id, at
+        )
+
+    def fail_owner_stop_control(
+        self, actor_agent_id: str, control_id: str, reason: str, at: str
+    ) -> dict[str, Any]:
+        return fail_owner_stop_control_operation(
+            self, actor_agent_id, control_id, reason, at
+        )
+
     def stop_decision(
         self,
         scope_id: str,
         actor_agent_id: str,
         terminal_generation: str,
         at: str,
+        *,
+        block_on_fresh_terminal: bool = False,
     ) -> dict[str, Any]:
         return stop_decision_operation(
-            self, scope_id, actor_agent_id, terminal_generation, at
+            self,
+            scope_id,
+            actor_agent_id,
+            terminal_generation,
+            at,
+            block_on_fresh_terminal=block_on_fresh_terminal,
         )
 
     def _canonical_counts(self) -> dict[str, int]:
@@ -2777,8 +3952,157 @@ class SQLiteStorage(SQLiteTransactionCore):
             at,
         )
 
+    def stopped_agent_retirement_adapter_identity(
+        self, request: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        return sqlite_stopped_retirement_ops.adapter_identity(self, request)
+
+    def stopped_agent_retirement(
+        self, operation_id: str
+    ) -> Optional[dict[str, Any]]:
+        return sqlite_stopped_retirement_ops.status(self, operation_id)
+
+    def complete_stopped_agent_retirement(
+        self,
+        request: Mapping[str, Any],
+        *,
+        adapter_kind: str,
+        verifier: Callable[[Mapping[str, Any]], Mapping[str, Any]],
+        request_digest: str,
+        at: str,
+        fault: Optional[FaultInjector] = None,
+    ) -> dict[str, Any]:
+        return sqlite_stopped_retirement_ops.complete(
+            self,
+            request,
+            adapter_kind=adapter_kind,
+            verifier=verifier,
+            request_digest=request_digest,
+            at=at,
+            fault=fault,
+        )
+
+    def prepare_provider_launch(
+        self, descriptor: Mapping[str, Any], at: str
+    ) -> dict[str, Any]:
+        return sqlite_provider_launch_ops.prepare_provider_launch(
+            self, descriptor, at
+        )
+
+    def bind_provider_launch(
+        self,
+        descriptor_id: str,
+        expected_version: int,
+        observation: Mapping[str, Any],
+        at: str,
+    ) -> dict[str, Any]:
+        return sqlite_provider_launch_ops.bind_provider_launch(
+            self, descriptor_id, expected_version, observation, at
+        )
+
+    def provider_launch_descriptor(
+        self, descriptor_id: str
+    ) -> Optional[dict[str, Any]]:
+        return sqlite_provider_launch_ops.provider_launch_descriptor(
+            self, descriptor_id
+        )
+
+    def claim_provider_restart(
+        self,
+        descriptor_id: str,
+        restart_id: str,
+        pane_id: str,
+        at: str,
+    ) -> dict[str, Any]:
+        return sqlite_provider_launch_ops.claim_provider_restart(
+            self, descriptor_id, restart_id, pane_id, at
+        )
+
+    def complete_provider_restart(
+        self,
+        descriptor_id: str,
+        restart_id: str,
+        intent_digest: str,
+        receipt: Mapping[str, Any],
+        at: str,
+    ) -> dict[str, Any]:
+        return sqlite_provider_launch_ops.complete_provider_restart(
+            self,
+            descriptor_id,
+            restart_id,
+            intent_digest,
+            receipt,
+            at,
+        )
+
+    def prepare_pi_session_migration(
+        self, intent: Mapping[str, Any], at: str
+    ) -> dict[str, Any]:
+        return sqlite_pi_session_migration_ops.prepare(self, intent, at)
+
+    def advance_pi_session_migration(
+        self,
+        migration_id: str,
+        intent_digest: str,
+        expected_state: str,
+        next_state: str,
+        receipt: Mapping[str, Any],
+        at: str,
+    ) -> dict[str, Any]:
+        return sqlite_pi_session_migration_ops.advance(
+            self, migration_id, intent_digest, expected_state, next_state, receipt, at
+        )
+
+    def pi_session_migration(self, migration_id: str) -> Optional[dict[str, Any]]:
+        return sqlite_pi_session_migration_ops.status(self, migration_id)
+
     def runtime_binding(self, binding_id: str) -> Optional[dict[str, Any]]:
         return sqlite_runtime_ops.runtime_binding(self, binding_id)
+
+    def reconcile_restored_runtime(
+        self,
+        runtime_instance_id: str,
+        actor_agent_id: str,
+        thread_id: str,
+        session_ref: str,
+        backend_kind: str,
+        expected_endpoint: str,
+        expected_generation: str,
+        observed_endpoint: str,
+        observed_generation: str,
+        at: str,
+    ) -> dict[str, Any]:
+        return sqlite_runtime_ops.reconcile_restored_runtime(
+            self,
+            runtime_instance_id,
+            actor_agent_id,
+            thread_id,
+            session_ref,
+            backend_kind,
+            expected_endpoint,
+            expected_generation,
+            observed_endpoint,
+            observed_generation,
+            at,
+        )
+
+    def record_restored_runtime_recovery(
+        self,
+        runtime_instance_id: str,
+        actor_agent_id: str,
+        failure_code: str,
+        at: str,
+    ) -> dict[str, Any]:
+        return sqlite_runtime_ops.record_restored_runtime_recovery(
+            self, runtime_instance_id, actor_agent_id, failure_code, at
+        )
+
+    def satisfy_restored_runtime_recovery(
+        self, runtime_instance_id: str, at: str
+    ) -> dict[str, Any]:
+        return sqlite_runtime_ops.satisfy_restored_runtime_recovery(
+            self, runtime_instance_id, at
+        )
 
     def update_runtime_binding(
         self,
@@ -2835,6 +4159,321 @@ class SQLiteStorage(SQLiteTransactionCore):
             runtime_instance_id,
             endpoint_identity,
             runtime_generation,
+            at,
+        )
+
+    def prepare_runtime_replacement(
+        self, request: Mapping[str, Any], at: str
+    ) -> dict[str, Any]:
+        return sqlite_runtime_replacement_ops.prepare_runtime_replacement(
+            self, request, at
+        )
+
+    def begin_runtime_replacement_effect(
+        self,
+        operation_id: str,
+        expected_version: int,
+        intent_digest: str,
+        effect: str,
+        at: str,
+    ) -> dict[str, Any]:
+        return sqlite_runtime_replacement_ops.begin_runtime_replacement_effect(
+            self, operation_id, expected_version, intent_digest, effect, at
+        )
+
+    def record_replacement_successor_verified(
+        self,
+        operation_id: str,
+        expected_version: int,
+        intent_digest: str,
+        receipt: Mapping[str, Any],
+        at: str,
+    ) -> dict[str, Any]:
+        return sqlite_runtime_replacement_ops.record_successor_verified(
+            self, operation_id, expected_version, intent_digest, receipt, at
+        )
+
+    def activate_runtime_replacement(
+        self,
+        operation_id: str,
+        expected_version: int,
+        intent_digest: str,
+        route_receipt: Mapping[str, Any],
+        descriptor_transactions: tuple[Any, ...],
+        at: str,
+    ) -> dict[str, Any]:
+        return sqlite_runtime_replacement_ops.activate_runtime_replacement(
+            self,
+            operation_id,
+            expected_version,
+            intent_digest,
+            route_receipt,
+            descriptor_transactions,
+            at,
+        )
+
+    def complete_runtime_replacement(
+        self,
+        operation_id: str,
+        expected_version: int,
+        intent_digest: str,
+        retirement_receipt: Mapping[str, Any],
+        event_id: str,
+        outbox_id: str,
+        at: str,
+    ) -> dict[str, Any]:
+        return sqlite_runtime_replacement_ops.complete_runtime_replacement(
+            self,
+            operation_id,
+            expected_version,
+            intent_digest,
+            retirement_receipt,
+            event_id,
+            outbox_id,
+            at,
+        )
+
+    def record_replacement_predecessor_retired(
+        self,
+        operation_id: str,
+        expected_version: int,
+        intent_digest: str,
+        retirement_receipt: Mapping[str, Any],
+        at: str,
+    ) -> dict[str, Any]:
+        return sqlite_runtime_replacement_ops.record_predecessor_retired(
+            self,
+            operation_id,
+            expected_version,
+            intent_digest,
+            retirement_receipt,
+            at,
+        )
+
+    def rollback_runtime_replacement(
+        self,
+        operation_id: str,
+        expected_version: int,
+        intent_digest: str,
+        failure_code: str,
+        receipt: Mapping[str, Any],
+        descriptor_transactions: tuple[Any, ...],
+        at: str,
+    ) -> dict[str, Any]:
+        return sqlite_runtime_replacement_ops.rollback_runtime_replacement(
+            self,
+            operation_id,
+            expected_version,
+            intent_digest,
+            failure_code,
+            receipt,
+            descriptor_transactions,
+            at,
+        )
+
+    def record_runtime_replacement_recovery(
+        self,
+        operation_id: str,
+        expected_version: int,
+        intent_digest: str,
+        failure_code: str,
+        at: str,
+    ) -> dict[str, Any]:
+        return sqlite_runtime_replacement_ops.record_runtime_replacement_recovery(
+            self,
+            operation_id,
+            expected_version,
+            intent_digest,
+            failure_code,
+            at,
+        )
+
+    def resume_runtime_replacement_recovery(
+        self,
+        operation_id: str,
+        expected_version: int,
+        intent_digest: str,
+        at: str,
+    ) -> dict[str, Any]:
+        return sqlite_runtime_replacement_ops.resume_runtime_replacement_recovery(
+            self, operation_id, expected_version, intent_digest, at
+        )
+
+    def runtime_replacement_status(
+        self, operation_id: str
+    ) -> Optional[dict[str, Any]]:
+        return sqlite_runtime_replacement_ops.runtime_replacement_status(
+            self, operation_id
+        )
+
+    def runtime_replacement_launch_context(
+        self, assignment_id: str
+    ) -> dict[str, Any]:
+        return sqlite_runtime_replacement_ops.runtime_replacement_launch_context(
+            self, assignment_id
+        )
+
+    def thread_archive(self, archive_id: str) -> Optional[dict[str, Any]]:
+        return sqlite_continuation_ops.thread_archive(self, archive_id)
+
+    def prepare_continuation(self, spec: dict[str, Any]) -> dict[str, Any]:
+        return sqlite_continuation_ops.prepare_continuation(self, spec)
+
+    def continuation_status(self, operation_id: str) -> Optional[dict[str, Any]]:
+        return sqlite_continuation_ops.continuation_status(self, operation_id)
+
+    def continuation_for_assignment(
+        self, assignment_id: str
+    ) -> Optional[dict[str, Any]]:
+        return sqlite_continuation_ops.continuation_for_assignment(self, assignment_id)
+
+    def claim_issue_reopen(
+        self,
+        operation_id: str,
+        expected_version: int,
+        expected_fence: int,
+        executor_id: str,
+        leased_until: str,
+        at: str,
+    ) -> dict[str, Any]:
+        return sqlite_continuation_ops.claim_issue_reopen(
+            self,
+            operation_id,
+            expected_version,
+            expected_fence,
+            executor_id,
+            leased_until,
+            at,
+        )
+
+    def record_issue_reopen(
+        self,
+        operation_id: str,
+        expected_version: int,
+        fence: int,
+        outcome: str,
+        receipt: dict[str, Any],
+        at: str,
+    ) -> dict[str, Any]:
+        return sqlite_continuation_ops.record_issue_reopen(
+            self, operation_id, expected_version, fence, outcome, receipt, at
+        )
+
+    def mark_continuation_launching(
+        self, operation_id: str, expected_version: int, at: str
+    ) -> dict[str, Any]:
+        return sqlite_continuation_ops.mark_continuation_launching(
+            self, operation_id, expected_version, at
+        )
+
+    def assignment_launch_context(self, assignment_id: str) -> dict[str, Any]:
+        return sqlite_assignment_ops.assignment_launch_context(self, assignment_id)
+
+    def record_assignment_context_delivery(
+        self,
+        assignment_id: str,
+        expected_version: int,
+        context_sha256: str,
+        byte_count: int,
+        effect_sha256: str,
+        display_receipt: dict[str, Any],
+        event_id: str,
+        at: str,
+    ) -> dict[str, Any]:
+        return sqlite_assignment_ops.record_assignment_context_delivery(
+            self,
+            assignment_id,
+            expected_version,
+            context_sha256,
+            byte_count,
+            effect_sha256,
+            display_receipt,
+            event_id,
+            at,
+        )
+
+    def record_assignment_title_revalidation(
+        self,
+        assignment_id: str,
+        expected_version: int,
+        display_receipt: dict[str, Any],
+        event_id: str,
+        at: str,
+    ) -> dict[str, Any]:
+        return sqlite_assignment_ops.record_assignment_title_revalidation(
+            self,
+            assignment_id,
+            expected_version,
+            display_receipt,
+            event_id,
+            at,
+        )
+
+    def begin_legacy_display_reconciliation(
+        self, command: LegacyDisplayReconciliationCommand
+    ) -> dict[str, Any]:
+        return sqlite_assignment_ops.begin_legacy_display_reconciliation(self, command)
+
+    def finalize_legacy_display_reconciliation(
+        self,
+        command: LegacyDisplayReconciliationCommand,
+        receipt: dict[str, Any],
+        at: str,
+    ) -> dict[str, Any]:
+        return sqlite_assignment_ops.finalize_legacy_display_reconciliation(
+            self, command, receipt, at
+        )
+
+    def fail_assignment_context_delivery(
+        self,
+        assignment_id: str,
+        expected_version: int,
+        failure_class: str,
+        event_id: str,
+        outbox_id: str,
+        at: str,
+    ) -> dict[str, Any]:
+        return sqlite_assignment_ops.fail_assignment_context_delivery(
+            self,
+            assignment_id,
+            expected_version,
+            failure_class,
+            event_id,
+            outbox_id,
+            at,
+        )
+
+    def fail_assignment_title_validation(
+        self,
+        assignment_id: str,
+        expected_version: int,
+        failure_class: str,
+        event_id: str,
+        outbox_id: str,
+        at: str,
+    ) -> dict[str, Any]:
+        return sqlite_assignment_ops.fail_assignment_title_validation(
+            self,
+            assignment_id,
+            expected_version,
+            failure_class,
+            event_id,
+            outbox_id,
+            at,
+        )
+
+    def settle_assignment_launch_cleanup(
+        self,
+        assignment_id: str,
+        expected_version: int,
+        cleanup_receipt_digest: str,
+        at: str,
+    ) -> dict[str, Any]:
+        return sqlite_assignment_ops.settle_assignment_launch_cleanup(
+            self,
+            assignment_id,
+            expected_version,
+            cleanup_receipt_digest,
             at,
         )
 

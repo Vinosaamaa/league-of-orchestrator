@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Any, Mapping, Optional, Protocol
+from typing import Any, Callable, Mapping, Optional, Protocol
+
+from .storage_types import FaultInjector
 
 
 class RuntimeBindingStorage(Protocol):
@@ -21,7 +23,189 @@ class RuntimeBindingStorage(Protocol):
         at: str,
     ) -> dict[str, Any]: ...
 
+    def stopped_agent_retirement_adapter_identity(
+        self, request: Mapping[str, Any]
+    ) -> dict[str, Any]: ...
+
+    def stopped_agent_retirement(
+        self, operation_id: str
+    ) -> Optional[dict[str, Any]]: ...
+
+    def complete_stopped_agent_retirement(
+        self,
+        request: Mapping[str, Any],
+        *,
+        adapter_kind: str,
+        verifier: Callable[[Mapping[str, Any]], Mapping[str, Any]],
+        request_digest: str,
+        at: str,
+        fault: Optional[FaultInjector] = None,
+    ) -> dict[str, Any]: ...
+
+    def prepare_provider_launch(
+        self, descriptor: Mapping[str, Any], at: str
+    ) -> dict[str, Any]: ...
+
+    def bind_provider_launch(
+        self,
+        descriptor_id: str,
+        expected_version: int,
+        observation: Mapping[str, Any],
+        at: str,
+    ) -> dict[str, Any]: ...
+
+    def provider_launch_descriptor(
+        self, descriptor_id: str
+    ) -> Optional[dict[str, Any]]: ...
+
+    def claim_provider_restart(
+        self,
+        descriptor_id: str,
+        restart_id: str,
+        pane_id: str,
+        at: str,
+    ) -> dict[str, Any]: ...
+
+    def complete_provider_restart(
+        self,
+        descriptor_id: str,
+        restart_id: str,
+        intent_digest: str,
+        receipt: Mapping[str, Any],
+        at: str,
+    ) -> dict[str, Any]: ...
+
+    def prepare_runtime_replacement(
+        self, request: Mapping[str, Any], at: str
+    ) -> dict[str, Any]: ...
+
+    def begin_runtime_replacement_effect(
+        self,
+        operation_id: str,
+        expected_version: int,
+        intent_digest: str,
+        effect: str,
+        at: str,
+    ) -> dict[str, Any]: ...
+
+    def record_replacement_successor_verified(
+        self,
+        operation_id: str,
+        expected_version: int,
+        intent_digest: str,
+        receipt: Mapping[str, Any],
+        at: str,
+    ) -> dict[str, Any]: ...
+
+    def activate_runtime_replacement(
+        self,
+        operation_id: str,
+        expected_version: int,
+        intent_digest: str,
+        route_receipt: Mapping[str, Any],
+        descriptor_transactions: tuple[Any, ...],
+        at: str,
+    ) -> dict[str, Any]: ...
+
+    def complete_runtime_replacement(
+        self,
+        operation_id: str,
+        expected_version: int,
+        intent_digest: str,
+        retirement_receipt: Mapping[str, Any],
+        event_id: str,
+        outbox_id: str,
+        at: str,
+    ) -> dict[str, Any]: ...
+
+    def record_replacement_predecessor_retired(
+        self,
+        operation_id: str,
+        expected_version: int,
+        intent_digest: str,
+        retirement_receipt: Mapping[str, Any],
+        at: str,
+    ) -> dict[str, Any]: ...
+
+    def rollback_runtime_replacement(
+        self,
+        operation_id: str,
+        expected_version: int,
+        intent_digest: str,
+        failure_code: str,
+        receipt: Mapping[str, Any],
+        descriptor_transactions: tuple[Any, ...],
+        at: str,
+    ) -> dict[str, Any]: ...
+
+    def record_runtime_replacement_recovery(
+        self,
+        operation_id: str,
+        expected_version: int,
+        intent_digest: str,
+        failure_code: str,
+        at: str,
+    ) -> dict[str, Any]: ...
+
+    def resume_runtime_replacement_recovery(
+        self,
+        operation_id: str,
+        expected_version: int,
+        intent_digest: str,
+        at: str,
+    ) -> dict[str, Any]: ...
+
+    def runtime_replacement_status(
+        self, operation_id: str
+    ) -> Optional[dict[str, Any]]: ...
+
+    def runtime_replacement_launch_context(
+        self, assignment_id: str
+    ) -> dict[str, Any]: ...
+
+    def prepare_pi_session_migration(
+        self, intent: Mapping[str, Any], at: str
+    ) -> dict[str, Any]: ...
+
+    def advance_pi_session_migration(
+        self,
+        migration_id: str,
+        intent_digest: str,
+        expected_state: str,
+        next_state: str,
+        receipt: Mapping[str, Any],
+        at: str,
+    ) -> dict[str, Any]: ...
+
+    def pi_session_migration(self, migration_id: str) -> Optional[dict[str, Any]]: ...
+
     def runtime_binding(self, binding_id: str) -> Optional[dict[str, Any]]: ...
+
+    def reconcile_restored_runtime(
+        self,
+        runtime_instance_id: str,
+        actor_agent_id: str,
+        thread_id: str,
+        session_ref: str,
+        backend_kind: str,
+        expected_endpoint: str,
+        expected_generation: str,
+        observed_endpoint: str,
+        observed_generation: str,
+        at: str,
+    ) -> dict[str, Any]: ...
+
+    def record_restored_runtime_recovery(
+        self,
+        runtime_instance_id: str,
+        actor_agent_id: str,
+        failure_code: str,
+        at: str,
+    ) -> dict[str, Any]: ...
+
+    def satisfy_restored_runtime_recovery(
+        self, runtime_instance_id: str, at: str
+    ) -> dict[str, Any]: ...
 
     def update_runtime_binding(
         self,

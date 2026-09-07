@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Vinosaamaa/league-of-orchestrator/schema/league-semantic-triage-batch.schema.json",
+  "title": "League benchmark semantic triage batch",
+  "type": "object",
+  "required": ["decisions"],
+  "properties": {
+    "decisions": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 25,
+      "items": {
+        "type": "object",
+        "required": ["items", "plan"],
+        "properties": {
+          "items": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 1,
+            "items": {
+              "type": "object",
+              "required": ["summary", "disposition"],
+              "properties": {
+                "summary": {"type": "string", "minLength": 1, "maxLength": 512},
+                "disposition": {
+                  "enum": ["new_request", "acknowledgement", "context"]
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "plan": {
+            "anyOf": [
+              {
+                "type": "object",
+                "required": ["work_kind", "requested_mode", "signals"],
+                "properties": {
+                  "work_kind": {
+                    "enum": ["question", "read-only", "repository-write", "supervised-test"]
+                  },
+                  "requested_mode": {"enum": ["direct", "champion"]},
+                  "signals": {
+                    "type": "object",
+                    "required": [
+                      "pre_bounded",
+                      "read_only",
+                      "answer_or_routing_only",
+                      "expected_minutes",
+                      "expected_task_action_calls",
+                      "creates_artifact",
+                      "mutates_state",
+                      "project_implementation",
+                      "runs_tests",
+                      "runs_benchmark"
+                    ],
+                    "properties": {
+                      "pre_bounded": {"type": "boolean"},
+                      "read_only": {"type": "boolean"},
+                      "answer_or_routing_only": {"type": "boolean"},
+                      "expected_minutes": {"type": "integer", "minimum": 0, "maximum": 60},
+                      "expected_task_action_calls": {"type": "integer", "minimum": 0, "maximum": 10},
+                      "creates_artifact": {"type": "boolean"},
+                      "mutates_state": {"type": "boolean"},
+                      "project_implementation": {"type": "boolean"},
+                      "runs_tests": {"type": "boolean"},
+                      "runs_benchmark": {"type": "boolean"}
+                    },
+                    "additionalProperties": false
+                  }
+                },
+                "additionalProperties": false
+              },
+              {"type": "null"}
+            ]
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

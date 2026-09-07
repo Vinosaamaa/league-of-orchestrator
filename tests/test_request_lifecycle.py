@@ -23,7 +23,7 @@ from league.storage import (  # noqa: E402
     RequestResultCommand,
     StorageRefusal,
 )
-from lifecycle_fakes import FakeDeliveryAdapter, FakeIds, FakeLaunchAdapter  # noqa: E402
+from lifecycle_fakes import FakeDeliveryAdapter, FakeIds, FakeLaunchAdapter, issue_bound_spec  # noqa: E402
 from request_lifecycle_fixture import (  # noqa: E402
     AHRI_ID,
     GAREN_RUNTIME,
@@ -52,8 +52,7 @@ def assign(
     champion: str,
     callsign: str,
 ) -> dict:
-    return AssignmentService(store, FakeLaunchAdapter(), clock, ids).assign(
-        AssignmentSpec(
+    spec = AssignmentSpec(
             assignment_id=assignment_id,
             request_id=request_id,
             claim_token=claim,
@@ -66,7 +65,10 @@ def assign(
             issue=17,
             branch=f"agent/synthetic/{task_id}",
             worktree=f"/synthetic/worktrees/{task_id}",
+            issue_receipt=None,
         )
+    return AssignmentService(store, FakeLaunchAdapter(), clock, ids).assign(
+        issue_bound_spec(store, spec, clock.now())
     )
 
 
@@ -358,6 +360,52 @@ def test_p100_local_r3_completion_requires_explicit_answer(root: Path) -> None:
     dispatch_request(
         store, clock, "R3", "claim-r3", "dispatch-r3", "repository-write", "champion"
     )
+    for operation in (
+        lambda: store.record_request_result(
+            RequestResultCommand(
+                "R3",
+                "claim-r3",
+                2,
+                "RES-R3-DIRECT",
+                "result-r3-direct",
+                "success",
+                "Shotcaller claimed direct implementation completion",
+                (),
+                clock.now(),
+                False,
+                None,
+                None,
+            )
+        ),
+        lambda: store.answer_request(
+            AnswerRequestCommand(
+                "R3",
+                "claim-r3",
+                2,
+                "response-r3-direct",
+                "codex",
+                "session:p100",
+                "response:r3-direct",
+                "durable",
+                "hash-r3-direct",
+                "Shotcaller claimed direct implementation delivery",
+                "event-r3-direct-answer",
+                clock.now(),
+            )
+        ),
+    ):
+        try:
+            operation()
+        except StorageRefusal as exc:
+            assert exc.code == "champion_delegation_required"
+        else:
+            raise AssertionError("Champion-routed implementation settled without delegation")
+    assert store.connection.execute(
+        "SELECT COUNT(*) FROM request_results WHERE request_id='R3'"
+    ).fetchone()[0] == 0
+    assert store.connection.execute(
+        "SELECT COUNT(*) FROM response_references WHERE request_id='R3'"
+    ).fetchone()[0] == 0
     local = assign(
         store,
         clock,
@@ -372,6 +420,36 @@ def test_p100_local_r3_completion_requires_explicit_answer(root: Path) -> None:
     )
     local_transition = complete_task(store, clock, ids, local, SHOTCALLER_ID)
     deliver(store, clock, ids, local_transition, SHOTCALLER_ID)
+    # A settled task alone is insufficient: it must still prove the exact
+    # accepted visible assignment. Mutations below affect synthetic rows only.
+    for column, invalid in (
+        ("runtime_instance_id", None),
+        ("acceptance_receipt_json", None),
+        ("coordinator_agent_id", JARVAN_ID),
+    ):
+        original = store.connection.execute(
+            f"SELECT {column} FROM task_assignments WHERE task_assignment_id='A301'"
+        ).fetchone()[0]
+        store.connection.execute(
+            f"UPDATE task_assignments SET {column}=? WHERE task_assignment_id='A301'", (invalid,)
+        )
+        try:
+            store.record_request_result(RequestResultCommand(
+                "R3", "claim-r3", 2, "RES-R3-FORGED", "result-r3-forged", "success",
+                "Synthetic incomplete delegation", ("T301",), clock.now(), False, None, None,
+            ))
+        except StorageRefusal as exc:
+            assert exc.code == "champion_delegation_required", exc.code
+        else:
+            raise AssertionError(f"completion accepted incomplete assignment {column}")
+        finally:
+            store.connection.execute(
+                f"UPDATE task_assignments SET {column}=? WHERE task_assignment_id='A301'", (original,)
+            )
+    task_reads = []
+    store.connection.set_trace_callback(
+        lambda sql: task_reads.append(sql) if "FROM tasks" in sql else None
+    )
     local_result = store.record_request_result(
         RequestResultCommand(
             "R3",
@@ -388,7 +466,20 @@ def test_p100_local_r3_completion_requires_explicit_answer(root: Path) -> None:
             None,
         )
     )
+    store.connection.set_trace_callback(None)
+    assert len(task_reads) == 1, "Champion result redundantly reloads its validated cited tasks"
     assert local_result["state"] == "in_progress"
+    # Accepted result evidence survives later cleanup/ownership changes; retry
+    # and delivery must not demand that its historical runtime remain active.
+    store.connection.execute(
+        "UPDATE task_assignments SET state='completed',coordinator_agent_id=? "
+        "WHERE task_assignment_id='A301'", (JARVAN_ID,)
+    )
+    retry = store.record_request_result(RequestResultCommand(
+        "R3", "claim-r3", 2, "RES-R3", "result-r3", "success",
+        "Local Champion result synthesized", ("T301",), clock.now(), False, None, None,
+    ))
+    assert retry["idempotent"] and retry["result_id"] == local_result["result_id"]
     store.answer_request(
         AnswerRequestCommand(
             "R3",

@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Vinosaamaa/league-of-orchestrator/schema/league-stopped-agent-retirement-receipt.schema.json",
+  "title": "League stopped-agent total-retirement receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "verified", "operation_id", "agent_id", "runtime_instance_id",
+    "callsign_assignment_id", "callsign", "adapter_kind", "provider_kind",
+    "multiplexer_kind", "session_ref", "endpoint", "runtime_generation",
+    "terminal_status", "repository_cleanup", "proof_digest", "completed_at",
+    "state", "idempotent"
+  ],
+  "properties": {
+    "schema": {"const": "league.stopped-agent-retirement-receipt.v1"},
+    "verified": {"const": true},
+    "operation_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "agent_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "runtime_instance_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "callsign_assignment_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "callsign": {"type": "string", "minLength": 1, "maxLength": 64},
+    "adapter_kind": {"type": "string", "minLength": 1, "maxLength": 64},
+    "provider_kind": {"type": "string", "minLength": 1, "maxLength": 64},
+    "multiplexer_kind": {"type": "string", "minLength": 1, "maxLength": 64},
+    "session_ref": {"type": "string", "minLength": 1, "maxLength": 2048},
+    "endpoint": {"type": "string", "minLength": 1, "maxLength": 2048},
+    "runtime_generation": {"type": "string", "minLength": 1, "maxLength": 512},
+    "terminal_status": {"enum": ["completed", "cancelled", "failed"]},
+    "repository_cleanup": {"const": false},
+    "proof_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "completed_at": {"type": "string", "format": "date-time", "maxLength": 64},
+    "state": {"const": "completed"},
+    "idempotent": {"type": "boolean"}
+  }
+}

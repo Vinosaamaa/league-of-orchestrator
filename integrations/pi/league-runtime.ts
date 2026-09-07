@@ -1,0 +1,314 @@
+// League's per-process Pi launch sandbox and presentation bridge. Provider
+// hook intake is profile-loaded from league-hooks.mjs.
+// @ts-nocheck
+
+import crypto from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
+import { spawn } from "node:child_process";
+
+let stateRoot = process.env.LEAGUE_STATE_ROOT;
+let worktree = process.env.LEAGUE_WORKTREE;
+let sandboxProfile = process.env.LEAGUE_PI_SANDBOX_PROFILE;
+let paneId = process.env.HERDR_PANE_ID;
+let runtimeKind = process.env.LEAGUE_RUNTIME_KIND;
+let providerKind = process.env.LEAGUE_PROVIDER_KIND;
+let launchRole = process.env.LEAGUE_LAUNCH_ROLE;
+let launchPlacement = process.env.LEAGUE_LAUNCH_PLACEMENT;
+let callsign = process.env.LEAGUE_CALLSIGN;
+let projectCode = process.env.LEAGUE_PROJECT_CODE;
+let taskLabel = process.env.LEAGUE_TASK_LABEL;
+let routingAlias = process.env.LEAGUE_ROUTING_ALIAS;
+let descriptorDigest = process.env.LEAGUE_LAUNCH_DESCRIPTOR_DIGEST;
+let descriptorId = process.env.LEAGUE_LAUNCH_DESCRIPTOR_ID;
+let metadataSource = process.env.LEAGUE_LAUNCH_METADATA_SOURCE;
+
+function exactRoot(value: string | undefined): string | undefined {
+  if (!value || !path.isAbsolute(value) || value === "/") return undefined;
+  return path.resolve(value);
+}
+
+let exactStateRoot = exactRoot(stateRoot);
+let exactWorktree = exactRoot(worktree);
+
+function quoted(value: string): string {
+  return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
+function inside(candidate: string, root: string): boolean {
+  const relative = path.relative(root, path.resolve(candidate));
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+function canonicalMutationPath(candidate: string): string | undefined {
+  try {
+    return fs.realpathSync.native(candidate);
+  } catch {
+    try {
+      return path.join(
+        fs.realpathSync.native(path.dirname(candidate)),
+        path.basename(candidate),
+      );
+    } catch {
+      return undefined;
+    }
+  }
+}
+
+type SessionIdentity = {
+  id: string;
+  file: string;
+  parentFile?: string;
+};
+
+function exactMetadataInputs(): boolean {
+  return Boolean(
+    paneId &&
+      exactStateRoot &&
+      runtimeKind === "pi" &&
+      (providerKind === "cursor" || providerKind === "codex") &&
+      (launchRole === "shotcaller" || launchRole === "champion") &&
+      (launchPlacement === "sibling_pane" || launchPlacement === "new_tab") &&
+      callsign &&
+      projectCode &&
+      taskLabel &&
+      routingAlias &&
+      descriptorDigest &&
+      descriptorId &&
+      metadataSource &&
+      /^league:pi-launch:[A-Za-z0-9._:-]{1,64}$/.test(metadataSource),
+  );
+}
+
+let metadataSeq = Date.now() * 1000;
+const MAX_TOKENS_PER_REPORT = 16;
+
+function reportLeagueMetadata(session: SessionIdentity): Promise<boolean> {
+  if (!exactMetadataInputs()) return Promise.resolve(false);
+  const threadTitle =
+    launchRole === "shotcaller"
+      ? callsign!
+      : `${callsign} · ${projectCode}|${taskLabel}`;
+  const source = metadataSource!;
+  const tokens = [
+    `launch_runtime_kind=${runtimeKind}`,
+    `launch_provider_kind=${providerKind}`,
+    `launch_role=${launchRole}`,
+    `launch_placement=${launchPlacement}`,
+    `launch_callsign=${callsign}`,
+    `launch_project_code=${projectCode}`,
+    `launch_task_label=${taskLabel}`,
+    `launch_routing_alias=${routingAlias}`,
+    `launch_session_id=${session.id}`,
+    `launch_session_path_digest=${crypto.createHash("sha256").update(session.file).digest("hex")}`,
+    `launch_descriptor_sha256=${descriptorDigest}`,
+    `launch_descriptor_id=${descriptorId}`,
+    `launch_state_root=${exactStateRoot}`,
+    `launch_metadata_source=${source}`,
+    "launch_activation_phase=session_started",
+  ];
+  if (session.parentFile) {
+    tokens.push(
+      `launch_parent_digest=${crypto.createHash("sha256").update(session.parentFile).digest("hex")}`,
+    );
+  }
+  if (tokens.length > MAX_TOKENS_PER_REPORT) {
+    throw new Error("League Pi metadata exceeds Herdr's per-report token limit");
+  }
+  const commandArguments = [
+    "pane",
+    "report-metadata",
+    paneId!,
+    "--source",
+    source,
+    "--applies-to-source",
+    "herdr:pi",
+    "--agent",
+    "pi",
+    "--display-agent",
+    providerKind!,
+    "--title",
+    threadTitle,
+    "--seq",
+    String(++metadataSeq),
+  ];
+  for (const token of tokens) commandArguments.push("--token", token);
+  return new Promise((resolve) => {
+    let finished = false;
+    let timer;
+    const child = spawn("herdr", commandArguments, {
+      stdio: "ignore",
+    });
+    const finish = (value: boolean) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      resolve(value);
+    };
+    timer = setTimeout(() => {
+      child.kill("SIGTERM");
+      finish(false);
+    }, 5000);
+    child.on("error", () => finish(false));
+    child.on("close", (code) => finish(code === 0));
+  });
+}
+
+export default function (pi) {
+  const flags = [
+    "pane-id", "state-root", "watcher-command", "worktree", "sandbox-profile",
+    "runtime-kind", "provider-kind", "role", "placement", "callsign",
+    "project-code", "task-label", "routing-alias", "descriptor-digest",
+    "descriptor-id", "metadata-source",
+  ];
+  for (const name of flags) {
+    pi.registerFlag(`league-${name}`, {
+      description: `League durable launch ${name}`,
+      type: "string",
+    });
+  }
+  const supplied = (name: string, fallback: string | undefined) => {
+    const value = pi.getFlag(`league-${name}`);
+    return typeof value === "string" && value ? value : fallback;
+  };
+  stateRoot = supplied("state-root", stateRoot);
+  paneId = supplied("pane-id", paneId);
+  worktree = supplied("worktree", worktree);
+  sandboxProfile = supplied("sandbox-profile", sandboxProfile);
+  runtimeKind = supplied("runtime-kind", runtimeKind);
+  providerKind = supplied("provider-kind", providerKind);
+  launchRole = supplied("role", launchRole);
+  launchPlacement = supplied("placement", launchPlacement);
+  callsign = supplied("callsign", callsign);
+  projectCode = supplied("project-code", projectCode);
+  taskLabel = supplied("task-label", taskLabel);
+  routingAlias = supplied("routing-alias", routingAlias);
+  descriptorDigest = supplied("descriptor-digest", descriptorDigest);
+  descriptorId = supplied("descriptor-id", descriptorId);
+  metadataSource = supplied("metadata-source", metadataSource);
+  exactStateRoot = exactRoot(stateRoot);
+  exactWorktree = exactRoot(worktree);
+  let sessionIdentity: SessionIdentity | undefined;
+  let reportedSessionKey: string | undefined;
+  const metadataReportsInFlight = new Map<string, Promise<boolean>>();
+
+  function refreshSession(ctx): SessionIdentity | undefined {
+    const id = ctx?.sessionManager?.getSessionId?.();
+    const file = ctx?.sessionManager?.getSessionFile?.();
+    const parentFile = ctx?.sessionManager?.getHeader?.()?.parentSession;
+    sessionIdentity =
+      typeof id === "string" && id && typeof file === "string" && path.isAbsolute(file)
+        ? {
+            id,
+            file: path.resolve(file),
+            parentFile:
+              typeof parentFile === "string" && path.isAbsolute(parentFile)
+                ? path.resolve(parentFile)
+                : undefined,
+          }
+        : undefined;
+    return sessionIdentity;
+  }
+
+  async function publishLeagueMetadata(
+    session: SessionIdentity,
+    force = false,
+  ): Promise<boolean> {
+    const sessionKey = `${session.id}\0${session.file}`;
+    if (!force && reportedSessionKey === sessionKey) return true;
+    const inFlight = metadataReportsInFlight.get(sessionKey);
+    if (!force && inFlight) return inFlight;
+    const pending = reportLeagueMetadata(session);
+    metadataReportsInFlight.set(sessionKey, pending);
+    const reported = await pending;
+    if (metadataReportsInFlight.get(sessionKey) === pending) {
+      metadataReportsInFlight.delete(sessionKey);
+    }
+    if (reported) reportedSessionKey = sessionKey;
+    return reported;
+  }
+
+  pi.registerCommand("league-sync", {
+    description: "Republish exact League session and launch metadata",
+    handler: async (_args, ctx) => {
+      const session = refreshSession(ctx);
+      if (!session) {
+        ctx.ui.notify("League session identity is unavailable.", "error");
+        return;
+      }
+      if (!(await publishLeagueMetadata(session, true))) {
+        ctx.ui.notify("League metadata publication failed.", "error");
+      }
+    },
+  });
+
+  pi.on("session_start", async (_event, ctx) => {
+    const session = refreshSession(ctx);
+    if (session) await publishLeagueMetadata(session);
+    pi.setActiveTools(
+      pi.getActiveTools().filter((name) =>
+        ["read", "grep", "find", "ls", "bash", "edit", "write"].includes(name),
+      ),
+    );
+  });
+
+  pi.on("agent_start", async (_event, ctx) => {
+    const session = refreshSession(ctx);
+    if (session) await publishLeagueMetadata(session);
+  });
+
+  pi.on("tool_call", (event, ctx) => {
+    const exactSession = refreshSession(ctx);
+    let authorized = Boolean(
+      exactSession && exactWorktree && exactStateRoot && sandboxProfile,
+    );
+    let reason = "League Pi sandbox identity is incomplete";
+    let shellCommand: string | undefined;
+    if (event.toolName === "write" || event.toolName === "edit") {
+      const supplied = event.input?.path;
+      if (typeof supplied !== "string") {
+        authorized = false;
+        reason = "League requires an exact mutation path";
+      } else if (exactWorktree && exactStateRoot) {
+        const lexical = path.isAbsolute(supplied) ? supplied : path.resolve(ctx.cwd, supplied);
+        const candidate = canonicalMutationPath(lexical);
+        authorized = Boolean(
+          authorized &&
+            candidate &&
+            (inside(candidate, exactWorktree) || inside(candidate, exactStateRoot)),
+        );
+        reason = "League blocked a write outside assignment roots";
+      }
+    } else if (event.toolName === "bash") {
+      const command = event.input?.command;
+      if (typeof command !== "string" || !command) {
+        authorized = false;
+        reason = "League requires an exact shell command";
+      } else if (exactWorktree && exactStateRoot && sandboxProfile) {
+        shellCommand = [
+          "/usr/bin/sandbox-exec",
+          "-f",
+          quoted(sandboxProfile),
+          "-D",
+          quoted(`WORKTREE=${exactWorktree}`),
+          "-D",
+          quoted(`STATE_ROOT=${exactStateRoot}`),
+          "/bin/zsh",
+          "-lc",
+          quoted(command),
+        ].join(" ");
+      }
+    } else if (!["read", "grep", "find", "ls"].includes(event.toolName)) {
+      authorized = false;
+      reason = "League blocked an undeclared Pi tool";
+    }
+    if (!authorized) {
+      return {
+        block: true,
+        reason,
+        terminate: true,
+      };
+    }
+    if (shellCommand) event.input.command = shellCommand;
+  });
+}

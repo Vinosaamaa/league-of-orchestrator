@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://league-of-orchestrator.invalid/schema/league-request-reconciliation.schema.json",
+  "title": "League duplicate request reconciliation receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "duplicate_request_id",
+    "canonical_request_id",
+    "duplicate_state",
+    "duplicate_version",
+    "canonical_version",
+    "idempotent"
+  ],
+  "properties": {
+    "schema": {"const": "league.request-reconciliation.v1"},
+    "duplicate_request_id": {"type": "string", "minLength": 1},
+    "canonical_request_id": {"type": "string", "minLength": 1},
+    "duplicate_state": {"const": "cancelled"},
+    "duplicate_version": {"type": "integer", "minimum": 2},
+    "canonical_version": {"type": "integer", "minimum": 1},
+    "idempotent": {"type": "boolean"}
+  }
+}

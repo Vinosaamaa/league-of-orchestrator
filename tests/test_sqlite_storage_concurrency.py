@@ -58,6 +58,22 @@ def test_two_writer_expected_version(state: Path) -> None:
     second.close()
 
 
+def test_hot_connection_validates_established_wal_without_mode_change(
+    state: Path,
+) -> None:
+    supervisor = SQLiteStorage(state, busy_timeout_ms=1000)
+    assert supervisor.policy.journal_mode == "WAL"
+    hook = SQLiteStorage(state, busy_timeout_ms=50, request_wal=False)
+    try:
+        assert hook.policy.journal_mode == "WAL"
+        assert hook.policy.wal_allowed is True
+        assert supervisor.agent_status(CHAMPION_ID) is not None
+        assert hook.agent_status(CHAMPION_ID) is not None
+    finally:
+        hook.close()
+        supervisor.close()
+
+
 def test_bounded_busy_and_crash_rollback(state: Path) -> None:
     holder = SQLiteStorage(state, busy_timeout_ms=1000)
     contender = SQLiteStorage(state, busy_timeout_ms=50)
@@ -112,6 +128,8 @@ def main() -> None:
         root = Path(temporary)
         _, writer_state, _ = seeded_state(root, "two-writer")
         test_two_writer_expected_version(writer_state)
+        _, mode_state, _ = seeded_state(root, "established-wal")
+        test_hot_connection_validates_established_wal_without_mode_change(mode_state)
         _, crash_state, _ = seeded_state(root, "busy-crash")
         test_bounded_busy_and_crash_rollback(crash_state)
     print("PASS: two-writer CAS, bounded busy refusal, and crash rollback")

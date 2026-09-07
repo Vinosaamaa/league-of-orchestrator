@@ -14,6 +14,7 @@ sys.path[:0] = [str(ROOT / "src"), str(ROOT / "tests")]
 
 from league.cleanup import (  # noqa: E402
     CLEANUP_ADAPTER_KINDS,
+    CLEANUP_DISPOSITIONS_BY_TASK_STATE,
     CleanupAdapterRegistry,
     CleanupExecutor,
     CleanupPlanner,
@@ -146,6 +147,32 @@ def cleanup_registry(
     return registry
 
 
+def set_synthetic_cleanup_task_state(store: SQLiteStorage, disposition: str) -> None:
+    task_state = {
+        "completed": "completed",
+        "rejected": "rejected",
+        "cancelled": "cancelled",
+        "failed": "failed",
+    }[disposition]
+    store.connection.execute(
+        "UPDATE tasks SET state=? WHERE task_id=?",
+        (task_state, TASK_ID),
+    )
+
+
+def test_cleanup_task_state_disposition_matrix_is_exact() -> None:
+    assert CLEANUP_DISPOSITIONS_BY_TASK_STATE == {
+        "completed": frozenset({"completed"}),
+        "complete": frozenset({"completed"}),
+        "ready_to_land": frozenset({"completed", "rejected", "cancelled"}),
+        "rejected": frozenset({"rejected"}),
+        "blocked": frozenset({"rejected", "failed"}),
+        "cancelled": frozenset({"rejected", "cancelled"}),
+        "canceled": frozenset({"rejected", "cancelled"}),
+        "failed": frozenset({"failed"}),
+    }
+
+
 def test_supported_policies_reach_cleanup_completed(root: Path) -> None:
     cases = (
         ("analysis", "completed"),
@@ -159,6 +186,7 @@ def test_supported_policies_reach_cleanup_completed(root: Path) -> None:
     for index, (task_class, disposition) in enumerate(cases):
         _, state, _ = seeded_state(root, f"policy-{index}")
         with SQLiteStorage(state) as store:
+            set_synthetic_cleanup_task_state(store, disposition)
             result = CleanupPlanner(store).plan(
                 manifest(task_class, disposition, with_resources=False),
                 operation_id=f"operation:policy-{index}",
@@ -190,6 +218,8 @@ def test_supported_policies_reach_cleanup_completed(root: Path) -> None:
 
 def test_cleanup_and_resource_commands_are_bounded(root: Path) -> None:
     _, cli_state, _ = seeded_state(root, "policy-cli")
+    with SQLiteStorage(cli_state) as store:
+        set_synthetic_cleanup_task_state(store, "completed")
     cli_manifest = root / "policy-cli.json"
     cli_manifest.write_text(json.dumps(manifest("analysis", with_resources=False)) + "\n")
     command = invoke_cli(
@@ -259,6 +289,7 @@ def test_cleanup_manifest_refusals(root: Path) -> None:
 def test_resource_registration_refusals(root: Path) -> None:
     _, state, _ = seeded_state(root, "resource-refusals")
     with SQLiteStorage(state) as store:
+        set_synthetic_cleanup_task_state(store, "completed")
         planner = CleanupPlanner(store)
         shared = resource("shared-release", "shared_lease", "release_lease")
         persistent = resource("persistent-retain", "persistent_retain", "retain")
@@ -351,6 +382,7 @@ def test_registered_resources_cannot_be_hidden(root: Path) -> None:
 def test_resource_registration_and_cleanup_plan_are_atomic(root: Path) -> None:
     _, state, _ = seeded_state(root, "atomic-plan")
     with SQLiteStorage(state) as store:
+        set_synthetic_cleanup_task_state(store, "completed")
         store.connection.execute(
             """
             CREATE TRIGGER synthetic_cleanup_action_failure
@@ -404,6 +436,7 @@ def test_request_cleanup_obligation_advances_into_verified_teardown(root: Path) 
             """,
             (TASK_ID, AT3),
         )
+        set_synthetic_cleanup_task_state(store, "completed")
         value = manifest("local_git", "completed", with_resources=False)
         value["expected_cleanup_version"] = 1
         result = CleanupPlanner(store).plan(
@@ -424,6 +457,7 @@ def test_request_cleanup_obligation_advances_into_verified_teardown(root: Path) 
 def planned_execution(root: Path, suffix: str) -> tuple[SQLiteStorage, CleanupExecutor, dict, dict, list[str]]:
     _, state, _ = seeded_state(root, suffix)
     store = SQLiteStorage(state)
+    set_synthetic_cleanup_task_state(store, "completed")
     operation_id = f"operation:{suffix}"
     CleanupPlanner(store).plan(manifest(), operation_id=operation_id, at=AT3)
     operation = store.cleanup_operation(operation_id)
@@ -561,6 +595,7 @@ def test_public_candidate_has_no_private_paths() -> None:
 
 
 def main() -> None:
+    test_cleanup_task_state_disposition_matrix_is_exact()
     with tempfile.TemporaryDirectory(prefix="league-cleanup-lifecycle-") as temporary:
         root = Path(temporary)
         test_supported_policies_reach_cleanup_completed(root)

@@ -20,10 +20,12 @@ class PrepareAssignmentCommand:
     branch: str
     worktree: str
     at: str
+    issue_receipt: Optional[dict[str, Any]]
     required_capabilities: tuple[str, ...] = ()
     assignment_role: str = "champion"
     dispatch_id: Optional[str] = None
     promoted_from_assignment_id: Optional[str] = None
+    excluded_callsigns: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -40,6 +42,30 @@ class FinishHiddenAssignmentCommand:
     event_id: str
     outbox_id: str
     at: str
+
+
+@dataclass(frozen=True)
+class LegacyDisplayReconciliationCommand:
+    assignment_id: str
+    expected_version: int
+    champion_agent_id: str
+    runtime_instance_id: str
+    callsign: str
+    pane_id: str
+    terminal_id: str
+    thread_id: str
+    worktree: str
+    routing_name: str
+    expected_presentation_source: Optional[str]
+    expected_title: Optional[str]
+    expected_state_change_seq: Optional[int]
+    target_task_label: str
+    owner_authorized: bool
+    at: str
+    expected_agent_status: Optional[str] = None
+    previous_worktree: Optional[str] = None
+    previous_branch: Optional[str] = None
+    branch: Optional[str] = None
 
 
 class AssignmentStorage(Protocol):
@@ -68,6 +94,68 @@ class AssignmentStorage(Protocol):
         at: str,
     ) -> dict[str, Any]: ...
 
+    def assignment_launch_context(self, assignment_id: str) -> dict[str, Any]: ...
+
+    def record_assignment_context_delivery(
+        self,
+        assignment_id: str,
+        expected_version: int,
+        context_sha256: str,
+        byte_count: int,
+        effect_sha256: str,
+        display_receipt: dict[str, Any],
+        event_id: str,
+        at: str,
+    ) -> dict[str, Any]: ...
+
+    def record_assignment_title_revalidation(
+        self,
+        assignment_id: str,
+        expected_version: int,
+        display_receipt: dict[str, Any],
+        event_id: str,
+        at: str,
+    ) -> dict[str, Any]: ...
+
+    def begin_legacy_display_reconciliation(
+        self, command: LegacyDisplayReconciliationCommand
+    ) -> dict[str, Any]: ...
+
+    def finalize_legacy_display_reconciliation(
+        self,
+        command: LegacyDisplayReconciliationCommand,
+        receipt: dict[str, Any],
+        at: str,
+    ) -> dict[str, Any]: ...
+
+    def fail_assignment_context_delivery(
+        self,
+        assignment_id: str,
+        expected_version: int,
+        failure_class: str,
+        event_id: str,
+        outbox_id: str,
+        at: str,
+    ) -> dict[str, Any]: ...
+
+    def fail_assignment_title_validation(
+        self,
+        assignment_id: str,
+        expected_version: int,
+        failure_class: str,
+        event_id: str,
+        outbox_id: str,
+        at: str,
+    ) -> dict[str, Any]: ...
+
+    def settle_assignment_launch_cleanup(
+        self,
+        assignment_id: str,
+        expected_version: int,
+        cleanup_receipt_digest: str,
+        at: str,
+    ) -> dict[str, Any]: ...
+
     def finish_hidden_assignment(
         self, command: FinishHiddenAssignmentCommand
     ) -> dict[str, Any]: ...
@@ -91,4 +179,5 @@ class AssignmentStorage(Protocol):
         outbox_id: str,
         recipient_agent_id: str,
         at: str,
+        attention_required: bool = False,
     ) -> dict[str, Any]: ...

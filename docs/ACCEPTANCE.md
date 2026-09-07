@@ -1,5 +1,12 @@
 # Isolated acceptance and reversible cutover foundation
 
+Issue #8 / PR #54's focused startup/rollover gate is
+`PYTHONDONTWRITEBYTECODE=1 python3 tests/test_rollover_successor.py`, plus the
+affected staged rollover, production cleanup, runtime adapter, schema and CLI
+suites. The tests cover registered Codex/Cursor native kinds with synthetic
+runtime observations; they do not run either live provider. Source completion
+does not close the installed bidirectional end-to-end acceptance gate.
+
 Issue [#23](https://github.com/Vinosaamaa/league-of-orchestrator/issues/23)
 owns this repository-local harness. It creates one disposable League home only
 beneath an explicit existing temporary root. It does not discover or use a home
@@ -36,18 +43,48 @@ An active SQLite supervisor owns delivery; without one, the dispatcher uses one
 verified Herdr endpoint. Receipt uniqueness makes a duplicate retry inert, and
 an unavailable endpoint leaves the row pending.
 
-Prompt submission is availability-critical. When a valid hook payload has no
-exact verified runtime identity, the hook stores its complete bytes once in the
-canonical quarantine with a `runtime_unverified` obligation and returns success
-so the local prompt proceeds. `league request bind-prompt` later requires one
-exact actor/runtime/session match, promotes the same prompt without changing its
-identity or bytes, and wakes the bound Shotcaller for model-authored triage.
+Prompt submission is availability-critical. Exact native Codex, Cursor, and Pi
+prompt, pre-mutation, and Stop hook envelopes without a canonical League runtime
+binding return their provider-native allow/no-op result immediately. They write
+no prompt, quarantine, watcher, or Stop state. After canonical promotion, the
+same running provider process uses the ordinary prompt, pre-mutation, and Stop
+policies; a managed binding whose watcher is unavailable still fails closed.
 When the hook session already identifies one canonical Shotcaller but its exact
 runtime is unavailable, the quarantine insert and that Shotcaller's
 `user_message_generation` and `wait_generation` increments are one transaction.
 A byte-identical hook retry changes neither generation. This rearms the bounded
 Stop guard: one Stop blocks, an identical retry may allow to prevent a loop,
 and the next accepted user prompt makes the next Stop block once again.
+
+Codex Stop continuity also binds the terminal generation to the exact
+`session_id` and `turn_id` in the real Stop payload. The first Stop for a new
+Codex turn blocks while obligations remain; a continuation retry for that same
+turn may allow, even when `last_assistant_message` and `stop_hook_active` have
+changed. This is a fallback for temporarily unavailable prompt intake, not a
+replacement for it: prompt capture, quarantine, user-priority wake, and their
+atomic user/wait generation increments remain required. Missing event, session,
+turn, or boolean active fields are refused instead of guessed.
+
+SQLite writer contention is a retryable Stop boundary, not a hook failure. Stop
+waits at most 250 milliseconds for the writer reservation; if that bound is
+exceeded, Codex receives a normal blocking continuation stating that the turn
+was not consumed. No Stop generation or obligation is changed, so the same
+payload can retry against canonical state. Prompt intake has a separate bounded
+one-second writer wait so an ordinary prompt already queued behind a short
+transition can commit its exact bytes after that transition releases. Focused
+coverage holds an `agent.transition` transaction open while UserPromptSubmit
+and Stop overlap, then proves the retry block, prompt bytes, transition event,
+delivery, and unresolved obligations all remain durable.
+
+Journal mode is canonical database state, not a hot-path preference. Migration
+under exclusive maintenance may establish WAL or rollback-journal mode. Every
+normal supervisor, prompt, Stop, transition, delivery, and reporting connection
+only reads and validates the established mode; it never issues a journal-mode
+change. Established WAL additionally requires the loaded SQLite runtime to pass
+the 3.51.3 safety gate. Focused acceptance keeps an actual supervisor process
+open on WAL while prompt and Stop hook processes open concurrently, then proves
+both hooks succeed, the supervisor wakes for user priority, and the exact prompt
+is durable once. Timeout bounds are unchanged.
 
 Run the complete foundation with one command after creating task-owned sentinel
 fixtures outside the requested namespace:
@@ -283,6 +320,103 @@ every archived node before any separately authorized rollback. The archive is
 never an active writer; stable hooks retain their existing command paths and
 switch together by resolving the new SQLite-backed launcher.
 
+After cutover, the stable watcher derives its SQLite state root from the same
+exact writer-pointer directory used to select the canonical writer. Codex and
+Cursor hook sessions bind first through one active or idle verified runtime;
+only if none exists may the imported active identity match directly. Multiple
+matches refuse. A non-Shotcaller prompt is accepted and retained exactly once
+against its exact verified runtime without a wake; when that runtime is absent
+or unverified, the prompt is retained as `runtime_unverified` quarantine without
+attempting a Shotcaller wake. The hook invocation itself may bootstrap a
+prompt-capture-only runtime when the non-retired Champion's exact thread,
+Herdr/tmux backend, and address all match; incomplete locators never bootstrap.
+Supervision registers only against one verified runtime owned by the exact
+active Shotcaller, independent of the archived thread identity.
+
+Queued prompt adapters may reuse their raw turn or generation key for distinct
+ordinary messages. The canonical hook source identity therefore binds adapter,
+session, raw key, and exact body hash. Identical retries deduplicate; different
+content or sessions cannot share the stored source key. A residual ownership or
+source conflict is retained in no-wake quarantine and never rejects the user
+message.
+
+### Issue 23 one-process Shotcaller turn and visible Champion launch
+
+UserPromptSubmit and Cursor before-submit remain boundary handlers: each stores
+the exact prompt once, advances the durable wait generation in the same
+transaction, and wakes only a verified Shotcaller. They never rewrite the body,
+inject control text, infer semantic items, mine transcripts, or shell through
+stable `league` subcommands. Stop similarly performs one bounded in-process
+storage decision.
+
+An ordinary Shotcaller turn uses exactly one external League process:
+
+```sh
+league --state-root <canonical-root> request turn \
+  --owner-agent-id <shotcaller-agent-id>
+```
+
+The process emits one bounded exact intake envelope, then reads a single-line
+JSON object containing ordered model-authored semantic `decisions` and matching
+semantic routing `plans`. The adapter supplies all mechanical IDs, claim tokens, timestamps,
+hashes, locators, JSON, and command arguments. One transaction triages every
+prompt, claims every new request, and records each direct, hidden, or Champion
+plan. Missing, reordered, duplicate, stale, cross-owner, conflicting, or partial
+input rolls back the whole begin phase. The connection holds no transaction
+while the same normal Shotcaller reasoning pass performs the work.
+
+Before reply, wait, handoff, or end, the same PID reads one semantic-only commit
+line with model-authorized answer/result content and outcomes. The adapter
+manufactures exact time, versions, hashes, and receipt identities. A second
+transaction records all outcomes and any delivery effects, then the process
+returns `phase=committed` with Stop-equivalent counts for unresolved prompts and
+requests, pending assignments/deliveries, active Champions/tasks, and cleanup
+obligations before exiting. A normal active turn never starts status, unresolved,
+or supervise polling. Cross-Squad routing and explicit defer, awaiting-user,
+block, or cancel remain dedicated claim/version-checked commands.
+
+`league assign run` is the supported visible launch surface. It composes the
+existing assignment service and real Herdr/Codex adapter: reserve, mark
+launching, create one unfocused exact-worktree endpoint, start workspace-write
+Codex with only the canonical League root added, observe the generated thread
+UUID, verify routing/display/backend/workspace/pane/terminal/cwd/title identity,
+activate, and deliver one bounded SQLite-only context. Because handshake and
+context prompts may trigger provider auto-title behavior, the adapter then
+restores and verifies the exact `<Callsign> · <Task>` sidebar, thread, and
+terminal title before recording context delivery. The context prompt uses its
+settled wait as the ordering barrier; final acceptance requires two fresh,
+identical observations and records the launch metadata source, exact agent
+authority source, and endpoint state-change sequence in the context receipt.
+Restoration requires the same launch-owned endpoint, thread, routing name, and
+ownership/source tokens; changed or unowned metadata refuses instead of being
+overwritten. An exact retry sends no prompt, re-observes the live endpoint, and
+performs at most one ownership-safe restoration. Generated task labels derive
+deterministically from the task summary as exactly two words; explicit labels
+remain limited to at most two words.
+External-effect failures settle blocked only after exact endpoint and
+reservation cleanup; otherwise the assignment and cleanup obligation remain
+`cleanup_pending`.
+
+In-place `league shotcaller create` uses the same effective-presentation-source
+rule in the already-calling Codex pane. Callsign publication is only a seed:
+activation requires two matching source/sequence observations after any owner
+prompt auto-title settles, with at most one same-authority restoration. Exact
+retry sends no prompt and creates no layout or process. A newer user-owned
+presentation source refuses metadata mutation; rollback clears the League route
+while preserving that title/source and unrelated tokens, restores only the
+League-owned sidebar/thread tokens to baseline, releases the reservation, and
+creates no Squad.
+
+The release gate is one installed disposable flow: exact capture, one-process
+semantic begin, Champion `assign run`, Champion working and terminal
+transitions, registered-watcher delivery, one-process final commit/boundary,
+proof-gated cleanup, endpoint and callsign release, zero residue, and storage
+integrity. Installed phase timings are recorded separately from the protocol
+mock, candidate CLI/SQLite measurements, and variable model reasoning. A
+multi-second installed infrastructure handoff refuses the performance gate and
+requires an in-process adapter without replacing SQLite or adding another
+external Garen process.
+
 The command refuses missing, relative, symbolic-link, or malformed sentinels
 and refuses an existing namespace. It accepts at most 16 byte sentinels so a
 caller cannot create an unbounded preflight workload. The global
@@ -333,11 +467,23 @@ make test-reporting-privacy
 ```
 
 The staged migration assertion and strict receipt schema follow
-`CURRENT_SCHEMA_VERSION`; the current contiguous sequence is
-`[1,2,3,4,5,6,7,8,9]`. Version 8 adds the provider-neutral routing and
-orchestration policy. Version 9 adds repository-owned artifact declarations and
-exact merged-publication receipts without changing the acceptance operation or
-sentinel contract.
+`CURRENT_SCHEMA_VERSION`; the current contiguous sequence is versions 1 through
+24. Versions 12 through 17 add the
+bounded rollover-reconciliation, in-place Shotcaller-bootstrap, immutable prompt
+provenance/current-owner, exact Stop-feedback suppression, issue-coupled
+continuation, and immutable switched-rollover snapshot-revision contracts. The
+acceptance operation and source-sentinel contract remain unchanged.
+
+Migration 24 records an immutable stopped-agent retirement request, exact
+provider/multiplexer pane-and-process absence proof, and completion receipt. The
+bounded `BEGIN IMMEDIATE` acceptance holds proof open while a second supported
+runtime writer receives a retryable refusal. It also intentionally interrupts
+the atomic settlement after runtime close
+and after callsign release, proves full rollback, reopens SQLite, retries once,
+and verifies the original receipt, closed runtime, retired Roster identity,
+released callsign, and untouched retained repository bytes. Separate cases prove
+orphan-process refusal, provider-alias normalization, bounded proof/input bytes,
+and indexed active-ownership lookups.
 
 The skill-contract suite uses only synthetic temporary custom roots and fake
 capability profiles. The current machine inventory was audited separately in a
@@ -347,10 +493,27 @@ rewrite a skill. Release-to-installed parity and a real runtime remain #23
 gates.
 
 The staged release manifest also proves exact source/release/staged parity for
-the portable report HTML template, League report skill, and shared guidance
-source. The guidance adapter tests stage only beneath disposable explicit roots;
-the acceptance harness does not install or cut over global Codex, Cursor, or Pi
-instructions.
+the portable report HTML template, League report skill, League-specific
+`global-agent-instructions/league/AGENTS.md` source, and every adapter-declared
+provider bootstrap asset. The synthetic cutover installer dispatches Codex,
+Pi, and Cursor CLI through their registered installers, preserves unrelated
+native handlers, and makes exact retry byte-inert. The isolated package test
+installs only `league/AGENTS.md`, restores its prior synthetic bytes, and proves
+the synthetic universal `AGENTS.md` hash is identical before install, after
+install, and after rollback. A manifest naming the universal target refuses
+before file or release-pointer mutation. The acceptance harness does not install
+or cut over global Codex, Cursor, or Pi instructions.
+
+The production pre-cutover validator applies the same ownership rule to every
+declared current target: an absolute path resolving to `.agents/AGENTS.md` is
+forbidden regardless of target id or kind. Before the live executor acquires
+its lock or creates any node, backup, release directory, or attempt directory,
+it proves that the exact candidate release and release-bundle identities are
+unallocated; it repeats that check under the cutover lock before mutation.
+Refused identities leave byte, node, pointer, and tree fingerprints unchanged.
+Rollback skips current targets already equal to their original snapshot, so an
+unchanged League supplement and the unregistered universal guide retain their
+original filesystem nodes as well as their hashes.
 
 The generation switch in these harnesses is a model exercised beneath the
 disposable namespace. It is not a global cutover command. Canonical cutover,

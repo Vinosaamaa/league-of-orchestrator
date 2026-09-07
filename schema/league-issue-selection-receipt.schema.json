@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Vinosaamaa/league-of-orchestrator/schema/league-issue-selection-receipt.schema.json",
+  "title": "Duplicate-preflight repository issue selection receipt",
+  "type": "object",
+  "required": ["schema", "selection_receipt_id", "selection_key", "selection_version", "task_id", "task_summary", "coordinator_agent_id", "repository", "repository_key", "normalized_title", "semantic_scope_digest", "decision", "issue", "issue_url", "issue_state", "issue_title", "issue_body_digest", "duplicate_matches", "prior_linkage", "reopen_action_receipt_digest", "task_scope_digest", "selected_at", "receipt_digest", "idempotent"],
+  "properties": {
+    "schema": {"const": "league.issue-selection-receipt.v1"},
+    "selection_receipt_id": {"type": "string", "minLength": 1},
+    "selection_key": {"type": "string", "minLength": 1},
+    "selection_version": {"type": "integer", "minimum": 1},
+    "task_id": {"type": "string", "minLength": 1},
+    "task_summary": {"type": "string", "minLength": 1},
+    "coordinator_agent_id": {"type": "string", "minLength": 1},
+    "repository": {"type": "string", "minLength": 1},
+    "repository_key": {"type": "string", "minLength": 1},
+    "normalized_title": {"type": "string", "minLength": 1},
+    "semantic_scope_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "decision": {"enum": ["reuse_open", "reopen_closed", "create_distinct"]},
+    "issue": {"type": "integer", "minimum": 1},
+    "issue_url": {"type": "string", "format": "uri"},
+    "issue_state": {"const": "open"},
+    "issue_title": {"type": "string", "minLength": 1},
+    "issue_body_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "duplicate_matches": {"type": "integer", "minimum": 0},
+    "prior_linkage": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "required": ["task_id", "assignment_id", "champion_agent_id", "runtime_instance_id", "session_ref"],
+          "properties": {
+            "task_id": {"type": "string", "minLength": 1},
+            "assignment_id": {"type": "string", "minLength": 1},
+            "champion_agent_id": {"type": "string", "minLength": 1},
+            "runtime_instance_id": {"type": "string", "minLength": 1},
+            "session_ref": {"type": ["string", "null"]}
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "reopen_action_receipt_digest": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+    "task_scope_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "selected_at": {"type": "string", "format": "date-time"},
+    "receipt_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "idempotent": {"type": "boolean"}
+  },
+  "additionalProperties": false
+}

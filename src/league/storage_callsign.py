@@ -8,6 +8,46 @@ from .storage_types import FaultInjector
 
 
 class CallsignQueueStorage(Protocol):
+    def callsign_assignment_status(self, assignment_id: str) -> Optional[dict[str, Any]]: ...
+
+    def record_shotcaller_bootstrap(
+        self,
+        assignment_id: str,
+        expected_version: int,
+        receipt: Mapping[str, Any],
+        at: str,
+        *,
+        fault: Optional[FaultInjector] = None,
+    ) -> dict[str, Any]: ...
+
+    def shotcaller_bootstrap_status(
+        self, assignment_id: str, *, include_display_ownership: bool = False
+    ) -> Optional[dict[str, Any]]: ...
+
+    def record_shotcaller_bootstrap_baseline(
+        self,
+        assignment_id: str,
+        expected_version: int,
+        baseline: Mapping[str, Any],
+    ) -> dict[str, Any]: ...
+
+    def shotcaller_bootstrap_baseline(self, assignment_id: str) -> Optional[dict[str, Any]]: ...
+
+    def record_shotcaller_bootstrap_publication(
+        self,
+        assignment_id: str,
+        expected_version: int,
+        publication: Mapping[str, Any],
+    ) -> dict[str, Any]: ...
+
+    def shotcaller_bootstrap_publication(
+        self, assignment_id: str
+    ) -> Optional[dict[str, Any]]: ...
+
+    def bind_shotcaller_bootstrap_runtime(
+        self, assignment_id: str, expected_version: int, runtime_instance_id: str
+    ) -> dict[str, Any]: ...
+
     def reconcile_callsign_pool(
         self,
         role: str,
@@ -29,6 +69,9 @@ class CallsignQueueStorage(Protocol):
         at: str,
         *,
         fault: Optional[FaultInjector] = None,
+        recovery_baseline: Optional[Mapping[str, Any]] = None,
+        recovery_thread_id: Optional[str] = None,
+        expected_callsign: Optional[str] = None,
     ) -> dict[str, Any]: ...
 
     def activate_callsign(

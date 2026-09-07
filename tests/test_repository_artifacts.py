@@ -14,6 +14,7 @@ sys.path[:0] = [str(ROOT / "src"), str(ROOT / "tests")]
 
 from storage_fixture import CHAMPION_ID, TASK_ID  # noqa: E402
 from storage_test_support import invoke_cli, seeded_state  # noqa: E402
+from league.sqlite_store import SQLiteStorage  # noqa: E402
 
 
 AT3 = "2026-01-01T00:02:00Z"
@@ -125,6 +126,16 @@ def main() -> None:
         status = invoke_cli(state, "artifact", "status", "--task-id", TASK_ID)
         assert status["result"]["artifacts"][0]["merge_commit"] == MERGE
 
+        # The imported legacy fixture intentionally has no active assignment or
+        # runtime through which the stable task-transition command could prove
+        # ownership.  Put only this synthetic cleanup subject at the terminal
+        # boundary so this test remains scoped to publication gating.
+        with SQLiteStorage(state) as store:
+            with store._transaction():
+                store.connection.execute(
+                    "UPDATE tasks SET state='ready_to_land' WHERE task_id=?",
+                    (TASK_ID,),
+                )
         allowed = invoke_cli(
             state, "cleanup", "plan", "--manifest", str(manifest),
             "--operation-id", "operation:published", "--at", AT3,

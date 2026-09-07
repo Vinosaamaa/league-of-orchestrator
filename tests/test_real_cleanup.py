@@ -38,6 +38,7 @@ from league.real_canary import (  # noqa: E402
 from league.sqlite_handoff_schema import CHAMPION_SEED, SHUFFLE_VERSION  # noqa: E402
 from league.sqlite_store import SQLiteStorage  # noqa: E402
 from league.storage import RuntimeRegistrationCommand, StorageRefusal  # noqa: E402
+from lifecycle_fakes import issue_bound_spec  # noqa: E402
 from storage_test_support import migrated_state  # noqa: E402
 
 
@@ -221,7 +222,8 @@ def active_callsign(store: SQLiteStorage) -> dict[str, Any]:
 
 
 class FakeHerdrRunner:
-    def __init__(self) -> None:
+    def __init__(self, agent_kind: str = "codex") -> None:
+        self.agent_kind = agent_kind
         self.agent = True
         self.pane = True
         self.fail_close_once = False
@@ -237,6 +239,7 @@ class FakeHerdrRunner:
             agents = (
                 [
                     {
+                        "agent": self.agent_kind,
                         "name": "cleanupcanary",
                         "pane_id": "w-test:p-canary",
                         "agent_status": str(self.agent),
@@ -309,6 +312,18 @@ def test_archive_git_and_scope(root: Path) -> None:
     assert archive.inspect(archive_action) == archive_action["intended_state"]
 
     git = validated["git"]
+    run(("git", "-C", git["repository"], "switch", "--orphan", "unrelated-primary"))
+    run(
+        (
+            "git",
+            "-C",
+            git["repository"],
+            "commit",
+            "--allow-empty",
+            "-m",
+            "Synthetic unrelated primary checkout",
+        )
+    )
     adapter = GitAdapter(git, SubprocessRunner())
     worktree_action = {
         "action_kind": "worktree_remove",
@@ -485,7 +500,9 @@ def test_real_canary_sqlite_setup_uses_explicit_root(root: Path) -> None:
     root.mkdir(parents=True)
     git = _create_git_canary(root)
     herdr = herdr_identity()
-    setup = _setup_sqlite(root, ROOT, git, herdr)
+    setup = _setup_sqlite(
+        root, ROOT, git, herdr, issue_spec_resolver=issue_bound_spec
+    )
     extended_git = {
         **git,
         "tested_tree": git["head"],
@@ -567,6 +584,7 @@ if args[:2] == ["agent", "list"]:
     agents = []
     if state["agent"]:
         agents = [{
+            "agent": "codex",
             "name": state["agent_name"],
             "pane_id": "w-test:p-canary",
             "agent_status": "done" if state["done"] else "idle",
@@ -706,7 +724,9 @@ def test_cleanup_reconcile_resumes_in_a_new_process(root: Path) -> None:
     root.mkdir(parents=True)
     git = _create_git_canary(root)
     herdr = herdr_identity()
-    setup = _setup_sqlite(root, ROOT, git, herdr)
+    setup = _setup_sqlite(
+        root, ROOT, git, herdr, issue_spec_resolver=issue_bound_spec
+    )
     state = root / "league/state"
     with SQLiteStorage(state, request_wal=False) as store:
         transition = store.transition_task(
@@ -808,11 +828,38 @@ def test_session_title_fallback_and_strict_canary_schemas() -> None:
     }
 
 
+def test_cursor_and_pi_use_provider_exit_contract() -> None:
+    action = {
+        "expected_identity": {
+            "agent_name": "cleanupcanary",
+            "pane_id": "w-test:p-canary",
+            "session_id": "canary-session",
+        },
+        "intended_state": {"completed": True, "action": "session_exit"},
+    }
+    for provider, exit_prompt in (("cursor", "/exit"), ("pi", "/quit")):
+        runner = FakeHerdrRunner(provider)
+        identity = {
+            **herdr_identity(),
+            "provider_kind": provider,
+            "exit_prompt": exit_prompt,
+        }
+        adapter = HerdrHarnessAdapter(identity, runner)
+        assert adapter.inspect(action) == action["expected_identity"]
+        adapter.apply(action)
+        assert any(
+            call[:5]
+            == ("herdr", "agent", "prompt", "cleanupcanary", exit_prompt)
+            for call in runner.calls
+        )
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="league-real-cleanup-") as directory:
         root = Path(directory)
         test_archive_git_and_scope(root / "git")
         test_herdr_and_callsign_exact_cleanup(root / "runtime")
+        test_cursor_and_pi_use_provider_exit_contract()
         test_repository_artifact_squash_tree_is_cleanup_eligible(root / "artifact")
         test_backend_close_resumes_after_external_failure(root / "backend-retry")
         test_real_canary_sqlite_setup_uses_explicit_root(root / "canary-setup")

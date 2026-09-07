@@ -1,5 +1,9 @@
 # Agent Instructions
 
+## Communication
+
+- Address the user as “summoner” at least once in every response.
+
 ## Scope
 
 - Repository work → use one issue-owned worktree and branch; keep unrelated

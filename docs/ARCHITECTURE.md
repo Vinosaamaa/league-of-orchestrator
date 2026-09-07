@@ -20,9 +20,10 @@ pending Squad registration, role-aware hidden-scientist assignments, versioned
 provider routing, and parent-request progress/outbox state. The storage layer
 also implements the canonical prompt/request lifecycle, exact owner return,
 adapter-neutral runtime binding, recoverable teardown, advisory project
-catalog, and bounded project-grouped Roster. Installation, live migration,
-cutover, autonomous planning, and an interactive Roster controller remain out
-of scope.
+catalog, and bounded project-grouped Roster. The source includes a hash-bound
+watcher-service install/start/rollback operation; executing it against live
+state, live migration/cutover, autonomous planning, and an interactive Roster
+controller remain out of scope for this change.
 
 ## Current modules
 
@@ -34,6 +35,11 @@ The repository keeps the proven runtime and new storage boundary separate:
   preflight and reservation rollback, hidden-worker allocation, optional Lead
   relay, semantic model routing, task-resource checks, and fail-closed teardown.
 - `bin/agent-watcher` is a path-resolving launcher with no domain behavior.
+  `canonical_watcher.py` brokers canonical hooks and service commands;
+  `persistent_supervisor.py` owns the one root-scoped event runtime;
+  `supervisor_service.py` owns exact launchd install/start/rollback; and
+  `restored_agent.py` verifies/rebinds the already-live watcher before metadata
+  replay after Herdr restoration.
 - `schema/`, `examples/`, and `config/` define the public authoring surface.
 - `tests/` exercises the imported behavior with temporary synthetic fixtures.
 - `src/league/storage.py` composes the only domain-facing persistence interface
@@ -50,19 +56,62 @@ The repository keeps the proven runtime and new storage boundary separate:
   produces an in-memory plan; it never opens a database or writes legacy files.
 - `src/league/request_services.py` owns injected visible-launch and delivery
   adapter boundaries; production adapter selection remains outside the store.
+- `src/league/cursor_steering.py` owns the Cursor/Herdr direct-delivery effect:
+  exact pane/session/status/process proof, idle submit versus working steer,
+  and durable retry fencing. `sqlite_cursor_steering_*` owns only its intent
+  and receipt state; it never reads terminal output or performs provider I/O.
+- `src/league/pi_launch.py` owns explicit Pi runtime launch and exact-session
+  restart through Herdr. Cursor/Codex selection is a descriptor field and Pi
+  CLI argument, never a session-home choice. `pi_session_migration.py` verifies
+  a shell-only restart boundary, first-record JSONL identity/lineage, bounded
+  unified-inventory uniqueness, and byte-exact copy. The schema-22 operation
+  modules persist launch, migration, and restart intent/receipts separately
+  from provider I/O.
+- `src/league/sqlite_continuation_ops.py` owns immutable provider-thread
+  lineages, per-cleanup archives, exclusive continuation claims, issue-reopen
+  fences, and runtime incarnations. `continuation.py` owns the bounded GitHub
+  issue adapter, recoverable reopen service, and read-only Git binding check.
+  These extend the existing cleanup and assignment lifecycles; they do not form
+  a second scheduler or provider-session store.
 - `src/league/adapters.py`, `adapter_types.py`, and `runtime.py` own opaque
   capability contracts and orchestration over injected harness and terminal
   adapters. `cleanup.py` and `routing.py` own proof-first teardown policy and
   assignment-neutral model/effort selection; `sqlite_runtime_ops.py` persists
   their bindings, decisions, resources, operations, and receipts.
+- `src/league/agent_adapters/` is the explicit Codex, Pi, and Cursor CLI
+  translation registry. Every adapter uses the same lifecycle vocabulary and
+  advertises only the operations its native contract supports;
+  `SharedLifecyclePolicy` owns the common accept/refuse seam consumed by prompt
+  capture and exposed for issue #81 enforcement. Each adapter also owns its
+  provider-specific visible-launch factory, so the CLI selects an adapter and
+  does not contain a Codex/Pi/Cursor launch switch. Cursor configured inside Pi
+  remains only a provider field, not a Cursor CLI runtime identity or session
+  pool.
+- `src/league/multiplexer_adapters/` independently registers Herdr and tmux.
+  Multiplexer adapters advertise only callable native operations. The current
+  Herdr adapter owns restored-agent discovery, exact endpoint/process
+  observation, routing, Champion-tab/Shotcaller-pane placement, display
+  metadata, delivery, and close transport; the tmux adapter advertises no
+  unimplemented capability. `display_replay.py` composes the selected
+  multiplexer adapter with the canonical runtime's agent adapter and contains no
+  Herdr command strings. It reconstructs presentation from existing schema-22
+  state rather than creating a second durable presentation store.
+- `routing.py` is the single model/effort policy implementation. Ordinary
+  visible launch defaults to Pi+Codex but requires the exact persisted routing
+  decision for its request/task/assignment, role, provider, and capabilities.
+  Explicit overrides are accepted only as an exact model+effort pair. The
+  packaged schema-3 policy and schema-1/2 migration/rollback path preserve the
+  strong-worker baseline and cannot silently fall back to Luna.
 - `src/league/skill_contracts.py` owns strict custom-skill provenance,
   capability-profile resolution, bounded content hashing, and sanitized
   duplicate/install parity. It consumes the existing adapter matrix but does
   not load skills, inspect bodies semantically, or mutate a custom root.
 - `src/league/privacy.py` owns the single exact-byte outbound validator;
   `remote_adapters.py` makes it mandatory immediately before every current or
-  future League remote transport. `guidance.py` has an explicit-root staging
-  API only and cannot discover or update installed guidance.
+  future League remote transport. `guidance.py` owns an explicit-root staging
+  and rollback API for only `league/AGENTS.md`. It refuses the universal
+  `AGENTS.md` target before mutation and cannot discover a home directory or
+  switch a release pointer.
 - `src/league/sqlite_report_ops.py` streams indexed canonical facts into one
   bounded stable JSON report. `reporting.py` derives Markdown and portable HTML
   from that object without another data source. The repository reporting skill
@@ -131,8 +180,10 @@ The repository-local SQLite path is separately testable:
    scientists require exact owner/request/subtask/model/effort/reason/budgets,
    remain outside the visible Roster, and deliver terminal-only.
 8. The role-aware Stop decision combines unresolved requests, active tasks,
-   assignments, deliveries, and cleanup, while blocking at most once per fresh
-   wait generation and yielding to ordinary user messages.
+   assignments, deliveries, and cleanup. An attached Shotcaller blocks every
+   unchanged Stop while obligations remain. A detached Shotcaller still blocks
+   owner action and permits delegated-only handoff only to its exact verified
+   persistent watcher. Ordinary user messages keep priority.
 9. Schema v4 evolves v3's one-per-task cleanup obligation rather than adding a
    competing lifecycle record. Request/assignment paths may create the initial
    obligation; verified teardown atomically advances it with ownership,
@@ -141,36 +192,66 @@ The repository-local SQLite path is separately testable:
    endpoint generation, and declared capabilities. Cleanup validates every
    action before its first external effect and then records immutable,
    fence-bound receipts for crash-safe resumption.
-11. Orchestration resolves explicit route, continuation, then one unique strong
+11. Schema v16 replaces the all-history provider-session uniqueness index with
+   live-only uniqueness, then adds one permanent lineage for each opaque
+   provider thread, one immutable archive per completed incarnation, and one
+   exclusive active continuation claim per archive. Cleanup planning writes the
+   archive before effects; finalization exposes it only after the exact owning
+   issue is observed closed and the final teardown receipt exists.
+12. An explicit continuation verifies the new repository/issue/branch/worktree
+   binding, completed acceptance, healthy context, exact-resume declarations,
+   instruction reconciliation, closed linked runtime history, and absence of a
+   live worktree owner. A fenced external action reopens only the archived issue.
+   Ordinary assignment then allocates a current callsign, launches a fresh
+   endpoint/runtime against the exact provider thread, and appends a lineage
+   incarnation. The old endpoint and worktree are never restored.
+13. Orchestration resolves explicit route, continuation, then one unique strong
    eligible Squad before local direct/Champion execution. Canonical ownership
    moves only after acknowledgement. Parent progress has immediate and
    15-minute changed-only aggregate classes plus one five-minute-grace overdue
    escalation; no heartbeat is synthesized.
-12. Model routing records policy/provider versions, structured semantic
+14. Model routing records policy/provider versions, structured semantic
    signals, explicit and expiring operator overrides, capability fallback,
    evidence-gated downgrade, and at most one safe-boundary escalation child.
-13. Configuration, hooks, guides, launchers, immutable failure/teardown/archive
-   evidence, installer backups, and other-product state remain files.
-14. Skill roots remain external file-owned inputs. The repository stores only
+15. Configuration, hooks, guides, launchers, immutable failure/teardown/archive
+   evidence, installer backups, and other-product state remain files. The
+   universal agent guide is terminal-environment-toolkit-owned; League owns
+   only its `league/AGENTS.md` orchestration supplement.
+16. Skill roots remain external file-owned inputs. The repository stores only
     public labels, identity/provenance/version/capability declarations, content
     hashes, and sanitized parity receipts; it stores no root path or skill body.
-15. Project aliases, codes, exact roots/repositories, and ordered suggested
+17. Project aliases, codes, exact roots/repositories, and ordered suggested
     Squads are versioned catalog facts. Suggestion changes never mutate tasks,
     assignments, requests, events, or instructions; explicit routing stays
     separate and authoritative.
-16. `league.roster-snapshot.v1` groups current work from one bounded read
+18. `league.roster-snapshot.v1` groups current work from one bounded read
     transaction. It is non-canonical, has explicit limits/truncation, and links
     every item to exact canonical keys without persisting a report cache.
-16. `league.report.v1` streams timestamp-indexed canonical facts and refuses
+19. `league.report.v1` streams timestamp-indexed canonical facts and refuses
     both fact and completion scans above their explicit bounds. Markdown and
     portable HTML are pure renderers over that versioned JSON object.
-17. Exact project roots and full evidence remain classified `local_only`.
+20. Exact project roots and full evidence remain classified `local_only`.
     Every remote adapter validates the final rendered bytes with the same
     fail-closed policy immediately before invoking its injected transport.
+21. Persistent supervision has five independent invariants:
+    - service ownership: one OS-service-manager-owned process, root lock, and
+      Unix socket multiplex all active Squad Shotcallers beneath one canonical
+      root; no model turn or Herdr plugin owns `service-run`;
+    - startup ordering: hash-bound install/start verifies all bindings live
+      before Herdr restoration; rollback restores only exact prior plist bytes;
+    - binding isolation: watcher registration, lease fence, generation, cursor,
+      wake target, notification policy, attachment mode, and recovery remain
+      keyed to one Shotcaller/Squad;
+    - delivery/Stop ordering: an active `request turn` defers attention;
+      attached Stop always blocks obligations, while detached Stop permits only
+      delegated-only work with an exact live detachment receipt; and
+    - recovery: exact-once delivery, restored Codex/Pi watcher rebind, metadata
+      replay, and lost-notification recovery remain per-Shotcaller and execute
+      outside model inference.
 
-`src/agent_watcher.py` does not import `league`. The filesystem baseline is the
-only live writer until issue #23 switches every consumer at one authorized
-generation; there is no dual canonical write path.
+`src/agent_watcher.py` does not import `league`. The launcher chooses either the
+preserved filesystem path or the exact SQLite writer-pointer path; there is no
+dual canonical write path.
 
 `src/league/acceptance.py` is the issue-#23 repository-local harness. It owns
 explicit-root sentinels, deterministic fake adapters, fixture migration parity,
@@ -201,14 +282,20 @@ performs no hosted mutation.
 
 ## Portability boundary
 
-The repository-local runtime core uses opaque namespaced session identity and
-declared capabilities. Codex+Herdr and Codex+tmux remain named contracts, and a
-deterministic Pi adapter proves the shared lifecycle without being labeled a
-real-runtime canary. The imported live watcher is unchanged: its Champion UUID,
-Codex hook, Herdr/tmux branch, and Herdr launch assumptions remain until issue
-#23 verifies and authorizes a cutover. Provider model names remain configuration
-data. Repository-local portability is implemented without claiming installed
-portability.
+The repository-local runtime core uses opaque namespaced session identity,
+declared capabilities, and explicit agent and multiplexer registries. Codex,
+Pi, and Cursor CLI keep native provider mechanics in dedicated adapter folders;
+Herdr advertises only its callable transport operations and tmux fails closed
+until its own adapter supplies them. Launch, restored-session reconciliation,
+and active Champion A-to-B replacement select those contracts without a
+provider/multiplexer branch in core policy. Adapters may return bounded storage
+transaction objects. Core validates their exact operation, assignment,
+participant, and source adapter before invoking them inside the ownership
+transaction. Pi-specific descriptor queries remain in
+`agent_adapters/pi/descriptor.py`; core storage does not interpret Pi's schema.
+Provider model names remain configuration data.
+The source and synthetic acceptance do not claim installed or live-runtime
+portability; issue #23 still owns cutover proof.
 
 The skill capability matrix selects one pair from the same registered adapter
 matrix, then evaluates orthogonal harness/tool/platform/browser/forge/

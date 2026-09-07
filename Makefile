@@ -13,24 +13,49 @@ STORAGE_TESTS := \
 	tests/test_sqlite_storage_import_export.py \
 	tests/test_sqlite_storage_commands.py \
 	tests/test_sqlite_storage_concurrency.py \
-	tests/test_project_catalog_roster.py
+	tests/test_project_catalog_roster.py \
+	tests/test_autonomous_delivery.py \
+	tests/test_issue_selection.py
 
 REQUEST_LIFECYCLE_TESTS := \
 	tests/test_request_lifecycle.py \
+	tests/test_request_turn_batch.py \
+	tests/test_delegation_policy.py \
 	tests/test_assignment_dispatch.py \
 	tests/test_request_concurrency.py \
 	tests/test_transition_delivery.py \
+	tests/test_cursor_steering.py \
+	tests/test_pi_provider_launch.py \
 	tests/test_shotcaller_stop.py \
+	tests/test_owner_stop_control.py \
 	tests/test_canonical_watcher.py \
+	tests/test_persistent_supervisor.py \
+	tests/test_multisquad_supervisor.py \
+	tests/test_supervisor_service.py \
+	tests/test_supervisor_delivery.py \
+	tests/test_calm_supervision.py \
+	tests/test_request_reconciliation.py \
 	tests/test_request_lifecycle_cli.py
 
+BENCHMARK_TESTS := \
+	tests/test_request_turn_benchmark.py \
+	tests/test_semantic_triage_benchmark.py \
+	tests/test_semantic_triage_benchmark_integration.py \
+	tests/test_inline_triage_prompt_shapes.py
+
 RUNTIME_LIFECYCLE_TESTS := \
+	tests/test_provider_hook_bootstrap.py \
 	tests/test_runtime_adapters.py \
+	tests/test_multiplexer_metadata.py \
+	tests/test_runtime_replacement.py \
+	tests/test_stopped_agent_retirement.py \
 	tests/test_cleanup_lifecycle.py \
 	tests/test_production_cleanup.py \
 	tests/test_repository_artifacts.py \
 	tests/test_real_cleanup.py \
-	tests/test_model_routing.py
+	tests/test_issue_continuation.py \
+	tests/test_model_routing.py \
+	tests/test_visible_champion_launch.py
 
 ROUTING_POLICY_TESTS := \
 	tests/test_routing_policy.py \
@@ -43,11 +68,15 @@ SKILL_CONTRACT_TESTS := \
 
 HANDOFF_CALLSIGN_TESTS := \
 	tests/test_callsign_queue.py \
-	tests/test_shotcaller_rollover.py
+	tests/test_shotcaller_rollover.py \
+	tests/test_rollover_successor.py \
+	tests/test_shotcaller_bootstrap.py \
+	tests/test_placement_policy.py
 
 ACCEPTANCE_TESTS := \
 	tests/test_acceptance_harness.py \
-	tests/test_pre_cutover.py
+	tests/test_pre_cutover.py \
+	tests/test_live_cutover.py
 
 REPORTING_PRIVACY_TESTS := \
 	tests/test_privacy.py \
@@ -56,13 +85,13 @@ REPORTING_PRIVACY_TESTS := \
 	tests/test_reporting.py \
 	tests/test_reporting_performance.py
 
-.PHONY: test test-baseline test-storage test-project-roster test-acceptance test-request-lifecycle test-runtime-lifecycle test-routing-policy test-skill-contracts test-handoff-callsigns test-reporting-privacy test-public-safety test-affected test-all
+.PHONY: test test-baseline test-storage test-project-roster test-acceptance test-request-lifecycle test-turn-benchmark test-runtime-lifecycle test-routing-policy test-skill-contracts test-handoff-callsigns test-reporting-privacy test-public-safety test-affected test-all
 test:
 	@$(MAKE) --no-print-directory test-baseline
 
 test-baseline:
 	@set -eu; for test in $(BASELINE_TESTS); do \
-		PYTHONDONTWRITEBYTECODE=1 $(PYTHON) $$test; \
+		LEAGUE_WRITER_POINTER="$(CURDIR)/tests/fixtures/absent-writer-pointer.json" PYTHONDONTWRITEBYTECODE=1 $(PYTHON) $$test; \
 	done
 
 test-storage:
@@ -75,6 +104,11 @@ test-project-roster:
 
 test-request-lifecycle:
 	@set -eu; for test in $(REQUEST_LIFECYCLE_TESTS); do \
+		PYTHONDONTWRITEBYTECODE=1 $(PYTHON) $$test; \
+	done
+
+test-turn-benchmark:
+	@set -eu; for test in $(BENCHMARK_TESTS); do \
 		PYTHONDONTWRITEBYTECODE=1 $(PYTHON) $$test; \
 	done
 

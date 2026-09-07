@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import json
 from typing import Any
 from urllib.parse import quote
 
@@ -148,8 +149,36 @@ def _agent_item(row: Any, event: Any, visibility: str, stale: bool) -> dict[str,
         "update": _private(row["update_text"], visibility),
         "blocker": _private(row["blocker"], visibility),
         "next_action": _private(row["next_action"], visibility),
+        "routing": _launch_routing(row),
         "evidence_links": evidence,
     }
+
+
+def _launch_routing(row: Any) -> dict[str, Any] | None:
+    raw = row["launch_receipt_json"]
+    if raw is None:
+        return None
+    try:
+        receipt = json.loads(raw)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise StorageRefusal(
+            "roster_routing_invalid", "canonical launch routing receipt is malformed"
+        ) from exc
+    routing = receipt.get("routing") if isinstance(receipt, dict) else None
+    if not isinstance(routing, dict):
+        return None
+    keys = ("decision_id", "provider", "model", "effort", "tier", "reason")
+    if any(key not in routing for key in keys) or any(
+        not isinstance(routing[key], str) or not routing[key]
+        for key in ("provider", "model", "effort", "tier", "reason")
+    ) or (
+        routing["decision_id"] is not None
+        and (not isinstance(routing["decision_id"], str) or not routing["decision_id"])
+    ):
+        raise StorageRefusal(
+            "roster_routing_invalid", "canonical launch routing receipt is incomplete"
+        )
+    return {key: routing[key] for key in keys}
 
 
 def _request_item(row: Any, visibility: str, stale: bool) -> dict[str, Any]:
@@ -213,7 +242,13 @@ def roster_snapshot(
         agent_rows = store.connection.execute(
             """
             SELECT agent_id,callsign,role,shotcaller_agent_id,task_id,status,version,
-                   updated_at,update_text,blocker,next_action,retired_at
+                   updated_at,update_text,blocker,next_action,retired_at,
+                   (SELECT ta.acceptance_receipt_json FROM task_assignments ta
+                     WHERE ta.champion_agent_id=agent_instances.agent_id
+                       AND ta.task_id=agent_instances.task_id
+                       AND ta.state='active'
+                     ORDER BY ta.updated_at DESC,ta.task_assignment_id DESC LIMIT 1)
+                     AS launch_receipt_json
               FROM agent_instances
              WHERE retired_at IS NULL AND role<>'hidden-worker'
                AND julianday(updated_at)<=julianday(?)
@@ -387,6 +422,7 @@ def roster_snapshot(
                         "update": _private(agent["update_text"], visibility),
                         "blocker": _private(agent["blocker"], visibility),
                         "next_action": _private(agent["next_action"], visibility),
+                        "routing": _launch_routing(agent),
                     }
                 )
             item = {

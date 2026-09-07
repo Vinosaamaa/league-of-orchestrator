@@ -11,10 +11,14 @@ from datetime import datetime
 from typing import Any, Optional
 
 from .storage_request import (
+    MAX_TRIAGE_TURN_PROMPTS,
     MAX_TASK_RESULT_SOURCES,
     AnswerRequestCommand,
     DispatchRequestCommand,
+    OwnerStopControl,
+    ReconcileDuplicateRequestCommand,
     RequestResultCommand,
+    TurnDispatchPlan,
 )
 from .storage_types import StorageRefusal
 from .orchestration import (
@@ -49,6 +53,13 @@ PROMPT_ITEM_DISPOSITIONS = {
     "deferred",
 }
 CHAMPION_WORK_KINDS = {
+    "benchmark",
+    "bug-fix",
+    "debugging",
+    "durable-research",
+    "operational",
+    "release",
+    "repository-reproduction",
     "repository-initialize",
     "repository-write",
     "configuration-write",
@@ -145,6 +156,94 @@ def _request_row(store: Any, request_id: str) -> sqlite3.Row:
     return row
 
 
+def _require_issue_owned_champion_tasks(
+    store: Any,
+    *,
+    request_id: str,
+    coordinator_agent_id: str,
+    task_ids: tuple[str, ...],
+    require_active: bool = True,
+) -> dict[str, sqlite3.Row]:
+    if not task_ids:
+        raise StorageRefusal(
+            "champion_delegation_required",
+            "Champion-routed implementation requires an issue-owned visible Champion result",
+        )
+    placeholders = ",".join("?" for _ in task_ids)
+    rows = store.connection.execute(
+        f"""
+        SELECT t.task_id,t.state,t.result_summary
+          FROM tasks t
+          JOIN task_assignments a
+            ON a.task_id=t.task_id AND a.request_id=t.request_id
+          JOIN repository_issue_bindings b
+            ON b.task_id=t.task_id
+           AND b.assignment_id=a.task_assignment_id
+           AND b.request_id=t.request_id
+          JOIN repository_issue_selection_receipts s
+            ON s.receipt_digest=b.issue_selection_receipt_digest
+           AND s.task_id=t.task_id
+         WHERE t.request_id=?
+           AND t.task_id IN ({placeholders})
+           AND t.state IN ('completed','complete','ready_to_land')
+           AND t.result_summary IS NOT NULL
+           AND a.assignment_role='champion'
+           AND (?=0 OR a.coordinator_agent_id=?)
+           AND a.champion_agent_id<>a.coordinator_agent_id
+           AND a.runtime_instance_id IS NOT NULL
+           AND a.acceptance_receipt_json IS NOT NULL
+           AND (?=0 OR a.state='active')
+           AND b.issue_state='open'
+           AND s.issue_state='open'
+           AND s.repository=b.repository
+           AND s.issue=b.issue
+           AND s.task_scope_digest=b.task_scope_digest
+        """,
+        (request_id, *task_ids, int(require_active), coordinator_agent_id, int(require_active)),
+    ).fetchall()
+    if {str(row["task_id"]) for row in rows} != set(task_ids):
+        raise StorageRefusal(
+            "champion_delegation_required",
+            "Champion-routed implementation lacks an exact issue-owned visible Champion receipt",
+        )
+    return {str(row["task_id"]): row for row in rows}
+
+
+def _require_champion_answer_result(store: Any, request: sqlite3.Row) -> None:
+    if request["execution_mode"] != "champion":
+        return
+    result_id = request["latest_result_id"]
+    result = (
+        None
+        if result_id is None
+        else store.connection.execute(
+            "SELECT produced_by_agent_id FROM request_results WHERE result_id=? AND request_id=?",
+            (result_id, request["request_id"]),
+        ).fetchone()
+    )
+    if result is None:
+        raise StorageRefusal(
+            "champion_delegation_required",
+            "Champion-routed implementation cannot be answered before its Champion result",
+        )
+    task_ids = tuple(
+        str(row["task_id"])
+        for row in store.connection.execute(
+            "SELECT task_id FROM request_result_sources WHERE result_id=? ORDER BY task_id",
+            (result_id,),
+        ).fetchall()
+    )
+    _require_issue_owned_champion_tasks(
+        store,
+        request_id=str(request["request_id"]),
+        coordinator_agent_id=str(result["produced_by_agent_id"]),
+        task_ids=task_ids,
+        # The accepted result is durable evidence even after a rollover or
+        # cleanup. Recheck its immutable issue proof, not current ownership.
+        require_active=False,
+    )
+
+
 def _active_claim(
     store: Any,
     request_id: str,
@@ -215,6 +314,7 @@ def intake_prompt(
     at: str,
     *,
     wake_scope_id: str | None = None,
+    wake: bool = True,
 ) -> dict[str, Any]:
     _time(at, "prompt capture time")
     encoded = body.encode("utf-8")
@@ -222,6 +322,8 @@ def intake_prompt(
         raise StorageRefusal("invalid_prompt", "prompt identity fields are required")
     if not encoded or len(encoded) > MAX_PROMPT_BYTES:
         raise StorageRefusal("invalid_prompt", "prompt body must be non-empty and within the bounded size")
+    if not wake and wake_scope_id is not None:
+        raise StorageRefusal("invalid_prompt_wake", "disabled prompt wake cannot name a scope")
     body_hash = hashlib.sha256(encoded).hexdigest()
     try:
         with store._transaction():
@@ -250,6 +352,7 @@ def intake_prompt(
                     "prompt_id": existing["prompt_id"],
                     "triage_state": existing["triage_state"],
                     "idempotent": True,
+                    "wake_committed": False,
                 }
             runtime = store.connection.execute(
                 """
@@ -292,8 +395,9 @@ def intake_prompt(
                 """
                 INSERT INTO prompts
                   (prompt_id,intake_actor_id,runtime_instance_id,adapter_kind,session_ref,
-                   source_event_key,triage_state,triage_digest,created_at)
-                VALUES(?,?,?,?,?,?,'untriaged',NULL,?)
+                   source_event_key,triage_state,triage_digest,created_at,current_owner_agent_id,
+                   current_owner_runtime_instance_id)
+                VALUES(?,?,?,?,?,?,'untriaged',NULL,?,?,?)
                 """,
                 (
                     prompt_id,
@@ -303,26 +407,20 @@ def intake_prompt(
                     session_ref,
                     source_event_key,
                     at,
+                    intake_actor_id,
+                    runtime_instance_id,
                 ),
             )
             store.connection.execute(
                 "INSERT INTO prompt_payloads(prompt_id,body,body_hash,byte_count,pruned_at) VALUES(?,?,?,?,NULL)",
                 (prompt_id, body, body_hash, len(encoded)),
             )
-            if wake_scope_id is None:
-                scope_row = store.connection.execute(
-                    "SELECT scope_id FROM watcher_scopes WHERE actor_agent_id=? ORDER BY scope_id LIMIT 1",
-                    (intake_actor_id,),
-                ).fetchone()
-                if scope_row is not None:
-                    wake_scope_id = str(scope_row["scope_id"])
-                else:
-                    actor = store.connection.execute(
-                        "SELECT callsign FROM agent_instances WHERE agent_id=? AND retired_at IS NULL",
-                        (intake_actor_id,),
-                    ).fetchone()
-                    if actor is not None:
-                        wake_scope_id = f"watcher:{actor['callsign']}"
+            if wake and wake_scope_id is None:
+                from .sqlite_watcher_ops import resolve_supervisor_scope
+
+                wake_scope_id = str(
+                    resolve_supervisor_scope(store, intake_actor_id)["scope_id"]
+                )
             if wake_scope_id is not None:
                 from .sqlite_watcher_ops import ensure_watcher_scope
 
@@ -333,16 +431,25 @@ def intake_prompt(
                     """
                     UPDATE watcher_scopes
                        SET user_message_generation=user_message_generation+1,
-                           wait_generation=wait_generation+1,stop_blocked=0,wait_active=0
+                           wait_generation=wait_generation+1,stop_blocked=0,wait_active=0,
+                           last_event_id=?,
+                           pending_stop_feedback_digest=NULL,
+                           pending_stop_terminal_generation=NULL,
+                           pending_stop_wait_generation=NULL
                      WHERE scope_id=?
                     """,
-                    (wake_scope_id,),
+                    (prompt_id, wake_scope_id),
                 )
     except StorageRefusal:
         raise
     except sqlite3.DatabaseError as exc:
         raise store._translate_database_error(exc, "prompt intake conflicted with canonical state") from exc
-    return {"prompt_id": prompt_id, "triage_state": "untriaged", "idempotent": False}
+    return {
+        "prompt_id": prompt_id,
+        "triage_state": "untriaged",
+        "idempotent": False,
+        "wake_committed": wake_scope_id is not None,
+    }
 
 
 def quarantine_prompt(
@@ -388,6 +495,7 @@ def quarantine_prompt(
                     "state": existing["state"],
                     "reason": existing["reason"],
                     "idempotent": True,
+                    "wake_committed": False,
                 }
             store.connection.execute(
                 """
@@ -416,10 +524,14 @@ def quarantine_prompt(
                     """
                     UPDATE watcher_scopes
                        SET user_message_generation=user_message_generation+1,
-                           wait_generation=wait_generation+1,stop_blocked=0,wait_active=0
+                           wait_generation=wait_generation+1,stop_blocked=0,wait_active=0,
+                           last_event_id=?,
+                           pending_stop_feedback_digest=NULL,
+                           pending_stop_terminal_generation=NULL,
+                           pending_stop_wait_generation=NULL
                      WHERE scope_id=? AND actor_agent_id=?
                     """,
-                    (wake_scope_id, wake_actor_id),
+                    (prompt_id, wake_scope_id, wake_actor_id),
                 )
                 store.connection.execute(
                     """
@@ -438,6 +550,7 @@ def quarantine_prompt(
         "state": "quarantined",
         "reason": "runtime_unverified",
         "idempotent": False,
+        "wake_committed": wake_scope_id is not None,
     }
 
 
@@ -449,8 +562,11 @@ def bind_quarantined_prompt(
     at: str,
     *,
     wake_scope_id: str | None = None,
+    wake: bool = True,
 ) -> dict[str, Any]:
     _time(at, "prompt binding time")
+    if not wake and wake_scope_id is not None:
+        raise StorageRefusal("invalid_prompt_wake", "disabled prompt wake cannot name a scope")
     try:
         with store._transaction():
             row = store.connection.execute(
@@ -465,7 +581,12 @@ def bind_quarantined_prompt(
                 )
                 if not exact:
                     raise StorageRefusal("prompt_binding_conflict", "prompt was bound to a different runtime")
-                return {"prompt_id": prompt_id, "triage_state": "untriaged", "idempotent": True}
+                return {
+                    "prompt_id": prompt_id,
+                    "triage_state": "untriaged",
+                    "idempotent": True,
+                    "wake_committed": False,
+                }
             runtime = store.connection.execute(
                 """
                 SELECT actor_agent_id,status,verified,session_ref
@@ -485,12 +606,15 @@ def bind_quarantined_prompt(
                 """
                 INSERT INTO prompts
                   (prompt_id,intake_actor_id,runtime_instance_id,adapter_kind,session_ref,
-                   source_event_key,triage_state,triage_digest,created_at)
-                VALUES(?,?,?,?,?,?,'untriaged',NULL,?)
+                   source_event_key,triage_state,triage_digest,created_at,current_owner_agent_id,
+                   current_owner_runtime_instance_id)
+                VALUES(?,?,?,?,?,?,'untriaged',NULL,?,?,?)
                 """,
                 (
                     prompt_id, intake_actor_id, runtime_instance_id, row["adapter_kind"],
                     row["session_ref"], row["source_event_key"], row["created_at"],
+                    intake_actor_id,
+                    runtime_instance_id,
                 ),
             )
             store.connection.execute(
@@ -510,20 +634,12 @@ def bind_quarantined_prompt(
             )
             if row["wake_committed"]:
                 wake_scope_id = None
-            elif wake_scope_id is None:
-                scope_row = store.connection.execute(
-                    "SELECT scope_id FROM watcher_scopes WHERE actor_agent_id=? ORDER BY scope_id LIMIT 1",
-                    (intake_actor_id,),
-                ).fetchone()
-                if scope_row is not None:
-                    wake_scope_id = str(scope_row["scope_id"])
-                else:
-                    actor = store.connection.execute(
-                        "SELECT callsign FROM agent_instances WHERE agent_id=? AND retired_at IS NULL",
-                        (intake_actor_id,),
-                    ).fetchone()
-                    if actor is not None:
-                        wake_scope_id = f"watcher:{actor['callsign']}"
+            elif wake and wake_scope_id is None:
+                from .sqlite_watcher_ops import resolve_supervisor_scope
+
+                wake_scope_id = str(
+                    resolve_supervisor_scope(store, intake_actor_id)["scope_id"]
+                )
             if wake_scope_id is not None:
                 from .sqlite_watcher_ops import ensure_watcher_scope
 
@@ -532,7 +648,10 @@ def bind_quarantined_prompt(
                     """
                     UPDATE watcher_scopes
                        SET user_message_generation=user_message_generation+1,
-                           wait_generation=wait_generation+1,stop_blocked=0,wait_active=0
+                           wait_generation=wait_generation+1,stop_blocked=0,wait_active=0,
+                           pending_stop_feedback_digest=NULL,
+                           pending_stop_terminal_generation=NULL,
+                           pending_stop_wait_generation=NULL
                      WHERE scope_id=?
                     """,
                     (wake_scope_id,),
@@ -549,7 +668,12 @@ def bind_quarantined_prompt(
         raise
     except sqlite3.DatabaseError as exc:
         raise store._translate_database_error(exc, "prompt binding conflicted with canonical state") from exc
-    return {"prompt_id": prompt_id, "triage_state": "untriaged", "idempotent": False}
+    return {
+        "prompt_id": prompt_id,
+        "triage_state": "untriaged",
+        "idempotent": False,
+        "wake_committed": wake_scope_id is not None,
+    }
 
 
 def _normalize_triage_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -565,6 +689,7 @@ def _normalize_triage_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]
             "summary": str(raw.get("summary", "")),
             "disposition": str(raw.get("disposition", "")),
             "request_id": raw.get("request_id"),
+            "expected_request_version": raw.get("expected_request_version"),
             "next_attention_at": raw.get("next_attention_at"),
         }
         if (
@@ -580,6 +705,14 @@ def _normalize_triage_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]
                 raise StorageRefusal("invalid_triage", "actionable prompt items require a request ID")
         elif item["request_id"] is not None:
             raise StorageRefusal("invalid_triage", "context and acknowledgement items cannot create requests")
+        if item["expected_request_version"] is not None and (
+            item["disposition"] not in {"follow_up", "duplicate", "deferred"}
+            or type(item["expected_request_version"]) is not int
+            or item["expected_request_version"] < 1
+        ):
+            raise StorageRefusal(
+                "invalid_triage", "only an existing-request item accepts a positive expected version"
+            )
         if item["disposition"] == "deferred":
             if not isinstance(item["next_attention_at"], str) or not item["next_attention_at"]:
                 raise StorageRefusal("invalid_triage", "deferred prompt item requires next attention time")
@@ -598,15 +731,14 @@ def _persist_triage_item(
     store: Any,
     *,
     prompt_id: str,
-    intake_actor_id: str,
+    capture_actor_id: str,
+    owner_agent_id: str,
     item: dict[str, Any],
     at: str,
 ) -> None:
     disposition = item["disposition"]
     request_id = item["request_id"]
-    if disposition in {"new_request", "deferred"}:
-        request_state = "deferred" if disposition == "deferred" else "open"
-        next_attention_at = item["next_attention_at"] if disposition == "deferred" else None
+    if disposition == "new_request":
         store.connection.execute(
             """
             INSERT INTO requests
@@ -618,16 +750,43 @@ def _persist_triage_item(
             (
                 request_id,
                 item["summary"],
-                intake_actor_id,
-                intake_actor_id,
-                request_state,
-                next_attention_at,
+                capture_actor_id,
+                owner_agent_id,
+                "open",
+                None,
                 at,
                 at,
             ),
         )
-    elif disposition in {"follow_up", "duplicate"}:
-        _request_row(store, str(request_id))
+    elif disposition in {"follow_up", "duplicate", "deferred"}:
+        request = _request_row(store, str(request_id))
+        expected_version = item["expected_request_version"]
+        if expected_version is not None and int(request["version"]) != expected_version:
+            raise StorageRefusal(
+                "version_conflict",
+                "semantic candidate request changed after intake",
+                retryable=True,
+            )
+        if disposition == "deferred":
+            if request["owner_agent_id"] != owner_agent_id:
+                raise StorageRefusal(
+                    "owner_mismatch", "only the current request owner may defer it"
+                )
+            changed = store.connection.execute(
+                """
+                UPDATE requests SET state='deferred',next_attention_at=?,version=version+1,
+                       updated_at=? WHERE request_id=? AND owner_agent_id=? AND version=?
+                """,
+                (
+                    item["next_attention_at"],
+                    at,
+                    request_id,
+                    owner_agent_id,
+                    request["version"],
+                ),
+            )
+            if changed.rowcount != 1:
+                raise StorageRefusal("version_conflict", "deferred request changed")
     store.connection.execute(
         """
         INSERT INTO prompt_items(prompt_item_id,prompt_id,ordinal,summary,disposition)
@@ -644,7 +803,7 @@ def _persist_triage_item(
     if request_id is not None:
         source_role = {
             "new_request": "origin",
-            "deferred": "origin",
+            "deferred": "follow_up",
             "follow_up": "follow_up",
             "duplicate": "duplicate",
         }[disposition]
@@ -652,6 +811,77 @@ def _persist_triage_item(
             "INSERT INTO request_sources(request_id,prompt_item_id,source_role) VALUES(?,?,?)",
             (request_id, item["prompt_item_id"], source_role),
         )
+
+
+def _triage_prompt_in_transaction(
+    store: Any,
+    prompt_id: str,
+    normalized: list[dict[str, Any]],
+    triage_digest: str,
+    at: str,
+    *,
+    expected_owner_agent_id: str | None = None,
+) -> dict[str, Any]:
+    counts = _triage_counts()
+    prompt = store.connection.execute(
+        "SELECT intake_actor_id,current_owner_agent_id,triage_state,triage_digest "
+        "FROM prompts WHERE prompt_id=?",
+        (prompt_id,),
+    ).fetchone()
+    if prompt is None:
+        raise StorageRefusal("prompt_unknown", "prompt does not exist")
+    if (
+        expected_owner_agent_id is not None
+        and prompt["current_owner_agent_id"] != expected_owner_agent_id
+    ):
+        raise StorageRefusal(
+            "owner_mismatch", "triage batch contains a prompt owned by another actor"
+        )
+    if prompt["triage_state"] == "complete":
+        if prompt["triage_digest"] != triage_digest:
+            raise StorageRefusal(
+                "triage_conflict", "prompt was already triaged with different items"
+            )
+        persisted = store.connection.execute(
+            "SELECT disposition,COUNT(*) count FROM prompt_items WHERE prompt_id=? GROUP BY disposition",
+            (prompt_id,),
+        ).fetchall()
+        for row in persisted:
+            counts[row["disposition"]] = int(row["count"])
+        return {
+            "prompt_id": prompt_id,
+            "triage_state": "complete",
+            "item_count": len(normalized),
+            "request_count": sum(
+                1
+                for item in normalized
+                if item["disposition"] == "new_request"
+            ),
+            "dispositions": counts,
+            "idempotent": True,
+        }
+    for item in normalized:
+        counts[item["disposition"]] += 1
+        _persist_triage_item(
+            store,
+            prompt_id=prompt_id,
+            capture_actor_id=prompt["intake_actor_id"],
+            owner_agent_id=prompt["current_owner_agent_id"],
+            item=item,
+            at=at,
+        )
+    store.connection.execute(
+        "UPDATE prompts SET triage_state='complete',triage_digest=? WHERE prompt_id=?",
+        (triage_digest, prompt_id),
+    )
+    return {
+        "prompt_id": prompt_id,
+        "triage_state": "complete",
+        "item_count": len(normalized),
+        "request_count": counts["new_request"],
+        "dispositions": counts,
+        "idempotent": False,
+    }
 
 
 def triage_prompt(
@@ -663,61 +893,500 @@ def triage_prompt(
     _time(at, "triage time")
     normalized = _normalize_triage_items(items)
     triage_digest = _digest(_json(normalized))
-    counts = _triage_counts()
     try:
         with store._transaction():
-            prompt = store.connection.execute(
-                "SELECT intake_actor_id,triage_state,triage_digest FROM prompts WHERE prompt_id=?",
-                (prompt_id,),
-            ).fetchone()
-            if prompt is None:
-                raise StorageRefusal("prompt_unknown", "prompt does not exist")
-            if prompt["triage_state"] == "complete":
-                if prompt["triage_digest"] != triage_digest:
-                    raise StorageRefusal("triage_conflict", "prompt was already triaged with different items")
-                persisted = store.connection.execute(
-                    "SELECT disposition,COUNT(*) count FROM prompt_items WHERE prompt_id=? GROUP BY disposition",
-                    (prompt_id,),
-                ).fetchall()
-                for row in persisted:
-                    counts[row["disposition"]] = int(row["count"])
-                return {
-                    "prompt_id": prompt_id,
-                    "triage_state": "complete",
-                    "item_count": len(normalized),
-                    "request_count": sum(
-                        1
-                        for item in normalized
-                        if item["disposition"] in {"new_request", "deferred"}
-                    ),
-                    "dispositions": counts,
-                    "idempotent": True,
-                }
-            for item in normalized:
-                counts[item["disposition"]] += 1
-                _persist_triage_item(
-                    store,
-                    prompt_id=prompt_id,
-                    intake_actor_id=prompt["intake_actor_id"],
-                    item=item,
-                    at=at,
-                )
-            store.connection.execute(
-                "UPDATE prompts SET triage_state='complete',triage_digest=? WHERE prompt_id=?",
-                (triage_digest, prompt_id),
+            result = _triage_prompt_in_transaction(
+                store, prompt_id, normalized, triage_digest, at
             )
     except StorageRefusal:
         raise
     except sqlite3.DatabaseError as exc:
         raise store._translate_database_error(exc, "prompt triage conflicted with canonical state") from exc
+    return result
+
+
+def triage_prompt_batch(
+    store: Any,
+    owner_agent_id: str,
+    expected_prompt_ids: tuple[str, ...],
+    decisions: list[dict[str, Any]],
+    at: str,
+) -> dict[str, Any]:
+    """Commit one exact turn's model-authored decisions in one transaction."""
+
+    _time(at, "triage time")
+    if not 0 <= len(expected_prompt_ids) <= MAX_TRIAGE_TURN_PROMPTS:
+        raise StorageRefusal("invalid_triage_batch", "triage turn prompt count is invalid")
+    if len(set(expected_prompt_ids)) != len(expected_prompt_ids):
+        raise StorageRefusal("invalid_triage_batch", "triage turn prompt identities are duplicated")
+    if not isinstance(decisions, list) or len(decisions) != len(expected_prompt_ids):
+        raise StorageRefusal(
+            "incomplete_triage_batch", "triage turn must decide every fetched prompt exactly once"
+        )
+    prepared: list[tuple[str, list[dict[str, Any]], str]] = []
+    decision_prompt_ids: list[str] = []
+    for decision in decisions:
+        if not isinstance(decision, dict) or set(decision) != {"prompt_id", "items"}:
+            raise StorageRefusal(
+                "invalid_triage_batch", "each triage decision must contain only prompt_id and items"
+            )
+        prompt_id = decision["prompt_id"]
+        items = decision["items"]
+        if not isinstance(prompt_id, str) or not isinstance(items, list):
+            raise StorageRefusal("invalid_triage_batch", "triage decision shape is invalid")
+        normalized = _normalize_triage_items(items)
+        prepared.append((prompt_id, normalized, _digest(_json(normalized))))
+        decision_prompt_ids.append(prompt_id)
+    if tuple(decision_prompt_ids) != expected_prompt_ids:
+        raise StorageRefusal(
+            "incomplete_triage_batch",
+            "triage decisions must match the fetched prompt identities and order exactly",
+        )
+    try:
+        with store._transaction():
+            owner = store.connection.execute(
+                "SELECT role,retired_at FROM agent_instances WHERE agent_id=?",
+                (owner_agent_id,),
+            ).fetchone()
+            if owner is None or owner["role"] != "shotcaller" or owner["retired_at"] is not None:
+                raise StorageRefusal(
+                    "owner_invalid", "triage batch requires one live Shotcaller owner"
+                )
+            receipts = [
+                _triage_prompt_in_transaction(
+                    store,
+                    prompt_id,
+                    normalized,
+                    digest,
+                    at,
+                    expected_owner_agent_id=owner_agent_id,
+                )
+                for prompt_id, normalized, digest in prepared
+            ]
+            linked_request_ids = tuple(
+                dict.fromkeys(
+                    str(item["request_id"])
+                    for _, normalized, _ in prepared
+                    for item in normalized
+                    if item["request_id"] is not None
+                )
+            )
+            readiness: list[dict[str, Any]] = []
+            for request_id in linked_request_ids:
+                request = _request_row(store, request_id)
+                claim = store.connection.execute(
+                    "SELECT released_at FROM request_claims WHERE request_id=?",
+                    (request_id,),
+                ).fetchone()
+                has_claim = claim is not None and claim["released_at"] is None
+                readiness.append(
+                    {
+                        "request_id": request_id,
+                        "state": request["state"],
+                        "version": int(request["version"]),
+                        "claim_required": not has_claim,
+                        "dispatch_ready": request["state"] in {"open", "accepted"} and has_claim,
+                    }
+                )
+    except StorageRefusal:
+        raise
+    except sqlite3.DatabaseError as exc:
+        raise store._translate_database_error(
+            exc, "prompt triage batch conflicted with canonical state"
+        ) from exc
     return {
-        "prompt_id": prompt_id,
-        "triage_state": "complete",
-        "item_count": len(normalized),
-        "request_count": counts["new_request"] + counts["deferred"],
-        "dispositions": counts,
+        "owner_agent_id": owner_agent_id,
+        "prompt_count": len(receipts),
+        "triage": receipts,
+        "dispatch_readiness": readiness,
+        "idempotent": bool(receipts) and all(item["idempotent"] for item in receipts),
+    }
+
+
+def begin_request_turn(
+    store: Any,
+    owner_agent_id: str,
+    expected_prompt_ids: tuple[str, ...],
+    decisions: list[dict[str, Any]],
+    plans: tuple[TurnDispatchPlan, ...],
+    at: str,
+    *,
+    expected_candidate_digest: str | None = None,
+    candidate_limit: int = 12,
+    candidate_max_bytes: int = 24_576,
+) -> dict[str, Any]:
+    """Triage, claim, and record each new request's routing plan atomically."""
+
+    planned_request_ids = tuple(plan.command.request_id for plan in plans)
+    if len(set(planned_request_ids)) != len(planned_request_ids):
+        raise StorageRefusal("invalid_turn_plan", "turn routing plans contain duplicate requests")
+    new_request_ids = tuple(
+        str(item.get("request_id"))
+        for decision in decisions
+        if isinstance(decision, dict)
+        for item in decision.get("items", [])
+        if isinstance(item, dict) and item.get("disposition") == "new_request"
+    )
+    if planned_request_ids != new_request_ids:
+        raise StorageRefusal(
+            "incomplete_turn_plan",
+            "turn routing plans must match each new request identity and order exactly",
+        )
+    if any(plan.command.at != at for plan in plans):
+        raise StorageRefusal("invalid_turn_plan", "turn routing plan timestamps must be exact")
+    external_plans = tuple(
+        plan for plan in plans if _dispatch_classification(plan.command)[0] != "direct"
+    )
+    if external_plans and not expected_candidate_digest:
+        raise StorageRefusal(
+            "candidate_inventory_required",
+            "new request dispatch requires the exact same-owner candidate inventory digest",
+        )
+    try:
+        with store._transaction():
+            if external_plans:
+                current_candidates = _candidate_request_inventory(
+                    store,
+                    owner_agent_id,
+                    limit=candidate_limit,
+                    max_bytes=candidate_max_bytes,
+                )
+                if current_candidates["truncated"]:
+                    raise StorageRefusal(
+                        "candidate_inventory_truncated",
+                        "same-owner duplicate check is incomplete; external dispatch is refused",
+                        retryable=True,
+                    )
+                if current_candidates["snapshot_digest"] != expected_candidate_digest:
+                    raise StorageRefusal(
+                        "version_conflict",
+                        "same-owner candidate inventory changed before dispatch",
+                        retryable=True,
+                    )
+            batch = triage_prompt_batch(
+                store,
+                owner_agent_id,
+                expected_prompt_ids,
+                decisions,
+                at,
+            )
+            routed: list[dict[str, Any]] = []
+            for plan in plans:
+                claim = claim_request(
+                    store,
+                    plan.command.request_id,
+                    plan.runtime_instance_id,
+                    plan.claim_token,
+                    plan.leased_until,
+                    at,
+                )
+                dispatch = dispatch_request(store, plan.command)
+                routed.append({"claim": claim, "dispatch": dispatch})
+    except StorageRefusal:
+        raise
+    except sqlite3.DatabaseError as exc:
+        raise store._translate_database_error(
+            exc, "request turn begin conflicted with canonical state"
+        ) from exc
+    return {"batch": batch, "routing": routed}
+
+
+def commit_request_turn(
+    store: Any,
+    owner_agent_id: str,
+    actions: tuple[AnswerRequestCommand | RequestResultCommand, ...],
+    at: str,
+) -> dict[str, Any]:
+    """Commit bounded direct answers/results and their delivery effects atomically."""
+
+    _time(at, "turn commit time")
+    if not 0 <= len(actions) <= 100:
+        raise StorageRefusal("invalid_turn_commit", "turn commit action count is invalid")
+    if any(action.at != at for action in actions):
+        raise StorageRefusal("invalid_turn_commit", "turn commit timestamps must be exact")
+    try:
+        with store._transaction():
+            receipts: list[dict[str, Any]] = []
+            for action in actions:
+                request = _request_row(store, action.request_id)
+                if request["owner_agent_id"] != owner_agent_id:
+                    raise StorageRefusal(
+                        "owner_mismatch", "turn commit action belongs to another request owner"
+                    )
+                if isinstance(action, AnswerRequestCommand):
+                    receipts.append(answer_request(store, action))
+                else:
+                    receipts.append(record_request_result(store, action))
+    except StorageRefusal:
+        raise
+    except sqlite3.DatabaseError as exc:
+        raise store._translate_database_error(
+            exc, "request turn commit conflicted with canonical state"
+        ) from exc
+    return {"owner_agent_id": owner_agent_id, "actions": receipts}
+
+
+def commit_interactive_request_turn(
+    store: Any,
+    owner_agent_id: str,
+    turn_token: str,
+    actions: tuple[AnswerRequestCommand | RequestResultCommand, ...],
+    at: str,
+    *,
+    owner_controls: tuple[OwnerStopControl, ...] = (),
+) -> dict[str, Any]:
+    """Commit request effects, semantic controls, and the supervisor turn atomically."""
+
+    from .sqlite_watcher_ops import commit_shotcaller_turn, prepare_owner_stop_control
+
+    if len(owner_controls) > 1 or any(
+        not isinstance(control, OwnerStopControl) for control in owner_controls
+    ):
+        raise StorageRefusal(
+            "owner_stop_invalid", "one request turn can record at most one owner stop"
+        )
+    try:
+        with store._transaction():
+            committed = commit_request_turn(store, owner_agent_id, actions, at)
+            prepared_controls = [
+                prepare_owner_stop_control(
+                    store,
+                    owner_agent_id,
+                    control.control_id,
+                    control.prompt_id,
+                    control.interrupt_delegates,
+                    at,
+                )
+                for control in owner_controls
+            ]
+            supervision = commit_shotcaller_turn(
+                store, owner_agent_id, turn_token, at
+            )
+    except StorageRefusal:
+        raise
+    except sqlite3.DatabaseError as exc:
+        raise store._translate_database_error(
+            exc, "interactive request turn commit conflicted with canonical state"
+        ) from exc
+    return {
+        **committed,
+        "supervision": supervision,
+        "owner_stop_controls": prepared_controls,
+    }
+
+
+def request_turn_boundary(store: Any, owner_agent_id: str) -> dict[str, Any]:
+    """Return the full Stop-equivalent obligation boundary on the open connection."""
+
+    from .sqlite_watcher_ops import obligation_counts
+
+    requests = unresolved_requests(store, owner_agent_id)
+    obligations = obligation_counts(store, owner_agent_id)
+    return {
+        **requests,
+        "obligations": obligations,
+        "safe_to_finish": sum(obligations.values()) == 0,
+    }
+
+
+def _existing_reconciliation_receipt(
+    store: Any, command: ReconcileDuplicateRequestCommand
+) -> dict[str, Any] | None:
+    existing = store.connection.execute(
+        "SELECT * FROM request_reconciliations WHERE duplicate_request_id=?",
+        (command.duplicate_request_id,),
+    ).fetchone()
+    if existing is None:
+        return None
+    exact = (
+        existing["canonical_request_id"] == command.canonical_request_id
+        and existing["actor_agent_id"] == command.owner_agent_id
+        and int(existing["duplicate_version_before"])
+        == command.expected_duplicate_version
+        and int(existing["canonical_version_at_link"])
+        == command.expected_canonical_version
+    )
+    if not exact:
+        raise StorageRefusal(
+            "reconciliation_conflict",
+            "duplicate request already has a different reconciliation",
+        )
+    duplicate = _request_row(store, command.duplicate_request_id)
+    return {
+        "schema": "league.request-reconciliation.v1",
+        "duplicate_request_id": command.duplicate_request_id,
+        "canonical_request_id": command.canonical_request_id,
+        "duplicate_state": duplicate["state"],
+        "duplicate_version": int(duplicate["version"]),
+        "canonical_version": int(existing["canonical_version_at_link"]),
+        "idempotent": True,
+    }
+
+
+def _validated_reconciliation_requests(
+    store: Any, command: ReconcileDuplicateRequestCommand
+) -> tuple[Any, Any]:
+    duplicate = _request_row(store, command.duplicate_request_id)
+    canonical = _request_row(store, command.canonical_request_id)
+    if (
+        duplicate["owner_agent_id"] != command.owner_agent_id
+        or canonical["owner_agent_id"] != command.owner_agent_id
+        or duplicate["owner_agent_id"] != canonical["owner_agent_id"]
+        or duplicate["owner_squad_id"] != canonical["owner_squad_id"]
+    ):
+        raise StorageRefusal(
+            "owner_mismatch",
+            "duplicate reconciliation requires the same current owner and Squad",
+        )
+    if (
+        int(duplicate["version"]) != command.expected_duplicate_version
+        or int(canonical["version"]) != command.expected_canonical_version
+    ):
+        raise StorageRefusal(
+            "version_conflict", "request changed before reconciliation", retryable=True
+        )
+    if (
+        duplicate["state"] in TERMINAL_REQUEST_STATES
+        or canonical["state"] in TERMINAL_REQUEST_STATES
+    ):
+        raise StorageRefusal(
+            "reconciliation_conflict",
+            "terminal requests refuse duplicate reconciliation",
+        )
+    chain = store.connection.execute(
+        """
+        SELECT 1 FROM request_reconciliations
+         WHERE duplicate_request_id=? OR canonical_request_id=? LIMIT 1
+        """,
+        (command.canonical_request_id, command.duplicate_request_id),
+    ).fetchone()
+    if chain is not None:
+        raise StorageRefusal(
+            "reconciliation_cycle",
+            "duplicate reconciliation chains and cycles are refused",
+        )
+    evidence_queries = (
+        (
+            "SELECT 1 FROM request_dispatches WHERE request_id=? LIMIT 1"
+        ),
+        "SELECT 1 FROM tasks WHERE request_id=? LIMIT 1",
+        "SELECT 1 FROM request_results WHERE request_id=? LIMIT 1",
+    )
+    if any(
+        store.connection.execute(query, (command.duplicate_request_id,)).fetchone()
+        is not None
+        for query in evidence_queries
+    ):
+        raise StorageRefusal(
+            "irreversible_execution_started",
+            "duplicate request has execution or result evidence and requires separate resolution",
+        )
+    return duplicate, canonical
+
+
+def _persist_request_reconciliation(
+    store: Any, command: ReconcileDuplicateRequestCommand, duplicate: Any
+) -> dict[str, Any]:
+    next_version = int(duplicate["version"]) + 1
+    changed = store.connection.execute(
+        """
+        UPDATE requests
+           SET state='cancelled',resolution_summary=?,version=?,updated_at=?
+         WHERE request_id=? AND owner_agent_id=? AND version=?
+        """,
+        (
+            "Superseded by the canonical same-owner request.",
+            next_version,
+            command.at,
+            command.duplicate_request_id,
+            command.owner_agent_id,
+            command.expected_duplicate_version,
+        ),
+    )
+    if changed.rowcount != 1:
+        raise StorageRefusal(
+            "version_conflict", "duplicate request changed", retryable=True
+        )
+    store.connection.execute(
+        "UPDATE request_claims SET released_at=? "
+        "WHERE request_id=? AND released_at IS NULL",
+        (command.at, command.duplicate_request_id),
+    )
+    event_id = "request-reconciliation:" + _digest(
+        _json(
+            {
+                "duplicate": command.duplicate_request_id,
+                "canonical": command.canonical_request_id,
+                "duplicate_version": command.expected_duplicate_version,
+                "canonical_version": command.expected_canonical_version,
+            }
+        )
+    )
+    _insert_request_event(
+        store,
+        event_id=event_id,
+        request_id=command.duplicate_request_id,
+        actor_id=command.owner_agent_id,
+        request_version=next_version,
+        event_type="request_superseded",
+        state="cancelled",
+        update="Duplicate request superseded by a canonical same-owner request.",
+        at=command.at,
+        detail={"canonical_request_id": command.canonical_request_id},
+    )
+    store.connection.execute(
+        """
+        INSERT INTO request_reconciliations
+          (duplicate_request_id,canonical_request_id,actor_agent_id,
+           duplicate_version_before,canonical_version_at_link,event_id,reconciled_at)
+        VALUES(?,?,?,?,?,?,?)
+        """,
+        (
+            command.duplicate_request_id,
+            command.canonical_request_id,
+            command.owner_agent_id,
+            command.expected_duplicate_version,
+            command.expected_canonical_version,
+            event_id,
+            command.at,
+        ),
+    )
+    return {
+        "schema": "league.request-reconciliation.v1",
+        "duplicate_request_id": command.duplicate_request_id,
+        "canonical_request_id": command.canonical_request_id,
+        "duplicate_state": "cancelled",
+        "duplicate_version": next_version,
+        "canonical_version": command.expected_canonical_version,
         "idempotent": False,
     }
+
+
+def reconcile_duplicate_request(
+    store: Any, command: ReconcileDuplicateRequestCommand
+) -> dict[str, Any]:
+    """Supersede one same-owner duplicate without erasing either request's provenance."""
+
+    _time(command.at, "request reconciliation time")
+    if command.duplicate_request_id == command.canonical_request_id:
+        raise StorageRefusal("invalid_reconciliation", "a request cannot supersede itself")
+    if command.expected_duplicate_version < 1 or command.expected_canonical_version < 1:
+        raise StorageRefusal(
+            "invalid_reconciliation", "expected request versions must be positive"
+        )
+    try:
+        with store._transaction():
+            receipt = _existing_reconciliation_receipt(store, command)
+            if receipt is not None:
+                return receipt
+            duplicate, _canonical = _validated_reconciliation_requests(store, command)
+            return _persist_request_reconciliation(store, command, duplicate)
+    except StorageRefusal:
+        raise
+    except sqlite3.DatabaseError as exc:
+        raise store._translate_database_error(
+            exc, "request reconciliation conflicted with canonical state"
+        ) from exc
 
 
 def claim_request(
@@ -942,6 +1611,78 @@ def claim_request(
     }
 
 
+def accept_routed_delivery(
+    store: Any,
+    event_id: str,
+    recipient_agent_id: str,
+    runtime_instance_id: str,
+    leased_until: str,
+    at: str,
+) -> dict[str, Any]:
+    """Accept one exact received route without caller-manufactured claim mechanics."""
+
+    _time(at, "routed acceptance time")
+    _time(leased_until, "routed acceptance lease")
+    route = store.connection.execute(
+        """
+        SELECT e.request_id,e.event_type,o.outbox_id,o.recipient_agent_id,
+               r.state,r.owner_agent_id,r.pending_owner_agent_id,r.last_route_event_id
+          FROM events e
+          JOIN delivery_outbox o ON o.event_id=e.event_id
+          JOIN requests r ON r.request_id=e.request_id
+         WHERE e.event_id=? AND o.recipient_agent_id=?
+        """,
+        (event_id, recipient_agent_id),
+    ).fetchone()
+    if (
+        route is None
+        or route["event_type"] != "request_routed"
+        or route["last_route_event_id"] != event_id
+        or route["state"] not in {"routed", "accepted"}
+        or (
+            route["state"] == "routed"
+            and route["pending_owner_agent_id"] != recipient_agent_id
+        )
+        or (
+            route["state"] == "accepted"
+            and route["owner_agent_id"] != recipient_agent_id
+        )
+    ):
+        raise StorageRefusal(
+            "routed_delivery_mismatch",
+            "event is not the exact current routed request for this recipient",
+        )
+    receipt = store.connection.execute(
+        "SELECT 1 FROM recipient_receipts WHERE event_id=? AND recipient_agent_id=?",
+        (event_id, recipient_agent_id),
+    ).fetchone()
+    if receipt is None:
+        raise StorageRefusal(
+            "route_unreceived", "routed request cannot be accepted before exact receipt"
+        )
+    claim_token = "routed-" + hashlib.sha256(
+        (
+            f"league.accept-routed.v1\0{event_id}\0{recipient_agent_id}\0"
+            f"{runtime_instance_id}"
+        ).encode()
+    ).hexdigest()
+    result = claim_request(
+        store,
+        str(route["request_id"]),
+        runtime_instance_id,
+        claim_token,
+        leased_until,
+        at,
+    )
+    return {
+        **result,
+        "route_event_id": event_id,
+        "route_outbox_id": route["outbox_id"],
+        "claim_token": claim_token,
+        "leased_until": leased_until,
+    }
+
+
 def release_request_claim(
     store: Any,
     request_id: str,
@@ -984,6 +1725,11 @@ def classify_dispatch(
         raise StorageRefusal("invalid_dispatch", "work kind is not part of the bounded classifier contract")
     if requested_mode == "hidden" and not hidden_supported:
         raise StorageRefusal("hidden_unavailable", "hidden advisory support is unavailable")
+    if work_kind in CHAMPION_WORK_KINDS and requested_mode in {"direct", "hidden"}:
+        raise StorageRefusal(
+            "champion_required",
+            "repository, durable research, benchmark, release, operational, and debugging work requires a visible Champion",
+        )
     force_local_champion = requested_mode == "champion"
     force_local_direct = requested_mode == "direct"
     decision = decide_orchestration_route(
@@ -1000,6 +1746,8 @@ def classify_dispatch(
         )
     if force_local_champion:
         decision = decision.__class__(LOCAL_CHAMPION, "explicit_champion", None, True)
+    elif work_kind in CHAMPION_WORK_KINDS:
+        decision = decision.__class__(LOCAL_CHAMPION, "worker_required", None, True)
     if force_local_direct and decision.route != LOCAL_DIRECT:
         raise StorageRefusal(
             "champion_required",
@@ -1053,6 +1801,21 @@ def _validate_hidden_scientist(
     return subtask
 
 
+def _dispatch_classification(
+    command: DispatchRequestCommand,
+) -> tuple[str, str, str]:
+    signal_value = command.orchestration.as_record()
+    signal_value["hidden_advisory"] = command.requested_mode == "hidden"
+    return classify_dispatch(
+        work_kind=command.work_kind,
+        requested_mode=command.requested_mode,
+        hidden_supported=command.hidden_supported,
+        signals=OrchestrationSignals(**signal_value),
+        explicit_squad_id=command.explicit_route,
+        continuation_squad_id=command.continuation_target,
+    )
+
+
 def dispatch_request(
     store: Any,
     command: DispatchRequestCommand,
@@ -1074,14 +1837,7 @@ def dispatch_request(
         "hidden_subtask": command.hidden_subtask,
         "hidden_scope_budget": command.hidden_scope_budget,
     }
-    mode, reason_code, reason = classify_dispatch(
-        work_kind=work_kind,
-        requested_mode=requested_mode,
-        hidden_supported=hidden_supported,
-        signals=OrchestrationSignals(**signal_value),
-        explicit_squad_id=explicit_route,
-        continuation_squad_id=command.continuation_target,
-    )
+    mode, reason_code, reason = _dispatch_classification(command)
     try:
         with store._transaction():
             request = _request_row(store, request_id)
@@ -1486,7 +2242,14 @@ def record_request_result(store: Any, command: RequestResultCommand) -> dict[str
             if int(request["version"]) != expected_version:
                 raise StorageRefusal("version_conflict", "request result expected-version failed")
             cited_tasks: dict[str, sqlite3.Row] = {}
-            if sources:
+            if request["execution_mode"] == "champion":
+                cited_tasks = _require_issue_owned_champion_tasks(
+                    store,
+                    request_id=request_id,
+                    coordinator_agent_id=str(request["owner_agent_id"]),
+                    task_ids=sources,
+                )
+            elif sources:
                 placeholders = ",".join("?" for _ in sources)
                 cited_tasks = {
                     str(row["task_id"]): row
@@ -1690,6 +2453,7 @@ def answer_request(store: Any, command: AnswerRequestCommand) -> dict[str, Any]:
             claim = _active_claim(store, request_id, token=claim_token, at=at)
             if int(request["version"]) != expected_version:
                 raise StorageRefusal("version_conflict", "request answer expected-version failed")
+            _require_champion_answer_result(store, request)
             next_version = expected_version + 1
             store.connection.execute(
                 """
@@ -1768,7 +2532,7 @@ def unresolved_requests(
     )
     untriaged_prompt_count = int(
         store.connection.execute(
-            "SELECT COUNT(*) FROM prompts WHERE intake_actor_id=? AND triage_state='untriaged'",
+            "SELECT COUNT(*) FROM prompts WHERE current_owner_agent_id=? AND triage_state='untriaged'",
             (owner_agent_id,),
         ).fetchone()[0]
     )
@@ -1777,7 +2541,7 @@ def unresolved_requests(
         SELECT p.prompt_id,p.adapter_kind,p.session_ref,p.source_event_key,p.created_at,
                pp.body_hash,pp.byte_count
           FROM prompts p JOIN prompt_payloads pp ON pp.prompt_id=p.prompt_id
-         WHERE p.intake_actor_id=? AND p.triage_state='untriaged'
+         WHERE p.current_owner_agent_id=? AND p.triage_state='untriaged'
          ORDER BY p.created_at,p.prompt_id
          LIMIT ?
         """,
@@ -1811,4 +2575,301 @@ def unresolved_requests(
         "safe_to_finish": request_total == 0 and untriaged_prompt_count == 0 and obligations == 0,
         "untriaged_prompts": [dict(row) for row in prompt_rows],
         "requests": [dict(row) for row in rows],
+    }
+
+
+def _candidate_request_inventory(
+    store: Any,
+    owner_agent_id: str,
+    *,
+    limit: int,
+    max_bytes: int,
+    after: str | None = None,
+    prompt_texts: tuple[str, ...] = (),
+    page: bool = False,
+) -> dict[str, Any]:
+    total = int(
+        store.connection.execute(
+            """
+            SELECT COUNT(*) FROM requests
+             WHERE owner_agent_id=? AND state NOT IN ('answered','cancelled')
+            """,
+            (owner_agent_id,),
+        ).fetchone()[0]
+    )
+    pool_limit = limit + 1 if page else min(48, limit * 4) + 1
+    if page:
+        rows = store.connection.execute(
+            """
+            SELECT request_id,summary,state,version,updated_at
+              FROM requests
+             WHERE owner_agent_id=? AND state NOT IN ('answered','cancelled')
+               AND request_id>?
+             ORDER BY request_id
+             LIMIT ?
+            """,
+            (owner_agent_id, after or "", pool_limit),
+        ).fetchall()
+    else:
+        rows = store.connection.execute(
+            """
+            SELECT request_id,summary,state,version,updated_at
+              FROM requests
+             WHERE owner_agent_id=? AND state NOT IN ('answered','cancelled')
+             ORDER BY updated_at DESC,request_id
+             LIMIT ?
+            """,
+            (owner_agent_id, pool_limit),
+        ).fetchall()
+    request_ids = [str(row["request_id"]) for row in rows]
+    routing_by_request: dict[str, dict[str, str]] = {}
+    if request_ids:
+        placeholders = ",".join("?" for _ in request_ids)
+        routing_rows = store.connection.execute(
+            f"""
+            SELECT t.request_id,t.project_id,p.repository,t.task_id
+              FROM tasks t
+              JOIN (
+                    SELECT request_id,MIN(task_id) AS task_id
+                      FROM tasks
+                     WHERE request_id IN ({placeholders})
+                     GROUP BY request_id
+                   ) selected
+                ON selected.request_id=t.request_id AND selected.task_id=t.task_id
+              LEFT JOIN projects p ON p.project_id=t.project_id
+             ORDER BY t.request_id
+            """,
+            tuple(request_ids),
+        ).fetchall()
+        for row in routing_rows:
+            routing_by_request[str(row["request_id"])] = {
+                key: str(row[key])
+                for key in ("project_id", "repository")
+                if row[key] is not None
+            }
+    prompt_terms = {
+        term
+        for text in prompt_texts
+        for term in re.findall(r"[a-z0-9]+", text.lower())
+        if len(term) > 2
+    }
+    prompt_terms = set(
+        sorted(prompt_terms, key=lambda term: (-len(term), term))[:64]
+    )
+    prepared: list[dict[str, Any]] = []
+    for row in rows:
+        summary = " ".join(str(row["summary"]).split())[:240]
+        candidate: dict[str, Any] = {
+            "request_id": row["request_id"],
+            "summary": summary,
+            "state": row["state"],
+            "version": int(row["version"]),
+        }
+        routing_key = routing_by_request.get(str(row["request_id"]), {})
+        if routing_key:
+            candidate["routing_key"] = routing_key
+        searchable = " ".join(
+            (summary, *(str(value) for value in routing_key.values()))
+        ).lower()
+        terms = {term for term in re.findall(r"[a-z0-9]+", searchable) if len(term) > 2}
+        candidate["_overlap"] = len(prompt_terms & terms)
+        candidate["_routing_overlap"] = int(
+            any(
+                (routing_terms := {
+                    term
+                    for term in re.findall(r"[a-z0-9]+", str(value).lower())
+                    if len(term) > 2
+                })
+                and routing_terms <= prompt_terms
+                for value in routing_key.values()
+            )
+        )
+        candidate["_updated_at"] = str(row["updated_at"])
+        prepared.append(candidate)
+    snapshot_rows = [
+        {key: value for key, value in row.items() if not key.startswith("_")}
+        for row in prepared
+    ]
+    snapshot_digest = _digest(_json(snapshot_rows))
+    if not page:
+        prepared.sort(key=lambda row: str(row["request_id"]))
+        prepared.sort(key=lambda row: row["_updated_at"], reverse=True)
+        prepared.sort(key=lambda row: row["_overlap"], reverse=True)
+        prepared.sort(key=lambda row: row["_routing_overlap"], reverse=True)
+    candidates: list[dict[str, Any]] = []
+    returned_bytes = 0
+    more = total > limit if not page else len(prepared) > limit
+    for row in prepared[:limit]:
+        candidate = {key: value for key, value in row.items() if not key.startswith("_")}
+        encoded = _json(candidate).encode("utf-8")
+        if returned_bytes + len(encoded) > max_bytes:
+            more = True
+            break
+        candidates.append(candidate)
+        returned_bytes += len(encoded)
+    digest = _digest(
+        _json(
+            {
+                "owner_agent_id": owner_agent_id,
+                "after": after,
+                "ranking": "request-id-page" if page else "routing-lexical-recency",
+                "truncated": more,
+                "requests": candidates,
+            }
+        )
+    )
+    return {
+        "owner_agent_id": owner_agent_id,
+        "total_count": total,
+        "returned_count": len(candidates),
+        "returned_bytes": returned_bytes,
+        "truncated": more,
+        "after": after if page else None,
+        "ranking": "request-id-page" if page else "routing-lexical-recency",
+        "next_cursor": candidates[-1]["request_id"] if page and more and candidates else None,
+        "digest": digest,
+        "snapshot_digest": snapshot_digest,
+        "requests": candidates,
+    }
+
+
+def untriaged_intake(
+    store: Any,
+    owner_agent_id: str,
+    *,
+    limit: int = 20,
+    max_bytes: int = 1_000_000,
+    candidate_limit: int = 12,
+    candidate_max_bytes: int = 24_576,
+    candidate_after: str | None = None,
+    candidate_page: bool = False,
+) -> dict[str, Any]:
+    """Return exact prompts plus bounded canonical semantic-dedup candidates."""
+
+    if (
+        not 1 <= limit <= 100
+        or not MAX_PROMPT_BYTES <= max_bytes <= 4_000_000
+        or not 1 <= candidate_limit <= (500 if candidate_page else 20)
+        or not 1_024 <= candidate_max_bytes <= 1_000_000
+        or (candidate_after is not None and not candidate_page)
+    ):
+        raise StorageRefusal(
+            "invalid_limit", "untriaged intake bounds are outside the supported range"
+        )
+    owner = store.connection.execute(
+        "SELECT role,retired_at FROM agent_instances WHERE agent_id=?",
+        (owner_agent_id,),
+    ).fetchone()
+    if owner is None or owner["role"] != "shotcaller" or owner["retired_at"] is not None:
+        raise StorageRefusal(
+            "owner_invalid", "untriaged intake requires one live Shotcaller owner"
+        )
+    total = int(
+        store.connection.execute(
+            "SELECT COUNT(*) FROM prompts WHERE current_owner_agent_id=? AND triage_state='untriaged'",
+            (owner_agent_id,),
+        ).fetchone()[0]
+    )
+    rows = store.connection.execute(
+        """
+        SELECT p.prompt_id,p.runtime_instance_id,p.current_owner_runtime_instance_id,
+               p.adapter_kind,p.session_ref,p.source_event_key,p.created_at,
+               pp.body,pp.body_hash,pp.byte_count,pp.pruned_at
+          FROM prompts p JOIN prompt_payloads pp ON pp.prompt_id=p.prompt_id
+         WHERE p.current_owner_agent_id=? AND p.triage_state='untriaged'
+         ORDER BY p.created_at,p.prompt_id
+         LIMIT ?
+        """,
+        (owner_agent_id, limit),
+    ).fetchall()
+    prompts: list[dict[str, Any]] = []
+    returned_bytes = 0
+    for row in rows:
+        body = row["body"]
+        if body is None or row["pruned_at"] is not None:
+            raise StorageRefusal(
+                "prompt_payload_unavailable",
+                "an untriaged prompt no longer has its exact retained body",
+            )
+        encoded = str(body).encode("utf-8")
+        if (
+            len(encoded) != int(row["byte_count"])
+            or hashlib.sha256(encoded).hexdigest() != row["body_hash"]
+        ):
+            raise StorageRefusal(
+                "prompt_payload_mismatch", "retained prompt bytes do not match their identity"
+            )
+        if returned_bytes + len(encoded) > max_bytes:
+            break
+        prompts.append(
+            {
+                "prompt_id": row["prompt_id"],
+                "runtime_instance_id": row["runtime_instance_id"],
+                "owner_runtime_instance_id": row["current_owner_runtime_instance_id"],
+                "adapter_kind": row["adapter_kind"],
+                "session_ref": row["session_ref"],
+                "source_event_key": row["source_event_key"],
+                "created_at": row["created_at"],
+                "body": body,
+                "body_hash": row["body_hash"],
+                "byte_count": int(row["byte_count"]),
+            }
+        )
+        returned_bytes += len(encoded)
+    candidate_inventory = _candidate_request_inventory(
+        store,
+        owner_agent_id,
+        limit=candidate_limit,
+        max_bytes=candidate_max_bytes,
+        after=candidate_after,
+        prompt_texts=tuple(str(prompt["body"]) for prompt in prompts),
+        page=candidate_page,
+    )
+    return {
+        "owner_agent_id": owner_agent_id,
+        "untriaged_prompt_count": total,
+        "returned_count": len(prompts),
+        "returned_bytes": returned_bytes,
+        "truncated": total > len(prompts),
+        "prompts": prompts,
+        "candidate_inventory": candidate_inventory,
+    }
+
+
+def semantic_recovery_backlog(store: Any, *, limit: int = 20) -> dict[str, Any]:
+    """Return only prompts that lack a verified live owner runtime."""
+
+    if not 1 <= limit <= 100:
+        raise StorageRefusal("invalid_limit", "semantic recovery backlog limit is invalid")
+    quarantined = store.connection.execute(
+        """
+        SELECT prompt_id,created_at FROM prompt_quarantine
+         WHERE state='quarantined'
+         ORDER BY created_at,prompt_id
+         LIMIT ?
+        """,
+        (limit + 1,),
+    ).fetchall()
+    orphaned = store.connection.execute(
+        """
+        SELECT p.prompt_id,p.created_at FROM prompts p
+         WHERE p.triage_state='untriaged'
+           AND NOT EXISTS (
+             SELECT 1 FROM runtime_instances r
+              WHERE r.actor_agent_id=p.current_owner_agent_id
+                AND r.status IN ('active','idle') AND r.verified=1
+           )
+         ORDER BY p.created_at,p.prompt_id
+         LIMIT ?
+        """,
+        (limit + 1,),
+    ).fetchall()
+    rows = sorted(
+        (*quarantined, *orphaned),
+        key=lambda row: (str(row["created_at"]), str(row["prompt_id"])),
+    )[: limit + 1]
+    return {
+        "returned_count": min(len(rows), limit),
+        "truncated": len(rows) > limit,
+        "prompt_ids": [str(row["prompt_id"]) for row in rows[:limit]],
     }

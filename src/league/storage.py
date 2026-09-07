@@ -4,22 +4,37 @@ from __future__ import annotations
 
 from .storage_admin import AdministrativeStorage
 from .storage_artifact import ArtifactStorage
-from .storage_assignment import AssignmentStorage, PrepareAssignmentCommand
+from .storage_assignment import (
+    AssignmentStorage,
+    LegacyDisplayReconciliationCommand,
+    PrepareAssignmentCommand,
+)
 from .storage_callsign import CallsignQueueStorage
+from .storage_continuation import ContinuationStorage
 from .storage_delivery import DeliveryStorage
 from .storage_lifecycle import LifecycleStorage
+from .storage_issue import IssueStorage
+from .storage_mode import (
+    BeginProtectedGateCommand,
+    ModeStorage,
+    SettleModeActionCommand,
+    SettleProtectedGateCommand,
+)
 from .storage_outbox import OutboxDispatchIdentity, OutboxStorage
 from .storage_project import ProjectStorage
 from .storage_reporting import ReportingStorage
 from .storage_request import (
     AnswerRequestCommand,
     DispatchRequestCommand,
+    OwnerStopControl,
+    ReconcileDuplicateRequestCommand,
     RequestResultCommand,
     RequestStorage,
 )
 from .storage_runtime import RuntimeLifecycleStorage
 from .storage_roster import RosterStorage
 from .storage_rollover import RolloverStorage
+from .storage_startup import StartupContextStorage
 from .storage_transfer import TransferStorage
 from .storage_watcher import RuntimeRegistrationCommand, WatcherStorage
 from .storage_types import (
@@ -47,6 +62,10 @@ class Storage(
     RosterStorage,
     CallsignQueueStorage,
     RolloverStorage,
+    StartupContextStorage,
+    ModeStorage,
+    IssueStorage,
+    ContinuationStorage,
 ):
     """The only domain-facing persistence interface.
 
@@ -61,12 +80,17 @@ __all__ = [
     "FaultInjector",
     "ImportArtifact",
     "ImportPlan",
+    "LegacyDisplayReconciliationCommand",
     "AnswerRequestCommand",
     "DispatchRequestCommand",
+    "ReconcileDuplicateRequestCommand",
     "OutboxDispatchIdentity",
     "PrepareAssignmentCommand",
     "RequestResultCommand",
     "RuntimeRegistrationCommand",
+    "SettleModeActionCommand",
+    "BeginProtectedGateCommand",
+    "SettleProtectedGateCommand",
     "Storage",
     "StorageRefusal",
 ]

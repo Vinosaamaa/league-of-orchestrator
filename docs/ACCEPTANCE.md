@@ -1,5 +1,12 @@
 # Isolated acceptance and reversible cutover foundation
 
+Issue #8 / PR #54's focused startup/rollover gate is
+`PYTHONDONTWRITEBYTECODE=1 python3 tests/test_rollover_successor.py`, plus the
+affected staged rollover, production cleanup, runtime adapter, schema and CLI
+suites. The tests cover registered Codex/Cursor native kinds with synthetic
+runtime observations; they do not run either live provider. Source completion
+does not close the installed bidirectional end-to-end acceptance gate.
+
 Issue [#23](https://github.com/Vinosaamaa/league-of-orchestrator/issues/23)
 owns this repository-local harness. It creates one disposable League home only
 beneath an explicit existing temporary root. It does not discover or use a home

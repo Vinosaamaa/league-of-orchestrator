@@ -75,7 +75,7 @@ def _validate_descriptor(value: Mapping[str, Any]) -> dict[str, Any]:
         "parent_session_path",
     }
     descriptor = dict(value)
-    if set(descriptor) != required or descriptor.get("schema") != "league.pi-launch-descriptor.v1":
+    if set(descriptor) not in (required, required | {"routing"}) or descriptor.get("schema") != "league.pi-launch-descriptor.v1":
         raise StorageRefusal("provider_launch_descriptor_invalid", "Pi launch descriptor fields are not exact")
     if (
         not isinstance(descriptor["descriptor_id"], str)
@@ -127,7 +127,88 @@ def _validate_descriptor(value: Mapping[str, Any]) -> dict[str, Any]:
         exact = session_id is None and session_path is None and SESSION_ID.fullmatch(str(parent_id or "")) and _absolute(parent_path)
     if not exact:
         raise StorageRefusal("provider_launch_session_invalid", "Pi create, fork, or resume identity is incomplete")
+    _validate_descriptor_routing(descriptor)
     return descriptor
+
+
+def _validate_descriptor_routing(descriptor: Mapping[str, Any]) -> None:
+    if "routing" in descriptor:
+        routing = descriptor["routing"]
+        fields = {
+            "decision_id", "provider", "model", "effort", "tier", "reason",
+            "reason_code", "policy_version", "provider_config_version", "explicit",
+        }
+        if not (
+            isinstance(routing, dict) and set(routing) == fields
+            and all(routing[key] == descriptor[field] for key, field in (
+                ("provider", "provider_kind"), ("model", "model"), ("effort", "effort")
+            ))
+            and isinstance(routing["explicit"], dict)
+            and set(routing["explicit"]) == {"runtime", "provider", "model", "effort"}
+            and all(isinstance(item, bool) for item in routing["explicit"].values())
+            and all(isinstance(routing[key], str) and bool(routing[key])
+                    for key in ("tier", "reason", "reason_code"))
+            and (
+                isinstance(routing["decision_id"], str) and SAFE_ID.fullmatch(routing["decision_id"])
+                or routing["decision_id"] is None
+                and routing["explicit"]["model"] and routing["explicit"]["effort"]
+                and routing["tier"] == "EXPLICIT"
+                and routing["reason_code"] == "explicit_override"
+                and routing["policy_version"] is None
+                and routing["provider_config_version"] is None
+            )
+        ):
+            raise StorageRefusal("provider_launch_descriptor_invalid", "Pi launch routing evidence is not exact")
+
+
+def _validate_canonical_routing_assignment(store: Any, exact: Mapping[str, Any]) -> None:
+    routing = exact.get("routing")
+    if routing and routing["decision_id"] is not None:
+        decision = store.routing_decision(routing["decision_id"])
+        assignment = store.connection.execute(
+            """SELECT a.*,c.requirements_json FROM task_assignments a
+                 JOIN callsign_assignments c ON c.callsign_assignment_id=?
+                WHERE a.task_assignment_id=?""",
+            (f"callsign-assignment:{exact['assignment_id']}", exact["assignment_id"]),
+        ).fetchone()
+        targets = {} if assignment is None else {
+            "assignment": exact["assignment_id"],
+            "task": assignment["task_id"], "request": assignment["request_id"],
+        }
+        from .agent_adapters import builtin_agent_adapter_registry
+        from .sqlite_callsign_ops import capabilities
+
+        provider_adapter = builtin_agent_adapter_registry().adapter(exact["runtime_kind"])
+        capabilities_match = False
+        if decision is not None and assignment is not None:
+            try:
+                capabilities_match = capabilities(
+                    json.loads(decision["required_capabilities_json"])
+                ) == capabilities(
+                    json.loads(assignment["requirements_json"])
+                )
+            except (json.JSONDecodeError, TypeError, StorageRefusal) as exc:
+                raise StorageRefusal(
+                    "provider_launch_routing_mismatch",
+                    "Pi canonical routing capabilities are malformed",
+                ) from exc
+        if not (
+            decision is not None and assignment is not None
+            and decision.get("subject_kind") in targets
+            and decision.get("subject_id") == targets.get(decision["subject_kind"])
+            and decision.get("role") == exact["role"]
+            and decision.get("state") in {"selected", "escalated"}
+            and provider_adapter.normalize_provider(str(decision.get("provider", ""))) == routing["provider"]
+            and all(decision.get(key) == routing[key] for key in (
+                "model", "effort", "tier", "reason", "reason_code",
+                "policy_version", "provider_config_version",
+            ))
+            and capabilities_match
+        ):
+            raise StorageRefusal(
+                "provider_launch_routing_mismatch",
+                "Pi routing evidence does not bind the exact canonical assignment",
+            )
 
 
 def prepare_provider_launch(store: Any, descriptor: Mapping[str, Any], at: str) -> dict[str, Any]:
@@ -136,6 +217,7 @@ def prepare_provider_launch(store: Any, descriptor: Mapping[str, Any], at: str) 
     digest = _digest(exact)
     try:
         with store._transaction():
+            _validate_canonical_routing_assignment(store, exact)
             existing = store.connection.execute(
                 "SELECT * FROM provider_launch_descriptors WHERE descriptor_id=?",
                 (exact["descriptor_id"],),

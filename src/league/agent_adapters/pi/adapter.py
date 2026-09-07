@@ -60,11 +60,12 @@ def _visible_launch_factory(
     from pathlib import Path
 
     from ...pi_launch import deterministic_pi_session_id
+    from ...sqlite_provider_launch_ops import SAFE_PROJECT
 
     project_code = launch.get("project_code")
-    if not isinstance(project_code, str) or not project_code:
+    if not isinstance(project_code, str) or not SAFE_PROJECT.fullmatch(project_code):
         raise StorageRefusal(
-            "launch_scope_invalid", "Pi launch requires an explicit project code"
+            "launch_scope_invalid", "Pi launch requires an exact uppercase project code"
         )
     descriptor_id = str(
         launch.get("launch_descriptor_id")

@@ -83,13 +83,20 @@ $HOME/.local/bin/league --state-root "$HOME/.local/state/league" request turn \
 - Tiny direct work follows the universal authority and engineering rules.
   Durable research, benchmarks, release or operational work, confirmed
   debugging, fixtures, tests, and repository changes require an issue-bound
-  visible Champion. Shotcallers do not implement repository work directly by
-  default.
+  visible Champion. Direct repository implementation refuses with
+  `delegation_required` through the shared provider policy.
+- Read-only diagnostics and supported recovery commands remain available;
+  recovery still requires its own exact authority. Prompt intake, Stop, and
+  detachment do not depend on implementation delegation.
 - Hidden workers stop at their bounded advisory perimeter and never own work
   that requires a visible Champion.
 - One issue assignment creates exactly one visible Champion. Do not add a
   hidden implementation owner or a second visible Champion for the same issue
   worktree.
+- A Champion-routed request cannot record its initial result until its exact
+  settled task proves the immutable issue-selection receipt, semantic issue
+  binding, distinct visible Champion runtime, and active assignment.
+  Answers require that result; accepted evidence survives cleanup and rollover.
 - Independently fixable work may run in parallel only through separate issues,
   tasks, assignments, branches, and worktrees.
 - A Champion starts from the exact assigned issue, acceptance criteria,

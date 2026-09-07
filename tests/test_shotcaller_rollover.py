@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -643,6 +644,8 @@ def _seed_legacy_null_route_refresh(
     champion_count: int = 1,
     imported: bool = True,
     materialize_runtime_after_snapshot: bool = False,
+    legacy_hook: bool = False,
+    named_route: bool = False,
 ) -> dict:
     context = seed_rollover(store, champion_count=champion_count)
     agents = []
@@ -669,6 +672,14 @@ def _seed_legacy_null_route_refresh(
         generation = "herdr:" + hashlib.sha256(
             f"{terminal_id}\0{thread_id}".encode("utf-8")
         ).hexdigest()[:24]
+        hook_digest = hashlib.sha256(
+            f"codex\0{thread_id}\0herdr\0{pane_id}".encode()
+        ).hexdigest()
+        if named_route:
+            store.connection.execute(
+                "UPDATE agent_instances SET routing_name=?,display_agent='codex' WHERE agent_id=?",
+                (callsign.lower(), champion_id),
+            )
         if not imported:
             store.connection.execute(
                 """
@@ -679,7 +690,7 @@ def _seed_legacy_null_route_refresh(
                 """,
                 (thread_id, pane_id, generation, champion_id),
             )
-        elif ordinal % 2 and not materialize_runtime_after_snapshot:
+        elif (legacy_hook or ordinal % 2) and not materialize_runtime_after_snapshot:
             store.connection.execute(
                 """
                 INSERT INTO runtime_instances
@@ -688,11 +699,11 @@ def _seed_legacy_null_route_refresh(
                 VALUES(?,?,'codex-thread','herdr',?,?,?,'idle',1,?,'["hook.capture"]')
                 """,
                 (
-                    f"runtime:legacy-null-route:{label}:{ordinal}",
+                    f"runtime:hook:{hook_digest}" if legacy_hook else f"runtime:legacy-null-route:{label}:{ordinal}",
                     champion_id,
                     thread_id,
                     pane_id,
-                    generation,
+                    f"hook:{hook_digest}" if legacy_hook else generation,
                     AT5,
                 ),
             )
@@ -4791,6 +4802,208 @@ def test_descendant_reconciliation_requires_exact_pending_delivery_set(root: Pat
         assert store.agent_status(champion_id)["shotcaller_agent_id"] == OLD_ID
 
 
+def _recovery_target_inputs(store: SQLiteStorage, seed: dict, label: str) -> dict:
+    champion_id = seed["context"]["champion_ids"][0]
+    row = store.rollover_bindings(seed["prepared"]["operation_id"], AT6)["page"]["rows"][0]
+    return {
+        "operation_id": seed["prepared"]["operation_id"],
+        "reconciliation_id": f"reconcile:recovery:{label}",
+        "champion_agent_id": champion_id,
+        "task_id": row["task_id"],
+        "snapshot_digest": seed["prepared"]["snapshot"]["digest"],
+        "snapshot_row_digest": row["row_digest"],
+        "expected_rollover_version": seed["switched"]["version"],
+        "expected_agent_version": store.agent_status(champion_id)["version"],
+        "expected_task_version": store.connection.execute(
+            "SELECT version FROM tasks WHERE task_id=?", (row["task_id"],)
+        ).fetchone()[0],
+        "expected_assignment_version": 0,
+        "expected_callsign_assignment_version": store.connection.execute(
+            "SELECT version FROM callsign_assignments WHERE agent_id=? AND state='active'",
+            (champion_id,),
+        ).fetchone()[0],
+    }
+
+
+def test_one_row_recovery_adopts_null_route_and_preserves_hook_history(root: Path) -> None:
+    for label, hook, named in (("null", False, False), ("hook", True, True), ("both", True, False)):
+        state, _ = migrated_state(root, f"one-row-recovery-{label}")
+        with SQLiteStorage(state) as store:
+            seed = _seed_legacy_null_route_refresh(
+                store, root, f"recovery-{label}", champion_count=2,
+                legacy_hook=hook, named_route=named,
+            )
+            inputs = _recovery_target_inputs(store, seed, label)
+            store.connection.execute("DELETE FROM squad_champions WHERE champion_agent_id=?",
+                                     (seed["context"]["champion_ids"][1],))
+            before = store.export_bytes(format_name="json", purpose="rollback", max_records=10000)
+            target = store.rollover_descendant_target(**inputs)
+            assert target["pending_outbox_ids"] == []
+            assert store.export_bytes(format_name="json", purpose="rollback", max_records=10000) == before
+            runtime_id = target["runtime"]["runtime_instance_id"] if hook else f"runtime:recovery:{label}"
+            runtime_before = None if not hook else dict(target["runtime"])
+            runner = FakeHerdrInventory(seed["agents"] + [{"pane_id": "unrelated:unnamed"}])
+            service = RolloverDescendantService(store, HerdrDescendantRuntimeAdapter(runner))
+            arguments = {**inputs, "runtime_instance_id": runtime_id, "pending_outbox_ids": (),
+                         "at": "2026-01-01T02:00:00Z"}
+            result = service.reconcile(**arguments)
+            agent = dict(store.connection.execute("SELECT * FROM agent_instances WHERE agent_id=?",
+                                                  (inputs["champion_agent_id"],)).fetchone())
+            assert agent["routing_name"] == seed["agents"][0]["name"] and agent["display_agent"] == "codex"
+            assert agent["shotcaller_agent_id"] == NEW_ID
+            for field in ("thread_id", "worktree", "kind", "backend", "address", "callsign"):
+                assert agent[field] == target[field]
+            assert store.connection.execute(
+                "SELECT row_digest FROM active_champion_snapshot_rows WHERE champion_agent_id=?",
+                (inputs["champion_agent_id"],),
+            ).fetchone()[0] == inputs["snapshot_row_digest"]
+            if hook:
+                assert dict(store.connection.execute("SELECT * FROM runtime_instances WHERE runtime_instance_id=?",
+                                                     (runtime_id,)).fetchone()) == runtime_before
+                detail = json.loads(store.connection.execute(
+                    "SELECT detail_json FROM events WHERE event_id=?", (inputs["reconciliation_id"],)
+                ).fetchone()[0])
+                assert detail["receipt"]["runtime_generation"] == runtime_before["runtime_generation"]
+            calls_before = len(runner.calls)
+            assert service.reconcile(**arguments)["idempotent"] is True
+            assert len(runner.calls) == calls_before
+
+
+def test_one_row_recovery_refuses_foreign_live_and_stale_frozen_identity(root: Path) -> None:
+    state, _ = migrated_state(root, "one-row-recovery-refusals")
+    with SQLiteStorage(state) as store:
+        seed = _seed_legacy_null_route_refresh(store, root, "recovery-refusals", legacy_hook=True)
+        inputs = _recovery_target_inputs(store, seed, "refusals")
+        target = store.rollover_descendant_target(**inputs)
+        runtime_id = target["runtime"]["runtime_instance_id"]
+        exact = seed["agents"][0]
+        for agents in (
+            [{**exact, "name": "foreign"}], [{**exact, "name": None}],
+            [{**exact, "agent_session": {"value": "foreign"}}],
+            [{**exact, "agent_status": []}], [{**exact, "terminal_id": ""}],
+            [exact, {**exact, "pane_id": "foreign:pane"}],
+        ):
+            try:
+                HerdrDescendantRuntimeAdapter(FakeHerdrInventory(agents)).verify(target, runtime_id)
+            except StorageRefusal as exc:
+                assert exc.code in {"descendant_runtime_mismatch", "descendant_runtime_ambiguous"}
+            else:
+                raise AssertionError("legacy recovery accepted foreign or ambiguous live identity")
+        for field in ("runtime_instance_id", "runtime_generation", "session_ref", "endpoint", "actor_agent_id"):
+            changed_runtime = {**target["runtime"], field: "hook:forged"}
+            try:
+                HerdrDescendantRuntimeAdapter(FakeHerdrInventory([exact])).verify(
+                    {**target, "runtime": changed_runtime}, runtime_id
+                )
+            except StorageRefusal as exc:
+                assert exc.code == "descendant_runtime_mismatch"
+            else:
+                raise AssertionError(f"hook recovery trusted mismatched {field}")
+        try:
+            HerdrDescendantRuntimeAdapter(FakeHerdrInventory([exact])).verify(
+                {**target, "runtime": None}, runtime_id
+            )
+        except StorageRefusal as exc:
+            assert exc.code == "descendant_runtime_mismatch"
+        else:
+            raise AssertionError("hook recovery invented a missing canonical hook runtime")
+        receipt = HerdrDescendantRuntimeAdapter(FakeHerdrInventory([exact])).verify(target, runtime_id)
+        store.connection.execute("UPDATE agent_instances SET branch='changed' WHERE agent_id=?",
+                                 (inputs["champion_agent_id"],))
+        before = store.export_bytes(format_name="json", purpose="rollback", max_records=10000)
+        try:
+            store.reconcile_rollover_descendant(**inputs, runtime_instance_id=runtime_id,
+                runtime_receipt=receipt, pending_outbox_ids=(), at=AT6)
+        except StorageRefusal as exc:
+            assert exc.code == "descendant_snapshot_mismatch"
+        else:
+            raise AssertionError("recovery overwrote a changed frozen binding")
+        assert store.export_bytes(format_name="json", purpose="rollback", max_records=10000) == before
+
+    state, _ = migrated_state(root, "one-row-recovery-modern-null")
+    with SQLiteStorage(state) as store:
+        seed = _seed_legacy_null_route_refresh(store, root, "modern-null", imported=False)
+        inputs = _recovery_target_inputs(store, seed, "modern-null")
+        before = store.export_bytes(format_name="json", purpose="rollback", max_records=10000)
+        try:
+            store.rollover_descendant_target(**inputs)
+        except StorageRefusal as exc:
+            assert exc.code == "descendant_identity_stale"
+        else:
+            raise AssertionError("one-row adoption accepted a modern null route")
+        assert store.export_bytes(format_name="json", purpose="rollback", max_records=10000) == before
+
+
+def test_one_row_recovery_outbox_preflight_and_atomic_faults(root: Path) -> None:
+    state, _ = migrated_state(root, "one-row-recovery-outboxes")
+    with SQLiteStorage(state) as store:
+        seed = _seed_legacy_null_route_refresh(store, root, "recovery-outboxes")
+        inputs = _recovery_target_inputs(store, seed, "outboxes")
+        for ordinal in range(27):
+            event_id = f"event:recovery:{ordinal:02d}"
+            store.connection.execute(
+                "INSERT INTO events(event_id,agent_id,task_id,entity_version,event_type,occurred_at,detail_json,update_text) "
+                "VALUES(?,?,?,1,'diagnostic',?,'{}','Synthetic recovery delivery')",
+                (event_id, inputs["champion_agent_id"] if ordinal == 25 else (None if ordinal == 26 else OLD_ID),
+                 inputs["task_id"] if ordinal == 26 else None, AT5),
+            )
+            store.connection.execute(
+                "INSERT INTO delivery_outbox(outbox_id,event_id,recipient_agent_id,state,available_at) "
+                "VALUES(?,?,?,'pending',?)", (f"outbox:recovery:{ordinal:02d}", event_id, OLD_ID,
+                                             "2026-01-02T00:00:00Z" if ordinal == 26 else AT5),
+            )
+        target = store.rollover_descendant_target(**inputs)
+        pending = ("outbox:recovery:25", "outbox:recovery:26")
+        assert tuple(target["pending_outbox_ids"]) == pending
+        with patch("league.sqlite_rollover_ops.MAX_DESCENDANT_PENDING_OUTBOXES", 1):
+            try:
+                store.rollover_descendant_target(**inputs)
+            except StorageRefusal as exc:
+                assert exc.code == "descendant_delivery_set_too_large"
+            else:
+                raise AssertionError("preflight silently truncated the exact delivery set")
+        runtime_id = "runtime:recovery:outboxes"
+        receipt = HerdrDescendantRuntimeAdapter(FakeHerdrInventory(seed["agents"])).verify(target, runtime_id)
+        arguments = {**inputs, "runtime_instance_id": runtime_id, "runtime_receipt": receipt,
+                     "pending_outbox_ids": pending, "at": "2026-01-01T02:00:00Z"}
+        before = store.export_bytes(format_name="json", purpose="rollback", max_records=10000)
+        store.connection.execute("UPDATE events SET agent_id=? WHERE event_id='event:recovery:24'",
+                                 (inputs["champion_agent_id"],))
+        try:
+            store.reconcile_rollover_descendant(**arguments)
+        except StorageRefusal as exc:
+            assert exc.code == "descendant_delivery_set_stale"
+        else:
+            raise AssertionError("commit accepted a delivery set changed after preflight")
+        store.connection.execute("UPDATE events SET agent_id=? WHERE event_id='event:recovery:24'", (OLD_ID,))
+        assert store.export_bytes(format_name="json", purpose="rollback", max_records=10000) == before
+        for point in ("after_descendant_runtime", "after_descendant_assignment", "after_descendant_task",
+                      "after_descendant_callsign", "after_descendant_agent", "after_descendant_outbox",
+                      "before_descendant_event", "after_descendant_event"):
+            def fault(stage: str) -> None:
+                if stage == point:
+                    raise InjectedCrash(point)
+            try:
+                store.reconcile_rollover_descendant(**arguments, fault=fault)
+            except InjectedCrash:
+                pass
+            else:
+                raise AssertionError(f"recovery did not exercise {point}")
+            assert store.export_bytes(format_name="json", purpose="rollback", max_records=10000) == before
+        store.connection.execute("UPDATE delivery_outbox SET state='in_flight' WHERE outbox_id=?", (pending[0],))
+        try:
+            store.rollover_descendant_target(**inputs)
+        except StorageRefusal as exc:
+            assert exc.code == "descendant_delivery_inflight"
+        else:
+            raise AssertionError("preflight exposed a claimed delivery as safely reconcilable")
+        store.connection.execute("UPDATE delivery_outbox SET state='pending' WHERE outbox_id=?", (pending[0],))
+        result = store.reconcile_rollover_descendant(**arguments)
+        assert result["retargeted_outbox_ids"] == list(pending)
+        assert store.connection.execute("SELECT COUNT(*) FROM delivery_outbox WHERE recipient_agent_id=?",
+                                        (OLD_ID,)).fetchone()[0] == 25
+
+
 def test_pre_switch_abort_restores_reservation(root: Path) -> None:
     state, _ = migrated_state(root, "abort")
     with SQLiteStorage(state) as store:
@@ -5031,6 +5244,9 @@ def main() -> None:
         test_descendant_runtime_adapter_normalizes_exact_done_to_idle_only_after_identity(root)
         test_descendant_reconciliation_refuses_ambiguous_runtime(root)
         test_descendant_reconciliation_requires_exact_pending_delivery_set(root)
+        test_one_row_recovery_adopts_null_route_and_preserves_hook_history(root)
+        test_one_row_recovery_refuses_foreign_live_and_stale_frozen_identity(root)
+        test_one_row_recovery_outbox_preflight_and_atomic_faults(root)
         test_pre_switch_abort_restores_reservation(root)
         test_pre_switch_abort_releases_cleaned_active_successor(root)
         test_public_safety_and_snapshot_staleness(root)

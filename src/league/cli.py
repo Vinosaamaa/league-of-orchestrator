@@ -261,6 +261,13 @@ def _add_agent_commands(groups: argparse._SubParsersAction) -> None:
     transition.add_argument("--status", required=True)
     transition.add_argument("--update", required=True)
     transition.add_argument("--at", required=True)
+    startup = commands.add_parser(
+        "startup-context",
+        help="Return one exact bounded public-safe startup context.",
+    )
+    startup.add_argument("--agent-id", required=True)
+    startup.add_argument("--runtime-instance-id", required=True)
+    startup.add_argument("--at", required=True)
 
 
 def _add_callsign_commands(groups: argparse._SubParsersAction) -> None:
@@ -476,6 +483,16 @@ def _add_rollover_commands(groups: argparse._SubParsersAction) -> None:
     _add_mode_gate_options(drain)
     status = commands.add_parser("status", help="Read durable rollover state and public digests.")
     status.add_argument("--operation-id", required=True)
+    run = commands.add_parser(
+        "run",
+        help="Advance existing rollover stages; wait for explicit successor and cleanup receipts.",
+    )
+    run.add_argument("--manifest", type=Path, required=True)
+    receipts = run.add_mutually_exclusive_group()
+    receipts.add_argument("--pages", type=Path, help="Successor-approved existing bindings page receipts.")
+    receipts.add_argument("--abort-receipt", type=Path, help="Existing exact successor cleanup receipt.")
+    receipts.add_argument("--drain-receipt", type=Path, help="Existing guarded predecessor cleanup receipt.")
+    run.add_argument("--at", required=True)
 
 
 def _add_delivery_commands(groups: argparse._SubParsersAction) -> None:
@@ -1739,6 +1756,10 @@ def _agent_transition(store: Storage, args: argparse.Namespace) -> CommandResult
     return transition, None
 
 
+def _agent_startup_context(store: Storage, args: argparse.Namespace) -> CommandResult:
+    return store.startup_context(args.agent_id, args.runtime_instance_id, args.at), None
+
+
 def _callsign_reconcile(store: Storage, args: argparse.Namespace) -> CommandResult:
     catalog = _read_json_object(args.catalog)
     if set(catalog) != {"entries"} or not isinstance(catalog["entries"], list):
@@ -1986,6 +2007,17 @@ def _rollover_drain(store: Storage, args: argparse.Namespace) -> CommandResult:
 def _rollover_status(store: Storage, args: argparse.Namespace) -> CommandResult:
     value = store.rollover_status(args.operation_id)
     return {"found": value is not None, "rollover": value}, None
+
+
+def _rollover_run(store: Storage, args: argparse.Namespace) -> CommandResult:
+    from .rollover_service import ShotcallerRolloverRunner
+
+    return ShotcallerRolloverRunner(store).run(
+        _read_json_object(args.manifest), at=args.at,
+        pages=None if args.pages is None else _read_json_object(args.pages),
+        abort_receipt=None if args.abort_receipt is None else _read_json_object(args.abort_receipt),
+        drain_receipt=None if args.drain_receipt is None else _read_json_object(args.drain_receipt),
+    ), None
 
 
 def _delivery_claim(store: Storage, args: argparse.Namespace) -> CommandResult:
@@ -3422,6 +3454,15 @@ def _assign_launch(store: Storage, args: argparse.Namespace) -> CommandResult:
         if args.league_command
         else Path(sys.argv[0]).resolve()
     )
+    if args.project_code is not None:
+        project_code = args.project_code
+    else:
+        project = store.resolve_project(args.repository, visibility="local")
+        project_code = (
+            str(project["code"])
+            if isinstance(project, dict) and isinstance(project.get("code"), str)
+            else None
+        )
     options = VisibleLaunchOptions(
         workspace_id=workspace_id,
         task_label=args.task_label or derive_task_label(args.task_summary),
@@ -3429,6 +3470,7 @@ def _assign_launch(store: Storage, args: argparse.Namespace) -> CommandResult:
         effort=effort,
         league_command=league_command,
         state_root=str(args.state_root.resolve()),
+        project_code=project_code,
         startup_timeout_ms=args.startup_timeout_ms,
         routing=routing,
     )
@@ -3650,18 +3692,23 @@ def _assign_reconcile_legacy_display(
     expected = _decode_json(
         args.expected_presentation_json, "legacy display expected presentation"
     )
-    if not isinstance(expected, dict) or set(expected) != {
-        "source",
-        "title",
-        "state_change_seq",
-    }:
+    expected_keys = set(expected) if isinstance(expected, dict) else set()
+    if not isinstance(expected, dict) or expected_keys not in (
+        {"source", "title", "state_change_seq"},
+        {"source", "title", "state_change_seq", "agent_status"},
+    ):
         raise StorageRefusal(
             "legacy_display_invalid",
-            "expected presentation must contain only source, title, and state_change_seq",
+            "expected presentation must contain source, title, state_change_seq, and optional agent_status",
         )
     expected_source = expected["source"]
     expected_title = expected["title"]
     expected_sequence = expected["state_change_seq"]
+    if "agent_status" in expected and expected["agent_status"] != "done":
+        raise StorageRefusal(
+            "legacy_display_invalid",
+            "expected presentation agent_status must be done",
+        )
     spec = LegacyDisplayReconciliationSpec(
         assignment_id=args.assignment_id,
         expected_version=args.expected_version,
@@ -3678,6 +3725,7 @@ def _assign_reconcile_legacy_display(
         expected_state_change_seq=expected_sequence,
         target_task_label=args.target_task_label,
         owner_authorized=args.owner_authorized or args.mode_action is not None,
+        expected_agent_status=expected.get("agent_status"),
         previous_worktree=(
             str(Path(args.previous_worktree).resolve())
             if args.previous_worktree is not None
@@ -3951,6 +3999,7 @@ HANDLERS: dict[str, CommandHandler] = {
     "storage.import": _storage_import,
     "agent.status": _agent_status,
     "agent.transition": _agent_transition,
+    "agent.startup-context": _agent_startup_context,
     "callsign.reconcile": _callsign_reconcile,
     "callsign.allocate": _callsign_allocate,
     "callsign.activate": _callsign_activate,
@@ -3969,6 +4018,7 @@ HANDLERS: dict[str, CommandHandler] = {
     "rollover.abort": _rollover_abort,
     "rollover.drain": _rollover_drain,
     "rollover.status": _rollover_status,
+    "rollover.run": _rollover_run,
     "delivery.claim": _delivery_claim,
     "delivery.ack": _delivery_ack,
     "delivery.fail": _delivery_fail,
@@ -4090,6 +4140,8 @@ SCHEMA_INVENTORY = (
     "league-rollover-pages.schema.json",
     "league-rollover-abort-receipt.schema.json",
     "league-rollover-drain-receipt.schema.json",
+    "league-startup-context.schema.json",
+    "league-shotcaller-rollover-run.schema.json",
     "league-activity-evidence.schema.json",
     "league-report.schema.json",
     "league-outbound-receipt.schema.json",

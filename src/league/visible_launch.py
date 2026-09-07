@@ -20,6 +20,7 @@ from .issue_first import IssueVerifier
 from .provider_lifecycle import provider_lifecycle
 from .multiplexer_adapters import RestoredEndpoint, builtin_multiplexer_adapter_registry
 from .storage import Storage, StorageRefusal
+from .presentation import ORCHESTRATOR_ROLE_TOKEN, canonical_display_metadata
 from .worktree import verified_worktree_repository_root
 
 
@@ -110,6 +111,7 @@ class VisibleLaunchOptions:
     effort: str
     league_command: str
     state_root: str
+    project_code: str | None = None
     startup_timeout_ms: int = 120_000
     routing: Mapping[str, Any] = field(default_factory=dict)
 
@@ -250,15 +252,22 @@ def _validate_options(options: VisibleLaunchOptions) -> None:
         raise StorageRefusal("launch_scope_invalid", "Herdr workspace identity is invalid")
     words = options.task_label.split()
     if (
-        not words
-        or len(words) > 2
+        len(words) != 2
         or len(options.task_label) > 48
         or options.task_label.strip() != options.task_label
         or any(character in options.task_label for character in "\r\n\0")
     ):
         raise StorageRefusal(
-            "launch_scope_invalid", "Champion display task must contain one or two words"
+            "launch_scope_invalid", "Champion display task must contain exactly two words"
         )
+    canonical_display_metadata(
+        {
+            ORCHESTRATOR_ROLE_TOKEN: "champion",
+            "callsign": "Champion",
+            "project_code": options.project_code,
+            "task_label": options.task_label,
+        }
+    )
     if not SAFE_MODEL.fullmatch(options.model) or not SAFE_EFFORT.fullmatch(options.effort):
         raise StorageRefusal("launch_scope_invalid", "Codex model or effort is invalid")
     state_root = Path(options.state_root)
@@ -619,6 +628,7 @@ class HerdrCodexLaunchAdapter:
             callsign=str(spec.callsign),
             applies_to_source=applies_to_source,
             sequence=observed_sequence + 1,
+            token_only=self._token_only_presentation(agent),
         )
         observation = self._verify_title(
             str(spec.callsign).lower(),
@@ -646,6 +656,16 @@ class HerdrCodexLaunchAdapter:
     def _title_source(self, assignment_id: str) -> str:
         return "league-launch-" + self._title_owner(assignment_id)
 
+    def _display(self, callsign: str) -> dict[str, str]:
+        return canonical_display_metadata(
+            {
+                ORCHESTRATOR_ROLE_TOKEN: "champion",
+                "callsign": callsign,
+                "project_code": self.options.project_code,
+                "task_label": self.options.task_label,
+            }
+        )
+
     def _report_title(
         self,
         *,
@@ -654,8 +674,34 @@ class HerdrCodexLaunchAdapter:
         callsign: str,
         applies_to_source: str,
         sequence: int,
+        token_only: bool = False,
     ) -> None:
-        title = f"{callsign} · {self.options.task_label}"
+        display = self._display(callsign)
+        title = display["title"]
+        display_tokens = {
+            key: value
+            for key, value in display.items()
+            if key not in {"title", "terminal_title"}
+        }
+        # The provider identity helper refreshes generic tokens from native OSC
+        # titles. Its explicit launch inputs must survive that refresh.
+        display_tokens.update(
+            launch_callsign=callsign,
+            launch_task_label=display["task_label"],
+        )
+        if "project_code" in display:
+            display_tokens["launch_project_code"] = display["project_code"]
+        if token_only:
+            display_tokens.update(
+                callsign=callsign,
+                identity_title=f"{self.profile.display_kind.title()} | {title}",
+                identity_title_mode="tokens-only",
+            )
+        token_arguments = tuple(
+            part
+            for key, value in display_tokens.items()
+            for part in ("--token", f"{key}={value}")
+        )
         self._command(
             (
                 "herdr",
@@ -670,14 +716,8 @@ class HerdrCodexLaunchAdapter:
                 self.profile.kind,
                 "--display-agent",
                 self.profile.display_kind,
-                "--title",
-                title,
-                "--token",
-                f"sidebar_name={callsign}",
-                "--token",
-                f"task_label={self.options.task_label}",
-                "--token",
-                f"thread_title={title}",
+                *(("--clear-title",) if token_only else ("--title", title)),
+                *token_arguments,
                 "--token",
                 f"launch_title_owner={self._title_owner(assignment_id)}",
                 "--token",
@@ -691,27 +731,89 @@ class HerdrCodexLaunchAdapter:
             allow_silent_success=True,
         )
 
+    def _token_only_presentation(self, agent: Mapping[str, Any]) -> bool:
+        tokens = agent.get("tokens")
+        if not isinstance(tokens, Mapping) or self._created is None:
+            return False
+        session_id = _session_id(agent)
+        endpoint_matches = (
+            agent.get("pane_id") == self._created.get("pane_id")
+            and agent.get("terminal_id") == self._created.get("terminal_id")
+            and agent.get("name") == self._created.get("routing_name")
+            and agent.get("cwd") == self._created.get("worktree")
+            and agent.get("foreground_cwd") == self._created.get("worktree")
+            and agent.get("workspace_id") == self.options.workspace_id
+        )
+        session_matches = (
+            isinstance(session_id, str)
+            and session_id == self._created.get("thread_id")
+        )
+        provider_matches = (
+            agent.get("agent") == self.profile.kind
+            and _session_source(agent) == f"herdr:{self.profile.kind}"
+        )
+        tokens_match = (
+            tokens.get("identity_title_mode") == "tokens-only"
+            and tokens.get("identity_thread_id") == session_id
+            and tokens.get("harness") == self.profile.kind
+        )
+        return endpoint_matches and session_matches and provider_matches and tokens_match
+
     def _title_exact(
         self, agent: Mapping[str, Any], callsign: str, assignment_id: str
     ) -> bool:
-        expected = f"{callsign} · {self.options.task_label}"
+        display = self._display(callsign)
+        expected = display["title"]
         terminal_titles = {
-            agent.get("terminal_title"),
-            agent.get("terminal_title_stripped"),
+            agent.get("terminal_title"), agent.get("terminal_title_stripped"),
         }
         tokens = agent.get("tokens")
+        token_only = self._token_only_presentation(agent)
+        if (
+            isinstance(tokens, Mapping)
+            and tokens.get("identity_title_mode") == "tokens-only"
+            and not token_only
+        ):
+            return False
+        rendered = agent.get("title")
+        identity_title = f"{self.profile.display_kind.title()} | {expected}"
+        # Native terminal_title is OSC evidence, not the rendered pane title in
+        # tokens-only mode. Accept only the exact helper output and status prefix.
+        rendered_exact = isinstance(rendered, str) and rendered in (
+            {identity_title}
+            | {f"{icon} {identity_title}" for icon in ("◇", "●", "○", "✓")}
+        )
         return bool(
             isinstance(tokens, Mapping)
-            and agent.get("metadata_source") == self._title_source(assignment_id)
-            and tokens.get("sidebar_name") == callsign
-            and tokens.get("task_label") == self.options.task_label
-            and tokens.get("thread_title") == expected
+            and (
+                agent.get("metadata_source") == self._title_source(assignment_id)
+                or ("metadata_source" not in agent and token_only)
+            )
+            and all(
+                tokens.get(key) == value
+                for key, value in display.items()
+                if key not in {"title", "terminal_title"}
+            )
             and tokens.get("launch_title_owner")
             == self._title_owner(assignment_id)
             and tokens.get("launch_title_source")
             == self._title_source(assignment_id)
             and tokens.get("launch_title_applies_to") == _session_source(agent)
-            and terminal_titles <= {expected, f"{expected} | {self.profile.display_kind}"}
+            and (
+                (
+                    token_only
+                    and rendered_exact
+                    and tokens.get("identity_title") == identity_title
+                    and tokens.get("callsign") == callsign
+                    and tokens.get("launch_callsign") == callsign
+                    and tokens.get("launch_task_label") == display["task_label"]
+                    and tokens.get("launch_project_code") == display.get("project_code")
+                )
+                or (
+                    not token_only
+                    and terminal_titles <= {expected, f"{expected} | {self.profile.display_kind}"}
+                )
+            )
         )
 
     def _verify_title(
@@ -727,7 +829,9 @@ class HerdrCodexLaunchAdapter:
         for _ in range(50):
             agent = self._get_agent(routing_name)
             if self._title_exact(agent, callsign, assignment_id):
-                source = agent.get("metadata_source")
+                # _title_exact proved the complete explicit ownership envelope
+                # when this Herdr surface omits its top-level source field.
+                source = agent.get("metadata_source", self._title_source(assignment_id))
                 applies_to_source = _session_source(agent)
                 sequence = agent.get("state_change_seq")
                 if (
@@ -739,16 +843,18 @@ class HerdrCodexLaunchAdapter:
                     consecutive = consecutive + 1 if key == prior_key else 1
                     prior_key = key
                     if consecutive >= stable_observations:
-                        expected = f"{callsign} · {self.options.task_label}"
-                        return {
+                        display = self._display(callsign)
+                        receipt = {
                             "source": source,
                             "applies_to_source": applies_to_source,
                             "state_change_seq": sequence,
-                            "sidebar_name": callsign,
-                            "task_label": self.options.task_label,
-                            "thread_title": expected,
-                            "terminal_title": expected,
+                            **{
+                                key: value
+                                for key, value in display.items()
+                                if key != "title"
+                            },
                         }
+                        return receipt
             else:
                 prior_key = None
                 consecutive = 0
@@ -774,6 +880,10 @@ class HerdrCodexLaunchAdapter:
         observed_thread = _session_id(agent)
         applies_to_source = _session_source(agent)
         presentation_source = agent.get("metadata_source")
+        if "metadata_source" not in agent and self._title_exact(
+            agent, callsign, assignment_id
+        ):
+            presentation_source = self._title_source(assignment_id)
         sequence = agent.get("state_change_seq")
         owned = bool(
             agent.get("name") == routing_name
@@ -807,6 +917,7 @@ class HerdrCodexLaunchAdapter:
                 callsign=callsign,
                 applies_to_source=str(applies_to_source),
                 sequence=int(sequence) + 1,
+                token_only=self._token_only_presentation(agent),
             )
         observation = self._verify_title(
             routing_name,
@@ -912,7 +1023,7 @@ class HerdrCodexLaunchAdapter:
                         "workspace_id": self.options.workspace_id,
                         "role": "champion",
                         "cwd": str(worktree.resolve()),
-                        "label": f"{spec.callsign} · {self.options.task_label}",
+                        "label": self._display(str(spec.callsign))["title"],
                     }
                 )
                 tab_id = endpoint.tab_id
@@ -1132,6 +1243,8 @@ def render_launch_context(
     spec: AssignmentSpec,
     receipt: Mapping[str, Any],
     options: VisibleLaunchOptions,
+    *,
+    include_display_hints: bool = True,
 ) -> str:
     text = "\n".join(
         (
@@ -1146,6 +1259,11 @@ def render_launch_context(
             f"Issue: {spec.issue}",
             f"Branch: {spec.branch}",
             f"Worktree: {spec.worktree}",
+            *(
+                (f"Project code: {options.project_code or 'none'}",
+                 f"Display task: {options.task_label}")
+                if include_display_hints else ()
+            ),
             f"League command: {options.league_command}",
             f"League state root: {options.state_root}",
             "Use only the stable League SQLite commands for status, task transitions, delivery, and cleanup.",
@@ -1214,7 +1332,18 @@ class VisibleChampionLaunchService:
                 self.options,
             )
             digest = _sha256(context.encode("utf-8"))
-            if prior["context_delivery"]["context_sha256"] != digest:
+            delivered_digest = prior["context_delivery"]["context_sha256"]
+            if delivered_digest != digest:
+                # Recognize only the exact pre-display-hints producer.  Keep its
+                # durable receipt and never deliver either context again.
+                legacy_context = render_launch_context(
+                    AssignmentSpec(**{**vars(spec), "callsign": prior["callsign"]}),
+                    receipt,
+                    self.options,
+                    include_display_hints=False,
+                )
+                digest = _sha256(legacy_context.encode("utf-8"))
+            if delivered_digest != digest:
                 raise StorageRefusal(
                     "assignment_context_conflict",
                     "assignment retry produced different bounded context",

@@ -4,12 +4,14 @@
 from __future__ import annotations
 
 import json
+import os
 import hashlib
 import subprocess
 import tempfile
 from dataclasses import replace
 from pathlib import Path
 import sys
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -27,6 +29,10 @@ from league.issue_first import (  # noqa: E402
     semantic_scope_digest,
 )
 from league.sqlite_project_ops import canonical_repository  # noqa: E402
+from league.presentation import (  # noqa: E402
+    canonical_display_metadata,
+    orchestrator_role_tokens,
+)
 from league.storage_assignment import PrepareAssignmentCommand  # noqa: E402
 import league.visible_launch as visible_launch  # noqa: E402
 from league.storage_issue import (  # noqa: E402
@@ -195,6 +201,7 @@ class FakeHerdrRunner:
         routing_name: str = "lux",
         occupied_names: tuple[str, ...] = (),
         harness_kind: str = "codex",
+        session_source: str | None = None,
     ) -> None:
         self.worktree = str(worktree.resolve())
         self.wrong_thread = wrong_thread
@@ -202,12 +209,14 @@ class FakeHerdrRunner:
         self.routing_name = routing_name
         self.occupied_names = occupied_names
         self.harness_kind = harness_kind
+        self.session_source = session_source or f"herdr:{harness_kind}"
+        self.agent_status = "idle"
         self.started = False
         self.session_reported = False
         self.closed = False
         self.title = ""
         self.tokens: dict[str, str] = {}
-        self.metadata_source = f"herdr:{harness_kind}"
+        self.metadata_source = self.session_source
         self.active_metadata_source = self.metadata_source
         self.metadata_reports_change_state_sequence = True
         self.source_sequences: dict[str, int] = {}
@@ -223,7 +232,7 @@ class FakeHerdrRunner:
         thread = "not-a-thread" if self.wrong_thread else THREAD_ID
         agent = {
             "agent": self.harness_kind,
-            "agent_status": "idle",
+            "agent_status": self.agent_status,
             "interactive_ready": True,
             "cwd": self.worktree,
             "foreground_cwd": self.worktree,
@@ -242,7 +251,7 @@ class FakeHerdrRunner:
         agent["agent_session"] = {
             "agent": self.harness_kind,
             "kind": "id",
-            "source": f"herdr:{self.harness_kind}",
+            "source": self.session_source,
             "value": thread,
         }
         return agent
@@ -271,7 +280,9 @@ class FakeHerdrRunner:
             Path(self.worktree),
             routing_name=self.routing_name,
             harness_kind=self.harness_kind,
+            session_source=self.session_source,
         )
+        copied.agent_status = self.agent_status
         copied.started = True
         copied.title = self.title
         copied.tokens = dict(self.tokens)
@@ -840,6 +851,7 @@ def test_real_adapter_one_command_success_and_retry(root: Path) -> None:
         "task_label": "Tiny Gate",
         "thread_title": "Lux · Tiny Gate",
         "terminal_title": "Lux · Tiny Gate",
+        "orchestrator_role": "champion",
     }
     assert runner.metadata_source == display_receipt["source"]
     assert len(runner.contexts) == 1
@@ -975,6 +987,64 @@ def test_real_adapter_one_command_success_and_retry(root: Path) -> None:
         "assignment_context",
     )
     assert activation_delivery["effect_id"] == result["context_delivery"]["effect_sha256"]
+    store.close()
+
+
+def test_base_delivered_context_retry_is_recognized_without_redelivery(root: Path) -> None:
+    # Frozen context bytes from main d49b615, before presentation hints existed.
+    # Only the old producer is substituted; candidate retry uses real code.
+    def base_context(spec, receipt, options):
+        return "\n".join((
+            f"League assignment: {spec.task_summary}",
+            f"Callsign: {spec.callsign}",
+            f"Agent ID: {spec.champion_agent_id}",
+            f"Task ID: {spec.task_id}",
+            f"Assignment ID: {spec.assignment_id}",
+            f"Runtime ID: {receipt['runtime_instance_id']}",
+            f"Shotcaller agent ID: {spec.coordinator_agent_id}",
+            f"Repository: {spec.repository}",
+            f"Issue: {spec.issue}",
+            f"Branch: {spec.branch}",
+            f"Worktree: {spec.worktree}",
+            f"League command: {options.league_command}",
+            f"League state root: {options.state_root}",
+            "Use only the stable League SQLite commands for status, task transitions, delivery, and cleanup.",
+            "Use league assign run for launch and canonical task/cleanup commands for lifecycle writes.",
+            "First record a working task transition with the exact runtime ID, then perform only this bounded assignment.",
+        ))
+
+    store, clock, worktree = _context(root, "base-context-retry")
+    options = _options(root)
+    runner = FakeHerdrRunner(worktree)
+    spec = _spec(worktree, "base-context-retry")
+    with patch.object(visible_launch, "render_launch_context", base_context):
+        created = VisibleChampionLaunchService(
+            store, _adapter(options, runner, store), options, clock
+        ).launch(spec)
+    assert "Project code:" not in runner.contexts[0]
+    delivered = store.assignment_launch_context(spec.assignment_id)["context_delivery"]
+    before = len(runner.calls)
+    retried = VisibleChampionLaunchService(
+        store, _adapter(options, runner, store), options, clock
+    ).launch(spec)
+    assert retried["state"] == "active" and retried["idempotent"] is True
+    assert retried["context_delivery"] == delivered
+    assert retried["runtime_instance_id"] == created["runtime_instance_id"]
+    assert len(runner.contexts) == 1
+    assert all(call[:3] in {("herdr", "agent", "get"), ("herdr", "agent", "list")}
+               for call in runner.calls[before:])
+    assert store.assignment_launch_context(spec.assignment_id)["context_delivery"] == delivered
+    # Legacy recognition is exact, not permission to accept changed context.
+    changed = replace(options, league_command=sys.executable)
+    try:
+        VisibleChampionLaunchService(
+            store, _adapter(changed, runner, store), changed, clock
+        ).launch(spec)
+    except StorageRefusal as exc:
+        assert exc.code == "assignment_context_conflict"
+    else:
+        raise AssertionError("legacy retry accepted changed command authority")
+    assert len(runner.contexts) == 1
     store.close()
 
 
@@ -2612,9 +2682,747 @@ def test_post_launch_activation_refusal_closes_owned_tab_and_blocks(root: Path) 
     store.close()
 
 
+def test_role_specific_display_names_use_only_explicit_canonical_metadata() -> None:
+    provider_shapes = (
+        {"runtime_provider": "codex", "display_agent": "codex"},
+        {"runtime_provider": "cursor", "display_agent": "cursor"},
+        {"runtime_provider": "pi", "display_agent": "cursor"},
+        {"runtime_provider": "pi", "display_agent": "codex"},
+    )
+    for provider in provider_shapes:
+        champion = canonical_display_metadata(
+            {
+                **provider,
+                "orchestrator_role": "champion",
+                "callsign": "Lux",
+                "project_code": "LOL",
+                "task_label": "Title Repair",
+            }
+        )
+        assert champion == {
+            "title": "Lux · LOL|Title Repair",
+            "terminal_title": "Lux · LOL|Title Repair",
+            "sidebar_name": "Lux",
+            "thread_title": "Lux · LOL|Title Repair",
+            "project_code": "LOL",
+            "task_label": "Title Repair",
+            "orchestrator_role": "champion",
+        }
+        shotcaller = canonical_display_metadata(
+            {
+                **provider,
+                "orchestrator_role": "shotcaller",
+                "callsign": "Ashe",
+                "project_code": "LOL",
+                "task_label": "Title Repair",
+            }
+        )
+        assert shotcaller == {
+            "title": "Ashe",
+            "terminal_title": "Ashe",
+            "sidebar_name": "Ashe",
+            "thread_title": "Ashe",
+            "orchestrator_role": "shotcaller",
+        }
+        assert all(
+            provider_value not in {str(value).lower() for value in champion.values()}
+            for provider_value in provider.values()
+        )
+    assert canonical_display_metadata(
+        {
+            "orchestrator_role": "champion",
+            "callsign": "Lux",
+            "task_label": "Title Repair",
+        }
+    )["title"] == "Lux · Title Repair"
+    assert canonical_display_metadata(
+        {"orchestrator_role": "unknown", "callsign": "Lux"}
+    ) == {}
+    for malformed_role in (None, [], {}, 1):
+        assert canonical_display_metadata(
+            {"orchestrator_role": malformed_role, "callsign": "Lux"}
+        ) == {}
+
+
+def test_champion_project_code_is_explicit_and_survives_provider_refresh(
+    root: Path,
+) -> None:
+    store, clock, worktree = _context(root, "project-code-title")
+    options = replace(_options(root), project_code="LOL")
+    runner = FakeHerdrRunner(worktree, session_source="herdr:cursor")
+    runner.metadata_source = "herdr:cursor"
+    service = VisibleChampionLaunchService(
+        store, _adapter(options, runner, store), options, clock
+    )
+    spec = _spec(worktree, "project-code-title")
+    result = service.launch(spec)
+    receipt = result["context_delivery"]["display_receipt"]
+    assert receipt["sidebar_name"] == "Lux"
+    assert receipt["project_code"] == "LOL"
+    assert receipt["task_label"] == "Tiny Gate"
+    assert receipt["thread_title"] == "Lux · LOL|Tiny Gate"
+    assert receipt["terminal_title"] == "Lux · LOL|Tiny Gate"
+
+    contexts = len(runner.contexts)
+    runner.metadata_source = "herdr:cursor"
+    runner.state_change_seq += 1
+    runner.title = "Cursor generated title"
+    runner.tokens.update(
+        {
+            "sidebar_name": "Cursor generated title",
+            "thread_title": "Cursor generated title",
+        }
+    )
+    calls_before = len(runner.calls)
+    retry = service.launch(spec)
+    retry_calls = runner.calls[calls_before:]
+    assert retry["idempotent"] is True
+    assert retry["context_delivery"]["display_receipt"]["project_code"] == "LOL"
+    assert runner.title == "Lux · LOL|Tiny Gate"
+    assert runner.tokens["sidebar_name"] == "Lux"
+    assert runner.tokens["thread_title"] == "Lux · LOL|Tiny Gate"
+    assert len(runner.contexts) == contexts == 1
+    assert sum(
+        call[:3] == ("herdr", "pane", "report-metadata")
+        for call in retry_calls
+    ) == 1
+
+    calls_before_icon = len(runner.calls)
+    runner.tokens["status_marker"] = "idle"
+    runner.state_change_seq += 1
+    exact = service.launch(spec)
+    assert exact["idempotent"] is True
+    assert runner.tokens["status_marker"] == "idle"
+    assert not any(
+        call[:3] == ("herdr", "pane", "report-metadata")
+        for call in runner.calls[calls_before_icon:]
+    )
+    store.close()
+
+
+def test_champion_role_token_is_canonical_for_cursor_authority_and_owned_retry(
+    root: Path,
+) -> None:
+    assert orchestrator_role_tokens("champion") == {
+        "orchestrator_role": "champion"
+    }
+    assert orchestrator_role_tokens("shotcaller") == {
+        "orchestrator_role": "shotcaller"
+    }
+    assert orchestrator_role_tokens("unknown") == {}
+    assert orchestrator_role_tokens(None) == {}
+
+    store, clock, worktree = _context(root, "cursor-role-token")
+    options = _options(root)
+    runner = FakeHerdrRunner(worktree, session_source="herdr:cursor")
+    runner.metadata_source = "herdr:cursor"
+    service = VisibleChampionLaunchService(
+        store, _adapter(options, runner, store), options, clock
+    )
+    spec = _spec(worktree, "cursor-role-token")
+    result = service.launch(spec)
+    contexts = len(runner.contexts)
+    assert result["context_delivery"]["display_receipt"][
+        "orchestrator_role"
+    ] == "champion"
+    assert runner.tokens["orchestrator_role"] == "champion"
+
+    runner.metadata_source = "herdr:cursor"
+    runner.state_change_seq += 1
+    runner.title = "Cursor generated title"
+    runner.tokens.update(
+        {
+            "sidebar_name": "Cursor generated title",
+            "thread_title": "Cursor generated title",
+            "orchestrator_role": "shotcaller",
+        }
+    )
+    calls_before = len(runner.calls)
+    retry = service.launch(spec)
+    retry_calls = runner.calls[calls_before:]
+    assert retry["idempotent"] is True
+    assert retry["context_delivery"]["display_receipt"][
+        "orchestrator_role"
+    ] == "champion"
+    assert runner.tokens["orchestrator_role"] == "champion"
+    assert len(runner.contexts) == contexts == 1
+    assert len(
+        [
+            call
+            for call in retry_calls
+            if call[:3] == ("herdr", "pane", "report-metadata")
+        ]
+    ) == 1
+    assert not any(
+        call[:3] == ("herdr", "agent", "prompt") for call in retry_calls
+    )
+    store.close()
+
+
+def test_retained_done_legacy_champion_reconciles_without_reactivating_endpoint(
+    root: Path,
+) -> None:
+    store, clock, worktree = _context(root, "retained-done-display")
+    store.connection.execute(
+        "INSERT INTO callsigns(callsign,pool_role,enabled,pool_position,last_released_at) VALUES('Shaco','champion',1,99,NULL)"
+    )
+    store.connection.execute(
+        "INSERT INTO callsign_queue(callsign,pool_role,queue_position,state,reservation_assignment_id,version,updated_at) VALUES('Shaco','champion',-1,'available',NULL,1,?)",
+        (clock.now(),),
+    )
+    options = _options(root)
+    launch_runner = FakeHerdrRunner(worktree, routing_name="shaco")
+    launch = VisibleChampionLaunchService(
+        store, _adapter(options, launch_runner, store), options, clock
+    ).launch(_spec(worktree, "retained-done-display"))
+    assignment_id = str(launch["assignment_id"])
+    receipt = store.assignment_launch_context(assignment_id)["acceptance_receipt"]
+    context_event = store.connection.execute(
+        "SELECT event_id,detail_json FROM events WHERE aggregate_id=? AND event_type='assignment_context_delivered'",
+        (assignment_id,),
+    ).fetchone()
+    context_detail = json.loads(context_event["detail_json"])
+    context_detail.pop("display_receipt")
+    store.connection.execute(
+        "UPDATE events SET detail_json=? WHERE event_id=?",
+        (
+            json.dumps(context_detail, sort_keys=True, separators=(",", ":")),
+            context_event["event_id"],
+        ),
+    )
+    task_id = store.connection.execute(
+        "SELECT task_id FROM task_assignments WHERE task_assignment_id=?",
+        (assignment_id,),
+    ).fetchone()["task_id"]
+    store.connection.execute(
+        "UPDATE tasks SET state='ready_to_land',version=version+1,updated_at=? WHERE task_id=?",
+        (clock.now(), task_id),
+    )
+
+    runner = launch_runner.active_copy()
+    runner.agent_status = "done"
+    runner.metadata_source = "herdr:codex"
+    runner.state_change_seq += 1
+    runner.title = "Prepare handshake only"
+    runner.tokens = {
+        "callsign": "Prepare",
+        "sidebar_name": "Prepare handshake only",
+        "thread_title": "Prepare handshake only",
+        "status_marker": "retained",
+        "user_accent": "keep-me",
+    }
+    spec = LegacyDisplayReconciliationSpec(
+        assignment_id=assignment_id,
+        expected_version=int(launch["version"]),
+        champion_agent_id=LUX_ID,
+        runtime_instance_id=str(launch["runtime_instance_id"]),
+        callsign="Shaco",
+        pane_id=str(receipt["endpoint"]),
+        terminal_id="term_test_99",
+        thread_id=str(receipt["thread_id"]),
+        worktree=str(worktree.resolve()),
+        routing_name="shaco",
+        expected_presentation_source="herdr:codex",
+        expected_title="Prepare handshake only",
+        expected_state_change_seq=runner.state_change_seq,
+        target_task_label="Broker Repair",
+        owner_authorized=True,
+        expected_agent_status="done",
+    )
+    service = LegacyDisplayReconciliationService(
+        store,
+        HerdrLegacyDisplayAdapter(
+            runner,
+            environment={"HERDR_ENV": "1", "HERDR_WORKSPACE_ID": "w1"},
+        ),
+        clock,
+    )
+    calls_before = len(runner.calls)
+
+    result = service.reconcile(spec)
+
+    assert result["state"] == "reconciled"
+    assert result["receipt"]["endpoint_status"] == "done"
+    assert result["receipt"]["orchestrator_role"] == "champion"
+    assert runner.agent_status == "done"
+    assert runner.routing_name == "shaco"
+    assert runner.title == "Shaco · Broker Repair"
+    assert runner.tokens["sidebar_name"] == "Shaco"
+    assert runner.tokens["thread_title"] == "Shaco · Broker Repair"
+    assert runner.tokens["status_marker"] == "retained"
+    assert runner.tokens["user_accent"] == "keep-me"
+    effect_calls = runner.calls[calls_before:]
+    assert len(
+        [
+            call
+            for call in effect_calls
+            if call[:3] == ("herdr", "pane", "report-metadata")
+        ]
+    ) == 1
+    assert not any(
+        call[:3]
+        in {
+            ("herdr", "agent", "prompt"),
+            ("herdr", "agent", "start"),
+            ("herdr", "pane", "close"),
+        }
+        for call in effect_calls
+    )
+    canonical = store.connection.execute(
+        "SELECT a.state assignment_state,r.status runtime_status,c.state callsign_state "
+        "FROM task_assignments a "
+        "JOIN runtime_instances r ON r.runtime_instance_id=a.runtime_instance_id "
+        "JOIN callsign_assignments c ON c.callsign_assignment_id='callsign-assignment:'||a.task_assignment_id "
+        "WHERE a.task_assignment_id=?",
+        (assignment_id,),
+    ).fetchone()
+    assert dict(canonical) == {
+        "assignment_state": "active",
+        "runtime_status": "active",
+        "callsign_state": "active",
+    }
+    durable = store.assignment_launch_context(assignment_id)[
+        "legacy_display_reconciliation"
+    ]
+    assert durable["intent"]["expected_agent_status"] == "done"
+    assert durable["intent"]["schema"] == "league.legacy-display-reconciliation-intent.v5"
+    assert durable["intent"]["canonical_lifecycle"] == "terminal"
+    assert durable["receipt"] == result["receipt"]
+    assert {
+        row["status"]
+        for row in store.connection.execute(
+            "SELECT status FROM events WHERE aggregate_id=? AND event_type IN ('assignment_legacy_display_reconciliation_intent','assignment_legacy_display_reconciled')",
+            (assignment_id,),
+        ).fetchall()
+    } == {"completed"}
+    reports_before_retry = len(
+        [call for call in runner.calls if call[:3] == ("herdr", "pane", "report-metadata")]
+    )
+    retry = service.reconcile(spec)
+    assert retry["receipt"] == result["receipt"]
+    assert retry["idempotent"] is True
+    assert len(
+        [call for call in runner.calls if call[:3] == ("herdr", "pane", "report-metadata")]
+    ) == reports_before_retry
+    assert runner.agent_status == "done"
+    store.close()
+
+
+def test_retained_done_reconciliation_requires_settled_task_and_active_callsign(
+    root: Path,
+) -> None:
+    store, clock, worktree, launch, receipt, runner = _prepared_legacy_display(
+        root, "retained-done-authority"
+    )
+    runner.agent_status = "done"
+    spec = replace(
+        _legacy_reconciliation_spec(launch, receipt, worktree, runner),
+        expected_agent_status="done",
+    )
+    service = LegacyDisplayReconciliationService(
+        store,
+        HerdrLegacyDisplayAdapter(
+            runner,
+            environment={"HERDR_ENV": "1", "HERDR_WORKSPACE_ID": "w1"},
+        ),
+        clock,
+    )
+
+    try:
+        service.reconcile(spec)
+    except StorageRefusal as exc:
+        assert exc.code == "legacy_display_lifecycle_unsettled"
+    else:
+        raise AssertionError("provider-done endpoint bypassed canonical task settlement")
+    assert not any(
+        call[:3] == ("herdr", "pane", "report-metadata") for call in runner.calls
+    )
+    assert store.assignment_launch_context(str(launch["assignment_id"]))[
+        "legacy_display_reconciliation"
+    ] is None
+
+    task_id = store.connection.execute(
+        "SELECT task_id FROM task_assignments WHERE task_assignment_id=?",
+        (launch["assignment_id"],),
+    ).fetchone()["task_id"]
+    store.connection.execute(
+        "UPDATE tasks SET state='completed',version=version+1,updated_at=? WHERE task_id=?",
+        (clock.now(), task_id),
+    )
+    store.connection.execute(
+        "UPDATE callsign_assignments SET state='released',released_at=? WHERE callsign_assignment_id=?",
+        (clock.now(), f"callsign-assignment:{launch['assignment_id']}"),
+    )
+    try:
+        service.reconcile(spec)
+    except StorageRefusal as exc:
+        assert exc.code == "legacy_display_conflict"
+    else:
+        raise AssertionError("retained-done repair accepted a released callsign")
+    assert not any(
+        call[:3] == ("herdr", "pane", "report-metadata") for call in runner.calls
+    )
+    assert store.assignment_launch_context(str(launch["assignment_id"]))[
+        "legacy_display_reconciliation"
+    ] is None
+    store.close()
+
+
+class RetainedDoneStatusRaceAdapter(HerdrLegacyDisplayAdapter):
+    """Change provider status after baseline verification, before the effect fence."""
+
+    def _matches_expected(self, spec, observation):
+        matches = super()._matches_expected(spec, observation)
+        if matches:
+            self.runner.agent_status = "idle"
+            self.runner.state_change_seq += 1
+        return matches
+
+
+def test_retained_done_reconciliation_refuses_status_race_before_effect(
+    root: Path,
+) -> None:
+    store, clock, worktree, launch, receipt, prepared = _prepared_legacy_display(
+        root, "retained-done-status-race"
+    )
+    task_id = store.connection.execute(
+        "SELECT task_id FROM task_assignments WHERE task_assignment_id=?",
+        (launch["assignment_id"],),
+    ).fetchone()["task_id"]
+    store.connection.execute(
+        "UPDATE tasks SET state='ready_to_land',version=version+1,updated_at=? WHERE task_id=?",
+        (clock.now(), task_id),
+    )
+    runner = FakeHerdrRunner(worktree)
+    runner.started = True
+    runner.agent_status = "done"
+    runner.routing_name = prepared.routing_name
+    runner.title = prepared.title
+    runner.tokens = dict(prepared.tokens)
+    runner.metadata_source = prepared.metadata_source
+    runner.state_change_seq = prepared.state_change_seq
+    spec = replace(
+        _legacy_reconciliation_spec(launch, receipt, worktree, runner),
+        expected_agent_status="done",
+    )
+    service = LegacyDisplayReconciliationService(
+        store,
+        RetainedDoneStatusRaceAdapter(
+            runner,
+            environment={"HERDR_ENV": "1", "HERDR_WORKSPACE_ID": "w1"},
+        ),
+        clock,
+    )
+
+    try:
+        service.reconcile(spec)
+    except StorageRefusal as exc:
+        assert exc.code == "legacy_display_identity_unverified"
+    else:
+        raise AssertionError("retained-done status race reached a metadata effect")
+    assert runner.agent_status == "idle"
+    assert runner.state_change_seq == prepared.state_change_seq + 1
+    assert not any(
+        call[:3] == ("herdr", "pane", "report-metadata") for call in runner.calls
+    )
+    assert runner.title == prepared.title
+    assert runner.tokens == prepared.tokens
+    assert store.assignment_launch_context(str(launch["assignment_id"]))[
+        "legacy_display_reconciliation"
+    ]["receipt"] is None
+    store.close()
+
+
+def test_legacy_display_reconciliation_requires_live_owned_presentation_source(
+    root: Path,
+) -> None:
+    store, clock, worktree, launch, receipt, runner = _prepared_legacy_display(
+        root, "legacy-provider-guards"
+    )
+    spec = _legacy_reconciliation_spec(launch, receipt, worktree, runner)
+    service = LegacyDisplayReconciliationService(
+        store,
+        HerdrLegacyDisplayAdapter(
+            runner,
+            environment={"HERDR_ENV": "1", "HERDR_WORKSPACE_ID": "w1"},
+        ),
+        clock,
+    )
+
+    original_agent = runner._agent
+    for mutate in (
+        lambda agent: agent.update(agent_status="done"),
+        lambda agent: agent.pop("metadata_source"),
+    ):
+        runner._agent = lambda mutate=mutate: (  # type: ignore[method-assign]
+            lambda agent: (mutate(agent), agent)[1]
+        )(original_agent())
+        try:
+            service.reconcile(spec)
+        except StorageRefusal as exc:
+            assert exc.code == "legacy_display_identity_unverified"
+        else:
+            raise AssertionError("non-live or source-less legacy display was mutated")
+        assert not any(
+            call[:3] == ("herdr", "pane", "report-metadata") for call in runner.calls
+        )
+    runner._agent = original_agent  # type: ignore[method-assign]
+    store.close()
+
+
+def test_legacy_display_refuses_malformed_agent_status_without_type_error(root: Path) -> None:
+    store, clock, worktree, launch, receipt, runner = _prepared_legacy_display(
+        root, "legacy-malformed-agent-status"
+    )
+    spec = replace(
+        _legacy_reconciliation_spec(launch, receipt, worktree, runner),
+        expected_agent_status=["done"],
+    )
+    service = LegacyDisplayReconciliationService(
+        store,
+        HerdrLegacyDisplayAdapter(
+            runner,
+            environment={"HERDR_ENV": "1", "HERDR_WORKSPACE_ID": "w1"},
+        ),
+        clock,
+    )
+    try:
+        service.reconcile(spec)
+    except StorageRefusal as exc:
+        assert exc.code == "legacy_display_invalid"
+    else:
+        raise AssertionError("malformed agent_status was not refused")
+    assert not any(
+        call[:3] == ("herdr", "pane", "report-metadata") for call in runner.calls
+    )
+    store.close()
+
+
+class TokenOnlyLaunchRunner(DeferredSessionRunner):
+    """Native OSC stays native; the identity helper renders explicit launch inputs."""
+
+    def __init__(self, worktree: Path, harness_kind: str = "codex"):
+        super().__init__(worktree, harness_kind=harness_kind)
+        self.title = f"Launch handshake synthetic | {harness_kind}"
+        self.tokens.update(
+            identity_title_mode="tokens-only",
+            harness=harness_kind,
+            identity_thread_id=THREAD_ID,
+        )
+
+    def _agent(self):
+        # Faithful identity-helper precedence: incomplete launch identity falls
+        # back to the provider prompt, even after an early League metadata write.
+        callsign = self.tokens.get("launch_callsign", "")
+        task = self.tokens.get("launch_task_label", "")
+        project = self.tokens.get("launch_project_code", "")
+        title = (
+            f"{callsign} · {project}|{task}"
+            if callsign and project and task
+            else "Launch handshake synthetic"
+        )
+        prior_tokens = dict(self.tokens)
+        self.tokens.update(
+            callsign=callsign or title,
+            thread_title=title,
+            identity_title=f"{self.harness_kind.title()} | {title}",
+        )
+        if self.tokens != prior_tokens:
+            self.state_change_seq += 1
+        agent = super()._agent()
+        agent.pop("metadata_source")
+        agent["terminal_title"] = agent["terminal_title_stripped"] = self.title
+        return agent
+
+    def run(self, arguments, *, timeout_seconds: int = 30):
+        result = super().run(arguments, timeout_seconds=timeout_seconds)
+        if tuple(arguments[:3]) == ("herdr", "agent", "prompt"):
+            self.title = f"New native prompt title | {self.harness_kind}"
+            self.state_change_seq += 1
+        return result
+
+
+def test_token_only_native_title_refresh_preserves_launch_identity(
+    root: Path, harness_kind: str = "codex"
+) -> None:
+    suffix = f"token-only-{harness_kind}-launch"
+    store, clock, worktree = _context(root, suffix)
+    options = replace(_options(root), project_code="League")
+    runner = TokenOnlyLaunchRunner(worktree, harness_kind)
+    spec = _spec(worktree, suffix)
+    service = VisibleChampionLaunchService(
+        store, _adapter(options, runner, store, harness_kind=harness_kind), options, clock
+    )
+    with patch.object(visible_launch.time, "sleep", lambda _: None):
+        first = service.launch(spec)
+        assert first["state"] == "active", first
+        receipt = store.assignment_launch_context(spec.assignment_id)
+        again = VisibleChampionLaunchService(
+            store, _adapter(options, runner, store, harness_kind=harness_kind), options, clock
+        ).launch(spec)
+    assert again["idempotent"] is True
+    assert again["state"] == "active"
+    assert store.assignment_launch_context(spec.assignment_id) == receipt
+    assert first["context_delivery"]["display_receipt"]["state_change_seq"] == runner.state_change_seq
+    assert len(runner.contexts) == 2  # one READY handshake and one work brief
+    assert runner.tokens["thread_title"] == "Lux · League|Tiny Gate"
+    assert runner.tokens["sidebar_name"] == "Lux"
+    assert runner.tokens["orchestrator_role"] == "champion"
+    assert runner.title == f"New native prompt title | {harness_kind}"
+    assert len([call for call in runner.calls if call[:3] == ("herdr", "tab", "create")]) == 1
+    assert len([call for call in runner.calls if call[:3] == ("herdr", "pane", "report-metadata")]) == 1
+    # Reverification must not turn absent top-level source into blanket authority.
+    adapter = _adapter(options, runner, store, harness_kind=harness_kind)
+    acceptance = receipt["acceptance_receipt"]
+    for mutate in (
+        lambda agent: agent.update(metadata_source="user:selected"),
+        lambda agent: agent.update(metadata_source=None),
+        lambda agent: agent.update(title="User title"),
+        lambda agent: agent["tokens"].update(launch_title_owner="foreign"),
+        lambda agent: agent["tokens"].update(launch_callsign="Other"),
+        lambda agent: agent["tokens"].update(identity_thread_id="foreign"),
+        lambda agent: agent["tokens"].update(harness="foreign"),
+        lambda agent: agent["tokens"].update(orchestrator_role="shotcaller"),
+        lambda agent: agent.update(terminal_id="other-terminal"),
+        lambda agent: agent.update(workspace_id="other-workspace"),
+        lambda agent: agent["agent_session"].update(source="foreign"),
+    ):
+        original_agent = runner._agent
+        def changed_agent():
+            agent = original_agent()
+            mutate(agent)
+            return agent
+        before = len(runner.calls)
+        with patch.object(runner, "_agent", changed_agent):
+            try:
+                adapter.verify_active_title(acceptance)
+            except StorageRefusal as exc:
+                assert exc.code in {"launch_title_restore_refused", "launch_identity_unverified"}
+            else:
+                raise AssertionError("ambiguous token-only presentation was accepted")
+        assert all(call[:3] == ("herdr", "agent", "get") for call in runner.calls[before:])
+    store.close()
+
+
+def test_token_only_without_project_refuses_provider_fallback(root: Path) -> None:
+    # The installed identity helper requires a nonempty project code. Do not
+    # invent one, spoof legacy ownership, or accept its native-title fallback.
+    for harness_kind in ("codex", "cursor"):
+        suffix = f"token-only-{harness_kind}-no-project"
+        store, clock, worktree = _context(root, suffix)
+        options = _options(root)
+        assert options.project_code is None
+        runner = TokenOnlyLaunchRunner(worktree, harness_kind)
+        service = VisibleChampionLaunchService(
+            store,
+            _adapter(options, runner, store, harness_kind=harness_kind),
+            options,
+            clock,
+        )
+        with patch.object(visible_launch.time, "sleep", lambda _: None):
+            result = service.launch(_spec(worktree, suffix))
+        assert result["state"] == "cleanup_pending"
+        assert result["failure_class"] == "launch_title_unverified"
+        assert runner.tokens["thread_title"] == "Launch handshake synthetic"
+        assert "launch_project_code" not in runner.tokens
+        assert not any(key.startswith("legacy_display_") for key in runner.tokens)
+        assert len(runner.contexts) == 1
+        assert "identity handshake" in runner.contexts[0]
+        store.close()
+
+
+def test_registered_direct_factory_project_metadata(root: Path) -> None:
+    import league.cli as cli
+
+    for kind in ("codex", "cursor"):
+        for index, (explicit, catalog, expected) in enumerate((
+            ("LEAGUE", "Catalog", "LEAGUE"),
+            (None, "Catalog", "Catalog"),
+            (None, None, None),
+            ("", "Catalog", "invalid"),
+            ("Bad Code", "Catalog", "invalid"),
+            ("x" * 25, "Catalog", "invalid"),
+        )):
+            suffix = f"registered-{kind}-project-{index}"
+            store, clock, worktree = _context(root, suffix)
+            options = _options(root)
+            spec = _spec(worktree, suffix)
+            runner = (FakeHerdrRunner(worktree, harness_kind=kind)
+                      if expected is None else TokenOnlyLaunchRunner(worktree, kind))
+            arguments = ["--state-root", options.state_root, "assign", "run"]
+            for key in (
+                "assignment_id", "request_id", "claim_token", "task_id",
+                "task_summary", "coordinator_agent_id", "champion_agent_id",
+                "repository", "issue", "branch", "worktree",
+            ):
+                arguments.extend(("--" + key.replace("_", "-"), str(getattr(spec, key))))
+            arguments.extend((
+                "--runtime-kind", kind, "--provider-kind", kind,
+                "--workspace-id", "w1", "--task-label", "Tiny Gate",
+                "--issue-selection-receipt-digest", "a" * 64,
+                "--league-command", options.league_command,
+            ))
+            if explicit is not None:
+                arguments.extend(("--project-code", explicit))
+            args = cli._parser().parse_args(arguments)
+            with (
+                patch.dict(os.environ, {"HERDR_ENV": "1", "HERDR_WORKSPACE_ID": "w1"}),
+                patch.object(cli, "SubprocessRunner", return_value=runner),
+                patch.object(cli, "GitHubIssueVerifier", return_value=FakeIssueVerifier(store=store)),
+                patch.object(cli, "_champion_launch_route", return_value={
+                    "model": options.model, "effort": options.effort,
+                    "runtime": kind, "provider": kind,
+                    "explicit": {"runtime": True, "provider": True,
+                                 "model": True, "effort": True},
+                }),
+                patch.object(cli, "_turn_time", side_effect=clock.now),
+                patch.object(visible_launch, "_Clock", return_value=clock),
+                patch.object(store, "resolve_project", return_value=(
+                    {"code": catalog} if catalog is not None else None
+                )) as resolve_project,
+                patch.object(visible_launch.time, "sleep", lambda _: None),
+            ):
+                if expected == "invalid":
+                    try:
+                        cli._assign_launch(store, args)
+                    except StorageRefusal as exc:
+                        assert exc.code == "presentation_metadata_invalid", exc.code
+                    else:
+                        raise AssertionError("invalid project metadata reached allocation")
+                    assert runner.calls == []
+                    try:
+                        store.assignment_launch_context(spec.assignment_id)
+                    except StorageRefusal as exc:
+                        assert exc.code == "assignment_unknown"
+                    else:
+                        raise AssertionError("invalid project metadata reserved an assignment")
+                else:
+                    first, _ = cli._assign_launch(store, args)
+                    assert first["state"] == "active", first
+                    receipt = store.assignment_launch_context(spec.assignment_id)
+                    retry, _ = cli._assign_launch(store, args)
+                    assert retry["state"] == "active" and retry["idempotent"]
+                    assert store.assignment_launch_context(spec.assignment_id) == receipt
+                    suffix_title = f"{expected}|Tiny Gate" if expected else "Tiny Gate"
+                    assert runner.tokens["thread_title"] == f"Lux · {suffix_title}"
+                    assert runner.tokens.get("launch_project_code") == expected
+                    assert f"Project code: {expected or 'none'}" in runner.contexts[-1]
+                    assert len([call for call in runner.calls
+                                if call[:3] == ("herdr", "tab", "create")]) == 1
+                if explicit is not None:
+                    resolve_project.assert_not_called()
+                else:
+                    assert resolve_project.call_count == 2
+            store.close()
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="league-visible-launch-") as temporary:
         root = Path(temporary)
+        test_registered_direct_factory_project_metadata(root)
+        test_token_only_native_title_refresh_preserves_launch_identity(root)
+        test_token_only_native_title_refresh_preserves_launch_identity(root, "cursor")
+        test_token_only_without_project_refuses_provider_fallback(root)
         test_generated_task_labels_are_deterministic_two_word_names()
         test_legacy_display_command_exposes_exact_owner_cas_inputs()
         test_task_label_defaults_and_explicit_labels_stay_two_words(root)
@@ -2623,6 +3431,8 @@ def main() -> None:
         test_immediate_resume_session_still_requires_exact_process_identity(root)
         test_resume_retry_reconciles_owned_endpoint_without_second_launch(root)
         test_real_adapter_one_command_success_and_retry(root)
+        test_base_delivered_context_retry_is_recognized_without_redelivery(root)
+        test_retained_done_reconciliation_refuses_status_race_before_effect(root)
         test_live_multiplexer_names_fence_stale_available_callsigns(root)
         test_active_retry_requires_migration18_issue_binding(root)
         test_active_retry_refuses_changed_owner_issue_before_title_read(root)

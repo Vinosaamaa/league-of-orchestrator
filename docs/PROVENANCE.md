@@ -21,6 +21,54 @@ event to translate the old bootstrap session without rewriting its receipt.
 Focused coverage: `tests/test_runtime_identity.py`. No hook invokes this repair
 automatically, and these source tests do not certify installation or live recovery.
 
+## Issue-#85 registered direct-launch project metadata
+
+The registered Codex/Cursor factories previously classified `project_code` as
+a forbidden native-session input. They now accept optional display metadata,
+apply an explicit value to driver options, and run the existing option validator
+before allocation or continuation effects. Provider/session restrictions remain
+unchanged. The CLI uses an explicit project code ahead of the catalog fallback
+so the driver and delivered context receive the same name. Full registered
+CLI/factory/driver synthetic coverage proves explicit, catalog, and absent-code
+paths, exact retry, and invalid-code refusal before any command or assignment
+reservation. Token-only no-project helper compatibility remains a separate
+toolkit dependency; no fabricated project metadata is introduced.
+
+## Issue-#85 token-only Champion launch compatibility
+
+The Codex/Cursor visible-launch adapter now supplies the identity helper's
+explicit `launch_callsign`, `launch_project_code` (when present), and
+`launch_task_label` inputs. Generic provider-refreshed tokens alone did not
+preserve the launch name. For the exact `tokens-only` presentation profile,
+verification observes the rendered pane title and identity tokens rather than
+mistaking native OSC `terminal_title` for the rendered title. An omitted
+top-level metadata source is accepted only with the complete assignment-owned
+launch envelope, exact endpoint/session identity, canonical display inputs,
+and stable observation. Explicit foreign/null sources and changed user display
+remain refusals. Synthetic deferred-handshake/context/retry coverage proves the
+compatibility case without a live provider, title parser, or renderer change.
+
+## Issue-#8 retained-row recovery compatibility
+
+The PR54 continuation deliberately adds two narrow compatibility cases to the
+existing one-row descendant reconciliation: imported paired-null routing
+metadata may be adopted only after exact live verification, and a verified
+legacy hook generation may retain its original identity after recomputation
+of the original producer hash. Null-route eligibility is shared with the
+already-landed snapshot refresh implementation; snapshot set guards and
+immutable binding digests are not weakened. Existing runtime rows are not
+rewritten. The same transaction now rechecks the frozen private binding before
+any adoption, closing the preflight-to-commit drift window.
+
+The existing target preflight also exposes the complete scoped pending outbox
+ID set (maximum 1,000; overflow refuses) using the same query as commit. This
+avoids the unrelated-recipient backlog cap without a new inspection surface.
+Synthetic `test_one_row_recovery_*` regressions cover exact recovery, changed
+active-set isolation, foreign and malformed live identity, forged hook
+identity, immutable runtime history, delivery selection, and rollback at every
+existing descendant fault boundary. No schema, installed state, live runtime,
+canonical ownership, or unrelated frozen binding is changed by this source work.
+
 ## Schema-16 release compatibility repair
 
 Issue #90 restores the already-canonical schema-16 migration omitted from the
@@ -239,6 +287,14 @@ root as an additional workspace-write root, and records bounded context or
 exact failure-cleanup receipts. Those League-specific rules now live only in
 the orchestration supplement and no longer claim universal-guide ownership.
 
+The issue-#81 limited-batch regression permits a fresh `request turn` after
+the prior turn committed when already-captured, untriaged prompts remain for
+that same owner and generation. The check and token replacement share one
+SQLite write transaction. An uncommitted turn, exhausted same-generation
+backlog, or stale generation still refuses; owner-active supervision and exact
+prompt accounting are unchanged. No fabricated intake or generation bump is
+needed to drain consecutive bounded batches.
+
 The issue-#23 rollover-successor correction deliberately separates immutable
 prompt capture provenance from mutable current triage ownership, moves each
 frozen Champion's agent/task/assignment/callsign/pending-delivery ownership in
@@ -323,6 +379,18 @@ ordinary Pi session and activates only when the existing canonical hook command
 proves that exact Pi session. Focused fake-adapter tests cover Codex, Cursor,
 and Pi; they are not live-provider evidence. Merge, installation, live provider
 canaries, cutover, rollback, and teardown remain separate gates.
+
+## Issue-#8 current-stage port
+
+PR #54 adds bounded startup reads and a thin staged rollover runner on schema
+24 without modifying migrations or rollover storage semantics. It replaces the
+historical candidate's custom provider commands, bulk obligation rewrite and
+duplicate cleanup with registered native capability checks, explicit successor
+page receipts, and current staged reconciliation/cleanup gates.
+`tests/test_rollover_successor.py` covers both native-kind directions using
+synthetic state, separate-process and concurrent retry, and exact survivor
+recovery after expired changed-set refresh refuses. These are repository-local
+proofs, not installation or live-provider receipts.
 
 ## Skill-contract implementation provenance
 
@@ -655,6 +723,40 @@ repository-issue binding before visible launch mutation. Repository,
 configuration, migration, test, benchmark, durable research, release,
 operational, reproduction, debugging, and bug-fix work now force visible
 Champion execution; the prior direct-tiny answer/check path is preserved.
+
+The PR #134 regression exposed two enforcement gaps after route selection:
+provider tools could mutate repository files before delegation, and a
+Champion-routed request could be answered or settled without a cited Champion
+task. Issue #81 now uses one provider-neutral pre-tool policy for Codex
+`PreToolUse` and Pi `tool_call`, returning the stable
+`delegation_required` refusal before a Shotcaller write. The canonical request
+completion path additionally requires the exact issue-selection receipt,
+semantic binding, distinct visible Champion runtime, active assignment, and
+settled task. An accepted result remains deliverable after ownership changes or
+cleanup, and settled retries remain effect-free. The preflight recognizes native
+file edits and common shell writes, not arbitrary program behavior; the provider
+sandbox remains authoritative. Read-only work, protected recovery, prompt intake,
+Stop, detachment, and Champion implementation retain their existing paths;
+Pi `agent_settled` watcher parity remains owned by issue #84.
+
+PR #201 review exposed expansion-dependent shell targets being mistaken for
+literal off-repository paths. The shared classifier now preserves shell word
+quoting and refuses unresolved mutation targets or relative writes after an
+unresolved directory change. It never evaluates shell expansion or executes
+the command. Literal off-repository writes and read-only diagnostics remain
+available, including escaped/single-quoted dollar filenames; filesystem identity
+is checked afresh rather than cached across requests. This remains a bounded
+preflight for recognized write forms, not an arbitrary-program shell sandbox.
+
+Issue selection no longer aggregates every full issue and pull-request body
+inside one bounded runner response. It pages required issue metadata, discards
+pull requests before output, and fetches bodies only for normalized-title
+candidates. Semantic/exact-issue selection and the scope lease are unchanged;
+an incomplete or timed-out scan refuses before any issue creation.
+Matching candidates are streamed and reduced to metadata/body digests after
+semantic validation, so their full bodies do not accumulate across pages.
+Champion completion reuses its issue-validated task rows within the existing
+transaction while retaining the common settled/nonempty-result checks.
 
 The owner-found duplicate-issue regression deliberately extends v17 with
 a normalized repository/title/semantic-scope lease and immutable per-task issue
@@ -1283,6 +1385,25 @@ only from matching Pi routing metadata, passes it explicitly to the Pi extension
 and publishes a reduced non-duplicative token set. Native Pi session identity,
 toolkit presentation tokens, JSONL bytes, and Job Journey state remain unchanged.
 
+Issue #85's presentation follow-up preserves the explicit two-word task when
+a project code is present: Champion thread and terminal titles are
+`<Callsign> · <PROJECT>|<Two Word Task>`, not a project-only title. Sidebar
+and Shotcaller naming remain callsign-only. Focused visible-launch coverage
+binds this deliberate correction. A service-level Pi regression exposed two
+production contract mismatches: duplicate native session fields in the strict
+activation envelope, and a native launch observation returned as a display
+receipt. Native fields remain in the durable provider descriptor; activation
+validation is unchanged. Context delivery now waits for prompt acceptance and
+returns a fresh stable, ownership-checked display receipt. Focused fake-adapter
+coverage does not replace installed end-to-end acceptance.
+
+The local integration with 0.2.75 preserves the shipped provider-neutral
+multiplexer delivery path and metadata sequence semantics. Pi requests its
+post-context wait through that shared adapter. Retained-done reconciliation
+uses intent version 5 so it cannot collide with the shipped worktree and
+runtime-generation intent versions 2–4; the focused suite retains their
+existing coverage. Combining retained-done repair with relocation or generation
+replacement refuses rather than inventing a mixed recovery operation.
 ## Provider-neutral restart display provenance
 
 A real named Herdr restart restored the same Codex/Pi sessions, panes, working
@@ -1933,3 +2054,65 @@ its launcher shell, using bounded OS PID/start-time, executable, parent, and
 foreground-group readbacks. A second Codex process, unrelated child, changed
 session, missing PID, or mismatched executable remains a refusal. Synthetic
 native-shaped fixtures cover this case; no process is started or terminated.
+
+## Issue #84: Pi factory routing descriptor acceptance
+
+The registered Pi factory emitted explicit model-routing evidence that the
+durable descriptor validator rejected as an extra field. The faithful synthetic
+factory-to-Herdr-adapter regression reproduced `launch_adapter_storagerefusal`
+and `cleanup_pending` before any endpoint allocation. Descriptors now accept
+only the exact optional routing shape, retain it in the digest and activation
+receipt, and reject mismatched provider/model/effort or malformed evidence.
+Persisted decisions must also bind the exact assignment/request/task, role,
+capabilities, and canonical decision fields. Legacy descriptors without routing
+remain valid; this does not introduce a routing policy or fallback model.
+
+The deliberate failure-handling change preserves the original storage refusal
+through the launch adapter. A fresh pre-allocation failure releases only its
+own callsign reservation through the existing canonical rollback. A prior
+durable attempt remains cleanup-pending because its endpoint may exist after a
+crash. Invalid project codes now fail in the factory before reservation using
+the same uppercase-code grammar as descriptor storage. `LEAGUE` with the
+two-word `Tiny Gate` label passes the real factory/adapter boundary using only
+temporary state and a fake multiplexer command runner.
+
+Red/green checks also caught lowercase project codes reaching the reservation
+boundary and foreign request routing being accepted after the optional-field
+repair. Both now refuse. During the ownership-check implementation, the focused
+test caught an incorrect assignment capability-column lookup (`IndexError`);
+the check now reads the exact callsign reservation's `requirements_json`.
+These are local source and synthetic-test receipts, not live launch evidence.
+The PR #202 follow-up reproduced malformed capability JSON through the canonical
+routing-decision storage API: its TEXT column has no JSON constraint. Such
+evidence previously escaped as `launch_adapter_jsondecodeerror` and left a fresh
+reservation cleanup-pending. Both canonical capability inputs now use the
+existing capability validator and map parse/type/shape failures to
+`provider_launch_routing_mismatch` inside descriptor preparation's transaction.
+Synthetic factory regressions prove no descriptor or endpoint allocation and
+exact reservation rollback for malformed JSON, null, mixed arrays, and objects.
+
+## Issue #84: Pi initial startup transport and safe native diagnostics
+
+The post-PR #202 launch reached an allocated shell pane but never verified a Pi
+session; the owning launch attempt subsequently rolled back its endpoint. A
+truncated-looking command was observed. A macOS 1,024-byte input/readiness race
+remains an unproven hypothesis, not the cause established by this source change.
+
+Synthetic factory regressions reproduced two concrete source defects: initial
+argv duplicated 15 metadata values already passed through Herdr placement's
+native `--env` arguments, and native startup errors on stderr became the opaque
+`launch_adapter_failed`. Initial launch now uses that exact placement environment
+only when it matches the descriptor-derived environment. Pane ID, provider,
+model, effort, extension, trust flag, and create/fork/resume session arguments
+remain explicit. Descriptor bytes/digests and restart argv are unchanged. Both
+initial argv forms remain recognizable only behind the existing exact metadata
+checks; the regression caught and corrected an initially stale full-argv-only
+process check. Wrong environment metadata still prevents activation and briefing.
+
+Bounded strict native error envelopes retain only allowlisted constant startup
+codes as `launch_native_<code>`. Native messages, IDs, arbitrary code values, and
+data are never copied into diagnostics. Malformed, duplicate, nonfinite, mixed,
+or oversized envelopes retain the generic refusal. Focused tests cover exact
+initial launch, retry, same-child restart, mismatched environment, and safe error
+rollback. No sleep, readiness assumption, wrapper, live launch, service change,
+or profile mutation is introduced; installed acceptance remains a separate gate.

@@ -20,6 +20,7 @@ STORAGE_TESTS := \
 REQUEST_LIFECYCLE_TESTS := \
 	tests/test_request_lifecycle.py \
 	tests/test_request_turn_batch.py \
+	tests/test_delegation_policy.py \
 	tests/test_assignment_dispatch.py \
 	tests/test_request_concurrency.py \
 	tests/test_transition_delivery.py \
@@ -70,6 +71,7 @@ SKILL_CONTRACT_TESTS := \
 HANDOFF_CALLSIGN_TESTS := \
 	tests/test_callsign_queue.py \
 	tests/test_shotcaller_rollover.py \
+	tests/test_rollover_successor.py \
 	tests/test_shotcaller_bootstrap.py \
 	tests/test_placement_policy.py
 

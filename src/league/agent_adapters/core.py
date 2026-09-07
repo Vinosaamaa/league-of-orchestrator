@@ -12,6 +12,7 @@ from typing import Any, Mapping, Protocol
 
 from ..adapter_types import AdapterContract, AdapterInstruction, OpaqueIdentity, RuntimeObservation
 from ..storage_types import StorageRefusal
+from ..delegation_policy import repository_implementation
 
 
 ADAPTER_OPERATIONS = frozenset(
@@ -125,6 +126,8 @@ class SharedLifecyclePolicy:
                 )
             if not authorized:
                 return LifecycleDecision(event.operation, "refuse", "tool_not_authorized")
+            if actor_role in {"shotcaller", "hidden-worker"} and repository_implementation(event.payload):
+                return LifecycleDecision(event.operation, "refuse", "delegation_required")
         return LifecycleDecision(event.operation, "accept", "policy_accepted")
 
 

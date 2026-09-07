@@ -2,7 +2,7 @@
 
 ## Incident
 
-The visible Champion launcher wrote and verified `<Callsign> · <Task>` before
+The visible Champion launcher wrote and verified a callsign/task title before
 delivering its launch handshake or assignment context. Herdr/Codex could then
 auto-title the visible sidebar, thread, and terminal from that prompt. League
 recorded context delivery without observing the final display state, so the
@@ -42,7 +42,8 @@ The final ordering invariant is:
 3. activate and deliver the bounded assignment context with a settled wait;
 4. require the same endpoint, thread, routing name, metadata source, agent
    authority source, and ownership token;
-5. restore `<Callsign> · <Task>` with the fresh observed sequence;
+5. restore the explicit canonical role-specific names with the fresh observed
+   sequence;
 6. require two consecutive matching sidebar, task-label, thread-title, and
    terminal-title observations at one state-change sequence;
 7. bind that source/sequence observation into the successful context receipt.
@@ -64,9 +65,15 @@ ownership-safe restoration. If a newer user-owned or unowned write is present,
 League performs no metadata mutation and records `cleanup_pending` against the
 exact runtime. Unproven cleanup remains a truthful cleanup obligation.
 
-Generated Champion task labels use a deterministic two-word default derived
-from the task summary. Explicit labels remain limited to at most two words, so
-the generated visible contract has no vague one-word fallback.
+Generated and explicit Champion task labels contain exactly two words. The
+provider-neutral naming contract is callsign-only for Shotcallers, callsign-only
+for Champion sidebars, and `<Callsign> · <PROJECT>|<Two Word Task>` for Champion
+thread and terminal title when an explicit catalog project code is available, otherwise
+`<Callsign> · <Two Word Task>`. Runtime/provider labels are never embedded and
+League never parses a title to discover identity. Prompt, context, OSC,
+restart, and icon refreshes cannot replace exact owned names; a newer
+user-owned presentation remains authoritative. Provider launch behavior and
+Herdr rendering remain owned by issues #84 and the Herdr layer respectively.
 
 ## Legacy recovery invariant
 
@@ -89,8 +96,9 @@ league --state-root <canonical-root> assign reconcile-legacy-display \
   --target-task-label <exact-two-word-label> --owner-authorized --at <timestamp>
 ```
 
-The presentation JSON has exactly three fields: `source`, `title`, and the
-integer `state_change_seq`. Extra, missing, or differently typed fields refuse.
+The presentation JSON normally has exactly three fields: `source`, `title`,
+and the integer `state_change_seq`. A retained endpoint may add only
+`"agent_status":"done"`; no other status or extra field is accepted.
 
 The store first appends one immutable intent after proving that the canonical
 assignment/runtime/route are exact, that only one live runtime matches, and
@@ -116,6 +124,54 @@ The operation does not create, replace, stop, or clean a runtime; allocate or
 release a callsign; create layout; register a Squad; or mutate task progress.
 It patches only display keys owned by this recovery and preserves every
 unrelated metadata token.
+
+### Retained-done classification
+
+A pre-fix Champion may finish at the provider while League deliberately retains
+its pane, route, runtime row, assignment, and callsign. That endpoint is not an
+active worker and must not be made to look active merely to repair its stale
+handshake title. The retained-done v5 intent requires every eligibility gate:
+
+- [ ] Exact canonical assignment and callsign assignment remain active.
+- [ ] One verified runtime binds the same agent/thread/pane/generation.
+- [ ] Route and physical worktree remain exact.
+- [ ] Canonical task is already terminal; provider status is `done`.
+- [ ] Legacy context contains no modern display receipt.
+
+If the task is not yet terminal, reconciliation refuses with
+`legacy_display_lifecycle_unsettled`; the ordinary durable task transition must
+settle lifecycle first. The shared identity, ownership, and observation fences
+above still apply.
+
+The v5 intent records the terminal lifecycle class and expected provider status
+`done`. The final receipt binds that same status to the stable source, title,
+sequence, and observation digest. Metadata repair does not prompt, start,
+close, rename, or resume the endpoint, and the final canonical events use a
+completed status instead of claiming active work. Two fresh observations still
+fence the effect, unrelated tokens are preserved, modern ownership metadata or
+identity drift refuses, and exact retry revalidates the stored receipt without
+a second report.
+
+## Canonical role-token invariant
+
+League publishes exactly one provider-neutral role key with its owned display
+overlay: `orchestrator_role=shotcaller` for a canonically verified Shotcaller or
+`orchestrator_role=champion` for a canonically verified Champion. The value is
+derived from the assignment/callsign role, never from provider title text or a
+best-effort guess. Missing and unknown roles therefore emit no token.
+
+Champion launch, active retry, legacy reconciliation, and retained-done
+reconciliation include the token in the same final source/sequence receipt as
+their title. Shotcaller create and exact retry include it in the existing
+title-owner/source overlay and the durable creation event receipt. Codex and
+Cursor presentation authorities follow the same rule. An exact owned retry may
+restore a changed value; an unowned source or ambiguous role refuses. Rollback
+clears only League's role token while preserving unrelated provider/user
+metadata.
+
+This is only the League metadata half of the cross-repository presentation
+contract. League adds no marker text, glyph, color, ANSI, conditional renderer
+logic, name/title length change, or pane styling.
 
 Shotcaller bootstrap applies a corresponding read boundary: current-pane and
 agent-inventory queries may retry malformed JSON up to three attempts each, but
@@ -197,8 +253,9 @@ unbound Codex pane can have a provider-generated callsign/sidebar/thread/title
 such as an owner prompt while having no routing binding and no
 `metadata_source` field. League now treats those values only as presentation:
 it infers the provider source solely from a complete, self-consistent Codex
-session/thread/identity-title envelope and normalizes Herdr's terminal
-` | codex` suffix. A real bind still requires a consistent top-level `name`,
+session/thread/identity-title envelope and consumes Herdr's explicit stripped
+terminal-title field without parsing provider suffixes. A real bind still
+requires a consistent top-level `name`,
 `routing_name`, or `routing_alias`; conflicting fields, a present invalid
 source, partial tokens, or endpoint identity drift refuse before mutation.
 
@@ -233,3 +290,69 @@ user races both before the write and in the final read-to-write window. The
 last-window fixture models Herdr's real per-source sequence rule and proves the
 League overlay is cleared while the newer user title/source and unrelated
 tokens survive.
+
+## Token-only direct-provider launch follow-up
+
+The registered-factory acceptance path exposed an earlier refusal than title
+verification: direct Codex and Cursor classified explicit `project_code` as
+forbidden, and the CLI did not forward that explicit value into shared display
+options. The factories now validate optional project metadata with the existing
+option validator, and the CLI aligns driver/context naming with the explicit
+code or catalog fallback. The regression enters through `assign run` parsing,
+both registered adapters, the real multiplexer driver factory, and the full
+visible-launch service against synthetic storage and transport. Invalid codes
+produce no native command or assignment reservation. No live launch is part of
+this source acceptance.
+
+A preserved pre-acceptance Codex launch exposed a second presentation surface:
+Herdr omitted top-level `metadata_source`, retained the native handshake OSC
+title, and exposed `identity_title_mode=tokens-only`. The installed identity
+helper prioritizes explicit `launch_*` inputs; without them its refresh replaced
+generic callsign/thread/task tokens with the native prompt. League's owner tokens
+alone therefore did not prove a correct visible title.
+
+The direct Codex/Cursor adapter publishes those explicit canonical inputs and,
+only for the exact token-only profile, the identity title consumed by the status
+renderer. It waits for the actual rendered title and complete owned display
+envelope at a stable source/sequence. It does not rename the native provider
+session or claim that an unchanged OSC title was repaired. Native prompt refresh
+cannot supply the canonical launch inputs. Missing ownership, changed identity,
+foreign/null source, or changed user presentation refuses without restoration.
+
+The focused synthetic test begins without a session, accepts one READY handshake,
+refreshes the native prompt after context, and verifies receipt-identical retry
+without a second launch, prompt, or metadata write. A failed pre-acceptance fresh
+launch is not covered by active-title revalidation: `assign run` refuses an
+already occupied fresh route, and `assign reconcile-runtime` does not activate a
+non-active assignment. There is no demonstrated supported adopt-partial-launch
+surface; recovery of a retained failed pane remains an explicit coordinator gate.
+
+The installed identity helper also requires a nonempty project code for its
+canonical Champion branch. With an absent or empty code it selects the native
+prompt even when the callsign and two-word task inputs are exact. League's
+optional-project naming contract cannot be represented by that helper without
+an owning-toolkit compatibility change. A fabricated project code would change
+the canonical name; legacy-reconciliation tokens would misrepresent ownership.
+Codex/Cursor no-project regression coverage therefore retains the truthful
+`launch_title_unverified` refusal and proves no work brief is delivered. This is
+a known availability blocker, not successful no-project launch support.
+
+## Pi service-boundary follow-up
+
+The full visible-launch service reproduced `launch_receipt_unverified`: the Pi
+adapter added native session fields outside the exact activation schema. After
+removing those duplicates (retaining the durable provider descriptor), the same
+test exposed a second mismatch: context delivery returned the native launch
+observation instead of the canonical display receipt. Neither storage validator
+was relaxed. A temporary-path alias in the new fixture was also normalized to
+match the exact canonical worktree binding.
+
+Pi context delivery now waits for prompt acceptance, verifies the persisted
+assignment/native endpoint, restores only descriptor-owned provider presentation,
+and observes stable source, sequence, sidebar, thread, terminal, and canonical
+role before recording delivery. A fresh adapter retry sends no second prompt.
+Token-only user edits, foreign runtime receipts, malformed or removed modern
+role tokens, and a newer user write after an early restoration refuse without a
+second restoration. Both Pi provider mappings run through the real service and
+synthetic SQLite store in the normal focused suite. Installed acceptance remains
+a separate coordinator-owned gate.

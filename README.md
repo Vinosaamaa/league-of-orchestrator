@@ -32,6 +32,8 @@ the watcher service installer runs only as an explicit, hash-authorized command.
 - Synthetic examples, authoring schemas, and focused local regression tests.
 - One standard-library SQLite implementation behind a `Storage` protocol and
   stable `league` command facade.
+- Bounded `agent startup-context` and receipt-driven `rollover run` over the
+  [existing guarded handoff stages](docs/HANDOFF_CALLSIGNS.md#startup-context-and-bounded-runner-8--pr-54).
 - Twenty-three contiguous checksummed schema migrations, a loaded-runtime WAL gate,
   verified backups, integrity checks, expected-version writes, and bounded contention.
 - A strict manifest importer covering every canonical issue-#18 artifact
@@ -71,12 +73,26 @@ the watcher service installer runs only as an explicit, hash-authorized command.
   tokens per Herdr report, performs two stable readbacks, never starts or resumes
   an agent, and fails closed on a missing, replaced, or ambiguous session.
 - Recoverable visible-Champion assignment with exact acceptance receipts,
-  settled post-context callsign/task title restoration bound to the exact
+  settled post-context role-specific title restoration bound to the exact
   metadata source and sequence, deterministic two-word display-task defaults,
   and one owner-authorized sequence-fenced League-overlay reconciliation for
-  exact active pre-fix Champions without modern title receipts,
+  exact active pre-fix Champions without modern title receipts. The same
+  receipt-bound command admits a retained provider endpoint reporting `done`
+  only after the canonical task is terminal, and preserves that terminal
+  status while repairing presentation without closing or reactivating it,
   source-bound transition outbox delivery, unique recipient effects, and fair
   backlog draining.
+- Provider-neutral presentation names derived only from explicit canonical
+  metadata: Shotcaller names are callsign-only; Champion sidebars are
+  callsign-only; and Champion thread/terminal titles are
+  `<Callsign> · <PROJECT>|<Two Word Task>` when an exact catalog project code exists, otherwise
+  `<Callsign> · <Two Word Task>`. Runtime/provider labels are never embedded or
+  parsed from titles. Prompt, context, OSC, restart, and icon-only refreshes
+  cannot replace an owned name; newer user-owned presentation still wins.
+- One League-owned `orchestrator_role` presentation token, emitted only as
+  `shotcaller` or `champion` from canonical role truth and covered by the same
+  source/owner receipts as the title overlay. Unknown roles emit no token;
+  League defines no glyph, color, marker, or renderer behavior for it.
 - One role-aware bounded Shotcaller Stop decision with ordinary-message
   priority and separate request, dispatch, and watcher leases, plus in-place
   Shotcaller bootstrap that waits for a stable source-owned callsign title
@@ -106,7 +122,9 @@ the watcher service installer runs only as an explicit, hash-authorized command.
   endpoint identity and every provider presentation byte still match that
   attempt. League's title overlay carries explicit owner/source tokens and uses
   Herdr's provider-source authority without borrowing its source-local sequence;
-  a later provider or user presentation refuses and is preserved. Rollback
+  a provider change before ownership is published or any later user-owned
+  presentation refuses and is preserved. Once exact League ownership exists,
+  a provider name refresh is restored from canonical fields. Rollback
   either proves the exact external restoration before releasing the reservation
   or leaves that reservation as the durable retry obligation. A reserved pane
   whose route provider also exposes route tokens is admitted only through the
@@ -508,7 +526,14 @@ current goal version; a later use cannot strand an older valid one.
 An autonomous grant never
 makes repository implementation direct: `request dispatch` still requires a
 visible Champion, and `assign run` verifies the issue against GitHub before any
-canonical assignment or terminal mutation.
+canonical assignment or terminal mutation. The same provider-neutral
+delegation policy blocks Shotcaller repository writes through Codex
+`PreToolUse` and Pi `tool_call` with `delegation_required`; a Champion-routed
+request also cannot be answered or settled without its issue-bound visible
+Champion task receipt. Native file edits and recognized shell file writes are
+checked; this is not a general-purpose shell sandbox. Read-only diagnostics,
+canonical recovery commands, prompt intake, Stop, and detachment retain their
+existing paths. Recovery still requires its own exact protected-action authority.
 
 Before `assign run`, select the issue through the duplicate-preflight command:
 

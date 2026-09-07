@@ -11,6 +11,7 @@ import sys
 import tempfile
 from pathlib import Path
 from typing import Any, Sequence
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -35,6 +36,7 @@ from league.real_canary import (  # noqa: E402
     _settle_transition_and_request,
     _setup_sqlite,
 )
+from league import real_canary  # noqa: E402
 from league.sqlite_handoff_schema import CHAMPION_SEED, SHUFFLE_VERSION  # noqa: E402
 from league.sqlite_store import SQLiteStorage  # noqa: E402
 from league.storage import RuntimeRegistrationCommand, StorageRefusal  # noqa: E402
@@ -854,9 +856,69 @@ def test_cursor_and_pi_use_provider_exit_contract() -> None:
         )
 
 
+def test_canary_readiness_requires_reply_without_trust_override(root: Path) -> None:
+    for reply, stalled in ((False, False), (True, False), (True, True)):
+        home = root / f"reply-{reply}-stalled-{stalled}"
+        worktree = home / "git/worktree"
+        worktree.mkdir(parents=True)
+        (worktree.parent / "repository").mkdir()
+        (home / "failure-scope.json").write_text("{}", encoding="utf-8")
+        calls: list[tuple[str, ...]] = []
+        prompt = ""
+        token = ""
+
+        def fake_run(arguments: Sequence[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            nonlocal prompt, token
+            args = tuple(arguments)
+            calls.append(args)
+            result = ""
+            code = 0
+            if args[:3] == ("herdr", "agent", "prompt"):
+                prompt = args[4]
+                token = "LEAGUE23_CANARY_READY_" + prompt.split('"')[5]
+                assert token not in prompt
+                code = int(stalled)
+                result = json.dumps({"error": {"code": "agent_prompt_stalled"}} if stalled else {"ok": True})
+            elif args[:3] == ("herdr", "pane", "read"):
+                result = "gpt-6-astra high\n" + prompt
+                if reply:
+                    result += "\n" + token
+            elif args[0] == "git":
+                if "rev-parse" in args:
+                    result = real_canary.REPORT_TESTED_HEAD
+                elif "branch" in args:
+                    result = real_canary.REPORT_BRANCH
+            else:
+                assert args[:3] == ("herdr", "pane", "wait-output"), args
+            return subprocess.CompletedProcess(args, code, result, "")
+
+        def fake_herdr(arguments: Sequence[str], *args: Any, **kwargs: Any) -> dict[str, Any]:
+            calls.append(("herdr", *arguments))
+            if arguments[:2] == ("pane", "split"):
+                return {"result": {"pane": {"pane_id": "w-test:p-test"}}}
+            assert arguments[:2] == ("agent", "start")
+            assert "gpt-6-astra" in arguments
+            assert not any("trust_level" in part for part in arguments)
+            return {"ok": True}
+
+        identity = {
+            "agent": "codex", "workspace_id": "w-test", "pane_id": "w-test:p-test",
+            "terminal_id": "terminal-test", "agent_session": {"value": "session-test"},
+        }
+        with patch.object(real_canary, "_run", side_effect=fake_run), patch.object(
+            real_canary, "_herdr", side_effect=fake_herdr
+        ), patch.object(real_canary, "_exact_agent", side_effect=[None, identity]):
+            if reply:
+                assert real_canary._create_herdr_canary(home, worktree, "test")["session_id"] == "session-test"
+            else:
+                refused(lambda: real_canary._create_herdr_canary(home, worktree, "test"), "real_canary_readiness_unproven")
+        assert sum(call[:3] == ("herdr", "agent", "prompt") for call in calls) == 1
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="league-real-cleanup-") as directory:
         root = Path(directory)
+        test_canary_readiness_requires_reply_without_trust_override(root / "readiness")
         test_archive_git_and_scope(root / "git")
         test_herdr_and_callsign_exact_cleanup(root / "runtime")
         test_cursor_and_pi_use_provider_exit_contract()

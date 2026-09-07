@@ -273,7 +273,7 @@ The cleanup gate has one deliberately real runtime command. It fetches only the
 two required report commits into a new repository beneath the explicit
 temporary root, creates an isolated worktree at the exact tested head,
 opens one no-focus Herdr pane, launches one Codex Champion routed as
-`gpt-5.6-sol high`, and stores the lifecycle in the canary's real SQLite state:
+`gpt-6-astra high`, and stores the lifecycle in the canary's real SQLite state:
 
 ```sh
 ./bin/league acceptance cleanup-canary \
@@ -297,6 +297,12 @@ eligible local branch, and releases the callsign last. It writes immutable
 per-action and final teardown receipts. Fault injection stops after the archive
 external effect, then a separate League CLI process reopens the SQLite store and
 resumes the same operation idempotently. Only `cleanup_completed` clears Stop.
+
+Readiness sends one nonce-bound challenge whose full answer is absent from the
+prompt, so echoed input cannot prove a reply. A stalled prompt is observed, not
+resubmitted. The launcher never configures directory trust; any native trust
+approval remains the user's decision. This cleanup-specific launcher does not
+prove production `assign run` or real prompt-hook intake.
 
 Readiness uses the normative supervision compatibility policy above. The
 command never uses the user's home directory, canonical League state, or a global install. It is a real

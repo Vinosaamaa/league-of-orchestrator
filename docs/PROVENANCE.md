@@ -1,5 +1,18 @@
 # Source provenance
 
+## Issue-#85 registered direct-launch project metadata
+
+The registered Codex/Cursor factories previously classified `project_code` as
+a forbidden native-session input. They now accept optional display metadata,
+apply an explicit value to driver options, and run the existing option validator
+before allocation or continuation effects. Provider/session restrictions remain
+unchanged. The CLI uses an explicit project code ahead of the catalog fallback
+so the driver and delivered context receive the same name. Full registered
+CLI/factory/driver synthetic coverage proves explicit, catalog, and absent-code
+paths, exact retry, and invalid-code refusal before any command or assignment
+reservation. Token-only no-project helper compatibility remains a separate
+toolkit dependency; no fabricated project metadata is introduced.
+
 ## Issue-#85 token-only Champion launch compatibility
 
 The Codex/Cursor visible-launch adapter now supplies the identity helper's

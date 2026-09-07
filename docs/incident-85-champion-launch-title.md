@@ -293,6 +293,17 @@ tokens survive.
 
 ## Token-only direct-provider launch follow-up
 
+The registered-factory acceptance path exposed an earlier refusal than title
+verification: direct Codex and Cursor classified explicit `project_code` as
+forbidden, and the CLI did not forward that explicit value into shared display
+options. The factories now validate optional project metadata with the existing
+option validator, and the CLI aligns driver/context naming with the explicit
+code or catalog fallback. The regression enters through `assign run` parsing,
+both registered adapters, the real multiplexer driver factory, and the full
+visible-launch service against synthetic storage and transport. Invalid codes
+produce no native command or assignment reservation. No live launch is part of
+this source acceptance.
+
 A preserved pre-acceptance Codex launch exposed a second presentation surface:
 Herdr omitted top-level `metadata_source`, retained the native handshake OSC
 title, and exposed `identity_title_mode=tokens-only`. The installed identity

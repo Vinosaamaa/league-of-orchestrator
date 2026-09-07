@@ -11,6 +11,7 @@ import sys
 import tempfile
 from types import SimpleNamespace
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -88,6 +89,8 @@ class HerdrOperationRunner:
             }
         elif command[1:3] == ("agent", "list"):
             result = {"agents": []}
+        elif command[1:3] == ("agent", "prompt"):
+            result = {"submitted": True}
         elif command[1:3] not in {
             ("agent", "prompt"), ("pane", "close"), ("pane", "rename")
         }:
@@ -482,6 +485,14 @@ def test_registered_herdr_placement_delivery_and_close_are_concrete(root: Path) 
     assert (shotcaller.tab_id, shotcaller.pane_id) == ("w1:t1", "w1:p3")
     delivered = herdr.delivery("lux", "Synthetic exact delivery.")
     assert delivered["target"] == "lux"
+    for output in ('{"error":{"code":"server_not_running"}}', '', 'null'):
+        with patch.object(runner, "run", return_value=subprocess.CompletedProcess([], 0, output, "")):
+            try:
+                herdr.delivery("lux", "Synthetic refused delivery.")
+            except StorageRefusal as exc:
+                assert exc.code == "display_replay_adapter_failed"
+            else:
+                raise AssertionError("native delivery without a success envelope was accepted")
     titled = herdr.title(champion, "Synthetic Champion")
     assert titled["title"] == "Synthetic Champion"
     assert herdr.close(champion)["closed"] is True

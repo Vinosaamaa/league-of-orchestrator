@@ -2238,3 +2238,10 @@ cannot change a successor, and uncommitted turns still exclude competitors and
 defer delivery. A new bounded turn may account for material work without a new
 user prompt; normal Stop obligations remain authoritative. Synthetic tests cover
 legacy records, post-commit delivery once, competing processes, and Stop blocks.
+
+The installed service also lacked the installing terminal's named Herdr session:
+read-only discovery consequently targeted the stopped default server. Rendering
+now persists the validated session selector in launchd, without copying pane IDs
+or a transient socket override. Default-session installs remain unchanged.
+Delivery requires a valid Herdr success envelope, because a native JSON error
+can accompany a zero exit status; such an error must never become a receipt.

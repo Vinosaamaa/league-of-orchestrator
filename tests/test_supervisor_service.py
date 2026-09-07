@@ -169,9 +169,22 @@ def test_launchd_environment_starts_the_canonical_watcher(root: Path) -> None:
     agent_watcher = (ROOT / "bin/agent-watcher").resolve()
     template = (ROOT / "config/league-supervisor.launchd.plist.in").resolve()
 
-    rendered, _ = render_launchd_plist(template, agent_watcher, state.resolve())
+    with patch.dict(os.environ, {"HERDR_SESSION": "synthetic-session"}):
+        rendered, _ = render_launchd_plist(template, agent_watcher, state.resolve())
     value = plistlib.loads(rendered)
     environment = value["EnvironmentVariables"]
+    assert environment["HERDR_SESSION"] == "synthetic-session"
+    assert "HERDR_SOCKET_PATH" not in environment and "HERDR_PANE_ID" not in environment
+    with patch.dict(os.environ, {"HERDR_SESSION": ""}):
+        default, _ = render_launchd_plist(template, agent_watcher, state.resolve())
+    assert "HERDR_SESSION" not in plistlib.loads(default)["EnvironmentVariables"]
+    with patch.dict(os.environ, {"HERDR_SESSION": "../foreign-session"}):
+        try:
+            render_launchd_plist(template, agent_watcher, state.resolve())
+        except StorageRefusal as exc:
+            assert exc.code == "supervisor_service_session_invalid"
+        else:
+            raise AssertionError("invalid session selector accepted")
     assert "/opt/homebrew/bin" in environment["PATH"].split(os.pathsep)
     assert value["StandardErrorPath"] == os.fspath(state.resolve() / "supervisor-startup.stderr.log")
     assert environment["LEAGUE_WRITER_POINTER"] == os.fspath(

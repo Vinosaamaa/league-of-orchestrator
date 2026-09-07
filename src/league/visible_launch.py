@@ -628,6 +628,7 @@ class HerdrCodexLaunchAdapter:
             callsign=str(spec.callsign),
             applies_to_source=applies_to_source,
             sequence=observed_sequence + 1,
+            token_only=self._token_only_presentation(agent),
         )
         observation = self._verify_title(
             str(spec.callsign).lower(),
@@ -673,6 +674,7 @@ class HerdrCodexLaunchAdapter:
         callsign: str,
         applies_to_source: str,
         sequence: int,
+        token_only: bool = False,
     ) -> None:
         display = self._display(callsign)
         title = display["title"]
@@ -681,6 +683,20 @@ class HerdrCodexLaunchAdapter:
             for key, value in display.items()
             if key not in {"title", "terminal_title"}
         }
+        # The provider identity helper refreshes generic tokens from native OSC
+        # titles. Its explicit launch inputs must survive that refresh.
+        display_tokens.update(
+            launch_callsign=callsign,
+            launch_task_label=display["task_label"],
+        )
+        if "project_code" in display:
+            display_tokens["launch_project_code"] = display["project_code"]
+        if token_only:
+            display_tokens.update(
+                callsign=callsign,
+                identity_title=f"{self.profile.display_kind.title()} | {title}",
+                identity_title_mode="tokens-only",
+            )
         token_arguments = tuple(
             part
             for key, value in display_tokens.items()
@@ -700,8 +716,7 @@ class HerdrCodexLaunchAdapter:
                 self.profile.kind,
                 "--display-agent",
                 self.profile.display_kind,
-                "--title",
-                title,
+                *(("--clear-title",) if token_only else ("--title", title)),
                 *token_arguments,
                 "--token",
                 f"launch_title_owner={self._title_owner(assignment_id)}",
@@ -716,6 +731,34 @@ class HerdrCodexLaunchAdapter:
             allow_silent_success=True,
         )
 
+    def _token_only_presentation(self, agent: Mapping[str, Any]) -> bool:
+        tokens = agent.get("tokens")
+        if not isinstance(tokens, Mapping) or self._created is None:
+            return False
+        session_id = _session_id(agent)
+        endpoint_matches = (
+            agent.get("pane_id") == self._created.get("pane_id")
+            and agent.get("terminal_id") == self._created.get("terminal_id")
+            and agent.get("name") == self._created.get("routing_name")
+            and agent.get("cwd") == self._created.get("worktree")
+            and agent.get("foreground_cwd") == self._created.get("worktree")
+            and agent.get("workspace_id") == self.options.workspace_id
+        )
+        session_matches = (
+            isinstance(session_id, str)
+            and session_id == self._created.get("thread_id")
+        )
+        provider_matches = (
+            agent.get("agent") == self.profile.kind
+            and _session_source(agent) == f"herdr:{self.profile.kind}"
+        )
+        tokens_match = (
+            tokens.get("identity_title_mode") == "tokens-only"
+            and tokens.get("identity_thread_id") == session_id
+            and tokens.get("harness") == self.profile.kind
+        )
+        return endpoint_matches and session_matches and provider_matches and tokens_match
+
     def _title_exact(
         self, agent: Mapping[str, Any], callsign: str, assignment_id: str
     ) -> bool:
@@ -725,9 +768,27 @@ class HerdrCodexLaunchAdapter:
             agent.get("terminal_title"), agent.get("terminal_title_stripped"),
         }
         tokens = agent.get("tokens")
+        token_only = self._token_only_presentation(agent)
+        if (
+            isinstance(tokens, Mapping)
+            and tokens.get("identity_title_mode") == "tokens-only"
+            and not token_only
+        ):
+            return False
+        rendered = agent.get("title")
+        identity_title = f"{self.profile.display_kind.title()} | {expected}"
+        # Native terminal_title is OSC evidence, not the rendered pane title in
+        # tokens-only mode. Accept only the exact helper output and status prefix.
+        rendered_exact = isinstance(rendered, str) and rendered in (
+            {identity_title}
+            | {f"{icon} {identity_title}" for icon in ("◇", "●", "○", "✓")}
+        )
         return bool(
             isinstance(tokens, Mapping)
-            and agent.get("metadata_source") == self._title_source(assignment_id)
+            and (
+                agent.get("metadata_source") == self._title_source(assignment_id)
+                or ("metadata_source" not in agent and token_only)
+            )
             and all(
                 tokens.get(key) == value
                 for key, value in display.items()
@@ -738,7 +799,21 @@ class HerdrCodexLaunchAdapter:
             and tokens.get("launch_title_source")
             == self._title_source(assignment_id)
             and tokens.get("launch_title_applies_to") == _session_source(agent)
-            and terminal_titles <= {expected, f"{expected} | {self.profile.display_kind}"}
+            and (
+                (
+                    token_only
+                    and rendered_exact
+                    and tokens.get("identity_title") == identity_title
+                    and tokens.get("callsign") == callsign
+                    and tokens.get("launch_callsign") == callsign
+                    and tokens.get("launch_task_label") == display["task_label"]
+                    and tokens.get("launch_project_code") == display.get("project_code")
+                )
+                or (
+                    not token_only
+                    and terminal_titles <= {expected, f"{expected} | {self.profile.display_kind}"}
+                )
+            )
         )
 
     def _verify_title(
@@ -754,7 +829,9 @@ class HerdrCodexLaunchAdapter:
         for _ in range(50):
             agent = self._get_agent(routing_name)
             if self._title_exact(agent, callsign, assignment_id):
-                source = agent.get("metadata_source")
+                # _title_exact proved the complete explicit ownership envelope
+                # when this Herdr surface omits its top-level source field.
+                source = agent.get("metadata_source", self._title_source(assignment_id))
                 applies_to_source = _session_source(agent)
                 sequence = agent.get("state_change_seq")
                 if (
@@ -803,6 +880,10 @@ class HerdrCodexLaunchAdapter:
         observed_thread = _session_id(agent)
         applies_to_source = _session_source(agent)
         presentation_source = agent.get("metadata_source")
+        if "metadata_source" not in agent and self._title_exact(
+            agent, callsign, assignment_id
+        ):
+            presentation_source = self._title_source(assignment_id)
         sequence = agent.get("state_change_seq")
         owned = bool(
             agent.get("name") == routing_name
@@ -836,6 +917,7 @@ class HerdrCodexLaunchAdapter:
                 callsign=callsign,
                 applies_to_source=str(applies_to_source),
                 sequence=int(sequence) + 1,
+                token_only=self._token_only_presentation(agent),
             )
         observation = self._verify_title(
             routing_name,

@@ -1,5 +1,19 @@
 # Source provenance
 
+## Issue-#85 token-only Champion launch compatibility
+
+The Codex/Cursor visible-launch adapter now supplies the identity helper's
+explicit `launch_callsign`, `launch_project_code` (when present), and
+`launch_task_label` inputs. Generic provider-refreshed tokens alone did not
+preserve the launch name. For the exact `tokens-only` presentation profile,
+verification observes the rendered pane title and identity tokens rather than
+mistaking native OSC `terminal_title` for the rendered title. An omitted
+top-level metadata source is accepted only with the complete assignment-owned
+launch envelope, exact endpoint/session identity, canonical display inputs,
+and stable observation. Explicit foreign/null sources and changed user display
+remain refusals. Synthetic deferred-handshake/context/retry coverage proves the
+compatibility case without a live provider, title parser, or renderer change.
+
 ## Issue-#8 retained-row recovery compatibility
 
 The PR54 continuation deliberately adds two narrow compatibility cases to the

@@ -1511,17 +1511,22 @@ def _validate_failed_launch_rollback(
         "SELECT * FROM callsign_assignments WHERE callsign_assignment_id=?",
         (f"callsign-assignment:{assignment['task_assignment_id']}",),
     ).fetchone()
-    if (
+    task_identity_mismatch = (
         task is None or task["current_owner_agent_id"] != assignment["champion_agent_id"]
         or task["state"] != {
             "pending": "pending", "launching": "accepted",
             "cleanup_pending": "blocked", "blocked": "blocked",
         }.get(assignment["state"])
-        or agent is None or agent["task_id"] != assignment["task_id"] or agent["role"] != "champion"
-        or reservation is None or reservation["agent_id"] != assignment["champion_agent_id"]
+    )
+    owner_identity_mismatch = (
+        agent is None or agent["task_id"] != assignment["task_id"] or agent["role"] != "champion"
+    )
+    reservation_identity_mismatch = (
+        reservation is None or reservation["agent_id"] != assignment["champion_agent_id"]
         or reservation["scope_kind"] != "task" or reservation["scope_id"] != assignment["task_id"]
         or reservation["role"] != "champion" or reservation["callsign"] != assignment["callsign"]
-    ):
+    )
+    if task_identity_mismatch or owner_identity_mismatch or reservation_identity_mismatch:
         raise StorageRefusal("cleanup_owner_refused", "failed launch owner or reservation identity changed")
     if reservation["state"] == "rolled_back":
         if reservation["failure_receipt_digest"] != failure_digest or agent["retired_at"] is None:

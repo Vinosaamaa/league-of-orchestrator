@@ -272,6 +272,18 @@ def render_launchd_plist(
         ),
         "PATH": service_path,
     }
+    # launchd does not inherit the installing terminal's named Herdr session.
+    # Persist only that selector, never pane IDs or a transient socket override.
+    session = os.environ.get("HERDR_SESSION")
+    if session:
+        if len(session) > 128 or any(
+            character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
+            for character in session
+        ):
+            raise StorageRefusal(
+                "supervisor_service_session_invalid", "Herdr session selector is invalid"
+            )
+        value["EnvironmentVariables"]["HERDR_SESSION"] = session
     rendered = plistlib.dumps(value, fmt=plistlib.FMT_XML, sort_keys=False)
     return rendered, _sha256(template)
 

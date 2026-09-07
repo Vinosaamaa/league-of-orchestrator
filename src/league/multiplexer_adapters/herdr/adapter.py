@@ -624,7 +624,9 @@ class HerdrMultiplexerAdapter:
         arguments = [self.binary, "agent", "prompt", target, body]
         if wait:
             arguments.extend(("--wait", "--timeout", "30000"))
-        self._effect(tuple(arguments), "Herdr agent delivery")
+        # Herdr can return a JSON error envelope with exit status zero.
+        # Require its success envelope before issuing a delivery receipt.
+        self._command(tuple(arguments), "Herdr agent delivery")
         return {
             "schema": "league.multiplexer-delivery.v1",
             "target": target,

@@ -10,6 +10,7 @@ from .adapter_types import OpaqueIdentity
 from .agent_adapters import adapter_kind_from_runtime, builtin_agent_adapter_registry
 from .multiplexer_adapters import builtin_multiplexer_adapter_registry
 from .storage import Storage, StorageRefusal
+from .sqlite_rollover_ops import _legacy_hook_runtime_exact
 from .visible_launch import CommandRunner, SubprocessRunner
 
 
@@ -82,13 +83,28 @@ class HerdrDescendantRuntimeAdapter:
             ) from exc
         expected_pane = target.get("address")
         expected_route = target.get("routing_name")
+        expected_display = target.get("display_agent")
+        adoption = target.get("route_adoption")
+        if adoption is not None:
+            if (
+                not isinstance(adoption, Mapping)
+                or expected_route is not None or expected_display is not None
+                or target.get("source_shape") != "imported_legacy_partial"
+                or target.get("kind") != "codex-thread"
+                or adoption != {"routing_name": str(target.get("callsign", "")).lower(),
+                                "display_agent": "codex"}
+            ):
+                raise StorageRefusal("descendant_runtime_mismatch", "legacy route adoption proof is not exact")
+            expected_route = adoption["routing_name"]
+            expected_display = adoption["display_agent"]
         expected_thread = target.get("thread_id")
         locator = _public_descendant_locator(target)
         related = [
             dict(agent)
             for agent in agents
             if agent.get("pane_id") == expected_pane
-            or agent.get("name") == expected_route
+            or (isinstance(expected_route, str) and bool(expected_route)
+                and agent.get("name") == expected_route)
             or _session(agent) == expected_thread
         ]
         if len(related) > 1:
@@ -104,6 +120,8 @@ class HerdrDescendantRuntimeAdapter:
             )
         agent = related[0]
         status = agent.get("agent_status")
+        if not isinstance(status, str):
+            raise StorageRefusal("descendant_runtime_mismatch", f"{locator}: live Herdr status is malformed")
         if status in CLOSED_STATUSES:
             raise StorageRefusal(
                 "descendant_runtime_closed",
@@ -128,7 +146,9 @@ class HerdrDescendantRuntimeAdapter:
             and agent.get("agent") == adapter_kind
             and _herdr_interactive_ready(agent)
             and agent.get("pane_id") == expected_pane
+            and isinstance(expected_route, str) and bool(expected_route)
             and agent.get("name") == expected_route
+            and (adoption is None or agent.get("display_agent", adapter_kind) == expected_display)
             and _session(agent) == expected_thread
             and isinstance(expected_thread, str)
             and bool(expected_thread)
@@ -151,6 +171,22 @@ class HerdrDescendantRuntimeAdapter:
             )
         runtime_status = "idle" if status in {"done", "idle"} else "active"
         generation = _herdr_runtime_generation(terminal_id, expected_thread)
+        runtime = target.get("runtime")
+        if (
+            runtime_instance_id.startswith("runtime:hook:")
+            or (isinstance(runtime, Mapping)
+                and str(runtime.get("runtime_generation", "")).startswith("hook:"))
+        ):
+            if not isinstance(runtime, Mapping) or not _legacy_hook_runtime_exact(
+                runtime, champion_agent_id=target["champion_agent_id"],
+                runtime_instance_id=runtime_instance_id,
+                harness_kind=agent_adapter.launch_profile.runtime_kind,
+                backend_kind="herdr", session_ref=expected_thread, endpoint=expected_pane,
+            ):
+                raise StorageRefusal("descendant_runtime_mismatch", f"{locator}: legacy hook binding is not exact")
+            # The receipt still binds the freshly observed terminal and thread;
+            # do not rewrite a historical hook identity as a Herdr fingerprint.
+            generation = runtime["runtime_generation"]
         return {
             "schema": "league.rollover-descendant-runtime.v1",
             "verified": True,
@@ -165,7 +201,7 @@ class HerdrDescendantRuntimeAdapter:
             "status": runtime_status,
             "callsign": target["callsign"],
             "routing_name": expected_route,
-            "display_agent": target["display_agent"],
+            "display_agent": expected_display,
             "worktree": str(worktree.resolve()),
             "terminal_id": terminal_id,
             "state_change_seq": state_change_seq,

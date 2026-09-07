@@ -1,5 +1,26 @@
 # Source provenance
 
+## Issue-#8 retained-row recovery compatibility
+
+The PR54 continuation deliberately adds two narrow compatibility cases to the
+existing one-row descendant reconciliation: imported paired-null routing
+metadata may be adopted only after exact live verification, and a verified
+legacy hook generation may retain its original identity after recomputation
+of the original producer hash. Null-route eligibility is shared with the
+already-landed snapshot refresh implementation; snapshot set guards and
+immutable binding digests are not weakened. Existing runtime rows are not
+rewritten. The same transaction now rechecks the frozen private binding before
+any adoption, closing the preflight-to-commit drift window.
+
+The existing target preflight also exposes the complete scoped pending outbox
+ID set (maximum 1,000; overflow refuses) using the same query as commit. This
+avoids the unrelated-recipient backlog cap without a new inspection surface.
+Synthetic `test_one_row_recovery_*` regressions cover exact recovery, changed
+active-set isolation, foreign and malformed live identity, forged hook
+identity, immutable runtime history, delivery selection, and rollback at every
+existing descendant fault boundary. No schema, installed state, live runtime,
+canonical ownership, or unrelated frozen binding is changed by this source work.
+
 ## Schema-16 release compatibility repair
 
 Issue #90 restores the already-canonical schema-16 migration omitted from the

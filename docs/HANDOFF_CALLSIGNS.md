@@ -177,3 +177,40 @@ survivor's binding changed, preserve the precise refusal. If its original page
 receipt is unavailable, do not backdate a read, use direct SQL, or reconstruct
 its digest: a bounded read-only historical-receipt accessor would be the smallest
 missing surface, not a weaker snapshot refresh or another state machine.
+
+### Exact imported one-row compatibility
+
+For an unchanged frozen imported binding with both route and displayed provider
+absent, `reconcile-descendant` reuses snapshot refresh's imported null-route
+eligibility proof. The native adapter must find exactly one matching live
+pane/thread/worktree, with the existing lowercase-callsign route and Codex
+provider. Unnamed unrelated endpoints are not route matches. This operation
+does not rename the live endpoint. Only after verification does the existing
+owner transaction adopt the paired routing fields, alongside the task,
+assignment, callsign, and exact pending deliveries. The original frozen row
+and imported history remain immutable. Modern, partially populated, foreign,
+ambiguous, and changed frozen bindings still refuse before adoption.
+
+An existing legacy hook runtime is accepted only when its ID and `hook:`
+generation exactly reproduce the hook producer's hash of adapter kind, thread,
+backend, and endpoint. Its actor, provider, capabilities, verification, and
+active/idle status must still agree. Fresh native inspection verifies the
+terminal, thread, route, worktree, and readiness; the existing runtime receipt
+binds that terminal and observation sequence. The historical hook generation
+is not replaced by the different terminal/thread-based `herdr:` fingerprint.
+No runtime is duplicated, and existing runtime rows remain unchanged.
+
+The existing read-only `rollover_descendant_target` preflight now returns
+`pending_outbox_ids`: the complete sorted set of pending predecessor deliveries
+whose source event belongs to this exact Champion or task. This is necessary
+because the recipient-wide backlog can hide eligible rows behind unrelated
+work. It exposes IDs only, does not filter out future-due pending rows, and
+refuses claimed deliveries or sets above 1,000 IDs rather than truncating.
+Pass that exact set through the existing repeated `--pending-outbox-id` option;
+commit repeats the same preflight under its transaction, including the frozen
+private-binding digest check. Changed sets, stale versions, and injected
+failures leave adoption and reconciliation rolled back together.
+
+These exceptions do not accept a runtime materialized after the frozen row or
+any other changed binding, do not refresh the broad snapshot, and do not add a
+schema, service, inspection command, or live recovery authority.

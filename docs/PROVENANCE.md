@@ -2294,3 +2294,21 @@ preflight, live runtime claim or cleanup receipt. Assignment/runtime/cleanup
 state remains untouched. Focused coverage rejects modern or incomplete
 linkage, wrong hashes, missing tasks, and altered acceptance identities; it
 proves exact retries and result-to-answer settlement while cleanup stays pending.
+
+## Semantic benchmark settlement boundary (issue 66)
+
+The mixed OFF/ON corpus includes delegated repository and test work. The old
+benchmark attempted to answer every new request without executing that work;
+current result gates correctly refused the final commit. The benchmark now
+answers only canonically direct fixture requests and preserves delegated
+requests as unresolved. Both arms report and verify those counts. This measures
+triage plus a truthful final boundary, not completed Champion work or full live
+acceptance. Commit failures retain the exact League refusal code and message.
+The subprocess regression checks the actual synthetic SQLite request states.
+
+The old duplicate-hook timing launched a second native invocation with the same
+text and turn ID. Invocation-scoped capture intentionally retains that as new
+steering, not a broker replay. Remove this invalid timing sample; require the
+entire captured batch count, not just its limited first page, to match the
+corpus. Existing exact-invocation broker retry tests remain authoritative for
+deduplication. No production prompt identity or result guard changes.

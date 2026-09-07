@@ -3379,7 +3379,7 @@ def test_registered_direct_factory_project_metadata(root: Path) -> None:
                 patch.object(visible_launch, "_Clock", return_value=clock),
                 patch.object(store, "resolve_project", return_value=(
                     {"code": catalog} if catalog is not None else None
-                )),
+                )) as resolve_project,
                 patch.object(visible_launch.time, "sleep", lambda _: None),
             ):
                 if expected == "invalid":
@@ -3409,6 +3409,10 @@ def test_registered_direct_factory_project_metadata(root: Path) -> None:
                     assert f"Project code: {expected or 'none'}" in runner.contexts[-1]
                     assert len([call for call in runner.calls
                                 if call[:3] == ("herdr", "tab", "create")]) == 1
+                if explicit is not None:
+                    resolve_project.assert_not_called()
+                else:
+                    assert resolve_project.call_count == 2
             store.close()
 
 

@@ -3438,14 +3438,15 @@ def _assign_launch(store: Storage, args: argparse.Namespace) -> CommandResult:
         if args.league_command
         else Path(sys.argv[0]).resolve()
     )
-    project = store.resolve_project(args.repository, visibility="local")
-    project_code = (
-        str(project["code"])
-        if isinstance(project, dict) and isinstance(project.get("code"), str)
-        else None
-    )
     if args.project_code is not None:
         project_code = args.project_code
+    else:
+        project = store.resolve_project(args.repository, visibility="local")
+        project_code = (
+            str(project["code"])
+            if isinstance(project, dict) and isinstance(project.get("code"), str)
+            else None
+        )
     options = VisibleLaunchOptions(
         workspace_id=workspace_id,
         task_label=args.task_label or derive_task_label(args.task_summary),

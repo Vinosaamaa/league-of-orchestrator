@@ -1,5 +1,48 @@
 # Source provenance
 
+## Issue #66 shipping repair
+
+Identity repair now requires OS-verified native Codex executable evidence even
+when pane metadata includes a cached process start. The supported launcher and
+single child remain valid. A committed repair records its prior watcher binding;
+only its exact open obligation, unchanged native proof and canonical version can
+admit the old session for rebinding. Ordinary watcher preflight remains strict.
+
+Champion event sends use two bounded delivery workers with no backlog, separate
+from control and recovery workers. Admission failure leaves delivery pending;
+accepted connections receive success only after the native send completes.
+Execution rechecks the binding and fence, and shutdown drains accepted sends.
+Detached transitions notify the exact leased supervisor through its Unix socket
+while retaining canonical direct delivery, owner-active deferral, Calm policy and
+outbox deduplication. They no longer wait for the recovery sweep solely because
+the owner is detached.
+
+Synthetic regressions in `tests/test_issue66_shipping.py` and
+`tests/test_supervisor_delivery.py` cover these deliberate differences, including
+sub-second ping during slow sends and immediate detached attention delivery.
+They do not certify installed or live acceptance.
+
+## Issue #66 legacy Shotcaller identity recovery
+
+The native runtime-registration CLI now validates the provider session and its
+agreement with the bound agent before accepting `verified`. A terminal session
+name cannot serve as a Codex thread ID. The storage contract remains opaque for
+synthetic adapters; native bootstrap already uses provider-owned validation.
+The legacy import boundary now rejects malformed Codex Shotcaller threads too;
+previously its UUID check covered Champions only.
+
+`runtime repair-shotcaller-identity` is an explicit owner-authorized, same-pane
+repair for malformed legacy Codex identities whose actor ID independently equals
+the live provider UUID. It verifies the native session and process twice, compares
+the expected canonical version/session/generation, and updates the agent/runtime
+atomically. It never replaces a valid thread, changes ownership, triages prompts,
+or starts/stops a process. Exact retries preserve the original event; a watcher
+failure remains a visible recovery obligation. Restored-display reads use that
+event to translate the old bootstrap session without rewriting its receipt.
+
+Focused coverage: `tests/test_runtime_identity.py`. No hook invokes this repair
+automatically, and these source tests do not certify installation or live recovery.
+
 ## Issue-#11 failed-launch settlement
 
 The existing `assign block --cleanup-proven` boundary now settles the exact
@@ -2023,6 +2066,33 @@ actions. This release delta changes only the version contract, deterministic
 release-staging expectations, and this provenance record beyond that merged
 tree.
 
+The issue #66 hook-compatibility candidate deliberately replaces Codex's
+accepted pre-tool `permissionDecision: allow` response with an empty JSON
+object. It does not rewrite tool input or bypass native sandbox or approval
+checks; canonical refusals still produce `permissionDecision: deny`. Broker
+requests receive a two-second response budget within the existing five-second
+native hook limit. A separate bounded control executor prevents background
+recovery and delivery work from exhausting the request-handler pool. Existing
+ownership fences, exact-once prompt handling, and attached Stop blocking remain
+unchanged. `tests/test_hook_runtime_regressions.py` covers native response
+compatibility, delayed replies, control-lane progress, and bounded admission.
+The launchd adapter also verifies asynchronous job removal before returning
+from bootout; a bounded failure preserves the refusal instead of claiming a
+completed rollback. The service tests cover delayed removal and timeout.
+The candidate also retains watcher startup stderr in a state-root-local log
+because launchd startup failures otherwise expose only a generic timeout.
+Rendering remains compatible with prior templates for exact rollback. The
+focused service suite verifies the log path. Local candidate installation and
+same-pane identity recovery subsequently verified, with all three watcher
+bindings live and no remaining identity-recovery obligation. This candidate
+is not a merged release; the earlier intermittent startup timeout remains
+unexplained and the new log was empty during the successful starts.
+Herdr process verification additionally supports one resumed Codex child and
+its launcher shell, using bounded OS PID/start-time, executable, parent, and
+foreground-group readbacks. A second Codex process, unrelated child, changed
+session, missing PID, or mismatched executable remains a refusal. Synthetic
+native-shaped fixtures cover this case; no process is started or terminated.
+
 ## Issue #84: Pi factory routing descriptor acceptance
 
 The registered Pi factory emitted explicit model-routing evidence that the
@@ -2118,3 +2188,35 @@ or oversized envelopes retain the generic refusal. Focused tests cover exact
 initial launch, retry, same-child restart, mismatched environment, and safe error
 rollback. No sleep, readiness assumption, wrapper, live launch, service change,
 or profile mutation is introduced; installed acceptance remains a separate gate.
+
+## Consolidated shipping completion: issues #66, #84, and #11
+
+The sole integration owner takes over the remaining source changes in one
+candidate. Assignment activation now binds the reserved callsign to its verified
+runtime. Exact active retries may repair only the historical null binding using
+the original committed receipt, current version, and matching canonical owner,
+task, runtime, and callsign. Startup identity checks remain strict.
+
+Pi's first native display contains launch identity tokens, not the canonical
+display tokens synthesized by the older test adapter. The display handshake now
+promotes only an exact owned initial bootstrap with the expected title and no
+canonical display tokens. Existing display conflicts and newer user edits still
+refuse. Tests exercise both providers with native-shaped bootstrap metadata.
+Post-context launch cleanup also blocks the exact Pi descriptor in its existing
+cleanup transaction. Historical settlement can reconcile an orphaned active
+descriptor only with the current assignment version, matching accepted identity,
+closed runtime, and original released callsign receipt; duplicate settlement
+does not repeat native cleanup or alter completed evidence.
+
+Completed workers whose checkout is a standalone clone can explicitly retain
+that repository while retiring their exact endpoint and callsign. Retention
+requires canonical completed ownership, acceptance/release proof, clean published
+Git identity, and a persistent-retain resource. It never removes the clone or
+its branch. Synthetic production-cleanup coverage includes foreign identity,
+dirty repositories, interrupted endpoint/callsign cleanup, exact retries, and
+byte-for-byte repository preservation. Installed acceptance remains separate.
+
+The combined verification also caught a stale real-canary expectation: the
+current Stop summary includes `runtime_recovery`. The canary now explicitly
+requires that count to be zero alongside its one pending cleanup, preserving
+the strict complete-summary comparison.

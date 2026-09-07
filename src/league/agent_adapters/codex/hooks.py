@@ -66,14 +66,18 @@ def translate_output(operation: str, output: Mapping[str, Any]) -> Mapping[str, 
         decision = output.get("decision", "accept")
         if decision not in {"accept", "refuse"}:
             raise StorageRefusal("hook_translation_invalid", "Codex policy decision is invalid")
+        # A successful no-op must not emit permissionDecision=allow. Some
+        # native Codex versions only accept that value with updatedInput.
+        # Omitting it preserves Codex's own approval and sandbox checks.
+        if decision == "accept":
+            return {}
         native: dict[str, Any] = {
             "hookEventName": "PreToolUse",
-            "permissionDecision": "allow" if decision == "accept" else "deny",
+            "permissionDecision": "deny",
         }
-        if decision == "refuse":
-            native["permissionDecisionReason"] = str(
-                output.get("reason_code", "league_policy_refused")
-            )
+        native["permissionDecisionReason"] = str(
+            output.get("reason_code", "league_policy_refused")
+        )
         return {"hookSpecificOutput": native}
     if operation in {"prompt_intake", "stop_supervision"}:
         return {

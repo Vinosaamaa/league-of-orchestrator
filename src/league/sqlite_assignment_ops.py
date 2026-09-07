@@ -693,6 +693,60 @@ def mark_assignment_launching(store: Any, assignment_id: str, expected_version: 
     return {"assignment_id": assignment_id, "state": "launching", "version": next_version, "idempotent": False}
 
 
+def _repair_active_callsign_runtime(store: Any, assignment: Any, expected_version: int,
+                                    receipt: dict[str, Any]) -> None:
+    """Repair only the historical null binding using the committed acceptance."""
+    reservation_id = f"callsign-assignment:{assignment['task_assignment_id']}"
+    reserved = store.connection.execute(
+        "SELECT * FROM callsign_assignments WHERE callsign_assignment_id=?", (reservation_id,)
+    ).fetchone()
+    if reserved is None:
+        raise StorageRefusal("assignment_incomplete", "active assignment has no callsign receipt")
+    runtime_id = receipt["runtime_instance_id"]
+    if reserved["runtime_instance_id"] is not None:
+        if reserved["runtime_instance_id"] != runtime_id:
+            raise StorageRefusal("receipt_conflict", "callsign runtime differs from accepted runtime")
+        return
+    actor = store.connection.execute("SELECT * FROM agent_instances WHERE agent_id=?",
+        (assignment["champion_agent_id"],)).fetchone()
+    runtime = store.connection.execute("SELECT * FROM runtime_instances WHERE runtime_instance_id=?",
+        (runtime_id,)).fetchone()
+    task = store.connection.execute("SELECT * FROM tasks WHERE task_id=?",
+        (assignment["task_id"],)).fetchone()
+    queue = store.connection.execute("SELECT state FROM callsign_queue WHERE callsign=?",
+        (assignment["callsign"],)).fetchone()
+    exact = (
+        assignment["version"] == expected_version and assignment["runtime_instance_id"] == runtime_id
+        and reserved["state"] == "active" and reserved["version"] == 2
+        and reserved["agent_id"] == assignment["champion_agent_id"]
+        and reserved["callsign"] == assignment["callsign"] == receipt["callsign"]
+        and reserved["role"] == assignment["assignment_role"]
+        and reserved["acceptance_digest"] == hashlib.sha256(_json(receipt).encode()).hexdigest()
+        and actor is not None and actor["retired_at"] is None
+        and actor["task_id"] == assignment["task_id"]
+        and actor["shotcaller_agent_id"] == assignment["coordinator_agent_id"]
+        and actor["role"] == assignment["assignment_role"]
+        and actor["thread_id"] == receipt["thread_id"] and actor["address"] == receipt["endpoint"]
+        and task is not None and task["coordinator_agent_id"] == assignment["coordinator_agent_id"]
+        and queue is not None and queue["state"] == "active"
+        and runtime is not None and runtime["verified"] and runtime["status"] in {"active", "idle"}
+        and runtime["actor_agent_id"] == assignment["champion_agent_id"]
+        and all(runtime[key] == receipt[receipt_key] for key, receipt_key in (
+            ("session_ref", "thread_id"), ("endpoint", "endpoint"),
+            ("runtime_generation", "runtime_generation"), ("harness_kind", "harness_kind"),
+            ("backend_kind", "backend_kind")))
+    )
+    if not exact:
+        raise StorageRefusal("receipt_conflict", "historical callsign repair evidence changed")
+    changed = store.connection.execute(
+        "UPDATE callsign_assignments SET runtime_instance_id=?,version=version+1 "
+        "WHERE callsign_assignment_id=? AND version=? AND runtime_instance_id IS NULL",
+        (runtime_id, reservation_id, reserved["version"]),
+    )
+    if changed.rowcount != 1:
+        raise StorageRefusal("assignment_conflict", "callsign repair lost its exact version")
+
+
 def activate_assignment(
     store: Any,
     assignment_id: str,
@@ -801,6 +855,7 @@ def activate_assignment(
                     raise StorageRefusal(
                         "assignment_incomplete", "active assignment is missing its committed delivery"
                     )
+                _repair_active_callsign_runtime(store, assignment, expected_version, receipt)
                 return {
                     "assignment_id": assignment_id,
                     "task_id": assignment["task_id"],
@@ -970,11 +1025,12 @@ def activate_assignment(
             )
             store.connection.execute(
                 """
-                UPDATE callsign_assignments SET state='active',acceptance_digest=?,
+                UPDATE callsign_assignments SET state='active',runtime_instance_id=?,acceptance_digest=?,
                        queue_version=?,version=version+1,activated_at=?
                  WHERE callsign_assignment_id=?
                 """,
                 (
+                    receipt["runtime_instance_id"],
                     receipt_digest,
                     queue_version,
                     at,
@@ -3219,6 +3275,52 @@ def fail_assignment_title_validation(
     }
 
 
+def _settle_failed_provider_descriptor(
+    store: Any, assignment: sqlite3.Row, expected_version: int, at: str,
+) -> bool:
+    """Close the exact Pi launch authority in the cleanup transaction."""
+    descriptors = store.connection.execute(
+        "SELECT * FROM provider_launch_descriptors WHERE assignment_id=?",
+        (assignment["task_assignment_id"],),
+    ).fetchall()
+    if not descriptors:
+        return False
+    receipt = _stored_object(
+        assignment["acceptance_receipt_json"], "cleanup_unproven",
+        "provider cleanup requires the accepted launch receipt",
+    )
+    if len(descriptors) != 1:
+        raise StorageRefusal("cleanup_unproven", "provider cleanup identity is ambiguous")
+    descriptor = descriptors[0]
+    generation = "herdr:" + hashlib.sha256(
+        f"{descriptor['terminal_id']}\0{descriptor['session_id']}".encode()
+    ).hexdigest()[:24]
+    if (
+        descriptor["state"] not in {"active", "blocked"}
+        or descriptor["role"] != "champion"
+        or receipt.get("assignment_id") != assignment["task_assignment_id"]
+        or receipt.get("runtime_instance_id") != assignment["runtime_instance_id"]
+        or receipt.get("harness_kind") != "pi-thread"
+        or receipt.get("endpoint") != descriptor["pane_id"]
+        or receipt.get("thread_id") != descriptor["session_path"]
+        or receipt.get("worktree") != descriptor["cwd"]
+        or receipt.get("display_agent") != descriptor["provider_kind"]
+        or receipt.get("runtime_generation") != generation
+    ):
+        raise StorageRefusal("cleanup_unproven", "provider cleanup differs from accepted identity")
+    if descriptor["state"] == "active":
+        if int(assignment["version"]) != expected_version:
+            raise StorageRefusal("assignment_conflict", "provider cleanup repair requires the current version")
+        store.connection.execute(
+            """UPDATE provider_launch_descriptors
+                  SET state='blocked',version=version+1,updated_at=?
+                WHERE descriptor_id=? AND state='active' AND version=?""",
+            (at, descriptor["descriptor_id"], descriptor["version"]),
+        )
+        return True
+    return False
+
+
 def settle_assignment_launch_cleanup(
     store: Any,
     assignment_id: str,
@@ -3244,16 +3346,10 @@ def settle_assignment_launch_cleanup(
                     raise StorageRefusal(
                         "receipt_conflict", "settled launch cleanup has a different receipt"
                     )
-                return {
-                    "assignment_id": assignment_id,
-                    "state": "blocked",
-                    "version": int(assignment["version"]),
-                    "cleanup_receipt": cleanup_receipt_digest,
-                    "idempotent": True,
-                }
             if (
-                assignment["state"] != "cleanup_pending"
-                or int(assignment["version"]) != expected_version
+                assignment["state"] not in {"cleanup_pending", "blocked"}
+                or (assignment["state"] == "cleanup_pending"
+                    and int(assignment["version"]) != expected_version)
                 or not assignment["runtime_instance_id"]
             ):
                 raise StorageRefusal(
@@ -3281,6 +3377,15 @@ def settle_assignment_launch_cleanup(
                     "cleanup_unproven",
                     "exact runtime close and callsign release are required before settlement",
                 )
+            descriptor_settled = _settle_failed_provider_descriptor(store, assignment, expected_version, at)
+            if assignment["state"] == "blocked":
+                return {
+                    "assignment_id": assignment_id,
+                    "state": "blocked",
+                    "version": int(assignment["version"]),
+                    "cleanup_receipt": cleanup_receipt_digest,
+                    "idempotent": not descriptor_settled,
+                }
             next_version = expected_version + 1
             store.connection.execute(
                 """

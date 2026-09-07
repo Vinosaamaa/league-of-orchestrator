@@ -147,7 +147,7 @@ def transition_command(active: dict, at: str) -> list[str]:
     ]
 
 
-def test_transition_commits_then_service_delivers_once(root: Path) -> None:
+def test_transition_commits_then_service_delivers_once(root: Path, *, detached: bool = False) -> None:
     state, clock, active = active_champion(root)
     active["state_root"] = state
     adapter = FakeDeliveryAdapter()
@@ -166,7 +166,17 @@ def test_transition_commits_then_service_delivers_once(root: Path) -> None:
         assert service["live"] and service["monitor_live"]
         assert supervisor_status(state, "Garen")["live"]
 
+        if detached:
+            with SQLiteStorage(state) as store:
+                binding = runtime._binding_state(SHOTCALLER_ID)
+                store.configure_supervision_policy(binding['scope_id'], SHOTCALLER_ID, 'calm', 5, clock.now())
+                store.set_supervision_attachment(binding['scope_id'], SHOTCALLER_ID, 'detached', clock.now(),
+                    expected_watcher_id=binding['watcher_id'], expected_fence=binding['fence'])
+                assert store.delivery_target(SHOTCALLER_ID, clock.now())['channel'] == 'direct'
         command = transition_command(active, clock.now())
+        if detached:
+            command.append('--attention-required')
+        began = time.monotonic()
         first = run_json(command, env)["result"]
         assert first["delivery"]["state"] == "scheduled"
         deadline = time.monotonic() + 3
@@ -178,6 +188,9 @@ def test_transition_commits_then_service_delivers_once(root: Path) -> None:
             ]
             time.sleep(0.01)
         assert len(matching) == 1
+        if detached:
+            assert matching[0].channel == 'direct'
+            assert time.monotonic() - began < 1, 'attention delivery waited for the 30-second recovery sweep'
 
         duplicate = run_json(command, env)["result"]
         assert duplicate["idempotent"] and duplicate["delivery"]["state"] == "scheduled"
@@ -373,6 +386,7 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="league-supervisor-delivery-") as temporary:
         root = Path(temporary)
         test_transition_commits_then_service_delivers_once(root / "delivery")
+        test_transition_commits_then_service_delivers_once(root / "detached", detached=True)
         test_stop_exposes_missing_supervisor_without_handoff(root / "stop")
         test_restart_reconcile_real_supervisor_and_exactly_once_delivery(
             root / "restart"

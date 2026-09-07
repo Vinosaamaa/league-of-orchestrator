@@ -143,6 +143,8 @@ def native_presentation(
                 "display_replay_descriptor_unproven",
                 "Shotcaller runtime has no canonical bootstrap publication",
             )
+        from ..sqlite_runtime_ops import repaired_bootstrap_publication
+        publication = repaired_bootstrap_publication(store, publication, row)
         if (
             publication.get("session_identity") != row["session_ref"]
             or publication.get("routing_name") != row["routing_name"]

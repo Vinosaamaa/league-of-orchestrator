@@ -20,6 +20,7 @@ from .real_cleanup import (
     CallsignAdapter,
     CommandRunner,
     GitAdapter,
+    RetainedRepositoryAdapter,
     HerdrBackendAdapter,
     HerdrHarnessAdapter,
     SubprocessRunner,
@@ -174,6 +175,7 @@ PRODUCTION_CLEANUP_ADAPTER_KINDS = frozenset(
         HerdrHarnessAdapter.kind,
         HerdrBackendAdapter.kind,
         GitAdapter.kind,
+        RetainedRepositoryAdapter.kind,
         CallsignAdapter.kind,
         ExactProcessAdapter.kind,
         SharedLeaseAdapter.kind,
@@ -300,6 +302,9 @@ def production_cleanup_registry(
     )
     registry.register(harness_driver)
     registry.register(backend_driver)
+    if "retain" in declared:
+        retained = _one(actions, "retain")
+        registry.register(RetainedRepositoryAdapter(retained["expected_identity"], command_runner))
     if "git" in declared:
         worktree = _one(actions, "worktree_remove")["expected_identity"]
         branch = _one(actions, "branch_delete")["expected_identity"]

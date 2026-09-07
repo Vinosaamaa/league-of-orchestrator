@@ -82,6 +82,17 @@ class LaunchctlServiceManager:
 
     def bootout(self, label: str) -> None:
         self._run(["bootout", f"{self.domain}/{label}"])
+        # launchctl can accept bootout before the job is removed. Do not
+        # publish rollback completion or race the next bootstrap against it.
+        deadline = time.monotonic() + 15.0
+        while self.is_loaded(label):
+            if time.monotonic() >= deadline:
+                raise StorageRefusal(
+                    "supervisor_service_stop_timeout",
+                    "launchd accepted stop but the watcher job remains loaded",
+                    retryable=True,
+                )
+            time.sleep(0.05)
 
 
 def _sha256(payload: bytes) -> str:
@@ -229,12 +240,17 @@ def render_launchd_plist(
         or value.get("KeepAlive") != {"SuccessfulExit": False}
         or value.get("ProcessType") != "Background"
         or value.get("ThrottleInterval") != 5
+        or value.get("StandardErrorPath") not in (
+            None, "@@STATE_ROOT@@/supervisor-startup.stderr.log"
+        )
     ):
         raise StorageRefusal(
             "supervisor_service_template_invalid",
             "launchd template does not express the supported persistent service",
         )
     value["ProgramArguments"] = [os.fspath(agent_watcher), "service-run"]
+    if "StandardErrorPath" in value:
+        value["StandardErrorPath"] = os.fspath(state_root / "supervisor-startup.stderr.log")
     python_directory = os.fspath(Path(sys.executable).resolve().parent)
     service_path = os.pathsep.join(
         dict.fromkeys(

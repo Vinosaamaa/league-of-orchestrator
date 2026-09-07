@@ -29,5 +29,7 @@
   <string>Background</string>
   <key>ThrottleInterval</key>
   <integer>5</integer>
+  <key>StandardErrorPath</key>
+  <string>@@STATE_ROOT@@/supervisor-startup.stderr.log</string>
 </dict>
 </plist>

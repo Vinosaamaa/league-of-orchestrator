@@ -173,12 +173,7 @@ def test_read_only_pre_tool_fast_path_needs_no_state_or_supervisor(root: Path) -
                 "tool_use_id": "tool:read-only-codex",
                 "tool_input": {"path": "synthetic.txt"},
             },
-            {
-                "hookSpecificOutput": {
-                    "hookEventName": "PreToolUse",
-                    "permissionDecision": "allow",
-                }
-            },
+            {},
         ),
         (
             "cursor-pre-tool-hook",
@@ -413,30 +408,14 @@ def _register_garen_runtime(
     harness_kind: str = "codex-thread",
 ) -> str:
     runtime_id = f"runtime:installed:{suffix}"
-    _league(
-        state,
-        "hook",
-        "register-runtime",
-        "--runtime-instance-id",
-        runtime_id,
-        "--actor-agent-id",
-        SHOTCALLER_ID,
-        "--harness-kind",
-        harness_kind,
-        "--backend-kind",
-        "herdr",
-        "--session-ref",
-        session_ref or f"session:{suffix}",
-        "--endpoint",
-        "garen",
-        "--runtime-generation",
-        f"generation:{suffix}",
-        "--status",
-        "active",
-        "--verified",
-        "--at",
-        AT2,
-    )
+    # These hooks exercise synthetic opaque adapter identities. Native CLI
+    # session/actor validation has separate coverage in test_runtime_identity.
+    with SQLiteStorage(state) as store:
+        store.register_runtime(RuntimeRegistrationCommand(
+            runtime_id, SHOTCALLER_ID, harness_kind, "herdr",
+            session_ref or f"session:{suffix}", "garen", f"generation:{suffix}",
+            "active", True, AT2,
+        ))
     return runtime_id
 
 
@@ -448,30 +427,11 @@ def _register_champion_runtime(
     harness_kind: str = "codex-thread",
 ) -> str:
     runtime_id = f"runtime:champion:{suffix}"
-    _league(
-        state,
-        "hook",
-        "register-runtime",
-        "--runtime-instance-id",
-        runtime_id,
-        "--actor-agent-id",
-        CHAMPION_ID,
-        "--harness-kind",
-        harness_kind,
-        "--backend-kind",
-        "herdr",
-        "--session-ref",
-        session_ref,
-        "--endpoint",
-        "synthetic-champion",
-        "--runtime-generation",
-        f"generation:{suffix}",
-        "--status",
-        "active",
-        "--verified",
-        "--at",
-        AT2,
-    )
+    with SQLiteStorage(state) as store:
+        store.register_runtime(RuntimeRegistrationCommand(
+            runtime_id, CHAMPION_ID, harness_kind, "herdr", session_ref,
+            "synthetic-champion", f"generation:{suffix}", "active", True, AT2,
+        ))
     return runtime_id
 
 
@@ -523,7 +483,7 @@ def test_explicit_and_session_stop_dispatch(root: Path) -> None:
 
 
 def test_codex_stop_reason_uses_resolved_callsign_not_turn_uuid() -> None:
-    turn_id = "01a0503e-1b77-7c21-be2b-1cf6d52cf047"
+    turn_id = "11111111-2222-4333-8444-555555555555"
     reason = _codex_stop_reason("Ashe", 4)
     assert reason == "League has unresolved obligations for Ashe at wait generation 4."
     assert turn_id not in reason
@@ -1279,12 +1239,7 @@ def test_provider_pre_tool_policy_and_pi_stop_are_shared_and_fail_closed(
         )
         accepted = _watcher(env, pretool_command, payload=pretool)
         assert accepted == (
-            {
-                "hookSpecificOutput": {
-                    "hookEventName": "PreToolUse",
-                    "permissionDecision": "allow",
-                }
-            }
+            {}
             if kind == "codex"
             else {"permission": "allow"}
             if kind == "cursor"
@@ -2357,15 +2312,11 @@ def test_native_provider_hooks_are_inert_until_exact_binding_then_activate(
                 "tool_name": "Write",
                 "tool_use_id": "tool:codex:bootstrap",
                 "tool_input": {"path": "synthetic.txt"},
+                "cwd": str(root.resolve()),
             }
             stop_detail = {"stop_hook_active": True}
             prompt_allow: dict[str, object] = {}
-            pretool_allow = {
-                "hookSpecificOutput": {
-                    "hookEventName": "PreToolUse",
-                    "permissionDecision": "allow",
-                }
-            }
+            pretool_allow = {}
             stop_allow: dict[str, object] = {}
         elif kind == "cursor":
             pretool_detail = {
@@ -2382,6 +2333,7 @@ def test_native_provider_hooks_are_inert_until_exact_binding_then_activate(
             pretool_detail = {
                 "tool_name": "write",
                 "tool_input": {"path": "synthetic.txt"},
+                "cwd": str(root.resolve()),
             }
             stop_detail = {}
             prompt_allow = {"binding": "unbound"}

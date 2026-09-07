@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 import subprocess
 import sys
 import tempfile
@@ -423,6 +424,148 @@ def test_production_cleanup_crash_resume_and_lease_scope(root: Path) -> None:
         assert receipt_policy == policy
 
 
+def test_standalone_repository_retention(root: Path, crash_action: str = "endpoint_close") -> None:
+    """Production execution closes only the exact fake endpoint, never the clone."""
+    root = root.resolve()
+    root.mkdir(parents=True)
+    git = _create_git_canary(root)
+    clone = root / "retained-clone"
+    commands = SubprocessRunner()
+    commands.run(("git", "clone", git["repository"], str(clone)))
+    commands.run(("git", "-C", str(clone), "checkout", git["branch"]))
+    git = {**git, "repository": str(clone), "worktree": str(clone),
+           "base_ref": "refs/remotes/origin/main"}
+    herdr = herdr_identity()
+    setup = _setup_sqlite(root, ROOT, git, herdr, issue_spec_resolver=issue_bound_spec)
+    manifest_path, _ = _cleanup_files(
+        root, git, herdr, f"callsign-assignment:{setup['assignment']['assignment_id']}", "Lux"
+    )
+    manifest = json.loads(manifest_path.read_text())
+    manifest["task_class"] = "pr_ci"
+    manifest["proof"]["publication"] = {
+        "exact_head": True, "ci_green": True, "integrated": True,
+    }
+    manifest["proof"]["acceptance"] = {"required_gates_complete": True}
+    manifest["proof"]["release"] = {"required_gates_complete": True}
+    retained = _resource("repository:retained", "persistent_retain", "retain", "retain", git)
+    retained["resource_type"] = "standalone_repository"
+    manifest["resources"] = [retained]
+    manifest["repository_retention"] = {
+        "resource_id": retained["resource_id"],
+        "reason": "Owner explicitly retains the completed repository.",
+        "acceptance_receipt": "synthetic:accepted-task",
+        "release_receipt": "synthetic:integrated-release",
+    }
+    manifest["final_actions"] = [
+        action for action in manifest["final_actions"] if action["adapter_kind"] != "git"
+    ]
+    runner = FakeHerdrRunner()
+    with SQLiteStorage(root / "league/state", request_wal=False) as store:
+        store.transition_task(
+            LIFECYCLE_TASK_ID, herdr["runtime_instance_id"], 3, "completed",
+            "Synthetic acceptance complete", "Retain clone; retire endpoint", None,
+            "transition:retain", "transition-key:retain", "event:retain", "outbox:retain",
+            SHOTCALLER_ID, "2026-01-01T01:01:00Z",
+        )
+        owner_version = store.connection.execute(
+            "SELECT version FROM agent_instances WHERE agent_id=?", (CHAMPION_ID,),
+        ).fetchone()[0]
+        store.transition(CHAMPION_ID, owner_version, "completed", "Synthetic accepted completion", AT_PLAN)
+        before_plan = store.export_bytes(format_name="json", purpose="rollback", max_records=1000)
+        invalid = []
+        for key in ("repository_retention",):
+            candidate = deepcopy(manifest)
+            candidate.pop(key)
+            invalid.append(candidate)
+        for gate in ("acceptance", "release", "publication"):
+            candidate = deepcopy(manifest)
+            candidate["proof"][gate] = {}
+            invalid.append(candidate)
+        for key, value in (("owner_id", SHOTCALLER_ID), ("lifetime", "task_owned"),
+                           ("applicable", False)):
+            candidate = deepcopy(manifest)
+            candidate["resources"][0][key] = value
+            invalid.append(candidate)
+        for key, value in (("worktree", str(root / "foreign")), ("branch", "foreign")):
+            candidate = deepcopy(manifest)
+            candidate["resources"][0]["expected_identity"][key] = value
+            if key == "worktree":
+                candidate["resources"][0]["expected_identity"]["repository"] = value
+            invalid.append(candidate)
+        for candidate in invalid:
+            try:
+                CleanupPlanner(store).plan(candidate, operation_id="operation:refused", at=AT_PLAN)
+            except StorageRefusal:
+                pass
+            else:
+                raise AssertionError("unproven retention planned")
+            assert store.export_bytes(format_name="json", purpose="rollback", max_records=1000) == before_plan
+        planned = CleanupPlanner(store).plan(manifest, operation_id="operation:retain", at=AT_PLAN)
+        actions = store.cleanup_operation(planned["operation_id"])["actions"]
+        assert [action["action_kind"] for action in actions] == [
+            "archive_identity_evidence", "retain", "session_exit", "endpoint_close", "callsign_release",
+        ]
+        before = {str(path.relative_to(clone)): path.read_bytes()
+                  for path in clone.rglob("*") if path.is_file()}
+        service = ProductionCleanup(store, runner=HybridRunner(runner))
+
+        registry = production_cleanup_registry(
+            store, store.cleanup_execution_context(planned["operation_id"]),
+            at=AT_PLAN, runner=HybridRunner(runner),
+        )
+        (clone / "dirty.txt").write_text("synthetic untracked work")
+        try:
+            registry.get("retain").inspect(actions[1])
+        except StorageRefusal as exc:
+            assert exc.code == "cleanup_identity_mismatch"
+        else:
+            raise AssertionError("dirty retained clone accepted")
+        (clone / "dirty.txt").unlink()
+        assert runner.pane is True
+
+        def crash(event: object) -> None:
+            if getattr(event, "action_kind", None) == crash_action:
+                raise RuntimeError("synthetic interruption after " + crash_action)
+
+        try:
+            service.execute(planned["operation_id"], expected_fence=0,
+                            executor_id="executor:first", leased_until=LEASE_FIRST,
+                            at=AT_PLAN, fault=crash)
+        except RuntimeError as exc:
+            assert "synthetic interruption" in str(exc)
+        else:
+            raise AssertionError("crash did not fire")
+        assert runner.pane is False
+        assert store.cleanup_operation(planned["operation_id"])["actions"][0]["state"] == "completed"
+        resumed = service.execute(planned["operation_id"], expected_fence=1,
+                                  executor_id="executor:resume", leased_until=LEASE_RESUME, at=AT_RESUME)
+        assert resumed["execution"]["state"] == "cleanup_completed"
+        duplicate = service.execute(planned["operation_id"], expected_fence=2,
+                                    executor_id="executor:duplicate", leased_until=LEASE_RESUME, at=AT_RESUME)
+        assert duplicate["execution"]["idempotent"] is True
+        assert {str(path.relative_to(clone)): path.read_bytes()
+                for path in clone.rglob("*") if path.is_file()} == before
+        assert store.connection.execute(
+            "SELECT state FROM task_resources WHERE resource_id=?", (retained["resource_id"],)
+        ).fetchone()[0] == "retained"
+        assert store.connection.execute(
+            "SELECT state FROM tasks WHERE task_id=?", (LIFECYCLE_TASK_ID,)
+        ).fetchone()[0] == "completed"
+        assert store.connection.execute(
+            "SELECT retired_at FROM agent_instances WHERE agent_id=?", (CHAMPION_ID,)
+        ).fetchone()[0] is not None
+        assignment = store.connection.execute(
+            "SELECT state,cleanup_required,cleanup_receipt FROM task_assignments WHERE task_id=?",
+            (LIFECYCLE_TASK_ID,),
+        ).fetchone()
+        assert assignment["state"] == "completed"
+        assert assignment["cleanup_required"] == 0
+        assert assignment["cleanup_receipt"] == resumed["execution"]["receipt_hash"]
+        assert store.callsign_assignment_status(
+            f"callsign-assignment:{setup['assignment']['assignment_id']}"
+        )["state"] == "released"
+
+
 def test_ready_to_land_owner_cancellation_recovers_planned_fence_zero_after_reopen(
     root: Path,
 ) -> None:
@@ -659,6 +802,8 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="league-production-cleanup-") as temporary:
         root = Path(temporary)
         test_production_cleanup_crash_resume_and_lease_scope(root / "e2e")
+        test_standalone_repository_retention(root / "standalone-retention")
+        test_standalone_repository_retention(root / "standalone-release-retry", "callsign_release")
         test_ready_to_land_owner_cancellation_recovers_planned_fence_zero_after_reopen(
             root / "ready-to-land-cancelled"
         )

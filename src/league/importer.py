@@ -447,6 +447,9 @@ class ImportPlanner:
         role = "hidden-worker" if source_role == "worker" else source_role
         self._ensure_callsign(callsign, role)
         agent_id = _text(status.get("thread_id"), "status.thread_id")
+        if (role == "shotcaller" and status.get("kind") == "codex-thread"
+            and not THREAD_ID.fullmatch(agent_id)):
+            raise StorageRefusal("identity_collision", "Codex Shotcaller thread_id is not an exact provider UUID")
         if agent_id in self.agents or callsign in self.agent_by_callsign:
             raise StorageRefusal("identity_collision", "agent or active callsign identity is duplicated")
         status_value = _text(status.get("status"), "status.status").lower()

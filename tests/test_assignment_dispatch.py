@@ -211,6 +211,34 @@ def test_exact_receipt_activation_and_atomic_rollback(root: Path) -> None:
     ).fetchone()
     assert assignment["state"] == "active" and assignment["acceptance_receipt_json"]
     assert assignment["runtime_instance_id"] == active["runtime_instance_id"]
+    # Synthetic membership normally established by the visible launch service.
+    store.connection.execute(
+        "INSERT INTO squad_champions(squad_id,champion_agent_id,joined_at) VALUES('squad:Garen',?,?)",
+        (LUX_ID, clock.now()),
+    )
+    startup = store.startup_context(LUX_ID, active["runtime_instance_id"], clock.now())
+    assert startup["verified"] and startup["task"]["task_id"] == active["task_id"]
+    reservation_id = f"callsign-assignment:{active['assignment_id']}"
+    # Historical producer omitted this field after committing valid activation.
+    store.connection.execute("UPDATE callsign_assignments SET runtime_instance_id=NULL WHERE callsign_assignment_id=?",
+                             (reservation_id,))
+    receipt = adapter.launch(bound)
+    before = tuple(store.connection.iterdump())
+    for version, changed in ((active["version"] - 1, receipt),
+                             (active["version"], {**receipt, "thread_id": "foreign"})):
+        try:
+            store.activate_assignment(active["assignment_id"], version, changed,
+                                      "ignored-event-retry", "ignored-outbox-retry", clock.now())
+        except StorageRefusal:
+            pass
+        else:
+            raise AssertionError("changed repair evidence accepted")
+        assert tuple(store.connection.iterdump()) == before
+    repaired = store.activate_assignment(active["assignment_id"], active["version"], receipt,
+                                         "ignored-event-retry", "ignored-outbox-retry", clock.now())
+    assert repaired["idempotent"] and repaired["outbox_id"] == active["outbox_id"]
+    assert store.startup_context(LUX_ID, active["runtime_instance_id"], clock.now())["verified"]
+    repaired_state = tuple(store.connection.iterdump())
     committed_retry = store.activate_assignment(
         active["assignment_id"],
         active["version"],
@@ -222,6 +250,7 @@ def test_exact_receipt_activation_and_atomic_rollback(root: Path) -> None:
     assert committed_retry["idempotent"]
     assert committed_retry["event_id"] == active["event_id"]
     assert committed_retry["outbox_id"] == active["outbox_id"]
+    assert tuple(store.connection.iterdump()) == repaired_state
     try:
         store.transition_task(
             active["task_id"],

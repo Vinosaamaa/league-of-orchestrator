@@ -211,6 +211,7 @@ def test_interactive_turn_uses_one_process_and_one_ordered_batch(root: Path) -> 
         "cleanup_obligations": 0,
         "pending_assignments": 0,
         "pending_deliveries": 1,
+        "runtime_recovery": 0,
         "unresolved_requests": 1,
     }, boundary
 

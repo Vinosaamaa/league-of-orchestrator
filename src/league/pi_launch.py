@@ -497,7 +497,15 @@ class HerdrPiLaunchAdapter:
                 "worktree_binding": binding,
             }
         )
-        prepared = self.store.prepare_provider_launch(self.descriptor, self.at)
+        try:
+            prepared = self.store.prepare_provider_launch(self.descriptor, self.at)
+        except StorageRefusal as exc:
+            # A fresh refusal precedes allocation. A durable prior attempt may
+            # already own an endpoint after a crash; retain its cleanup fence.
+            prior = self.store.provider_launch_descriptor(str(self.descriptor["descriptor_id"]))
+            raise LaunchAdapterError(
+                exc.code, cleanup_required=self.created_endpoint or prior is not None,
+            ) from exc
         self.descriptor["descriptor_digest"] = prepared["descriptor_digest"]
         try:
             if prepared["state"] == "active":

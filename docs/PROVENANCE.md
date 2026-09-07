@@ -1979,3 +1979,39 @@ and prevents routine Stop feedback from authorizing bypass or hook recovery
 actions. This release delta changes only the version contract, deterministic
 release-staging expectations, and this provenance record beyond that merged
 tree.
+
+## Issue #84: Pi factory routing descriptor acceptance
+
+The registered Pi factory emitted explicit model-routing evidence that the
+durable descriptor validator rejected as an extra field. The faithful synthetic
+factory-to-Herdr-adapter regression reproduced `launch_adapter_storagerefusal`
+and `cleanup_pending` before any endpoint allocation. Descriptors now accept
+only the exact optional routing shape, retain it in the digest and activation
+receipt, and reject mismatched provider/model/effort or malformed evidence.
+Persisted decisions must also bind the exact assignment/request/task, role,
+capabilities, and canonical decision fields. Legacy descriptors without routing
+remain valid; this does not introduce a routing policy or fallback model.
+
+The deliberate failure-handling change preserves the original storage refusal
+through the launch adapter. A fresh pre-allocation failure releases only its
+own callsign reservation through the existing canonical rollback. A prior
+durable attempt remains cleanup-pending because its endpoint may exist after a
+crash. Invalid project codes now fail in the factory before reservation using
+the same uppercase-code grammar as descriptor storage. `LEAGUE` with the
+two-word `Tiny Gate` label passes the real factory/adapter boundary using only
+temporary state and a fake multiplexer command runner.
+
+Red/green checks also caught lowercase project codes reaching the reservation
+boundary and foreign request routing being accepted after the optional-field
+repair. Both now refuse. During the ownership-check implementation, the focused
+test caught an incorrect assignment capability-column lookup (`IndexError`);
+the check now reads the exact callsign reservation's `requirements_json`.
+These are local source and synthetic-test receipts, not live launch evidence.
+The PR #202 follow-up reproduced malformed capability JSON through the canonical
+routing-decision storage API: its TEXT column has no JSON constraint. Such
+evidence previously escaped as `launch_adapter_jsondecodeerror` and left a fresh
+reservation cleanup-pending. Both canonical capability inputs now use the
+existing capability validator and map parse/type/shape failures to
+`provider_launch_routing_mismatch` inside descriptor preparation's transaction.
+Synthetic factory regressions prove no descriptor or endpoint allocation and
+exact reservation rollback for malformed JSON, null, mixed arrays, and objects.

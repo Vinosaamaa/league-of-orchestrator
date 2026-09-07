@@ -3444,6 +3444,8 @@ def _assign_launch(store: Storage, args: argparse.Namespace) -> CommandResult:
         if isinstance(project, dict) and isinstance(project.get("code"), str)
         else None
     )
+    if args.project_code is not None:
+        project_code = args.project_code
     options = VisibleLaunchOptions(
         workspace_id=workspace_id,
         task_label=args.task_label or derive_task_label(args.task_summary),

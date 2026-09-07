@@ -110,6 +110,32 @@ matches the exact switched rollover predecessor and version. Completion derives
 the rollover drain receipt from immutable cleanup action receipts; retries reuse
 the same cleanup operation and rollover receipt.
 
+## Proven partial-launch settlement
+
+`league assign block --assignment-id <exact-id> --expected-version <current-version>
+--failure-class <original-failure> --cleanup-proven --at <UTC-time>` records
+already-proven partial-launch rollback; it performs no process, pane, Git, or
+filesystem action. The caller must first verify exact external cleanup. The
+flag is not itself a runtime observation. Omitting `--cleanup-required` is
+appropriate after rollback; proven Champion cleanup normalizes that flag to
+false even when it was supplied.
+
+For a pre-activation Champion with no registered runtime or active resources,
+reservation rollback, the assignment receipt, and the exact pending
+`failed_launch` obligation settle atomically. The task remains blocked and the
+request remains unchanged. This is failed-attempt accounting, not successful
+delivery of the requested work.
+
+The same command repairs an already-blocked historical assignment only when
+its current version, original failure class, exact rolled-back reservation
+digest, retired owner, and pending failed-launch obligation match. Recovery
+does not repeat callsign release or advance task/request/agent versions. An
+exact retry accepts the settlement's input or resulting assignment version,
+revalidates the canonical guards, and performs no writes. Changed receipts,
+ownership, registered runtimes/resources, foreign policies, missing historical
+obligations, or any existing cleanup operation refuse atomically. No schema
+migration, successful-task rewrite, runtime adoption, or new CLI is introduced.
+
 ## Already-stopped total retirement
 
 Issue [#127](https://github.com/Vinosaamaa/league-of-orchestrator/issues/127)

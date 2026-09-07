@@ -1,5 +1,21 @@
 # Source provenance
 
+## Issue-#11 failed-launch settlement
+
+The existing `assign block --cleanup-proven` boundary now settles the exact
+pending `failed_launch` obligation in the reservation rollback transaction.
+Previously it could release the reservation while leaving cleanup pending.
+Already-blocked recovery requires the original durable rollback digest and
+exact current assignment version; it leaves the task/request outcome and
+retired agent/callsign unchanged. Exact retries are read-only. Proven Champion
+rollback clears `cleanup_required` rather than retaining a stale true flag.
+
+Focused assignment and visible-launch tests cover pending and historical
+settlement, command retries, competing writers, transaction faults, receipt
+conflicts, foreign policies/owners, existing operations, and retained/shared
+resource refusal. These are synthetic temporary-root proofs only. No schema,
+release identity, installed state, live endpoint, or guide ownership changes.
+
 ## Issue-#85 registered direct-launch project metadata
 
 The registered Codex/Cursor factories previously classified `project_code` as

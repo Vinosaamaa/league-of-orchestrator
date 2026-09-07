@@ -11,6 +11,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from typing import Mapping
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -23,6 +24,7 @@ from league.shotcaller_bootstrap import (  # noqa: E402
     ShotcallerBootstrapSpec,
 )
 from league.sqlite_handoff_schema import SHOTCALLER_SEED, SHUFFLE_VERSION  # noqa: E402
+from league.presentation import ORCHESTRATOR_ROLE_TOKEN, orchestrator_role_tokens  # noqa: E402
 from league.sqlite_store import SQLiteStorage  # noqa: E402
 from league.storage import StorageRefusal  # noqa: E402
 from lifecycle_fakes import FakeClock  # noqa: E402
@@ -45,9 +47,11 @@ class RecordingHerdr:
         provider_kind: str | None = None,
         publish_mismatch: bool = False,
         delayed_auto_title_reads: int | None = None,
+        session_source: str | None = None,
     ) -> None:
         self.worktree = str(worktree.resolve())
         self.thread_id = thread_id
+        self.session_source = session_source or f"herdr:{agent_kind}"
         self.agent_kind = agent_kind
         self.provider_kind = provider_kind or agent_kind
         self.terminal_id = "terminal:1"
@@ -71,13 +75,13 @@ class RecordingHerdr:
         self.calls: list[tuple[str, ...]] = []
 
     def _agent(self) -> dict[str, object]:
+        stripped_title = self.title
+        if stripped_title.endswith(" | codex"):
+            stripped_title = stripped_title[: -len(" | codex")]
         value: dict[str, object] = {
             "agent": self.agent_kind,
             "agent_status": self.agent_status,
-            "agent_session": {
-                "source": f"herdr:{self.agent_kind}",
-                "value": self.thread_id,
-            },
+            "agent_session": {"source": self.session_source, "value": self.thread_id},
             "cwd": self.worktree,
             "foreground_cwd": self.worktree,
             "pane_id": "w1:p1",
@@ -92,7 +96,7 @@ class RecordingHerdr:
                 else self.terminal_title_override
             ),
             "terminal_title_stripped": (
-                self.title
+                stripped_title
                 if self.terminal_title_stripped_override is None
                 else self.terminal_title_stripped_override
             ),
@@ -158,7 +162,7 @@ class RecordingHerdr:
                 return subprocess.CompletedProcess(command, 0, "", "")
             if "--applies-to-source" in command:
                 applies_to = command[command.index("--applies-to-source") + 1]
-                if applies_to != f"herdr:{self.agent_kind}":
+                if applies_to != self.session_source:
                     return subprocess.CompletedProcess(
                         command, 1, "", "metadata source mismatch"
                     )
@@ -283,6 +287,7 @@ class UserTitleAfterPublishHerdr(RecordingHerdr):
         self.metadata_source = "user-selected"
         self.state_change_seq += 1
         self.title = "User selected title"
+        self.tokens[ORCHESTRATOR_ROLE_TOKEN] = "champion"
 
 
 class ProviderPresentationAfterPublishHerdr(RecordingHerdr):
@@ -473,6 +478,7 @@ def _shotcaller_title_ownership(spec: ShotcallerBootstrapSpec) -> dict[str, str]
     return {
         "shotcaller_title_owner": owner,
         "shotcaller_title_source": f"league-shotcaller-{owner}",
+        "orchestrator_role": "shotcaller",
     }
 
 
@@ -617,6 +623,8 @@ def test_in_place_bootstrap_creates_shotcaller_without_layout_or_squad_registrat
         assert created["idempotent"] is False
         assert created["callsign"] == "Ashe"
         assert created["runtime_instance_id"] == "runtime:shotcaller:ashe"
+        assert created["orchestrator_role"] == "shotcaller"
+        assert runner.tokens["orchestrator_role"] == "shotcaller"
         assert [call[:3] for call in runner.calls[:2]] == [
             ("herdr", "pane", "current"),
             ("herdr", "agent", "list"),
@@ -673,6 +681,13 @@ def test_in_place_bootstrap_creates_shotcaller_without_layout_or_squad_registrat
             "callsign_activated",
             "shotcaller_created",
         ]
+        created_detail = json.loads(
+            store.connection.execute(
+                "SELECT detail_json FROM events WHERE event_type='shotcaller_created' AND agent_id=?",
+                (AGENT_ID,),
+            ).fetchone()[0]
+        )
+        assert created_detail["orchestrator_role"] == "shotcaller"
         calls_before_retry = len(runner.calls)
         retry = service.bootstrap(_spec())
         assert retry == {**created, "idempotent": True}
@@ -683,6 +698,19 @@ def test_in_place_bootstrap_creates_shotcaller_without_layout_or_squad_registrat
         assert store.connection.execute(
             "SELECT COUNT(*) FROM events WHERE agent_id=?", (AGENT_ID,)
         ).fetchone()[0] == 3
+        runner.tokens["orchestrator_role"] = "champion"
+        calls_before_role_tamper = len(runner.calls)
+        try:
+            service.bootstrap(_spec())
+        except StorageRefusal as exc:
+            assert exc.code == "shotcaller_metadata_unverified"
+        else:
+            raise AssertionError("Shotcaller retry accepted a tampered canonical role")
+        assert not any(
+            call[:3] == ("herdr", "pane", "report-metadata")
+            for call in runner.calls[calls_before_role_tamper:]
+        )
+        runner.tokens["orchestrator_role"] = "shotcaller"
         calls_before_mismatch = len(runner.calls)
         runner.thread_id = "77777777-7777-4777-8777-777777777777"
         try:
@@ -852,6 +880,89 @@ def test_in_place_bootstrap_creates_shotcaller_without_layout_or_squad_registrat
         assert tuple(scope) == (AGENT_ID, 2, 3)
 
 
+def test_cursor_authority_shotcaller_role_token_is_owned_and_retry_safe(
+    root: Path,
+) -> None:
+    assert orchestrator_role_tokens("hidden-worker") == {}
+    state, _ = migrated_state(root, "cursor-shotcaller-role")
+    worktree = root / "cursor-shotcaller-role" / "worktree"
+    worktree.mkdir()
+    clock = FakeClock()
+    runner = RecordingHerdr(worktree, session_source="herdr:cursor")
+    runner.metadata_source = "herdr:cursor"
+    with SQLiteStorage(state) as store:
+        _seed_available_ashe(store, clock)
+        service = _service(store, clock, worktree, runner)
+        runner.tokens["orchestrator_role"] = "champion"
+        calls_before_unowned = len(runner.calls)
+        try:
+            service.bootstrap(_spec())
+        except StorageRefusal as exc:
+            assert exc.code == "shotcaller_metadata_unverified"
+        else:
+            raise AssertionError("unbound pane role token was guessed as Shotcaller")
+        assert store.callsign_assignment_status(_spec().assignment_id) is None
+        assert not any(
+            call[:3]
+            in {
+                ("herdr", "agent", "rename"),
+                ("herdr", "pane", "report-metadata"),
+            }
+            for call in runner.calls[calls_before_unowned:]
+        )
+        runner.tokens.pop("orchestrator_role")
+        created = service.bootstrap(_spec())
+        assert created["state"] == "active"
+        assert runner.tokens["orchestrator_role"] == "shotcaller"
+        reports = len(
+            [
+                call
+                for call in runner.calls
+                if call[:3] == ("herdr", "pane", "report-metadata")
+            ]
+        )
+        retry = service.bootstrap(_spec())
+        assert retry == {**created, "idempotent": True}
+        assert runner.tokens["orchestrator_role"] == "shotcaller"
+        assert len(
+            [
+                call
+                for call in runner.calls
+                if call[:3] == ("herdr", "pane", "report-metadata")
+            ]
+        ) == reports
+
+        runner.metadata_source = "herdr:cursor"
+        runner.state_change_seq += 1
+        runner.title = "Cursor refreshed title"
+        runner.tokens.update(
+            {
+                "sidebar_name": "Cursor refreshed title",
+                "thread_title": "Cursor refreshed title",
+            }
+        )
+        calls_before = len(runner.calls)
+        refreshed = service.bootstrap(_spec())
+        assert refreshed["idempotent"] is True
+        assert runner.title == "Ashe"
+        assert runner.tokens["sidebar_name"] == "Ashe"
+        assert runner.tokens["thread_title"] == "Ashe"
+        assert runner.tokens["orchestrator_role"] == "shotcaller"
+        assert sum(
+            call[:3] == ("herdr", "pane", "report-metadata")
+            for call in runner.calls[calls_before:]
+        ) == 1
+
+        calls_before_icon = len(runner.calls)
+        runner.tokens["status_marker"] = "working"
+        runner.state_change_seq += 1
+        exact = service.bootstrap(_spec())
+        assert exact["idempotent"] is True
+        assert runner.tokens["status_marker"] == "working"
+        assert not any(
+            call[:3] == ("herdr", "pane", "report-metadata")
+            for call in runner.calls[calls_before_icon:]
+        )
 def test_in_place_bootstrap_is_provider_neutral_and_never_creates_layout(
     root: Path,
 ) -> None:
@@ -1510,12 +1621,174 @@ def test_preexisting_reserved_bootstrap_rejects_residual_metadata_without_baseli
     )
 
 
-def test_completed_bootstrap_retry_refuses_later_provider_title_without_prompt(root: Path) -> None:
+class PreRoleBootstrapAdapter(HerdrShotcallerBootstrapAdapter):
+    """Frozen pre-role publisher/observer contract from main d49b615."""
+
+    def _report_title(self, spec, callsign, agent):
+        authority_source = agent["agent_session"]["source"]
+        self._published_source = self._title_source(spec)
+        self._expected_published_sequence = agent["state_change_seq"]
+        self._run((
+            "herdr", "pane", "report-metadata", self.options.pane_id,
+            "--source", self._title_source(spec),
+            "--applies-to-source", authority_source,
+            "--agent", self.options.runtime_kind,
+            "--display-agent", self.options.provider_kind,
+            "--title", callsign,
+            "--token", f"sidebar_name={callsign}",
+            "--token", f"thread_title={callsign}",
+            "--token", f"shotcaller_title_owner={self._title_owner(spec)}",
+            "--token", f"shotcaller_title_source={self._title_source(spec)}",
+        ), "Herdr Shotcaller metadata", silent=True)
+
+    def _published_exact(self, spec, callsign, pane, agent):
+        tokens = agent.get("tokens")
+        source = self._presentation_source(agent)
+        authority = agent["agent_session"]["source"]
+        ownership_exact = bool(
+            isinstance(tokens, Mapping)
+            and tokens.get("shotcaller_title_owner") == self._title_owner(spec)
+            and tokens.get("shotcaller_title_source") == self._title_source(spec)
+        )
+        return bool(
+            self._exact(spec, pane, agent)
+            and self._routing_name(agent) == callsign.lower()
+            and ownership_exact
+            and (source in {self._title_source(spec), authority}
+                 or (source is None and ownership_exact))
+            and tokens.get("sidebar_name") == callsign
+            and tokens.get("thread_title") == callsign
+            and self._presentation_title(agent) == callsign
+        )
+
+
+def test_pre_role_completed_bootstrap_retries_exact_live_base_presentation(root: Path) -> None:
+    for runtime_kind in ("codex", "cursor", "pi"):
+        name = f"pre-role-completed-{runtime_kind}"
+        state, _ = migrated_state(root, name)
+        worktree = root / name / "worktree"
+        worktree.mkdir()
+        clock = FakeClock()
+        runner = RecordingHerdr(worktree, agent_kind=runtime_kind)
+        options = ShotcallerBootstrapOptions(
+            workspace_id="w1", tab_id="w1:t1", pane_id="w1:p1",
+            worktree=str(worktree), runtime_kind=runtime_kind,
+            provider_kind=runtime_kind if runtime_kind != "pi" else "codex",
+        )
+        environment = {"HERDR_ENV": "1", "HERDR_WORKSPACE_ID": "w1",
+                       "HERDR_TAB_ID": "w1:t1", "HERDR_PANE_ID": "w1:p1"}
+        with SQLiteStorage(state) as store:
+            _seed_available_ashe(store, clock)
+            created = ShotcallerBootstrapService(
+                store, PreRoleBootstrapAdapter(options, runner, environment=environment), clock
+            ).bootstrap(_spec())
+            event_id = f"shotcaller:{_spec().assignment_id}:created"
+            detail = json.loads(store.connection.execute(
+                "SELECT detail_json FROM events WHERE event_id=?", (event_id,)
+            ).fetchone()[0])
+            before = len(runner.calls)
+            try:
+                ShotcallerBootstrapService(
+                    store, HerdrShotcallerBootstrapAdapter(options, runner, environment=environment), clock
+                ).bootstrap(_spec())
+            except StorageRefusal as exc:
+                assert exc.code == "shotcaller_metadata_unverified"
+            else:
+                raise AssertionError("modern completion accepted a missing owned role token")
+            assert not any(call[:3] == ("herdr", "pane", "report-metadata")
+                           for call in runner.calls[before:])
+            detail.pop("orchestrator_role")
+            legacy_detail = json.dumps(detail, sort_keys=True, separators=(",", ":"))
+            store.connection.execute("UPDATE events SET detail_json=? WHERE event_id=?",
+                                     (legacy_detail, event_id))
+            assert "orchestrator_role" not in runner.tokens
+            runner.tokens["user_badge"] = "favorite"
+            prior_tokens = dict(runner.tokens)
+            prior_source, prior_title = runner.metadata_source, runner.title
+            for field, value in (
+                ("orchestrator_role", "champion"),
+                ("orchestrator_role", ""),
+                ("shotcaller_title_owner", "foreign"),
+                ("shotcaller_title_source", "foreign"),
+                ("sidebar_name", "Provider refreshed sidebar"),
+                ("thread_title", "Provider refreshed thread"),
+                ("metadata_source", "user-selected"),
+                ("title", "Provider refreshed title"),
+                ("terminal_id", "terminal:changed"),
+                ("agent_status", []),
+            ):
+                if field in {"metadata_source", "title", "terminal_id", "agent_status"}:
+                    setattr(runner, field, value)
+                else:
+                    runner.tokens[field] = value
+                before = len(runner.calls)
+                observed_tokens = dict(runner.tokens)
+                try:
+                    ShotcallerBootstrapService(
+                        store, HerdrShotcallerBootstrapAdapter(options, runner, environment=environment), clock
+                    ).bootstrap(_spec())
+                except StorageRefusal as exc:
+                    assert exc.code in {"shotcaller_metadata_unverified", "shotcaller_identity_unverified", "receipt_conflict", "bootstrap_baseline_unverified"}, (field, exc.code)
+                else:
+                    raise AssertionError(f"pre-token retry accepted changed {field}")
+                assert runner.tokens == observed_tokens
+                assert not any(call[:3] in {
+                    ("herdr", "pane", "report-metadata"), ("herdr", "agent", "rename"),
+                    ("herdr", "agent", "prompt"), ("herdr", "agent", "start"),
+                    ("herdr", "tab", "create"), ("herdr", "pane", "split"),
+                } for call in runner.calls[before:])
+                assert store.callsign_assignment_status(_spec().assignment_id)["state"] == "active"
+                runner.tokens = dict(prior_tokens)
+                runner.metadata_source, runner.title = prior_source, prior_title
+                runner.terminal_id, runner.agent_status = "terminal:1", "working"
+            before = len(runner.calls)
+            changed_spec = ShotcallerBootstrapSpec(
+                **{**vars(_spec()), "runtime_instance_id": "runtime:foreign"}
+            )
+            try:
+                ShotcallerBootstrapService(
+                    store, HerdrShotcallerBootstrapAdapter(options, runner, environment=environment), clock
+                ).bootstrap(changed_spec)
+            except StorageRefusal as exc:
+                assert exc.code == "receipt_conflict"
+            else:
+                raise AssertionError("pre-token retry accepted a foreign runtime receipt")
+            assert not any(call[:3] == ("herdr", "pane", "report-metadata")
+                           for call in runner.calls[before:])
+            before = len(runner.calls)
+            service = ShotcallerBootstrapService(
+                store, HerdrShotcallerBootstrapAdapter(options, runner, environment=environment), clock
+            )
+            retried = service.bootstrap(_spec())
+            assert retried == {**created, "idempotent": True}
+            assert retried["orchestrator_role"] == runner.tokens["orchestrator_role"] == "shotcaller"
+            assert runner.tokens["user_badge"] == "favorite"
+            assert runner.title == runner.tokens["sidebar_name"] == runner.tokens["thread_title"] == "Ashe"
+            assert sum(call[:3] == ("herdr", "pane", "report-metadata")
+                       for call in runner.calls[before:]) == 1
+            assert not any(call[:3] in {
+                ("herdr", "agent", "rename"), ("herdr", "agent", "start"),
+                ("herdr", "agent", "prompt"), ("herdr", "pane", "split"),
+                ("herdr", "tab", "create"),
+            } for call in runner.calls[before:])
+            before = len(runner.calls)
+            assert service.bootstrap(_spec()) == retried
+            assert not any(call[:3] == ("herdr", "pane", "report-metadata")
+                           for call in runner.calls[before:])
+            assert store.connection.execute(
+                "SELECT detail_json FROM events WHERE event_id=?", (event_id,)
+            ).fetchone()[0] == legacy_detail
+
+
+def test_completed_bootstrap_retry_restores_provider_refreshed_title_without_prompt(
+    root: Path,
+) -> None:
     state, _ = migrated_state(root, "shotcaller-completed-retry")
     worktree = root / "shotcaller-completed-retry" / "worktree"
     worktree.mkdir()
     clock = FakeClock()
     runner = RecordingHerdr(worktree)
+    runner.provider_managed_presentation = True
     with SQLiteStorage(state) as store:
         _seed_available_ashe(store, clock)
         service = ShotcallerBootstrapService(
@@ -1563,22 +1836,40 @@ def test_completed_bootstrap_retry_refuses_later_provider_title_without_prompt(r
                 assert exc.code in {"receipt_conflict", "receipt_mismatch"}
             else:
                 raise AssertionError("completed bootstrap retry accepted changed identity")
+        # A receipt written before canonical role metadata was introduced is
+        # still a completed Shotcaller, but retry must reverify the live
+        # assignment and return the canonical role rather than role_owned=False.
+        created_event = store.connection.execute(
+            "SELECT detail_json FROM events WHERE event_id=?",
+            (f"shotcaller:{_spec().assignment_id}:created",),
+        ).fetchone()
+        assert created_event is not None
+        legacy_detail = json.loads(created_event["detail_json"])
+        legacy_detail.pop("orchestrator_role", None)
+        store.connection.execute(
+            "UPDATE events SET detail_json=? WHERE event_id=?",
+            (json.dumps(legacy_detail, sort_keys=True, separators=(",", ":")),
+             f"shotcaller:{_spec().assignment_id}:created"),
+        )
+        pre_token_retry = service.bootstrap(_spec())
+        assert pre_token_retry["orchestrator_role"] == "shotcaller"
         runner.metadata_source = "herdr:codex"
         runner.state_change_seq += 1
         runner.title = "Create the Shotcaller for this pane | codex"
         calls_before_retry = len(runner.calls)
 
-        try:
-            service.bootstrap(_spec())
-        except StorageRefusal as exc:
-            assert exc.code == "shotcaller_metadata_unverified"
-        else:
-            raise AssertionError("completed retry overwrote a later provider title")
+        retried = service.bootstrap(_spec())
+        assert retried == {**created, "idempotent": True}
         retry_calls = runner.calls[calls_before_retry:]
+        metadata_calls = [
+            call
+            for call in retry_calls
+            if call[:3] == ("herdr", "pane", "report-metadata")
+        ]
+        assert len(metadata_calls) == 1
         assert not any(
             call[:3]
             in {
-                ("herdr", "pane", "report-metadata"),
                 ("herdr", "agent", "rename"),
                 ("herdr", "agent", "prompt"),
                 ("herdr", "tab", "create"),
@@ -1587,8 +1878,9 @@ def test_completed_bootstrap_retry_refuses_later_provider_title_without_prompt(r
             }
             for call in retry_calls
         )
-        assert runner.metadata_source == "herdr:codex"
-        assert runner.title == "Create the Shotcaller for this pane | codex"
+        assert runner.title == "Ashe | codex"
+        assert runner.tokens["sidebar_name"] == "Ashe"
+        assert runner.tokens["thread_title"] == "Ashe"
         assert store.shotcaller_bootstrap_status(_spec().assignment_id) == {
             **created,
             "idempotent": True,
@@ -1650,6 +1942,43 @@ def test_completed_bootstrap_retry_refuses_newer_user_title_with_stale_tokens(
             **created,
             "idempotent": True,
         }
+
+
+def test_completed_bootstrap_retry_refuses_malformed_agent_status_closed(
+    root: Path,
+) -> None:
+    state, _ = migrated_state(root, "shotcaller-completed-malformed-status")
+    worktree = root / "shotcaller-completed-malformed-status" / "worktree"
+    worktree.mkdir()
+    clock = FakeClock()
+    runner = RecordingHerdr(worktree)
+    with SQLiteStorage(state) as store:
+        _seed_available_ashe(store, clock)
+        service = _service(store, clock, worktree, runner)
+        created = service.bootstrap(_spec())
+        calls_before_retry = len(runner.calls)
+        runner.agent_status = ["done"]  # type: ignore[assignment]
+
+        try:
+            _service(store, clock, worktree, runner).bootstrap(_spec())
+        except StorageRefusal as exc:
+            assert exc.code == "shotcaller_identity_unverified"
+        else:
+            raise AssertionError("malformed Shotcaller agent status was accepted")
+
+        assert store.shotcaller_bootstrap_status(_spec().assignment_id) == {
+            **created,
+            "idempotent": True,
+        }
+        assert not any(
+            call[:3]
+            in {
+                ("herdr", "agent", "rename"),
+                ("herdr", "pane", "report-metadata"),
+                ("herdr", "agent", "prompt"),
+            }
+            for call in runner.calls[calls_before_retry:]
+        )
 
 
 def test_bootstrap_metadata_and_atomic_finalization_failures_restore_exact_state(
@@ -4252,7 +4581,7 @@ def test_bootstrap_rolls_back_without_overwriting_newer_user_title(root: Path) -
     assert runner.name is None
     assert runner.metadata_source == "user-selected"
     assert runner.title == "User selected title"
-    assert runner.tokens == {"user_badge": "favorite"}
+    assert runner.tokens == {"user_badge": "favorite", "orchestrator_role": "champion"}
     metadata_calls = [
         call
         for call in runner.calls
@@ -4271,6 +4600,7 @@ def test_bootstrap_rolls_back_without_overwriting_newer_user_title(root: Path) -
         "thread_title=",
         "shotcaller_title_owner=",
         "shotcaller_title_source=",
+        "orchestrator_role=champion",
     }
     assert not any(
         call[:3]
@@ -4396,6 +4726,7 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="league-shotcaller-bootstrap-") as temporary:
         root = Path(temporary)
         test_in_place_bootstrap_creates_shotcaller_without_layout_or_squad_registration(root)
+        test_cursor_authority_shotcaller_role_token_is_owned_and_retry_safe(root)
         test_in_place_bootstrap_is_provider_neutral_and_never_creates_layout(root)
         test_in_place_bootstrap_adopts_exact_named_tet_pi_session(root)
         test_in_place_bootstrap_refuses_named_tet_pi_callsign_mismatch(root)
@@ -4409,8 +4740,10 @@ def main() -> None:
         test_bootstrap_identity_mismatch_makes_no_canonical_mutation(root)
         test_preexisting_reserved_bootstrap_requires_durable_baseline_when_alias_empty(root)
         test_preexisting_reserved_bootstrap_rejects_residual_metadata_without_baseline(root)
-        test_completed_bootstrap_retry_refuses_later_provider_title_without_prompt(root)
+        test_completed_bootstrap_retry_restores_provider_refreshed_title_without_prompt(root)
+        test_pre_role_completed_bootstrap_retries_exact_live_base_presentation(root)
         test_completed_bootstrap_retry_refuses_newer_user_title_with_stale_tokens(root)
+        test_completed_bootstrap_retry_refuses_malformed_agent_status_closed(root)
         test_bootstrap_metadata_and_atomic_finalization_failures_restore_exact_state(root)
         test_clean_rolled_back_bootstrap_residue_rebinds_same_thread_in_place(root)
         test_legacy_rolled_back_bootstrap_residue_captures_clean_live_baseline(root)

@@ -1295,6 +1295,25 @@ only from matching Pi routing metadata, passes it explicitly to the Pi extension
 and publishes a reduced non-duplicative token set. Native Pi session identity,
 toolkit presentation tokens, JSONL bytes, and Job Journey state remain unchanged.
 
+Issue #85's presentation follow-up preserves the explicit two-word task when
+a project code is present: Champion thread and terminal titles are
+`<Callsign> · <PROJECT>|<Two Word Task>`, not a project-only title. Sidebar
+and Shotcaller naming remain callsign-only. Focused visible-launch coverage
+binds this deliberate correction. A service-level Pi regression exposed two
+production contract mismatches: duplicate native session fields in the strict
+activation envelope, and a native launch observation returned as a display
+receipt. Native fields remain in the durable provider descriptor; activation
+validation is unchanged. Context delivery now waits for prompt acceptance and
+returns a fresh stable, ownership-checked display receipt. Focused fake-adapter
+coverage does not replace installed end-to-end acceptance.
+
+The local integration with 0.2.75 preserves the shipped provider-neutral
+multiplexer delivery path and metadata sequence semantics. Pi requests its
+post-context wait through that shared adapter. Retained-done reconciliation
+uses intent version 5 so it cannot collide with the shipped worktree and
+runtime-generation intent versions 2–4; the focused suite retains their
+existing coverage. Combining retained-done repair with relocation or generation
+replacement refuses rather than inventing a mixed recovery operation.
 ## Provider-neutral restart display provenance
 
 A real named Herdr restart restored the same Codex/Pi sessions, panes, working

@@ -13,6 +13,7 @@ from typing import Any, Mapping
 
 from .storage import Storage, StorageRefusal
 from .storage_assignment import LegacyDisplayReconciliationCommand
+from .presentation import ORCHESTRATOR_ROLE_TOKEN, orchestrator_role_tokens
 from .visible_launch import (
     CommandRunner,
     SubprocessRunner,
@@ -35,6 +36,7 @@ OWNERSHIP_TOKENS = {
     "legacy_display_assignment",
     "legacy_display_source",
     "legacy_display_applies_to",
+    ORCHESTRATOR_ROLE_TOKEN,
 }
 LEGACY_OWNERSHIP_TOKENS = {
     key for key in OWNERSHIP_TOKENS if key.startswith("legacy_display_")
@@ -129,6 +131,7 @@ class LegacyDisplayReconciliationSpec:
     expected_state_change_seq: int | None
     target_task_label: str
     owner_authorized: bool
+    expected_agent_status: str | None = None
     previous_worktree: str | None = None
     previous_branch: str | None = None
     branch: str | None = None
@@ -256,9 +259,15 @@ class HerdrLegacyDisplayAdapter:
         )
         sequence = agent.get("state_change_seq")
         worktree = str(Path(spec.worktree).resolve())
+        status_exact = (
+            agent.get("agent_status") == spec.expected_agent_status
+            if spec.expected_agent_status is not None
+            else isinstance(agent.get("agent_status"), str)
+            and agent.get("agent_status") in PRESENT_STATUSES
+        )
         exact = bool(
             agent.get("agent") == "codex"
-            and agent.get("agent_status") in PRESENT_STATUSES
+            and status_exact
             and agent.get("name") == spec.routing_name
             and agent.get("pane_id") == spec.pane_id
             and agent.get("terminal_id") == spec.terminal_id
@@ -293,6 +302,8 @@ class HerdrLegacyDisplayAdapter:
             "state_change_seq": sequence,
             "tokens_digest": _digest(token_map),
         }
+        if spec.expected_agent_status is not None:
+            projection["endpoint_status"] = spec.expected_agent_status
         return projection, token_map
 
     def _matches_expected(
@@ -315,7 +326,7 @@ class HerdrLegacyDisplayAdapter:
         observation: Mapping[str, Any],
     ) -> dict[str, Any]:
         target = f"{spec.callsign} · {spec.target_task_label}"
-        return {
+        receipt = {
             "schema": "league.legacy-display-reconciliation.v1",
             "reconciliation_id": reconciliation_id,
             "assignment_id": spec.assignment_id,
@@ -329,7 +340,12 @@ class HerdrLegacyDisplayAdapter:
             "thread_title": target,
             "terminal_title": target,
             "observation_digest": _digest(observation),
+            ORCHESTRATOR_ROLE_TOKEN: "champion",
         }
+        if spec.expected_agent_status is not None:
+            receipt["schema"] = "league.legacy-display-reconciliation.v2"
+            receipt["endpoint_status"] = spec.expected_agent_status
+        return receipt
 
     def _reconciliation_tokens(
         self,
@@ -340,11 +356,13 @@ class HerdrLegacyDisplayAdapter:
     ) -> dict[str, str]:
         target = f"{spec.callsign} · {spec.target_task_label}"
         owner = hashlib.sha256(spec.assignment_id.encode("utf-8")).hexdigest()[:16]
+        role = orchestrator_role_tokens("champion")[ORCHESTRATOR_ROLE_TOKEN]
         return {
             "callsign": spec.callsign,
             "sidebar_name": spec.callsign,
             "task_label": spec.target_task_label,
             "thread_title": target,
+            ORCHESTRATOR_ROLE_TOKEN: role,
             "identity_title": f"Codex | {target}",
             "identity_title_mode": "tokens-only",
             "legacy_display_owner": owner,
@@ -427,6 +445,10 @@ class HerdrLegacyDisplayAdapter:
             exact = bool(
                 observation["presentation_source"] != source
                 and not LEGACY_OWNERSHIP_TOKENS.intersection(tokens)
+                # A newer provider/user presentation may have restored the
+                # durable Champion role token.  Clear only this reconciliation's
+                # ownership tokens; never erase that preserved role truth.
+                and tokens.get(ORCHESTRATOR_ROLE_TOKEN) in {None, "champion"}
             )
             if exact:
                 stable = stable + 1 if current == prior else 1
@@ -649,11 +671,17 @@ class HerdrLegacyDisplayAdapter:
             and tokens.get("sidebar_name") == spec.callsign
             and tokens.get("task_label") == spec.target_task_label
             and tokens.get("thread_title") == target
+            and tokens.get(ORCHESTRATOR_ROLE_TOKEN)
+            == receipt.get(ORCHESTRATOR_ROLE_TOKEN)
             and tokens.get("legacy_display_assignment")
             == receipt.get("reconciliation_id")
             and tokens.get("legacy_display_source") == receipt.get("source")
             and tokens.get("legacy_display_applies_to")
             == receipt.get("applies_to_source")
+            and (
+                spec.expected_agent_status is None
+                or receipt.get("endpoint_status") == spec.expected_agent_status
+            )
         )
         if not exact:
             raise StorageRefusal(

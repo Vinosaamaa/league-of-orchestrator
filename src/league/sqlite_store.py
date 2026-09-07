@@ -2438,8 +2438,12 @@ class SQLiteStorage(SQLiteTransactionCore):
             self, assignment_id, expected_version, receipt, at, fault=fault
         )
 
-    def shotcaller_bootstrap_status(self, assignment_id: str) -> Optional[dict[str, Any]]:
-        return shotcaller_bootstrap_status_operation(self, assignment_id)
+    def shotcaller_bootstrap_status(
+        self, assignment_id: str, *, include_display_ownership: bool = False
+    ) -> Optional[dict[str, Any]]:
+        return shotcaller_bootstrap_status_operation(
+            self, assignment_id, include_display_ownership=include_display_ownership
+        )
 
     def record_shotcaller_bootstrap_baseline(
         self, assignment_id: str, expected_version: int, baseline: dict[str, Any]

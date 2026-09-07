@@ -20,7 +20,9 @@ class CallsignQueueStorage(Protocol):
         fault: Optional[FaultInjector] = None,
     ) -> dict[str, Any]: ...
 
-    def shotcaller_bootstrap_status(self, assignment_id: str) -> Optional[dict[str, Any]]: ...
+    def shotcaller_bootstrap_status(
+        self, assignment_id: str, *, include_display_ownership: bool = False
+    ) -> Optional[dict[str, Any]]: ...
 
     def record_shotcaller_bootstrap_baseline(
         self,

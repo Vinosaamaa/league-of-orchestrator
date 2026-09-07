@@ -3067,23 +3067,15 @@ def test_retained_done_reconciliation_requires_settled_task_and_active_callsign(
     store.close()
 
 
-class RetainedDoneStatusRaceRunner(FakeHerdrRunner):
-    def __init__(self, worktree: Path) -> None:
-        super().__init__(worktree)
-        self.started = True
-        self.agent_status = "done"
-        self.get_reads = 0
+class RetainedDoneStatusRaceAdapter(HerdrLegacyDisplayAdapter):
+    """Change provider status after baseline verification, before the effect fence."""
 
-    def run(
-        self, arguments, *, timeout_seconds: int = 30
-    ) -> subprocess.CompletedProcess[str]:
-        command = tuple(arguments)
-        if command[:3] == ("herdr", "agent", "get"):
-            self.get_reads += 1
-            if self.get_reads == 2:
-                self.agent_status = "idle"
-                self.state_change_seq += 1
-        return super().run(arguments, timeout_seconds=timeout_seconds)
+    def _matches_expected(self, spec, observation):
+        matches = super()._matches_expected(spec, observation)
+        if matches:
+            self.runner.agent_status = "idle"
+            self.runner.state_change_seq += 1
+        return matches
 
 
 def test_retained_done_reconciliation_refuses_status_race_before_effect(
@@ -3100,7 +3092,9 @@ def test_retained_done_reconciliation_refuses_status_race_before_effect(
         "UPDATE tasks SET state='ready_to_land',version=version+1,updated_at=? WHERE task_id=?",
         (clock.now(), task_id),
     )
-    runner = RetainedDoneStatusRaceRunner(worktree)
+    runner = FakeHerdrRunner(worktree)
+    runner.started = True
+    runner.agent_status = "done"
     runner.routing_name = prepared.routing_name
     runner.title = prepared.title
     runner.tokens = dict(prepared.tokens)
@@ -3112,7 +3106,7 @@ def test_retained_done_reconciliation_refuses_status_race_before_effect(
     )
     service = LegacyDisplayReconciliationService(
         store,
-        HerdrLegacyDisplayAdapter(
+        RetainedDoneStatusRaceAdapter(
             runner,
             environment={"HERDR_ENV": "1", "HERDR_WORKSPACE_ID": "w1"},
         ),
@@ -3125,6 +3119,8 @@ def test_retained_done_reconciliation_refuses_status_race_before_effect(
         assert exc.code == "legacy_display_identity_unverified"
     else:
         raise AssertionError("retained-done status race reached a metadata effect")
+    assert runner.agent_status == "idle"
+    assert runner.state_change_seq == prepared.state_change_seq + 1
     assert not any(
         call[:3] == ("herdr", "pane", "report-metadata") for call in runner.calls
     )
@@ -3213,6 +3209,7 @@ def main() -> None:
         test_resume_retry_reconciles_owned_endpoint_without_second_launch(root)
         test_real_adapter_one_command_success_and_retry(root)
         test_base_delivered_context_retry_is_recognized_without_redelivery(root)
+        test_retained_done_reconciliation_refuses_status_race_before_effect(root)
         test_live_multiplexer_names_fence_stale_available_callsigns(root)
         test_active_retry_requires_migration18_issue_binding(root)
         test_active_retry_refuses_changed_owner_issue_before_title_read(root)

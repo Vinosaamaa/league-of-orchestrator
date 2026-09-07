@@ -130,15 +130,20 @@ unrelated metadata token.
 A pre-fix Champion may finish at the provider while League deliberately retains
 its pane, route, runtime row, assignment, and callsign. That endpoint is not an
 active worker and must not be made to look active merely to repair its stale
-handshake title. The retained-done v2 intent is therefore available only when
-the exact canonical assignment and callsign assignment are still active, one
-verified runtime binds the same agent/thread/pane/generation, the route and
-physical worktree remain exact, the task is already in a terminal state, and
-the legacy context contains no modern display receipt. If the task is not yet
-terminal, reconciliation refuses with `legacy_display_lifecycle_unsettled`;
-the ordinary durable task transition must settle lifecycle first.
+handshake title. The retained-done v5 intent requires every eligibility gate:
 
-The v2 intent records the terminal lifecycle class and expected provider status
+- [ ] Exact canonical assignment and callsign assignment remain active.
+- [ ] One verified runtime binds the same agent/thread/pane/generation.
+- [ ] Route and physical worktree remain exact.
+- [ ] Canonical task is already terminal; provider status is `done`.
+- [ ] Legacy context contains no modern display receipt.
+
+If the task is not yet terminal, reconciliation refuses with
+`legacy_display_lifecycle_unsettled`; the ordinary durable task transition must
+settle lifecycle first. The shared identity, ownership, and observation fences
+above still apply.
+
+The v5 intent records the terminal lifecycle class and expected provider status
 `done`. The final receipt binds that same status to the stable source, title,
 sequence, and observation digest. Metadata repair does not prompt, start,
 close, rename, or resume the endpoint, and the final canonical events use a

@@ -8,12 +8,67 @@ from __future__ import annotations
 
 from pathlib import Path
 import re
-import shlex
 from typing import Any, Mapping
 
 
 EDIT_TOOLS = frozenset({"apply_patch", "edit", "multiedit", "notebookedit", "write", "write_file", "delete"})
 SHELL_TOOLS = frozenset({"bash", "exec_command", "shell"})
+SHELL_WORDS = re.compile(
+    r'''(?:\\[\s\S]|'[^']*'|"(?:\\[\s\S]|[^"\\])*"|[^\s;&|<>'"\\])+|[;&|<>]+|\n|\S'''
+)
+
+
+def _shell_literal(word: str) -> str | None:
+    """Decode quoting only. Expansion-dependent words stay unresolved."""
+    value: list[str] = []
+    quote = None
+    index = 0
+    while index < len(word):
+        char = word[index]
+        following = word[index + 1:index + 2]
+        if char == "\\" and quote != "'":
+            if not following:
+                return None
+            if quote is None or following in '$`"\\\n':
+                if following != "\n":
+                    value.append(following)
+                index += 2
+                continue
+        if char in "\"'" and (quote is None or quote == char):
+            quote = char if quote is None else None
+        elif quote != "'" and (
+            char == "`" or (char == "$" and following and
+                            (following.isalnum() or following in "_@*#?$!({[-"
+                             or (quote is None and following in "'\"")))
+        ):
+            return None
+        elif quote is None and (
+            char in "*?" or (char == "[" and "]" in word[index + 1:])
+            or (char == "~" and index == 0)
+            or (char == "{" and re.search(r"\{[^}]*?(?:,|\.\.)[^}]*\}", word[index:]))
+        ):
+            return None
+        else:
+            value.append(char)
+        index += 1
+    return None if quote else "".join(value)
+
+
+def _shell_path(word: str, cwd: Path | None) -> Path | None:
+    literal = _shell_literal(word)
+    if literal is None:
+        return None
+    path = Path(literal)
+    if not path.is_absolute():
+        if cwd is None:
+            return None
+        path = cwd / path
+    return path
+
+
+def _shell_target(word: str, cwd: Path | None) -> bool:
+    path = _shell_path(word, cwd)
+    return path is None or _repository_path(str(path), Path("/"))
 
 
 def _repository_path(value: str, cwd: Path) -> bool:
@@ -50,21 +105,25 @@ def repository_implementation(payload: Mapping[str, Any]) -> bool:
                 for target in targets
             )
         return any(_repository_path(target, cwd) for target in targets) if targets else _repository_path(str(cwd), cwd)
-    if name not in SHELL_TOOLS or cwd is None:
+    if name not in SHELL_TOOLS:
         return False
     command = inputs.get("command", inputs.get("cmd"))
     if not isinstance(command, str):
         return False
-    try:
-        lexer = shlex.shlex(command, posix=False, punctuation_chars=";&|<>")
-        lexer.whitespace_split = True
-        tokens = list(lexer)
-    except ValueError:
-        return False
     segment: list[str] = []
     segments: list[list[str]] = []
-    for token in tokens:
-        if token in {";", "&&", "||", "|", "&"}:
+    comment = False
+    # Keep concatenated quoted fragments in one word, without stripping the
+    # distinction between an escaped/single-quoted dollar and an expansion.
+    for match in SHELL_WORDS.finditer(command):
+        token = match.group()
+        if token == "\n":
+            comment = False
+        elif token.startswith("#"):
+            comment = True
+        if comment:
+            continue
+        if token in {";", "&&", "||", "|", "&", "\n"}:
             segments.append(segment)
             segment = []
         else:
@@ -74,27 +133,46 @@ def repository_implementation(payload: Mapping[str, Any]) -> bool:
         if not words:
             continue
         for index, word in enumerate(words[:-1]):
-            if word in {">", ">>"} and _repository_path(shlex.split(words[index + 1])[0], cwd):
+            if word == ">&":
+                descriptor = _shell_literal(words[index + 1])
+                if descriptor is not None and (descriptor.isdigit() or descriptor == "-"):
+                    continue  # Descriptor duplication/closure is not a file write.
+            if word in {">", ">>", ">|", ">&", "&>", "&>>"} and _shell_target(words[index + 1], cwd):
                 return True
-        # Keep quoted punctuation distinct from actual shell redirections.
-        executable = Path(shlex.split(words[0])[0]).name
-        args = [shlex.split(word)[0] if shlex.split(word) else "" for word in words[1:]]
-        if executable == "cd" and args:
-            cwd = (cwd / args[0]).resolve()
+        while words and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", words[0]):
+            words = words[1:]
+        if not words:
+            continue
+        executable = Path(_shell_literal(words[0]) or "").name
+        args = words[1:]
+        if executable == "cd":
+            while args and _shell_literal(args[0]) in {"--", "-L", "-P"}:
+                args = args[1:]
+            cwd = _shell_path(args[0], cwd) if args and _shell_literal(args[0]) != "-" else None
         elif executable == "git":
-            if args[:1] == ["-C"] and len(args) > 2:
-                cwd = (cwd / args[1]).resolve()
+            git_cwd = cwd
+            while args and _shell_literal(args[0]) == "-C" and len(args) > 2:
+                git_cwd = _shell_path(args[1], git_cwd)
                 args = args[2:]
-            if args[:1] in (["apply"], ["am"]) and _repository_path(str(cwd), cwd):
+            if args and _shell_literal(args[0]) in {"apply", "am"} and _shell_target(".", git_cwd):
                 return True
         elif executable in {"apply_patch", "patch"}:
-            if _repository_path(str(cwd), cwd):
+            if _shell_target(".", cwd):
                 return True
-        elif executable in {"sed", "perl"} and any(re.match(r"^-[^-]*i", arg) or arg == "--in-place" for arg in args):
-            if args and _repository_path(args[-1], cwd):
+        elif executable in {"sed", "perl"} and any(
+            re.match(r"^-[^-]*i", _shell_literal(arg) or "") or _shell_literal(arg) == "--in-place"
+            for arg in args
+        ):
+            if args and _shell_target(args[-1], cwd):
                 return True
         elif executable in {"tee", "touch", "cp", "mv", "rm"}:
             targets = args[-1:] if executable == "cp" else args
-            if any(_repository_path(arg, cwd) for arg in targets if not arg.startswith("-")):
+            if executable in {"cp", "mv"}:
+                for index, arg in enumerate(args):
+                    if _shell_literal(arg) in {"-t", "--target-directory"} and index + 1 < len(args):
+                        targets = [args[index + 1], *(targets if executable == "mv" else [])]
+                    elif arg.startswith("--target-directory="):
+                        targets = [arg.split("=", 1)[1], *(targets if executable == "mv" else [])]
+            if any(_shell_target(arg, cwd) for arg in targets if not arg.startswith("-")):
                 return True
     return False

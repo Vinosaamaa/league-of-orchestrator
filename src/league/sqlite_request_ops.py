@@ -163,7 +163,7 @@ def _require_issue_owned_champion_tasks(
     coordinator_agent_id: str,
     task_ids: tuple[str, ...],
     require_active: bool = True,
-) -> None:
+) -> dict[str, sqlite3.Row]:
     if not task_ids:
         raise StorageRefusal(
             "champion_delegation_required",
@@ -172,7 +172,7 @@ def _require_issue_owned_champion_tasks(
     placeholders = ",".join("?" for _ in task_ids)
     rows = store.connection.execute(
         f"""
-        SELECT t.task_id
+        SELECT t.task_id,t.state,t.result_summary
           FROM tasks t
           JOIN task_assignments a
             ON a.task_id=t.task_id AND a.request_id=t.request_id
@@ -206,6 +206,7 @@ def _require_issue_owned_champion_tasks(
             "champion_delegation_required",
             "Champion-routed implementation lacks an exact issue-owned visible Champion receipt",
         )
+    return {str(row["task_id"]): row for row in rows}
 
 
 def _require_champion_answer_result(store: Any, request: sqlite3.Row) -> None:
@@ -2240,15 +2241,15 @@ def record_request_result(store: Any, command: RequestResultCommand) -> dict[str
             _active_claim(store, request_id, token=claim_token, at=at)
             if int(request["version"]) != expected_version:
                 raise StorageRefusal("version_conflict", "request result expected-version failed")
+            cited_tasks: dict[str, sqlite3.Row] = {}
             if request["execution_mode"] == "champion":
-                _require_issue_owned_champion_tasks(
+                cited_tasks = _require_issue_owned_champion_tasks(
                     store,
                     request_id=request_id,
                     coordinator_agent_id=str(request["owner_agent_id"]),
                     task_ids=sources,
                 )
-            cited_tasks: dict[str, sqlite3.Row] = {}
-            if sources:
+            elif sources:
                 placeholders = ",".join("?" for _ in sources)
                 cited_tasks = {
                     str(row["task_id"]): row

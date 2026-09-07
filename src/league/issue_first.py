@@ -11,7 +11,7 @@ import time
 import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Mapping, Protocol, Sequence
+from typing import Any, Iterator, Mapping, Protocol, Sequence
 
 from .privacy import validate_final_rendered_payload
 from .sqlite_project_ops import canonical_repository
@@ -418,12 +418,13 @@ class GitHubIssueSelectionService:
             "state": state,
             "title": title.strip(),
             "body": body,
+            "body_digest": hashlib.sha256(body.encode("utf-8")).hexdigest(),
             "html_url": url,
         }
 
     def _all_issues(
         self, owner: str, repository_name: str, normalized_title: str
-    ) -> list[dict[str, Any]]:
+    ) -> Iterator[dict[str, Any]]:
         # Bound each runner response before it reaches the output limit. PRs
         # and unrelated issue bodies are never returned by the listing command.
         # Use the raw page count (including PRs) to detect pagination exhaustion.
@@ -440,7 +441,6 @@ class GitHubIssueSelectionService:
                 raise StorageRefusal("issue_selection_search_failed", "GitHub issue search exceeded its time bound")
             return result
 
-        issues: list[dict[str, Any]] = []
         for page in range(1, 101):
             payload = search(
                 (
@@ -477,9 +477,9 @@ class GitHubIssueSelectionService:
                 if (candidate["number"] != raw["number"]
                         or normalize_issue_title(candidate["title"]) != normalized_title):
                     raise StorageRefusal("issue_selection_search_failed", "GitHub issue changed during selection")
-                issues.append(candidate)
+                yield candidate
             if count < 100:
-                return issues
+                return
         raise StorageRefusal(
             "issue_selection_search_failed", "GitHub issue search exceeded its page bound"
         )
@@ -555,7 +555,7 @@ class GitHubIssueSelectionService:
                 if normalize_issue_title(candidate["title"]) != normalized_title:
                     continue
                 try:
-                    candidate_scope = semantic_scope_digest(candidate["body"])
+                    candidate_scope = semantic_scope_digest(candidate.pop("body"))
                 except StorageRefusal as exc:
                     if exc.code == "issue_scope_incomplete":
                         raise StorageRefusal(
@@ -668,9 +668,7 @@ class GitHubIssueSelectionService:
                     issue=int(selected["number"]),
                     issue_url=str(selected["html_url"]),
                     issue_title=str(selected["title"]),
-                    issue_body_digest=hashlib.sha256(
-                        str(selected["body"]).encode("utf-8")
-                    ).hexdigest(),
+                    issue_body_digest=str(selected["body_digest"]),
                     duplicate_matches=len(equivalents),
                     reopen_action_receipt_digest=reopen_digest,
                     at=at,

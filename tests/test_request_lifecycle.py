@@ -446,6 +446,10 @@ def test_p100_local_r3_completion_requires_explicit_answer(root: Path) -> None:
             store.connection.execute(
                 f"UPDATE task_assignments SET {column}=? WHERE task_assignment_id='A301'", (original,)
             )
+    task_reads = []
+    store.connection.set_trace_callback(
+        lambda sql: task_reads.append(sql) if "FROM tasks" in sql else None
+    )
     local_result = store.record_request_result(
         RequestResultCommand(
             "R3",
@@ -462,6 +466,8 @@ def test_p100_local_r3_completion_requires_explicit_answer(root: Path) -> None:
             None,
         )
     )
+    store.connection.set_trace_callback(None)
+    assert len(task_reads) == 1, "Champion result redundantly reloads its validated cited tasks"
     assert local_result["state"] == "in_progress"
     # Accepted result evidence survives later cleanup/ownership changes; retry
     # and delivery must not demand that its historical runtime remain active.

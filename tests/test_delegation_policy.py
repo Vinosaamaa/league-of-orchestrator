@@ -109,11 +109,102 @@ def test_shared_policy_is_effect_scoped_and_does_not_gate_recovery(root: Path) -
     assert not repository_implementation({"tool_name": "write", "tool_input": {"path": str(outside)}})
 
 
+def test_unresolved_shell_mutation_targets_refuse_without_expansion(root: Path) -> None:
+    outside = root / "shell-outside"
+    outside.mkdir()
+    repo = root / "shell-repository"
+    repo.mkdir()
+    (repo / ".git").mkdir()
+    commands = (
+        'printf x > "$TARGET"',
+        'printf x >& "$TARGET"',
+        'printf x > "${TARGET}/file"',
+        'printf x > /"$TARGET"',
+        'printf x > "/""$TARGET"',
+        "printf x > $(touch must-not-execute)",
+        'printf x > "`touch must-not-execute`"',
+        'touch "$TARGET"',
+        'cp source "$TARGET"',
+        'cp -t "$TARGET" source',
+        'cp --target-directory="$TARGET" source',
+        'mv "$TARGET" destination',
+        'sed -i s/x/y/ "$TARGET"',
+        'cd "$DIRECTORY" && touch relative.txt',
+        'cd -- "$DIRECTORY" && touch relative.txt',
+        'cd && touch relative.txt',
+        'git -C "$DIRECTORY" apply change.patch',
+        'git -C / -C "$DIRECTORY" apply change.patch',
+        'MODE=synthetic touch "$TARGET"',
+    )
+    for provider in ("codex", "pi"):
+        for command in commands:
+            native = payload(provider, outside, "bash", {"command": command})
+            # Classify source text only; even command substitution must never run.
+            with patch("subprocess.run", side_effect=AssertionError("shell evaluation forbidden")):
+                decision = _pre_tool_output(f"{provider}-pre-tool-hook", native, exact_binding=True,
+                                           actor_role="shotcaller", delegated_by_shotcaller=False)
+            assert decision == {"decision": "refuse", "reason_code": "delegation_required"}, command
+    assert not (outside / "must-not-execute").exists()
+
+
+def test_literal_off_repository_writes_and_diagnostics_stay_available(root: Path) -> None:
+    outside = root / "literal-outside"
+    outside.mkdir()
+    commands = (
+        "printf x > '$TARGET'",
+        r'printf x > "\$TARGET"',
+        r'printf x > \$TARGET',
+        "printf x > 'prefix/'\"literal$\"",
+        f'printf "$MESSAGE" > "{outside}/note.txt"',
+        'printf "$MESSAGE" > /dev/null',
+        'cp "$SOURCE" literal-destination',
+        'cp -t literal-destination "$SOURCE"',
+        'cat "$SOURCE"',
+        'git -C "$DIRECTORY" status --short',
+        f'cd "$DIRECTORY" && printf x > "{outside}/note.txt"',
+        'git -C "$DIRECTORY" status; touch literal-destination',
+        'printf okay # > "$TARGET"',
+        'printf okay\nprintf x > literal-destination',
+        "printf x > '~literal-name'",
+    )
+    for command in commands:
+        assert not repository_implementation(payload("pi", outside, "bash", {"command": command})), command
+    (outside / ".git").mkdir()
+    for command in ('git status 2>&1', 'printf diagnostics >&2', 'printf diagnostics >&-'):
+        assert not repository_implementation(payload("pi", outside, "bash", {"command": command})), command
+    # Return to off-repository assertions with a different synthetic directory.
+    outside = root / "absolute-outside"
+    outside.mkdir()
+    assert not repository_implementation({"tool_name": "bash", "tool_input": {"command": "cat $SOURCE"}})
+    assert repository_implementation({"tool_name": "bash", "tool_input": {"command": "touch relative"}})
+    assert not repository_implementation({"tool_name": "bash", "tool_input": {
+        "command": f'printf x > "{outside}/absolute-without-cwd"',
+    }})
+
+
+def test_target_identity_is_rechecked_without_cross_request_caching(root: Path) -> None:
+    outside = root / "fresh-outside"
+    outside.mkdir()
+    repo = root / "fresh-repository"
+    repo.mkdir()
+    link = root / "changing-target"
+    link.symlink_to(outside, target_is_directory=True)
+    native = payload("codex", outside, "bash", {"command": f'printf x > "{link}/file"'})
+    assert not repository_implementation(native)
+    (repo / ".git").mkdir()
+    link.unlink()
+    link.symlink_to(repo, target_is_directory=True)
+    assert repository_implementation(native)
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="league-delegation-policy-") as temporary:
         root = Path(temporary)
         test_pr134_native_hook_refuses_before_file_or_publication_effect(root)
         test_shared_policy_is_effect_scoped_and_does_not_gate_recovery(root)
+        test_unresolved_shell_mutation_targets_refuse_without_expansion(root)
+        test_literal_off_repository_writes_and_diagnostics_stay_available(root)
+        test_target_identity_is_rechecked_without_cross_request_caching(root)
         test_read_only_pre_tool_fast_path_needs_no_state_or_supervisor(root)
     native = run_pi_scenario("delegation-required")
     assert native["tool"] == {"block": True, "reason": "delegation_required", "terminate": True}

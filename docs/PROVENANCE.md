@@ -658,11 +658,24 @@ sandbox remains authoritative. Read-only work, protected recovery, prompt intake
 Stop, detachment, and Champion implementation retain their existing paths;
 Pi `agent_settled` watcher parity remains owned by issue #84.
 
+PR #201 review exposed expansion-dependent shell targets being mistaken for
+literal off-repository paths. The shared classifier now preserves shell word
+quoting and refuses unresolved mutation targets or relative writes after an
+unresolved directory change. It never evaluates shell expansion or executes
+the command. Literal off-repository writes and read-only diagnostics remain
+available, including escaped/single-quoted dollar filenames; filesystem identity
+is checked afresh rather than cached across requests. This remains a bounded
+preflight for recognized write forms, not an arbitrary-program shell sandbox.
+
 Issue selection no longer aggregates every full issue and pull-request body
 inside one bounded runner response. It pages required issue metadata, discards
 pull requests before output, and fetches bodies only for normalized-title
 candidates. Semantic/exact-issue selection and the scope lease are unchanged;
 an incomplete or timed-out scan refuses before any issue creation.
+Matching candidates are streamed and reduced to metadata/body digests after
+semantic validation, so their full bodies do not accumulate across pages.
+Champion completion reuses its issue-validated task rows within the existing
+transaction while retaining the common settled/nonempty-result checks.
 
 The owner-found duplicate-issue regression deliberately extends v17 with
 a normalized repository/title/semantic-scope lease and immutable per-task issue

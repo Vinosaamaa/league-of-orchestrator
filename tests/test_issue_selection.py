@@ -7,6 +7,7 @@ import json
 import subprocess
 import tempfile
 import threading
+import tracemalloc
 from dataclasses import replace
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -591,6 +592,26 @@ def test_incomplete_paginated_search_never_creates(root: Path) -> None:
         store.close()
 
 
+def test_many_matching_candidates_do_not_retain_all_bodies(root: Path) -> None:
+    _, store, _ = create_context(root, "stream-matching-candidates")
+    body = BODY + "\n## Details\n" + "synthetic details " * 3500
+    runner = FakeGitHubRunner([_issue(number, state="open", body=body) for number in range(1, 121)])
+    tracemalloc.start()
+    try:
+        selected = GitHubIssueSelectionService(store, runner).select(
+            _spec("task:many-matches"), "attempt:many-matches", AT,
+            allow_create=False, expected_issue=120,
+        )
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert selected["issue"] == 120 and selected["duplicate_matches"] == 120
+    assert runner.created == 0
+    # Full bodies total over 7 MiB; retain only per-candidate metadata/digests.
+    assert peak < 4 * 1024 * 1024, peak
+    store.close()
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="league-issue-selection-") as temporary:
         root = Path(temporary)
@@ -603,6 +624,7 @@ def main() -> None:
         test_expected_issue_mismatch_refuses_before_create(root)
         test_oversized_repository_is_paged_before_runner_output_limit(root)
         test_incomplete_paginated_search_never_creates(root)
+        test_many_matching_candidates_do_not_retain_all_bodies(root)
     print("PASS: duplicate preflight reuses, reopens with linkage, creates only distinct scope, and serializes concurrency")
 
 

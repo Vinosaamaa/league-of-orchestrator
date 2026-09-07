@@ -1,5 +1,13 @@
 # Source provenance
 
+## Issue #66 live cleanup acceptance proof (parent #23)
+
+The disposable Codex canary now uses Astra high, leaves native directory trust
+unchanged, and accepts only a nonce-bound response absent from the submitted
+prompt. A stalled submission is never sent twice. Synthetic focused checks
+reject prompt echo and cover successful and stalled-then-observed replies;
+these checks do not constitute real runtime acceptance.
+
 ## Issue #66 shipping repair
 
 Identity repair now requires OS-verified native Codex executable evidence even

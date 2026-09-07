@@ -419,9 +419,6 @@ def _create_herdr_canary(home: Path, worktree: Path, namespace: str) -> dict[str
     repository = worktree.parent / "repository"
     if not repository.is_dir() or repository.is_symlink():
         raise StorageRefusal("real_canary_scope_refused", "disposable repository identity changed")
-    trust_override = (
-        f"projects.{json.dumps(str(repository))}.trust_level=\"trusted\""
-    )
     if _exact_agent(home, name) is not None:
         raise StorageRefusal("real_canary_name_conflict", "Herdr canary name is already active")
     split = _herdr(
@@ -465,11 +462,9 @@ def _create_herdr_canary(home: Path, worktree: Path, namespace: str) -> dict[str
             "120000",
             "--",
             "--model",
-            "gpt-5.6-sol",
+            "gpt-6-astra",
             "--config",
             'model_reasoning_effort="high"',
-            "--config",
-            trust_override,
         ),
         home,
         timeout=150,
@@ -486,38 +481,37 @@ def _create_herdr_canary(home: Path, worktree: Path, namespace: str) -> dict[str
         "--format",
         "text",
     )
+    challenge = hashlib.sha256(os.urandom(32)).hexdigest()[:24]
+    readiness_token = f"LEAGUE23_CANARY_READY_{challenge}"
     prompt_arguments = (
         "herdr",
         "agent",
         "prompt",
         name,
-        "Reply exactly LEAGUE23_CANARY_READY. Do not edit files or run commands.",
+        'Reply only with the concatenation of "LEAGUE23_", "CANARY_READY_", '
+        f'and "{challenge}" (no spaces). Do not edit files or run commands.',
         "--wait",
         "--timeout",
         str(READINESS_WAIT_MILLISECONDS),
     )
+    prompted = _run(
+        prompt_arguments, cwd=home, allowed=frozenset({0, 1}), timeout=45
+    )
+    prompt_receipt = _json_result(prompted, "Herdr prompt")
+    error_code = prompt_receipt.get("error", {}).get("code")
+    if prompted.returncode != 0 and error_code not in {
+        "agent_prompt_stalled", "timeout",
+    }:
+        raise StorageRefusal(
+            "real_canary_command_failed", "Herdr readiness prompt was not accepted"
+        )
     observed: subprocess.CompletedProcess[str] | None = None
     for attempt in range(READINESS_MAX_OBSERVATIONS):
-        prompted = _run(
-            prompt_arguments,
-            cwd=home,
-            allowed=frozenset({0, 1}),
-            timeout=45,
-        )
-        prompt_receipt = _json_result(prompted, "Herdr prompt")
-        error_code = prompt_receipt.get("error", {}).get("code")
-        if prompted.returncode != 0 and error_code not in {
-            "agent_prompt_stalled",
-            "timeout",
-        }:
-            raise StorageRefusal(
-                "real_canary_command_failed", "Herdr readiness prompt was not accepted"
-            )
-        if prompted.returncode == 0:
+        if attempt:
             _run(
                 (
                     "herdr", "pane", "wait-output", pane_id,
-                    "--match", "LEAGUE23_CANARY_READY",
+                    "--match", readiness_token,
                     "--source", "recent-unwrapped", "--lines", "160",
                     "--timeout", "15000",
                 ),
@@ -526,12 +520,8 @@ def _create_herdr_canary(home: Path, worktree: Path, namespace: str) -> dict[str
                 timeout=20,
             )
         observed = _run(read_arguments, cwd=home)
-        if "LEAGUE23_CANARY_READY" in observed.stdout:
+        if readiness_token in observed.stdout:
             break
-        if attempt == 0 and error_code == "agent_prompt_stalled":
-            time.sleep(1)
-            continue
-        break
     if observed is None:
         raise StorageRefusal("real_canary_readiness_unproven", "Codex readiness was not observed")
     clean = _run(
@@ -544,8 +534,8 @@ def _create_herdr_canary(home: Path, worktree: Path, namespace: str) -> dict[str
         ("git", "-C", str(worktree), "branch", "--show-current"), cwd=home
     ).stdout.strip()
     readiness = {
-        "token_observed": "LEAGUE23_CANARY_READY" in observed.stdout,
-        "route_observed": "gpt-5.6-sol high" in observed.stdout,
+        "token_observed": readiness_token in observed.stdout,
+        "route_observed": "gpt-6-astra high" in observed.stdout,
         "worktree_clean": clean,
         "head_exact": head == REPORT_TESTED_HEAD,
         "branch_exact": branch == REPORT_BRANCH,

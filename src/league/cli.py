@@ -498,6 +498,13 @@ def _add_rollover_commands(groups: argparse._SubParsersAction) -> None:
 def _add_delivery_commands(groups: argparse._SubParsersAction) -> None:
     delivery = groups.add_parser("delivery", help="Claim, acknowledge, or fail exact event delivery.")
     commands = delivery.add_subparsers(dest="action", required=True)
+    for name in ("inspect-outbox", "reconcile-received"):
+        command = commands.add_parser(name, help="Inspect or explicitly acknowledge one uncertain delivery read by its recipient.")
+        for field in ("outbox-id", "event-id", "recipient-agent-id"):
+            command.add_argument(f"--{field}", required=True)
+        if name == "reconcile-received":
+            for field in ("runtime-instance-id", "expected-envelope-sha256", "receipt-reference", "at"):
+                command.add_argument(f"--{field}", required=True)
     claim = commands.add_parser("claim", help="Claim a delivery with an explicit bounded lease.")
     claim.add_argument("--event-id", required=True)
     claim.add_argument("--recipient-agent-id", required=True)
@@ -2041,6 +2048,19 @@ def _delivery_claim(store: Storage, args: argparse.Namespace) -> CommandResult:
 def _delivery_ack(store: Storage, args: argparse.Namespace) -> CommandResult:
     return store.acknowledge_delivery(
         args.event_id, args.recipient_agent_id, args.claim_token, args.at
+    ), None
+
+
+def _delivery_inspect_outbox(store: Storage, args: argparse.Namespace) -> CommandResult:
+    from .sqlite_outbox_ops import inspect_outbox
+    return inspect_outbox(store, args.outbox_id, args.event_id, args.recipient_agent_id), None
+
+
+def _delivery_reconcile_received(store: Storage, args: argparse.Namespace) -> CommandResult:
+    from .sqlite_outbox_ops import reconcile_received_outbox
+    return reconcile_received_outbox(
+        store, args.outbox_id, args.event_id, args.recipient_agent_id,
+        args.runtime_instance_id, args.expected_envelope_sha256, args.receipt_reference, args.at,
     ), None
 
 
@@ -4038,6 +4058,8 @@ HANDLERS: dict[str, CommandHandler] = {
     "delivery.fail": _delivery_fail,
     "delivery.claim-outbox": _delivery_claim_outbox,
     "delivery.ack-outbox": _delivery_ack_outbox,
+    "delivery.inspect-outbox": _delivery_inspect_outbox,
+    "delivery.reconcile-received": _delivery_reconcile_received,
     "delivery.fail-outbox": _delivery_fail_outbox,
     "delivery.backlog": _delivery_backlog,
     "delivery.dispatch": _delivery_dispatch,

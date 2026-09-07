@@ -2245,3 +2245,17 @@ now persists the validated session selector in launchd, without copying pane IDs
 or a transient socket override. Default-session installs remain unchanged.
 Delivery requires a valid Herdr success envelope, because a native JSON error
 can accompany a zero exit status; such an error must never become a receipt.
+
+The synthetic shell delivery fixture now returns the native success envelope.
+Final baseline and request/runtime verification caught that stale fixture after
+the production transport began requiring an explicit response.
+
+An ambiguous delivery intentionally drops its dispatch lease, but ordinary
+acknowledgement requires that lease. The new `delivery inspect-outbox` and
+`delivery reconcile-received` path lets the exact active Shotcaller explicitly
+read and acknowledge one uncertain event without resending it. It binds the
+envelope hash, recipient runtime, and receipt reference in a durable audit event,
+preserves the original uncertain attempt, refuses active dispatches and control
+events, and satisfies only that recipient's delivery obligation. It never
+claims native delivery success or completes a task/request. Exact retries do
+not write; changed owner, content, or receipt fails closed.

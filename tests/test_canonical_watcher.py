@@ -441,7 +441,8 @@ def _fake_herdr(root: Path, env: dict[str, str]) -> Path:
     prompt_log = root / "prompts.log"
     fake = fake_bin / "herdr"
     fake.write_text(
-        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$PROMPT_LOG\"\n",
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$PROMPT_LOG\"\n"
+        "printf '%s\\n' '{\"result\":{\"submitted\":true}}'\n",
         encoding="utf-8",
     )
     fake.chmod(0o755)

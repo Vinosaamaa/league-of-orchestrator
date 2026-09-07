@@ -1387,6 +1387,14 @@ def _add_assignment_commands(groups: argparse._SubParsersAction) -> None:
     block.add_argument("--failure-class", required=True)
     block.add_argument("--cleanup-required", action="store_true")
     block.add_argument("--cleanup-proven", action="store_true")
+    settle = commands.add_parser(
+        "settle-launch-cleanup",
+        help="Settle only an exact failed launch with closed runtime and released callsign receipts.",
+    )
+    settle.add_argument("--assignment-id", required=True)
+    settle.add_argument("--expected-version", type=int, required=True)
+    settle.add_argument("--cleanup-receipt-digest", required=True)
+    settle.add_argument("--at", required=True)
     finish_hidden = commands.add_parser(
         "finish-hidden",
         help="Deliver one cleanup-gated hidden scientist terminal result; no routine progress is allowed.",
@@ -3660,6 +3668,12 @@ def _assign_activate(store: Storage, args: argparse.Namespace) -> CommandResult:
     ), None
 
 
+def _assign_settle_launch_cleanup(store: Storage, args: argparse.Namespace) -> CommandResult:
+    return store.settle_assignment_launch_cleanup(
+        args.assignment_id, args.expected_version, args.cleanup_receipt_digest, args.at,
+    ), None
+
+
 def _assign_finish_hidden(store: Storage, args: argparse.Namespace) -> CommandResult:
     return store.finish_hidden_assignment(
         FinishHiddenAssignmentCommand(
@@ -4088,6 +4102,7 @@ HANDLERS: dict[str, CommandHandler] = {
     "assign.replace-runtime": _assign_replace_runtime,
     "assign.launching": _assign_launching,
     "assign.activate": _assign_activate,
+    "assign.settle-launch-cleanup": _assign_settle_launch_cleanup,
     "assign.reconcile-runtime": _assign_reconcile_runtime,
     "assign.reconcile-legacy-display": _assign_reconcile_legacy_display,
     "assign.block": _assign_block,

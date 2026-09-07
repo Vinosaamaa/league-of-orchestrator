@@ -33,6 +33,7 @@ from league.multiplexer_adapters import builtin_multiplexer_adapter_registry  # 
 from league.request_services import AssignmentSpec  # noqa: E402
 from request_lifecycle_fixture import LUX_ID, create_context  # noqa: E402
 from storage_fixture import REPOSITORY, SHOTCALLER_ID  # noqa: E402
+from storage_test_support import invoke_cli  # noqa: E402
 from test_visible_champion_launch import (  # noqa: E402
     FakeIssueVerifier,
     _context,
@@ -1290,8 +1291,12 @@ def test_failed_context_settles_exact_provider_descriptor(root: Path) -> None:
             (row["pane_id"], row["descriptor_id"]),
         )
         store.connection.commit()
-        repaired = store.settle_assignment_launch_cleanup(
-            spec.assignment_id, result["version"], result["cleanup_receipt"], clock.now())
+        repaired = invoke_cli(
+            root / "pi-context-cleanup" / "state", "assign", "settle-launch-cleanup",
+            "--assignment-id", spec.assignment_id,
+            "--expected-version", str(result["version"]),
+            "--cleanup-receipt-digest", result["cleanup_receipt"], "--at", clock.now(),
+        )["result"]
         assert not repaired["idempotent"]
         before = list(store.connection.iterdump())
         retry = store.settle_assignment_launch_cleanup(

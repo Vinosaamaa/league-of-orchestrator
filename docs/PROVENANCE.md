@@ -218,6 +218,14 @@ root as an additional workspace-write root, and records bounded context or
 exact failure-cleanup receipts. Those League-specific rules now live only in
 the orchestration supplement and no longer claim universal-guide ownership.
 
+The issue-#81 limited-batch regression permits a fresh `request turn` after
+the prior turn committed when already-captured, untriaged prompts remain for
+that same owner and generation. The check and token replacement share one
+SQLite write transaction. An uncommitted turn, exhausted same-generation
+backlog, or stale generation still refuses; owner-active supervision and exact
+prompt accounting are unchanged. No fabricated intake or generation bump is
+needed to drain consecutive bounded batches.
+
 The issue-#23 rollover-successor correction deliberately separates immutable
 prompt capture provenance from mutable current triage ownership, moves each
 frozen Champion's agent/task/assignment/callsign/pending-delivery ownership in

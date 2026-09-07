@@ -33,6 +33,10 @@ teardown; issue #23 owns those gates.
   database effect exactly once.
 - Request claims, outbox dispatch leases, and watcher registration leases have
   independent holders, fences, expiry, and recovery.
+- A committed bounded `request turn` may continue at the same prompt generation
+  only while that owner's captured untriaged backlog remains. Token replacement
+  is atomic; uncommitted turns still exclude competitors. This uses the normal
+  one-process-per-batch path without new intake or changing prompt generation.
 - Inspection and rollback exports cap prompt payload bodies at 16 MiB in
   addition to the record-count bound, refusing before payload rows are
   materialized when either budget is exceeded.

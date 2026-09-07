@@ -937,13 +937,25 @@ def prepare_rollover(
                 "SELECT * FROM callsign_assignments WHERE callsign_assignment_id=?",
                 (callsign_assignment_id,),
             ).fetchone()
+            bootstrap_scope = bool(
+                assignment is not None
+                and assignment["scope_kind"] == "shotcaller"
+                and assignment["scope_id"] == successor_agent_id
+                and assignment["state"] == "active"
+                and assignment["runtime_instance_id"]
+                and assignment["acceptance_digest"]
+            )
+            legacy_squad_scope = bool(
+                assignment is not None
+                and assignment["scope_kind"] == "squad"
+                and assignment["scope_id"] == squad_id
+                and assignment["state"] in {"reserved", "active"}
+            )
             if (
                 assignment is None
                 or assignment["agent_id"] != successor_agent_id
                 or assignment["role"] != "shotcaller"
-                or assignment["scope_kind"] != "squad"
-                or assignment["scope_id"] != squad_id
-                or assignment["state"] not in {"reserved", "active"}
+                or not (bootstrap_scope or legacy_squad_scope)
             ):
                 raise StorageRefusal(
                     "successor_identity_mismatch", "successor callsign reservation is not exact"

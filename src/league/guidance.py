@@ -12,10 +12,11 @@ import re
 from pathlib import Path
 from typing import Any, Sequence
 
+from .agent_adapters import builtin_agent_adapter_kinds
 from .storage_types import StorageRefusal
 
 
-SUPPORTED_HARNESSES = frozenset({"codex", "cursor", "pi"})
+SUPPORTED_HARNESSES = frozenset(builtin_agent_adapter_kinds())
 UNIVERSAL_TARGET = "AGENTS.md"
 LEAGUE_TARGET = "league/AGENTS.md"
 TARGET_NAME = Path(LEAGUE_TARGET).name

@@ -9,6 +9,7 @@ import os
 import sqlite3
 import sys
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, BinaryIO, Callable, Optional
@@ -21,12 +22,19 @@ from .cleanup import CleanupExecutor, CleanupFaultEvent, CleanupPlanner
 from .continuation import (
     ContinuationIssueReopener,
     GitHubIssueAdapter,
-    continuation_resume_thread,
     verified_binding,
 )
+from .agent_adapters import builtin_agent_adapter_registry
+from .multiplexer_adapters import builtin_multiplexer_adapter_registry
 from .importer import build_import_plan
 from .orchestration import OrchestrationSignals
-from .routing import ModelRouter, load_routing_config
+from .routing import (
+    ModelRouter,
+    install_migrated_routing_config,
+    load_routing_config,
+    migrate_routing_config,
+    rollback_routing_config,
+)
 from .reporting import REPORT_FORMATS, render_report
 from .skill_contracts import (
     audit_installations,
@@ -48,6 +56,7 @@ from .storage_request import (
     MAX_TRIAGE_TURN_BYTES,
     MAX_TRIAGE_TURN_PROMPTS,
     AnswerRequestCommand,
+    OwnerStopControl,
     ReconcileDuplicateRequestCommand,
     RequestProgressCommand,
     RequestResultCommand,
@@ -57,22 +66,15 @@ from .storage_assignment import FinishHiddenAssignmentCommand
 from .storage_mode import PROTECTED_GATE_ACTIONS
 from .protected_gate import ProtectedGateExecutor
 from .request_services import AssignmentSpec
+from .runtime_replacement import RuntimeReplacementService, RuntimeReplacementSpec
 from .shotcaller_bootstrap import (
-    HerdrShotcallerBootstrapAdapter,
     ShotcallerBootstrapOptions,
     ShotcallerBootstrapService,
     ShotcallerBootstrapSpec,
 )
-from .rollover_descendant import (
-    HerdrDescendantRuntimeAdapter,
-    RolloverDescendantService,
-)
-from .rollover_snapshot import (
-    HerdrRolloverSnapshotAdapter,
-    RolloverSnapshotRefreshService,
-)
+from .rollover_descendant import RolloverDescendantService
+from .rollover_snapshot import RolloverSnapshotRefreshService
 from .visible_launch import (
-    HerdrCodexLaunchAdapter,
     SubprocessRunner,
     VisibleChampionLaunchService,
     VisibleLaunchOptions,
@@ -80,12 +82,9 @@ from .visible_launch import (
     derived_champion_agent_id,
     derive_task_label,
 )
-from .pi_launch import (
-    HerdrPiLaunchAdapter,
-    deterministic_pi_session_id,
-    resume_pi_after_restart,
-)
-from .pi_session_migration import migrate_pi_session
+from .display_replay import replay_restored_display
+from .restored_agent import reconcile_restored_agents, utc_now
+from .provider_hooks import rollback_provider_hooks, upgrade_provider_hooks
 from .legacy_display_reconciliation import (
     HerdrLegacyDisplayAdapter,
     LegacyDisplayReconciliationService,
@@ -135,6 +134,21 @@ class _BoundedSentinelPath(argparse.Action):
             )
         paths.append(value)
         setattr(namespace, self.dest, paths)
+
+
+class _ExplicitChoice(argparse.Action):
+    """Keep the public default while recording whether the owner supplied it."""
+
+    def __call__(
+        self,
+        parser: argparse.ArgumentParser,
+        namespace: argparse.Namespace,
+        value: str,
+        option_string: Optional[str] = None,
+    ) -> None:
+        del parser, option_string
+        setattr(namespace, self.dest, value)
+        setattr(namespace, f"{self.dest}_explicit", True)
 
 
 def _turn_prompt_limit(value: str) -> int:
@@ -308,12 +322,15 @@ def _add_mode_gate_options(parser: argparse.ArgumentParser) -> None:
 
 def _add_shotcaller_commands(groups: argparse._SubParsersAction) -> None:
     shotcaller = groups.add_parser(
-        "shotcaller", help="Create one canonical Shotcaller in the exact calling Codex pane."
+        "shotcaller", help="Create one canonical Shotcaller in the exact calling agent pane."
     )
     commands = shotcaller.add_subparsers(dest="action", required=True)
     create = commands.add_parser(
         "create",
-        help="Allocate and bind the calling unnamed Codex thread without creating Herdr layout.",
+        help=(
+            "Allocate and bind the exact calling agent session without creating Herdr layout; "
+            "an existing route must match the next eligible callsign."
+        ),
     )
     for name in (
         "callsign-assignment-id",
@@ -324,6 +341,9 @@ def _add_shotcaller_commands(groups: argparse._SubParsersAction) -> None:
     ):
         create.add_argument(f"--{name}", required=True)
     create.add_argument("--capability", action="append", default=[])
+    create.add_argument("--runtime-kind", default="codex")
+    create.add_argument("--provider-kind", default=None)
+    create.add_argument("--multiplexer-kind", default="herdr")
     _add_mode_gate_options(create)
 
 
@@ -379,6 +399,7 @@ def _add_rollover_commands(groups: argparse._SubParsersAction) -> None:
     refresh_bindings.add_argument(
         "--expected-snapshot-version", type=int, required=True
     )
+    refresh_bindings.add_argument("--multiplexer-kind", default="herdr")
     _add_mode_gate_options(refresh_bindings)
     acknowledge = commands.add_parser(
         "acknowledge", help="Acknowledge exact successor identity, capability, and snapshot coverage."
@@ -427,6 +448,7 @@ def _add_rollover_commands(groups: argparse._SubParsersAction) -> None:
         default=[],
         help="Declare one exact pending descendant outbox still targeting the predecessor.",
     )
+    reconcile_descendant.add_argument("--multiplexer-kind", default="herdr")
     _add_mode_gate_options(reconcile_descendant)
     reconcile_intake = commands.add_parser(
         "reconcile-intake",
@@ -723,13 +745,62 @@ def _add_runtime_commands(groups: argparse._SubParsersAction) -> None:
     )
     for name in ("descriptor-id", "restart-id", "pane-id", "at"):
         resume_launch.add_argument(f"--{name}", required=True)
+    resume_launch.add_argument("--multiplexer-kind", default="herdr")
     resume_launch.add_argument("--startup-timeout-ms", type=int, default=120_000)
     migrate_pi = commands.add_parser(
         "migrate-pi-session",
         help="Copy one stopped legacy Pi JSONL into the unified inventory and bind its exact resume descriptor.",
     )
     migrate_pi.add_argument("--manifest", type=Path, required=True)
+    migrate_pi.add_argument("--multiplexer-kind", default="herdr")
     migrate_pi.add_argument("--at", required=True)
+    replay = commands.add_parser(
+        "replay-restored-display",
+        help=(
+            "Reconcile canonical League presentation onto exact already-restored "
+            "agent sessions without launching or resuming a process."
+        ),
+    )
+    replay.add_argument("--multiplexer-kind", default="herdr")
+    replay.add_argument("--timeout-ms", type=int, default=30_000)
+    replay.add_argument("--poll-ms", type=int, default=100)
+    reconcile_restored = commands.add_parser(
+        "reconcile-restored-agent",
+        help=(
+            "Reconcile exact restored sessions, routing, runtime generations, "
+            "Shotcaller watchers, and presentation without process effects."
+        ),
+    )
+    reconcile_restored.add_argument("--multiplexer-kind", required=True)
+    reconcile_restored.add_argument("--timeout-ms", type=int, default=30_000)
+    reconcile_restored.add_argument("--poll-ms", type=int, default=100)
+    retire_stopped = commands.add_parser(
+        "retire-stopped-agent",
+        help=(
+            "Prove one exact Champion endpoint is already absent, then atomically "
+            "close its stale runtime, terminalize it, and release its callsign."
+        ),
+    )
+    for name in (
+        "operation-id",
+        "agent-id",
+        "runtime-instance-id",
+        "session-ref",
+        "endpoint",
+        "runtime-generation",
+        "provider-kind",
+        "multiplexer-kind",
+        "callsign-assignment-id",
+        "at",
+    ):
+        retire_stopped.add_argument(f"--{name}", required=True)
+    retire_stopped.add_argument("--expected-agent-version", type=int, required=True)
+    retire_stopped.add_argument("--expected-callsign-version", type=int, required=True)
+    retire_stopped.add_argument(
+        "--terminal-status",
+        choices=("completed", "cancelled", "failed"),
+        required=True,
+    )
 
 
 def _add_skill_commands(groups: argparse._SubParsersAction) -> None:
@@ -799,6 +870,25 @@ def _add_routing_commands(groups: argparse._SubParsersAction) -> None:
     outcome.add_argument("--latency-ms", type=int, required=True)
     outcome.add_argument("--cost-microunits", type=int)
     outcome.add_argument("--at", required=True)
+    migrate = commands.add_parser(
+        "migrate-config",
+        help="Render a retained schema-1/2 routing policy as validated schema 3.",
+    )
+    migrate.add_argument("--config", type=Path, required=True)
+    migrate.add_argument("--destination", type=Path)
+    migrate.add_argument("--backup", type=Path)
+    rollback = commands.add_parser(
+        "rollback-config",
+        help="Restore one exact backed-up routing policy after a verified migration.",
+    )
+    rollback.add_argument("--destination", type=Path, required=True)
+    rollback.add_argument("--backup", type=Path, required=True)
+    rollback.add_argument("--expected-installed-sha256", required=True)
+    rollback.add_argument("--expected-backup-sha256", required=True)
+    validate = commands.add_parser(
+        "validate-config", help="Validate one exact schema-3 routing policy."
+    )
+    validate.add_argument("--config", type=Path, required=True)
 
 
 def _add_resource_commands(groups: argparse._SubParsersAction) -> None:
@@ -1151,7 +1241,7 @@ def _add_assignment_commands(groups: argparse._SubParsersAction) -> None:
     prepare.add_argument("--requires", action="append", default=[])
     launch = commands.add_parser(
         "run",
-        help="Reserve, start, verify, activate, and brief one visible Herdr/Codex Champion.",
+        help="Reserve, start, verify, activate, and brief one visible Champion through registered agent and multiplexer adapters.",
     )
     for name in (
         "request-id",
@@ -1162,13 +1252,16 @@ def _add_assignment_commands(groups: argparse._SubParsersAction) -> None:
         "repository",
         "branch",
         "worktree",
-        "model",
-        "effort",
     ):
         launch.add_argument(f"--{name}", required=True)
+    launch.add_argument("--model")
+    launch.add_argument("--effort")
+    launch.add_argument("--routing-decision-id")
     launch.add_argument("--task-label")
-    launch.add_argument("--runtime-kind", choices=("codex", "pi"), default="codex")
-    launch.add_argument("--provider-kind", choices=("cursor", "codex"), default="codex")
+    launch.set_defaults(runtime_kind_explicit=False, provider_kind_explicit=False)
+    launch.add_argument("--runtime-kind", default="pi", action=_ExplicitChoice)
+    launch.add_argument("--provider-kind", default="codex", action=_ExplicitChoice)
+    launch.add_argument("--multiplexer-kind", default="herdr")
     launch.add_argument("--project-code")
     launch.add_argument("--release-root")
     launch.add_argument("--session-mode", choices=("create", "fork", "resume"), default="create")
@@ -1184,6 +1277,43 @@ def _add_assignment_commands(groups: argparse._SubParsersAction) -> None:
     launch.add_argument("--requires", action="append", default=[])
     launch.add_argument("--startup-timeout-ms", type=int, default=120_000)
     launch.add_argument("--issue-selection-receipt-digest", required=True)
+    replacement = commands.add_parser(
+        "replace-runtime",
+        help=(
+            "Atomically replace one exact active Champion runtime through registered "
+            "predecessor, successor, and multiplexer adapters."
+        ),
+    )
+    for name in (
+        "operation-id",
+        "assignment-id",
+        "predecessor-agent-id",
+        "predecessor-runtime-instance-id",
+        "successor-agent-id",
+        "successor-runtime-instance-id",
+        "successor-runtime-kind",
+        "successor-provider-kind",
+        "staging-routing-name",
+        "at",
+    ):
+        replacement.add_argument(f"--{name}", required=True)
+    replacement.add_argument("--expected-assignment-version", type=int, required=True)
+    replacement.add_argument("--expected-agent-version", type=int, required=True)
+    replacement.add_argument("--expected-task-version", type=int, required=True)
+    replacement.add_argument("--multiplexer-kind", default="herdr")
+    replacement.add_argument("--routing-decision-id")
+    replacement.add_argument("--model")
+    replacement.add_argument("--effort")
+    replacement.add_argument("--project-code")
+    replacement.add_argument("--release-root")
+    replacement.add_argument("--session-mode", choices=("create", "fork", "resume"), default="create")
+    replacement.add_argument("--session-id")
+    replacement.add_argument("--session-path")
+    replacement.add_argument("--parent-session-id")
+    replacement.add_argument("--parent-session-path")
+    replacement.add_argument("--workspace-id")
+    replacement.add_argument("--league-command")
+    replacement.add_argument("--startup-timeout-ms", type=int, default=120_000)
     launching = commands.add_parser("launching", help="Commit launch intent before adapter work.")
     launching.add_argument("--assignment-id", required=True)
     launching.add_argument("--expected-version", type=int, required=True)
@@ -1224,6 +1354,9 @@ def _add_assignment_commands(groups: argparse._SubParsersAction) -> None:
         reconcile_display.add_argument(f"--{name}", required=True)
     reconcile_display.add_argument("--expected-version", type=int, required=True)
     reconcile_display.add_argument("--expected-presentation-json", required=True)
+    reconcile_display.add_argument("--previous-worktree")
+    reconcile_display.add_argument("--previous-branch")
+    reconcile_display.add_argument("--branch")
     reconcile_display.add_argument("--owner-authorized", action="store_true")
     _add_mode_gate_options(reconcile_display)
     block = commands.add_parser("block", help="Record a blocked or cleanup-pending failed launch.")
@@ -1300,7 +1433,10 @@ def _add_hook_commands(groups: argparse._SubParsersAction) -> None:
     rearm = commands.add_parser("rearm", help="Bind the next possible block to a fresh event wait generation.")
     for name in ("scope-id", "actor-agent-id", "event-id", "at"):
         rearm.add_argument(f"--{name}", required=True)
-    allow = commands.add_parser("allow-stop-once", help="Permit one explicit final Stop decision.")
+    allow = commands.add_parser(
+        "allow-stop-once",
+        help="Retired compatibility command; refuses in favor of semantic owner control.",
+    )
     allow.add_argument("--scope-id", required=True)
     allow.add_argument("--actor-agent-id", required=True)
     stop = commands.add_parser("stop", help="Combine request, assignment, delivery, and cleanup obligations once.")
@@ -1314,6 +1450,13 @@ def _add_hook_commands(groups: argparse._SubParsersAction) -> None:
         policy.add_argument(f"--{name}", required=True)
     policy.add_argument("--mode", choices=("all_material", "calm"), required=True)
     policy.add_argument("--unreachable-grace-seconds", type=int, default=60)
+    attachment = commands.add_parser(
+        "set-attachment",
+        help="Attach Stop to the model or detach only to one verified live watcher.",
+    )
+    for name in ("scope-id", "actor-agent-id", "at"):
+        attachment.add_argument(f"--{name}", required=True)
+    attachment.add_argument("--mode", choices=("attached", "detached"), required=True)
     reconcile_silent = commands.add_parser(
         "reconcile-silent",
         help="Return and acknowledge one bounded page of Calm-suppressed transitions.",
@@ -1419,6 +1562,23 @@ def _add_help_commands(groups: argparse._SubParsersAction) -> None:
     commands.add_parser("inventory", help="Emit the versioned command inventory.")
 
 
+def _add_provider_hook_commands(groups: argparse._SubParsersAction) -> None:
+    provider_hooks = groups.add_parser(
+        "provider-hooks",
+        help="Upgrade or roll back every registry-declared provider hook bootstrap.",
+    )
+    commands = provider_hooks.add_subparsers(dest="action", required=True)
+    for action, help_text in (
+        ("upgrade", "Back up and atomically upgrade all registered provider hooks."),
+        ("rollback", "Restore every provider hook from one exact upgrade manifest."),
+    ):
+        command = commands.add_parser(action, help=help_text)
+        command.add_argument("--source-root", type=Path, required=True)
+        command.add_argument("--profile-root", type=Path, required=True)
+        command.add_argument("--stable-watcher", type=Path, required=True)
+        command.add_argument("--manifest", type=Path, required=True)
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="league",
@@ -1473,6 +1633,7 @@ def _parser() -> argparse.ArgumentParser:
         _add_hook_commands,
         _add_mode_commands,
         _add_issue_commands,
+        _add_provider_hook_commands,
         _add_help_commands,
         _add_acceptance_commands,
     ):
@@ -1561,9 +1722,9 @@ def _agent_transition(store: Storage, args: argparse.Namespace) -> CommandResult
         args.agent_id, args.expected_version, args.status, args.update, args.at
     )
     if transition.get("outbox_id"):
-        from .canonical_delivery import dispatch_event
+        from .persistent_supervisor import handoff_transition_delivery
 
-        transition["delivery"] = dispatch_event(
+        transition["delivery"] = handoff_transition_delivery(
             store,
             outbox_id=transition["outbox_id"],
             event_id=transition["event_id"],
@@ -1631,6 +1792,15 @@ def _callsign_status(store: Storage, args: argparse.Namespace) -> CommandResult:
 
 
 def _shotcaller_create(store: Storage, args: argparse.Namespace) -> CommandResult:
+    multiplexer = builtin_multiplexer_adapter_registry().adapter(
+        args.multiplexer_kind
+    )
+    if "shotcaller_bootstrap" not in multiplexer.capabilities or "calling_context" not in multiplexer.capabilities:
+        raise StorageRefusal(
+            "multiplexer_shotcaller_unsupported",
+            "selected multiplexer has no Shotcaller bootstrap and calling-context driver",
+        )
+    context = multiplexer.calling_context()
     spec = ShotcallerBootstrapSpec(
         assignment_id=args.callsign_assignment_id,
         agent_id=args.agent_id,
@@ -1639,17 +1809,19 @@ def _shotcaller_create(store: Storage, args: argparse.Namespace) -> CommandResul
         capabilities=tuple(args.capability),
     )
     options = ShotcallerBootstrapOptions(
-        workspace_id=os.environ.get("HERDR_WORKSPACE_ID", ""),
-        tab_id=os.environ.get("HERDR_TAB_ID", ""),
-        pane_id=os.environ.get("HERDR_PANE_ID", ""),
+        workspace_id=context["workspace_id"],
+        tab_id=context["tab_id"],
+        pane_id=context["pane_id"],
         worktree=str(Path.cwd().resolve()),
+        runtime_kind=args.runtime_kind,
+        provider_kind=args.provider_kind or args.runtime_kind,
     )
     class FixedClock:
         def now(self) -> str:
             return args.at
 
     return ShotcallerBootstrapService(
-        store, HerdrShotcallerBootstrapAdapter(options), FixedClock()
+        store, multiplexer.shotcaller_bootstrap_driver(options), FixedClock()
     ).bootstrap(spec), None
 
 
@@ -1684,8 +1856,16 @@ def _rollover_bindings(store: Storage, args: argparse.Namespace) -> CommandResul
 def _rollover_refresh_bindings(
     store: Storage, args: argparse.Namespace
 ) -> CommandResult:
+    multiplexer = builtin_multiplexer_adapter_registry().adapter(
+        args.multiplexer_kind
+    )
+    if "rollover_reconciliation" not in multiplexer.capabilities:
+        raise StorageRefusal(
+            "multiplexer_rollover_unsupported",
+            "selected multiplexer has no rollover reconciliation driver",
+        )
     return RolloverSnapshotRefreshService(
-        store, HerdrRolloverSnapshotAdapter()
+        store, multiplexer.rollover_snapshot_driver()
     ).refresh(
         operation_id=args.operation_id,
         refresh_id=args.refresh_id,
@@ -1731,8 +1911,16 @@ def _rollover_commit(store: Storage, args: argparse.Namespace) -> CommandResult:
 def _rollover_reconcile_descendant(
     store: Storage, args: argparse.Namespace
 ) -> CommandResult:
+    multiplexer = builtin_multiplexer_adapter_registry().adapter(
+        args.multiplexer_kind
+    )
+    if "rollover_reconciliation" not in multiplexer.capabilities:
+        raise StorageRefusal(
+            "multiplexer_rollover_unsupported",
+            "selected multiplexer has no rollover reconciliation driver",
+        )
     return RolloverDescendantService(
-        store, HerdrDescendantRuntimeAdapter()
+        store, multiplexer.rollover_descendant_driver()
     ).reconcile(
         operation_id=args.operation_id,
         reconciliation_id=args.reconciliation_id,
@@ -1993,9 +2181,9 @@ def _task_transition(store: Storage, args: argparse.Namespace) -> CommandResult:
         args.attention_required,
     )
     if transition.get("outbox_id"):
-        from .canonical_delivery import dispatch_event
+        from .persistent_supervisor import handoff_transition_delivery
 
-        transition["delivery"] = dispatch_event(
+        transition["delivery"] = handoff_transition_delivery(
             store,
             outbox_id=transition["outbox_id"],
             event_id=transition["event_id"],
@@ -2042,23 +2230,84 @@ def _runtime_matrix(_: Storage, __: argparse.Namespace) -> CommandResult:
 
 
 def _runtime_resume_launch(store: Storage, args: argparse.Namespace) -> CommandResult:
-    return resume_pi_after_restart(
-        store,
+    multiplexer = builtin_multiplexer_adapter_registry(
+        herdr_runner=SubprocessRunner()
+    ).adapter(args.multiplexer_kind)
+    if "provider_session_lifecycle" not in multiplexer.capabilities:
+        raise StorageRefusal(
+            "provider_session_multiplexer_unsupported",
+            "selected multiplexer cannot resume an exact provider session",
+        )
+    return multiplexer.resume_provider_session(
+        store=store,
         descriptor_id=args.descriptor_id,
         restart_id=args.restart_id,
         pane_id=args.pane_id,
         at=args.at,
-        runner=SubprocessRunner(),
         startup_timeout_ms=args.startup_timeout_ms,
     ), None
 
 
 def _runtime_migrate_pi_session(store: Storage, args: argparse.Namespace) -> CommandResult:
-    return migrate_pi_session(
-        store,
-        _read_json_object(args.manifest),
+    multiplexer = builtin_multiplexer_adapter_registry(
+        herdr_runner=SubprocessRunner()
+    ).adapter(args.multiplexer_kind)
+    if "provider_session_lifecycle" not in multiplexer.capabilities:
+        raise StorageRefusal(
+            "provider_session_multiplexer_unsupported",
+            "selected multiplexer cannot migrate an exact provider session",
+        )
+    return multiplexer.migrate_provider_session(
+        store=store,
+        manifest=_read_json_object(args.manifest),
         at=args.at,
-        runner=SubprocessRunner(),
+    ), None
+
+
+def _runtime_replay_restored_display(
+    store: Storage, args: argparse.Namespace
+) -> CommandResult:
+    return replay_restored_display(
+        store,
+        multiplexer_kind=args.multiplexer_kind,
+        timeout_ms=args.timeout_ms,
+        poll_ms=args.poll_ms,
+    ), None
+
+
+def _runtime_reconcile_restored_agent(
+    store: Storage, args: argparse.Namespace
+) -> CommandResult:
+    return reconcile_restored_agents(
+        store,
+        multiplexer_kind=args.multiplexer_kind,
+        timeout_ms=args.timeout_ms,
+        poll_ms=args.poll_ms,
+        at=utc_now(),
+    ), None
+
+
+def _runtime_retire_stopped_agent(
+    store: Storage, args: argparse.Namespace
+) -> CommandResult:
+    from .stopped_retirement import RetirementSpec, StoppedAgentRetirement
+
+    return StoppedAgentRetirement(store).retire(
+        RetirementSpec(
+            operation_id=args.operation_id,
+            agent_id=args.agent_id,
+            runtime_instance_id=args.runtime_instance_id,
+            session_ref=args.session_ref,
+            endpoint=args.endpoint,
+            runtime_generation=args.runtime_generation,
+            provider_kind=args.provider_kind,
+            multiplexer_kind=args.multiplexer_kind,
+            expected_agent_version=args.expected_agent_version,
+            callsign_assignment_id=args.callsign_assignment_id,
+            expected_callsign_version=args.expected_callsign_version,
+            terminal_status=args.terminal_status,
+            at=args.at,
+        )
     ), None
 
 
@@ -2128,6 +2377,32 @@ def _routing_outcome(store: Storage, args: argparse.Namespace) -> CommandResult:
         latency_ms=args.latency_ms,
         cost_microunits=args.cost_microunits,
         recorded_at=args.at,
+    ), None
+
+
+def _routing_migrate_config(args: argparse.Namespace) -> CommandResult:
+    if (args.destination is None) != (args.backup is None):
+        raise StorageRefusal(
+            "routing_install_invalid",
+            "routing migration installation requires both destination and backup",
+        )
+    if args.destination is not None:
+        return install_migrated_routing_config(
+            args.config, args.destination, args.backup
+        ), None
+    return migrate_routing_config(_read_json_object(args.config)), None
+
+
+def _routing_validate_config(args: argparse.Namespace) -> CommandResult:
+    return load_routing_config(args.config), None
+
+
+def _routing_rollback_config(args: argparse.Namespace) -> CommandResult:
+    return rollback_routing_config(
+        args.destination,
+        args.backup,
+        expected_installed_sha256=args.expected_installed_sha256,
+        expected_backup_sha256=args.expected_backup_sha256,
     ), None
 
 
@@ -2372,9 +2647,44 @@ def _turn_mechanical_id(kind: str, *parts: str) -> str:
     return f"{kind}:{hashlib.sha256(payload).hexdigest()}"
 
 
+@dataclass(frozen=True)
+class _MechanizedTurnDecisions:
+    decisions: list[dict[str, Any]]
+    new_requests: list[dict[str, Any]]
+    owner_controls: tuple[OwnerStopControl, ...]
+
+
+def _mechanize_owner_control(
+    prompt_count: int,
+    prompt: dict[str, Any],
+    items: list[dict[str, Any]],
+    raw_control: Any,
+) -> OwnerStopControl | None:
+    if raw_control is None:
+        return None
+    if (
+        prompt_count != 1
+        or len(items) != 1
+        or items[0]["disposition"] != "acknowledgement"
+        or not isinstance(raw_control, dict)
+        or set(raw_control) != {"action", "interrupt_delegates"}
+        or raw_control.get("action") != "stop"
+        or type(raw_control.get("interrupt_delegates")) is not bool
+    ):
+        raise StorageRefusal(
+            "owner_stop_invalid",
+            "owner stop requires one fully acknowledged prompt and an exact structured control",
+        )
+    return OwnerStopControl(
+        control_id=_turn_mechanical_id("owner-stop", str(prompt["prompt_id"])),
+        prompt_id=str(prompt["prompt_id"]),
+        interrupt_delegates=raw_control["interrupt_delegates"],
+    )
+
+
 def _mechanize_turn_decisions(
     intake: dict[str, Any], value: Any, at: str
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+) -> _MechanizedTurnDecisions:
     prompts = intake["prompts"]
     candidate_inventory = intake.get("candidate_inventory", {})
     candidates = {
@@ -2388,10 +2698,16 @@ def _mechanize_turn_decisions(
         )
     decisions: list[dict[str, Any]] = []
     new_requests: list[dict[str, Any]] = []
+    owner_controls: list[OwnerStopControl] = []
     for prompt_index, (prompt, raw_decision) in enumerate(zip(prompts, value), start=1):
-        if not isinstance(raw_decision, dict) or set(raw_decision) != {"items"}:
+        if (
+            not isinstance(raw_decision, dict)
+            or "items" not in raw_decision
+            or set(raw_decision) - {"items", "owner_control"}
+        ):
             raise StorageRefusal(
-                "invalid_triage_batch", "each semantic decision must contain only items"
+                "invalid_triage_batch",
+                "each semantic decision may contain only items and one structured owner control",
             )
         raw_items = raw_decision["items"]
         if not isinstance(raw_items, list):
@@ -2477,8 +2793,17 @@ def _mechanize_turn_decisions(
                         "runtime_instance_id": prompt["owner_runtime_instance_id"],
                     }
                 )
+        owner_control = _mechanize_owner_control(
+            len(prompts), prompt, items, raw_decision.get("owner_control")
+        )
+        if owner_control is not None:
+            owner_controls.append(owner_control)
         decisions.append({"prompt_id": prompt["prompt_id"], "items": items})
-    return decisions, new_requests
+    return _MechanizedTurnDecisions(
+        decisions=decisions,
+        new_requests=new_requests,
+        owner_controls=tuple(owner_controls),
+    )
 
 
 def _turn_dispatch_plans(
@@ -2919,6 +3244,137 @@ def _assign_prepare(store: Storage, args: argparse.Namespace) -> CommandResult:
     ), None
 
 
+def _champion_launch_route(
+    store: Storage,
+    args: argparse.Namespace,
+    *,
+    assignment_id: str,
+) -> dict[str, Any]:
+    runtime_kind = getattr(args, "runtime_kind", "pi")
+    agent_adapter = builtin_agent_adapter_registry().adapter(runtime_kind)
+    explicit = (args.model, args.effort)
+    if (args.model is None) != (args.effort is None):
+        raise StorageRefusal(
+            "launch_route_incomplete",
+            "explicit launch routing requires both model and effort",
+        )
+    decision = (
+        store.routing_decision(args.routing_decision_id)
+        if args.routing_decision_id is not None
+        else None
+    )
+    if args.routing_decision_id is not None and decision is None:
+        raise StorageRefusal(
+            "launch_routing_decision_unknown",
+            "Champion launch routing decision does not exist",
+        )
+    if decision is not None:
+        subject_targets = {
+            "request": args.request_id,
+            "task": args.task_id,
+            "assignment": assignment_id,
+        }
+        try:
+            decision_capabilities = tuple(
+                json.loads(str(decision["required_capabilities_json"]))
+            )
+        except (KeyError, TypeError, json.JSONDecodeError) as exc:
+            raise StorageRefusal(
+                "launch_routing_decision_invalid",
+                "Champion launch routing decision is malformed",
+            ) from exc
+        try:
+            selected_provider = agent_adapter.normalize_provider(
+                str(decision.get("provider", ""))
+            )
+            requested_provider = agent_adapter.normalize_provider(args.provider_kind)
+        except StorageRefusal as exc:
+            raise StorageRefusal(
+                "launch_routing_decision_mismatch",
+                "Champion routing selected a provider unsupported by the runtime adapter",
+            ) from exc
+        runtime_explicit = bool(getattr(args, "runtime_kind_explicit", False))
+        provider_explicit = bool(getattr(args, "provider_kind_explicit", True))
+        resolved_provider = requested_provider
+        provider_compatible = selected_provider == resolved_provider
+        exact = bool(
+            decision.get("subject_kind") in subject_targets
+            and decision.get("subject_id")
+            == subject_targets.get(str(decision.get("subject_kind")))
+            and decision.get("role") == "champion"
+            and decision.get("state") in {"selected", "escalated"}
+            and isinstance(decision.get("model"), str)
+            and bool(decision["model"])
+            and isinstance(decision.get("effort"), str)
+            and bool(decision["effort"])
+            and provider_compatible
+            and agent_adapter.accepts_provider(resolved_provider)
+            and sorted(decision_capabilities) == sorted(args.requires)
+        )
+        if not exact:
+            raise StorageRefusal(
+                "launch_routing_decision_mismatch",
+                "Champion launch routing decision does not match the exact assignment",
+            )
+        if args.model is not None and explicit != (
+            decision["model"],
+            decision["effort"],
+        ):
+            raise StorageRefusal(
+                "launch_routing_decision_mismatch",
+                "explicit model or effort conflicts with the persisted routing decision",
+            )
+        args.provider_kind = str(resolved_provider)
+        return {
+            "decision_id": str(decision["decision_id"]),
+            "provider": str(resolved_provider),
+            "model": str(decision["model"]),
+            "effort": str(decision["effort"]),
+            "tier": decision.get("tier"),
+            "reason": decision.get("reason"),
+            "reason_code": decision.get("reason_code"),
+            "policy_version": decision.get("policy_version"),
+            "provider_config_version": decision.get("provider_config_version"),
+            "explicit": {
+                "runtime": runtime_explicit,
+                "provider": provider_explicit,
+                "model": args.model is not None,
+                "effort": args.effort is not None,
+            },
+        }
+    if args.model is None:
+        raise StorageRefusal(
+            "launch_routing_decision_required",
+            "default Champion launch requires one exact persisted ModelRouter decision",
+        )
+    runtime_kind = getattr(args, "runtime_kind", "pi")
+    runtime_explicit = bool(getattr(args, "runtime_kind_explicit", False))
+    provider_explicit = bool(getattr(args, "provider_kind_explicit", True))
+    args.provider_kind = agent_adapter.normalize_provider(args.provider_kind)
+    if not agent_adapter.accepts_provider(args.provider_kind):
+        raise StorageRefusal(
+            "launch_provider_invalid",
+            "explicit provider does not belong to the selected runtime adapter",
+        )
+    return {
+        "decision_id": None,
+        "provider": str(args.provider_kind),
+        "model": str(args.model),
+        "effort": str(args.effort),
+        "tier": "EXPLICIT",
+        "reason": "Explicit launch override.",
+        "reason_code": "explicit_override",
+        "policy_version": None,
+        "provider_config_version": None,
+        "explicit": {
+            "runtime": runtime_explicit,
+            "provider": provider_explicit,
+            "model": True,
+            "effort": True,
+        },
+    }
+
+
 def _assign_launch(store: Storage, args: argparse.Namespace) -> CommandResult:
     if args.state_root is None:
         raise StorageRefusal("state_root_required", "visible launch requires canonical state")
@@ -2928,7 +3384,23 @@ def _assign_launch(store: Storage, args: argparse.Namespace) -> CommandResult:
     champion_agent_id = args.champion_agent_id or derived_champion_agent_id(
         assignment_id
     )
-    workspace_id = args.workspace_id or os.environ.get("HERDR_WORKSPACE_ID", "")
+    routing = _champion_launch_route(
+        store, args, assignment_id=assignment_id
+    )
+    model, effort = str(routing["model"]), str(routing["effort"])
+    runner = SubprocessRunner()
+    multiplexer = builtin_multiplexer_adapter_registry(
+        herdr_runner=runner, herdr_binary="herdr"
+    ).adapter(args.multiplexer_kind)
+    if args.workspace_id:
+        workspace_id = args.workspace_id
+    else:
+        if "calling_context" not in multiplexer.capabilities:
+            raise StorageRefusal(
+                "multiplexer_context_unavailable",
+                "selected multiplexer cannot identify the calling workspace",
+            )
+        workspace_id = multiplexer.calling_context()["workspace_id"]
     league_command = str(
         Path(args.league_command).resolve()
         if args.league_command
@@ -2943,12 +3415,13 @@ def _assign_launch(store: Storage, args: argparse.Namespace) -> CommandResult:
     options = VisibleLaunchOptions(
         workspace_id=workspace_id,
         task_label=args.task_label or derive_task_label(args.task_summary),
-        model=args.model,
-        effort=args.effort,
+        model=model,
+        effort=effort,
         league_command=league_command,
         state_root=str(args.state_root.resolve()),
         project_code=project_code,
         startup_timeout_ms=args.startup_timeout_ms,
+        routing=routing,
     )
     spec = AssignmentSpec(
         assignment_id=assignment_id,
@@ -2965,88 +3438,41 @@ def _assign_launch(store: Storage, args: argparse.Namespace) -> CommandResult:
         issue_receipt=None,
         required_capabilities=tuple(args.requires),
     )
-    runner = SubprocessRunner()
-    if args.runtime_kind == "codex":
-        resume_thread_id = continuation_resume_thread(
-            store,
-            assignment_id=assignment_id,
-            task_id=args.task_id,
-            champion_agent_id=champion_agent_id,
-            repository=args.repository,
-            issue=args.issue,
-            branch=args.branch,
-            worktree=args.worktree,
-            at=_turn_time(),
-        )
-        if args.provider_kind != "codex" or any(
-            value is not None
-            for value in (
-                args.project_code,
-                args.release_root,
-                args.session_id,
-                args.session_path,
-                args.parent_session_id,
-                args.parent_session_path,
-            )
-        ) or args.session_mode != "create":
-            raise StorageRefusal(
-                "launch_scope_invalid",
-                "Codex runtime cannot accept Pi provider/session inputs",
-            )
-        adapter = HerdrCodexLaunchAdapter(
-            options, runner, resume_thread_id=resume_thread_id
-        )
-    else:
-        if not args.project_code:
-            raise StorageRefusal(
-                "launch_scope_invalid",
-                "Pi launch requires an explicit project code",
-            )
-        descriptor_id = f"pi-launch:{assignment_id}"
-        requested_session_id = args.session_id
-        if args.session_mode == "create" and requested_session_id is None:
-            requested_session_id = deterministic_pi_session_id(descriptor_id)
-        release_root = Path(
-            args.release_root or Path(league_command).parent.parent
-        ).resolve()
-        descriptor = {
-            "schema": "league.pi-launch-descriptor.v1",
-            "descriptor_id": descriptor_id,
+    launch_time = _turn_time()
+    release_root = Path(
+        args.release_root or Path(league_command).parent.parent
+    ).resolve()
+    agent_adapter = builtin_agent_adapter_registry().adapter(args.runtime_kind)
+    adapter = agent_adapter.visible_launch(
+        store=store,
+        options=options,
+        multiplexer=multiplexer,
+        startup_timeout_ms=args.startup_timeout_ms,
+        launch={
             "assignment_id": assignment_id,
-            "runtime_kind": "pi",
+            "task_id": args.task_id,
+            "champion_agent_id": champion_agent_id,
+            "repository": args.repository,
+            "issue": args.issue,
+            "branch": args.branch,
+            "worktree": args.worktree,
             "provider_kind": args.provider_kind,
-            "model": args.model,
-            "effort": args.effort,
-            "cwd": str(Path(args.worktree).resolve()),
-            "role": "champion",
-            "placement": "new_tab",
-            "callsign": "pending",
             "project_code": args.project_code,
-            "task_label": options.task_label,
-            "routing_name": "pending",
-            "workspace_id": workspace_id,
-            "creator_pane_id": None,
-            "state_root": str(args.state_root.resolve()),
-            "release_root": str(release_root),
-            "launch_mode": args.session_mode,
-            "requested_session_id": requested_session_id,
-            "requested_session_path": (
-                str(Path(args.session_path).resolve()) if args.session_path else None
-            ),
+            "release_root": args.release_root,
+            "resolved_release_root": str(release_root),
+            "session_path": args.session_path,
             "parent_session_id": args.parent_session_id,
-            "parent_session_path": (
-                str(Path(args.parent_session_path).resolve())
-                if args.parent_session_path
-                else None
-            ),
-        }
-        adapter = HerdrPiLaunchAdapter(
-            store,
-            descriptor,
-            at=_turn_time(),
-            runner=runner,
-            startup_timeout_ms=args.startup_timeout_ms,
-        )
+            "parent_session_path": args.parent_session_path,
+            "session_id": args.session_id,
+            "session_mode": args.session_mode,
+            "workspace_id": workspace_id,
+            "state_root": str(args.state_root.resolve()),
+            "model": model,
+            "effort": effort,
+            "routing": routing,
+            "at": launch_time,
+        },
+    )
     verifier = GitHubIssueVerifier(
         runner,
         selection_receipt_digest=args.issue_selection_receipt_digest,
@@ -3054,6 +3480,113 @@ def _assign_launch(store: Storage, args: argparse.Namespace) -> CommandResult:
     return VisibleChampionLaunchService(
         store, adapter, options, issue_verifier=verifier
     ).launch(spec), None
+
+
+def _assign_replace_runtime(
+    store: Storage, args: argparse.Namespace
+) -> CommandResult:
+    if args.state_root is None:
+        raise StorageRefusal(
+            "state_root_required", "runtime replacement requires canonical state"
+        )
+    context = store.runtime_replacement_launch_context(args.assignment_id)
+    route_args = argparse.Namespace(
+        request_id=context["request_id"],
+        task_id=context["task_id"],
+        requires=list(context["required_capabilities"]),
+        runtime_kind=args.successor_runtime_kind,
+        provider_kind=args.successor_provider_kind,
+        runtime_kind_explicit=True,
+        provider_kind_explicit=True,
+        routing_decision_id=args.routing_decision_id,
+        model=args.model,
+        effort=args.effort,
+    )
+    routing = _champion_launch_route(
+        store, route_args, assignment_id=args.assignment_id
+    )
+    runner = SubprocessRunner()
+    multiplexers = builtin_multiplexer_adapter_registry(
+        herdr_runner=runner, herdr_binary="herdr"
+    )
+    multiplexer = multiplexers.adapter(args.multiplexer_kind)
+    if args.workspace_id:
+        workspace_id = args.workspace_id
+    else:
+        if "calling_context" not in multiplexer.capabilities:
+            raise StorageRefusal(
+                "multiplexer_context_unavailable",
+                "selected multiplexer cannot identify the calling workspace",
+            )
+        workspace_id = multiplexer.calling_context()["workspace_id"]
+    league_command = str(
+        Path(args.league_command).resolve()
+        if args.league_command
+        else Path(sys.argv[0]).resolve()
+    )
+    release_root = Path(
+        args.release_root or Path(league_command).parent.parent
+    ).resolve()
+    options = VisibleLaunchOptions(
+        workspace_id=workspace_id,
+        task_label=derive_task_label(context["task_summary"]),
+        model=str(routing["model"]),
+        effort=str(routing["effort"]),
+        league_command=league_command,
+        state_root=str(args.state_root.resolve()),
+        startup_timeout_ms=args.startup_timeout_ms,
+        routing=routing,
+    )
+    agents = builtin_agent_adapter_registry()
+    successor = agents.adapter(args.successor_runtime_kind)
+    request = {
+        "schema": "league.runtime-replacement-request.v1",
+        "operation_id": args.operation_id,
+        "assignment_id": args.assignment_id,
+        "predecessor_agent_id": args.predecessor_agent_id,
+        "predecessor_runtime_instance_id": args.predecessor_runtime_instance_id,
+        "successor_agent_id": args.successor_agent_id,
+        "successor_runtime_instance_id": args.successor_runtime_instance_id,
+        "successor_adapter_kind": args.successor_runtime_kind,
+        "successor_harness_kind": successor.launch_profile.runtime_kind,
+        "successor_provider_kind": route_args.provider_kind,
+        "multiplexer_kind": args.multiplexer_kind,
+        "canonical_routing_name": context["routing_name"],
+        "staging_routing_name": args.staging_routing_name,
+        "routing_decision_id": args.routing_decision_id,
+        "model": str(routing["model"]),
+        "effort": str(routing["effort"]),
+        "expected_assignment_version": args.expected_assignment_version,
+        "expected_agent_version": args.expected_agent_version,
+        "expected_task_version": args.expected_task_version,
+    }
+    launch_inputs = {
+        "runtime_instance_id": args.successor_runtime_instance_id,
+        "provider_kind": route_args.provider_kind,
+        "project_code": args.project_code,
+        "release_root": args.release_root,
+        "resolved_release_root": str(release_root),
+        "session_path": args.session_path,
+        "parent_session_id": args.parent_session_id,
+        "parent_session_path": args.parent_session_path,
+        "session_id": args.session_id,
+        "session_mode": args.session_mode,
+        "workspace_id": workspace_id,
+        "state_root": str(args.state_root.resolve()),
+        "model": str(routing["model"]),
+        "effort": str(routing["effort"]),
+        "routing": routing,
+    }
+    return RuntimeReplacementService(
+        store, agents, multiplexers, _ProvidedClock(args.at)
+    ).replace(
+        RuntimeReplacementSpec(
+            request=request,
+            launch_options=options,
+            launch_inputs=launch_inputs,
+            startup_timeout_ms=args.startup_timeout_ms,
+        )
+    ), None
 
 
 def _assign_launching(store: Storage, args: argparse.Namespace) -> CommandResult:
@@ -3142,6 +3675,13 @@ def _assign_reconcile_legacy_display(
         target_task_label=args.target_task_label,
         owner_authorized=args.owner_authorized or args.mode_action is not None,
         expected_agent_status=expected.get("agent_status"),
+        previous_worktree=(
+            str(Path(args.previous_worktree).resolve())
+            if args.previous_worktree is not None
+            else None
+        ),
+        previous_branch=args.previous_branch,
+        branch=args.branch,
     )
     return LegacyDisplayReconciliationService(
         store, HerdrLegacyDisplayAdapter(), _ProvidedClock(args.at)
@@ -3339,6 +3879,14 @@ def _hook_set_supervision_policy(
     ), None
 
 
+def _hook_set_attachment(
+    store: Storage, args: argparse.Namespace
+) -> CommandResult:
+    return store.set_supervision_attachment(
+        args.scope_id, args.actor_agent_id, args.mode, args.at
+    ), None
+
+
 def _issue_select(store: Storage, args: argparse.Namespace) -> CommandResult:
     runner = SubprocessRunner()
     service = GitHubIssueSelectionService(store, runner)
@@ -3356,6 +3904,29 @@ def _issue_select(store: Storage, args: argparse.Namespace) -> CommandResult:
         f"issue-attempt:{uuid.uuid4()}",
         args.at,
         reopen_action_receipt_digest=args.reopen_action_receipt_digest,
+    ), None
+
+
+def _provider_hooks_upgrade(args: argparse.Namespace) -> CommandResult:
+    return dict(
+        upgrade_provider_hooks(
+            builtin_agent_adapter_registry(),
+            source_root=args.source_root,
+            profile_root=args.profile_root,
+            stable_watcher=args.stable_watcher,
+            manifest_path=args.manifest,
+        )
+    ), None
+
+
+def _provider_hooks_rollback(args: argparse.Namespace) -> CommandResult:
+    return dict(
+        rollback_provider_hooks(
+            source_root=args.source_root,
+            profile_root=args.profile_root,
+            stable_watcher=args.stable_watcher,
+            manifest_path=args.manifest,
+        )
     ), None
 
 
@@ -3419,6 +3990,9 @@ HANDLERS: dict[str, CommandHandler] = {
     "runtime.matrix": _runtime_matrix,
     "runtime.resume-launch": _runtime_resume_launch,
     "runtime.migrate-pi-session": _runtime_migrate_pi_session,
+    "runtime.replay-restored-display": _runtime_replay_restored_display,
+    "runtime.reconcile-restored-agent": _runtime_reconcile_restored_agent,
+    "runtime.retire-stopped-agent": _runtime_retire_stopped_agent,
     "routing.choose": _routing_choose,
     "routing.escalate": _routing_escalate,
     "routing.outcome": _routing_outcome,
@@ -3456,6 +4030,7 @@ HANDLERS: dict[str, CommandHandler] = {
     "request.reconcile-duplicate": _request_reconcile_duplicate,
     "assign.prepare": _assign_prepare,
     "assign.run": _assign_launch,
+    "assign.replace-runtime": _assign_replace_runtime,
     "assign.launching": _assign_launching,
     "assign.activate": _assign_activate,
     "assign.reconcile-runtime": _assign_reconcile_runtime,
@@ -3476,6 +4051,7 @@ HANDLERS: dict[str, CommandHandler] = {
     "mode.revoke": _mode_revoke,
     "issue.select": _issue_select,
     "hook.set-supervision-policy": _hook_set_supervision_policy,
+    "hook.set-attachment": _hook_set_attachment,
     "hook.reconcile-silent": _hook_reconcile_silent,
 }
 
@@ -3504,6 +4080,7 @@ SCHEMA_INVENTORY = (
     "league-roster-snapshot.schema.json",
     "league-callsign-catalog.schema.json",
     "league-runtime-acceptance.schema.json",
+    "league-stopped-agent-retirement-receipt.schema.json",
     "league-shotcaller-handoff-plan.schema.json",
     "league-rollover-pages.schema.json",
     "league-rollover-abort-receipt.schema.json",
@@ -3516,6 +4093,7 @@ SCHEMA_INVENTORY = (
     "league-mode-status.schema.json",
     "league-mode-action-receipt.schema.json",
     "league-protected-gate-receipt.schema.json",
+    "league-supervisor-service-status.schema.json",
     "league-repository-issue.schema.json",
     "league-issue-selection-receipt.schema.json",
 )
@@ -3524,6 +4102,14 @@ CONFIG_ONLY_COMMANDS = {
     "skill.validate": _skill_validate,
     "skill.audit": _skill_audit,
     "skill.matrix": _skill_matrix,
+    "routing.migrate-config": _routing_migrate_config,
+    "routing.rollback-config": _routing_rollback_config,
+    "routing.validate-config": _routing_validate_config,
+}
+
+PROVIDER_HOOK_COMMANDS = {
+    "provider-hooks.upgrade": _provider_hooks_upgrade,
+    "provider-hooks.rollback": _provider_hooks_rollback,
 }
 
 
@@ -3535,6 +4121,7 @@ def _help_inventory() -> dict[str, Any]:
             (
                 *HANDLERS,
                 *CONFIG_ONLY_COMMANDS,
+                *PROVIDER_HOOK_COMMANDS,
                 "storage.migrate",
                 "acceptance.run",
                 "acceptance.preflight",
@@ -3705,6 +4292,13 @@ def _run(args: argparse.Namespace) -> CommandResult:
                 "skill validation uses explicit config/root inputs and refuses --state-root",
             )
         return CONFIG_ONLY_COMMANDS[command](args)
+    if command in PROVIDER_HOOK_COMMANDS:
+        if args.state_root is not None:
+            raise StorageRefusal(
+                "invalid_provider_hook_state_root",
+                "provider hook operations use explicit roots and refuse --state-root",
+            )
+        return PROVIDER_HOOK_COMMANDS[command](args)
     if command == "storage.migrate":
         if args.state_root is None:
             raise StorageRefusal(
@@ -3768,6 +4362,95 @@ def _run(args: argparse.Namespace) -> CommandResult:
         return handler(store, args)
 
 
+def _run_interactive_request_turn(
+    store: Storage, args: argparse.Namespace, source: BinaryIO, sink: BinaryIO
+) -> tuple[dict[str, Any], None]:
+    begin_at = _turn_time(args.at)
+    turn_token = f"request-turn:{uuid.uuid4()}"
+    store.begin_shotcaller_turn(args.owner_agent_id, turn_token, begin_at)
+    request_state_committed = False
+    try:
+        intake = store.untriaged_intake(
+            args.owner_agent_id,
+            limit=args.limit,
+            max_bytes=args.max_bytes,
+            candidate_limit=args.candidate_limit,
+            candidate_max_bytes=args.candidate_max_bytes,
+        )
+        sink.write(_envelope_bytes("request.turn", result={"phase": "intake", **intake}))
+        sink.flush()
+        expected_prompt_ids = tuple(prompt["prompt_id"] for prompt in intake["prompts"])
+        begin_payload = _turn_begin_payload(source, intake, expected_prompt_ids)
+        mechanized = _mechanize_turn_decisions(
+            intake, begin_payload["decisions"], begin_at
+        )
+        begun = store.begin_request_turn(
+            args.owner_agent_id,
+            expected_prompt_ids,
+            mechanized.decisions,
+            _turn_dispatch_plans(
+                begin_payload["plans"], begin_at, mechanized.new_requests
+            ),
+            begin_at,
+            expected_candidate_digest=intake["candidate_inventory"]["snapshot_digest"],
+            candidate_limit=args.candidate_limit,
+            candidate_max_bytes=args.candidate_max_bytes,
+        )
+        for request, route in zip(mechanized.new_requests, begun["routing"]):
+            route["mechanical"] = {
+                "request_id": request["request_id"],
+                "claim_token": _turn_mechanical_id("claim", request["request_id"]),
+            }
+        sink.write(
+            _envelope_bytes(
+                "request.turn",
+                result={
+                    "phase": "begun",
+                    **begun,
+                    "unresolved": store.request_turn_boundary(args.owner_agent_id),
+                },
+            )
+        )
+        sink.flush()
+        commit_payload = _read_turn_payload(source)
+        if set(commit_payload) != {"actions"}:
+            raise StorageRefusal(
+                "invalid_turn_payload",
+                "turn commit input must contain only an actions array",
+            )
+        commit_at = _turn_time(args.at)
+        committed = store.commit_interactive_request_turn(
+            args.owner_agent_id,
+            turn_token,
+            _turn_commit_actions(
+                commit_payload["actions"], commit_at, mechanized.new_requests, begun
+            ),
+            commit_at,
+            owner_controls=mechanized.owner_controls,
+        )
+        request_state_committed = True
+        from .owner_stop import execute_owner_stop_controls
+
+        committed["owner_stop_controls"] = execute_owner_stop_controls(
+            store,
+            tuple(committed["owner_stop_controls"]),
+            commit_at,
+        )
+        return (
+            {
+                "phase": "committed",
+                **committed,
+                "unresolved": store.request_turn_boundary(args.owner_agent_id),
+            },
+            None,
+        )
+    finally:
+        if not request_state_committed:
+            store.abort_shotcaller_turn(
+                args.owner_agent_id, turn_token, _turn_time(args.at)
+            )
+
+
 def main(
     argv: Optional[list[str]] = None,
     *,
@@ -3781,74 +4464,8 @@ def main(
         if command == "request.turn":
             with _open(args) as store:
                 source = input_stream or sys.stdin.buffer
-                begin_at = _turn_time(args.at)
-                intake = store.untriaged_intake(
-                    args.owner_agent_id,
-                    limit=args.limit,
-                    max_bytes=args.max_bytes,
-                    candidate_limit=args.candidate_limit,
-                    candidate_max_bytes=args.candidate_max_bytes,
-                )
-                sink.write(
-                    _envelope_bytes(command, result={"phase": "intake", **intake})
-                )
-                sink.flush()
-                expected_prompt_ids = tuple(
-                    prompt["prompt_id"] for prompt in intake["prompts"]
-                )
-                begin_payload = _turn_begin_payload(
-                    source, intake, expected_prompt_ids
-                )
-                decisions, new_requests = _mechanize_turn_decisions(
-                    intake, begin_payload["decisions"], begin_at
-                )
-                begun = store.begin_request_turn(
-                    args.owner_agent_id,
-                    expected_prompt_ids,
-                    decisions,
-                    _turn_dispatch_plans(begin_payload["plans"], begin_at, new_requests),
-                    begin_at,
-                    expected_candidate_digest=intake["candidate_inventory"]["snapshot_digest"],
-                    candidate_limit=args.candidate_limit,
-                    candidate_max_bytes=args.candidate_max_bytes,
-                )
-                for request, route in zip(new_requests, begun["routing"]):
-                    route["mechanical"] = {
-                        "request_id": request["request_id"],
-                        "claim_token": _turn_mechanical_id("claim", request["request_id"]),
-                    }
-                sink.write(
-                    _envelope_bytes(
-                        command,
-                        result={
-                            "phase": "begun",
-                            **begun,
-                            "unresolved": store.request_turn_boundary(args.owner_agent_id),
-                        },
-                    )
-                )
-                sink.flush()
-                commit_payload = _read_turn_payload(source)
-                if set(commit_payload) != {"actions"}:
-                    raise StorageRefusal(
-                        "invalid_turn_payload",
-                        "turn commit input must contain only an actions array",
-                    )
-                commit_at = _turn_time(args.at)
-                committed = store.commit_request_turn(
-                    args.owner_agent_id,
-                    _turn_commit_actions(
-                        commit_payload["actions"], commit_at, new_requests, begun
-                    ),
-                    commit_at,
-                )
-                result, raw = (
-                    {
-                        "phase": "committed",
-                        **committed,
-                        "unresolved": store.request_turn_boundary(args.owner_agent_id),
-                    },
-                    None,
+                result, raw = _run_interactive_request_turn(
+                    store, args, source, sink
                 )
         else:
             result, raw = _run(args)

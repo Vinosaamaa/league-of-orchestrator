@@ -7,14 +7,16 @@
   <key>ProgramArguments</key>
   <array>
     <string>@@AGENT_WATCHER@@</string>
-    <string>--shotcaller</string>
-    <string>@@SHOTCALLER@@</string>
     <string>service-run</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict>
     <key>LEAGUE_STATE_ROOT</key>
     <string>@@STATE_ROOT@@</string>
+    <key>LEAGUE_WRITER_POINTER</key>
+    <string>@@WRITER_POINTER@@</string>
+    <key>PATH</key>
+    <string>@@PYTHON_PATH@@</string>
   </dict>
   <key>RunAtLoad</key>
   <true/>

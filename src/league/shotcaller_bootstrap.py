@@ -1,4 +1,4 @@
-"""In-place creation of one canonical Shotcaller from the calling Codex runtime."""
+"""In-place creation of one canonical Shotcaller from the calling runtime."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
+from .agent_adapters import builtin_agent_adapter_registry
 from .sqlite_callsign_ops import digest
 from .presentation import ORCHESTRATOR_ROLE_TOKEN, canonical_display_metadata
 from .storage import Storage, StorageRefusal
@@ -49,6 +50,8 @@ class ShotcallerBootstrapOptions:
     tab_id: str
     pane_id: str
     worktree: str
+    runtime_kind: str = "codex"
+    provider_kind: str = "codex"
 
 
 def _result(completed: subprocess.CompletedProcess[str], label: str) -> dict[str, Any]:
@@ -89,6 +92,21 @@ class HerdrShotcallerBootstrapAdapter:
         self.options = options
         self.runner = runner or SubprocessRunner()
         self.environment = dict(environment or os.environ)
+        self.agent_adapter = builtin_agent_adapter_registry().adapter(
+            options.runtime_kind
+        )
+        self.launch_profile = self.agent_adapter.launch_profile
+        if (
+            options.runtime_kind == "pi"
+            and options.provider_kind not in {"codex", "cursor"}
+        ) or (
+            options.runtime_kind != "pi"
+            and options.provider_kind != options.runtime_kind
+        ):
+            raise StorageRefusal(
+                "shotcaller_identity_unverified",
+                "Shotcaller runtime and provider kinds do not form a supported binding",
+            )
         self._observed: dict[str, Any] | None = None
         self._restore_baseline: dict[str, Any] | None = None
         self._published_source: str | None = None
@@ -150,7 +168,7 @@ class HerdrShotcallerBootstrapAdapter:
         if len(matches) != 1:
             raise StorageRefusal(
                 "shotcaller_identity_unverified",
-                "current pane does not contain exactly one visible Codex runtime",
+                "current pane does not contain exactly one visible runtime",
             )
         return dict(pane), matches[0]
 
@@ -165,21 +183,35 @@ class HerdrShotcallerBootstrapAdapter:
             if not isinstance(value, str) or not ROUTING_ALIAS.fullmatch(value):
                 raise StorageRefusal(
                     "shotcaller_identity_unverified",
-                    "calling Codex routing observation is ambiguous",
+                    "calling runtime routing observation is ambiguous",
                 )
             bindings.add(value)
         if len(bindings) > 1:
             raise StorageRefusal(
                 "shotcaller_identity_unverified",
-                "calling Codex routing observation is ambiguous",
+                "calling runtime routing observation is ambiguous",
             )
         return next(iter(bindings), None)
 
     def _presentation_title(self, agent: Mapping[str, Any]) -> str | None:
-        value = agent.get("terminal_title_stripped")
-        if value is None:
-            value = agent.get("terminal_title")
-        return value if isinstance(value, str) else None
+        tokens = agent.get("tokens")
+        thread_id = _session(agent)
+        if (
+            agent.get("agent") == "pi"
+            and isinstance(tokens, Mapping)
+            and isinstance(thread_id, str)
+            and tokens.get("identity_thread_id")
+            == "sha256:" + hashlib.sha256(thread_id.encode("utf-8")).hexdigest()
+            and isinstance(tokens.get("thread_title"), str)
+            and tokens.get("thread_title")
+        ):
+            return str(tokens["thread_title"])
+        value = agent.get("terminal_title_stripped", agent.get("terminal_title"))
+        if not isinstance(value, str):
+            return None
+        agent_kind = agent.get("agent")
+        suffix = f" | {agent_kind}" if isinstance(agent_kind, str) else ""
+        return value[: -len(suffix)] if suffix and value.endswith(suffix) else value
 
     def _display(self, callsign: str) -> dict[str, str]:
         return canonical_display_metadata(
@@ -213,6 +245,51 @@ class HerdrShotcallerBootstrapAdapter:
             or not isinstance(title, str)
         ):
             return None
+        route = self._routing_name(agent)
+        provider_label = tokens.get("provider_label")
+        provider_name = self.options.provider_kind
+        expected_provider_label = (
+            f"pi{provider_name.title()}"
+            if self.options.runtime_kind == "pi"
+            else provider_name
+        )
+        identity_thread_id = tokens.get("identity_thread_id")
+        accepted_thread_ids = {thread_id}
+        if self.options.runtime_kind == "pi":
+            accepted_thread_ids.add(
+                "sha256:" + hashlib.sha256(thread_id.encode("utf-8")).hexdigest()
+            )
+        token_route = tokens.get("routing_alias")
+        orchestrator_identity = tokens.get("orchestrator_identity")
+        provider_projection = bool(
+            tokens.get("harness") == self.options.runtime_kind
+            and provider_label == expected_provider_label
+            and identity_thread_id in accepted_thread_ids
+            and isinstance(tokens.get("thread_title"), str)
+            and tokens.get("thread_title")
+            and tokens.get("identity_title")
+            == f"{self.options.runtime_kind.title()} | {tokens['thread_title']}"
+            and isinstance(tokens.get("sidebar_name"), str)
+            and tokens.get("sidebar_name")
+            and title
+            and tokens.get(TITLE_OWNER_TOKEN) in {None, ""}
+            and tokens.get(TITLE_SOURCE_TOKEN) in {None, ""}
+            and (
+                (
+                    route is None
+                    and token_route in {None, ""}
+                    and orchestrator_identity in {None, ""}
+                )
+                or (
+                    route is not None
+                    and token_route == route
+                    and orchestrator_identity
+                    == f"{self.options.runtime_kind} · {route}"
+                )
+            )
+        )
+        if provider_projection:
+            return authority_source
         labels = (
             tokens.get("callsign"),
             tokens.get("sidebar_name"),
@@ -221,15 +298,13 @@ class HerdrShotcallerBootstrapAdapter:
         if (
             not all(isinstance(value, str) and value for value in labels)
             or len(set(labels)) != 1
-            or tokens.get("harness") != "codex"
+            or tokens.get("harness") != self.options.runtime_kind
             or tokens.get("identity_thread_id") != thread_id
-            or tokens.get("identity_title") != f"Codex | {labels[0]}"
+            or tokens.get("identity_title")
+            != f"{self.options.runtime_kind.title()} | {labels[0]}"
             or title != labels[0]
         ):
             return None
-        route = self._routing_name(agent)
-        token_route = tokens.get("routing_alias")
-        orchestrator_identity = tokens.get("orchestrator_identity")
         if route is None:
             if (
                 (token_route is not None and token_route != "")
@@ -243,7 +318,7 @@ class HerdrShotcallerBootstrapAdapter:
             pass
         elif (
             token_route != route
-            or orchestrator_identity != f"codex · {route}"
+            or orchestrator_identity != f"{self.options.runtime_kind} · {route}"
             or (
                 str(labels[0]).casefold() != route.casefold()
                 and provider_route_only_alias != route
@@ -296,8 +371,11 @@ class HerdrShotcallerBootstrapAdapter:
                 spec.runtime_instance_id,
             }
             or baseline.get("schema")
-            != "league.shotcaller-bootstrap-baseline.v2"
-            or baseline.get("routing_name") is not None
+            not in {
+                "league.shotcaller-bootstrap-baseline.v2",
+                "league.shotcaller-bootstrap-baseline.v3",
+            }
+            or baseline.get("routing_name") not in {None, expected_alias}
             or baseline.get("terminal_id") != agent.get("terminal_id")
             or baseline.get("endpoint_generation") != endpoint_generation
             or baseline.get("presentation_source") != source
@@ -332,9 +410,10 @@ class HerdrShotcallerBootstrapAdapter:
                 source_less_provider
                 and (
                     tokens.get("callsign") != title
-                    or tokens.get("harness") != "codex"
+                    or tokens.get("harness") != self.options.runtime_kind
                     or tokens.get("identity_thread_id") != spec.thread_id
-                    or tokens.get("identity_title") != f"Codex | {title}"
+                    or tokens.get("identity_title")
+                    != f"{self.options.runtime_kind.title()} | {title}"
                     or not (
                         (
                             tokens.get("routing_alias") in {None, ""}
@@ -343,7 +422,7 @@ class HerdrShotcallerBootstrapAdapter:
                         or (
                             tokens.get("routing_alias") == expected_alias
                             and tokens.get("orchestrator_identity")
-                            == f"codex · {expected_alias}"
+                            == f"{self.options.runtime_kind} · {expected_alias}"
                         )
                     )
                 )
@@ -410,7 +489,7 @@ class HerdrShotcallerBootstrapAdapter:
         sequence = agent.get("state_change_seq")
         worktree = str(Path(self.options.worktree).resolve())
         return bool(
-            agent.get("agent") == "codex"
+            agent.get("agent") == self.options.runtime_kind
             and agent.get("workspace_id") == self.options.workspace_id
             and agent.get("tab_id") == self.options.tab_id
             and agent.get("pane_id") == self.options.pane_id
@@ -441,9 +520,10 @@ class HerdrShotcallerBootstrapAdapter:
         allow_unpublished: bool = False,
         route_only_recovery: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
-        if not THREAD_UUID.fullmatch(spec.thread_id):
+        if not self._valid_session_identity(spec.thread_id):
             raise StorageRefusal(
-                "shotcaller_identity_unverified", "calling Codex thread identity is invalid"
+                "shotcaller_identity_unverified",
+                "calling runtime session identity is invalid",
             )
         pane, agent = self._current()
         tokens = agent.get("tokens")
@@ -479,6 +559,11 @@ class HerdrShotcallerBootstrapAdapter:
             presentation_source = owned_source
         routing_exact = (
             routing_name is None
+            or (
+                expected_alias is None
+                and tokens.get(TITLE_OWNER_TOKEN) in {None, ""}
+                and tokens.get(TITLE_SOURCE_TOKEN) in {None, ""}
+            )
             if expected_alias is None
             else routing_name == expected_alias
             or (allow_unpublished and routing_name is None)
@@ -491,7 +576,7 @@ class HerdrShotcallerBootstrapAdapter:
         ):
             raise StorageRefusal(
                 "shotcaller_identity_unverified",
-                "calling Codex must be exact, current, and not already routing-bound",
+                "calling runtime must be exact, current, and not already routing-bound",
             )
         self._observed = {
             "terminal_id": str(agent["terminal_id"]),
@@ -509,9 +594,18 @@ class HerdrShotcallerBootstrapAdapter:
             self._restore_baseline = self.restoration_baseline()
         return dict(self._observed)
 
+    def _valid_session_identity(self, value: str) -> bool:
+        if self.options.runtime_kind in {"codex", "cursor"}:
+            return bool(THREAD_UUID.fullmatch(value))
+        return bool(value and value.strip() == value and "\x00" not in value)
+
     def recovery_baseline(self) -> dict[str, Any]:
         baseline = self.restoration_baseline()
-        baseline["schema"] = "league.shotcaller-bootstrap-baseline.v2"
+        baseline["schema"] = (
+            "league.shotcaller-bootstrap-baseline.v3"
+            if baseline["routing_name"] is not None
+            else "league.shotcaller-bootstrap-baseline.v2"
+        )
         baseline["presentation_source"] = self._observed["presentation_source"]
         return baseline
 
@@ -543,8 +637,21 @@ class HerdrShotcallerBootstrapAdapter:
             not in {
                 "league.shotcaller-bootstrap-baseline.v1",
                 "league.shotcaller-bootstrap-baseline.v2",
+                "league.shotcaller-bootstrap-baseline.v3",
             }
-            or baseline.get("routing_name") is not None
+            or (
+                baseline.get("schema")
+                == "league.shotcaller-bootstrap-baseline.v3"
+                and baseline.get("routing_name") != self._observed["routing_name"]
+            )
+            or (
+                baseline.get("schema")
+                in {
+                    "league.shotcaller-bootstrap-baseline.v1",
+                    "league.shotcaller-bootstrap-baseline.v2",
+                }
+                and baseline.get("routing_name") is not None
+            )
             or baseline.get("terminal_id") != self._observed["terminal_id"]
             or baseline.get("endpoint_generation") != self._observed["endpoint_generation"]
         ):
@@ -568,7 +675,11 @@ class HerdrShotcallerBootstrapAdapter:
         routing_name = self._routing_name(agent)
         presentation_source = self._presentation_source(agent)
         common_exact = bool(
-            baseline.get("schema") == "league.shotcaller-bootstrap-baseline.v2"
+            baseline.get("schema")
+            in {
+                "league.shotcaller-bootstrap-baseline.v2",
+                "league.shotcaller-bootstrap-baseline.v3",
+            }
             and self._exact(spec, pane, agent)
             and isinstance(tokens, Mapping)
             and agent.get("terminal_id") == baseline.get("terminal_id")
@@ -760,7 +871,7 @@ class HerdrShotcallerBootstrapAdapter:
                 "same-pane Shotcaller metadata authority is incomplete",
             )
         self._published_source = self._title_source(spec)
-        self._expected_published_sequence = sequence + 1
+        self._expected_published_sequence = sequence
         display = self._display(callsign)
         token_arguments = tuple(
             part
@@ -779,9 +890,9 @@ class HerdrShotcallerBootstrapAdapter:
                 "--applies-to-source",
                 authority_source,
                 "--agent",
-                "codex",
+                self.options.runtime_kind,
                 "--display-agent",
-                "codex",
+                self.options.provider_kind,
                 "--title",
                 display["title"],
                 *token_arguments,
@@ -890,7 +1001,7 @@ class HerdrShotcallerBootstrapAdapter:
                 if (
                     self._expected_published_sequence is not None
                     and consecutive == 0
-                    and sequence != self._expected_published_sequence
+                    and sequence < self._expected_published_sequence
                 ):
                     raise StorageRefusal(
                         "shotcaller_metadata_unverified",
@@ -933,13 +1044,13 @@ class HerdrShotcallerBootstrapAdapter:
             "agent_id": spec.agent_id,
             "callsign": callsign,
             "runtime_instance_id": spec.runtime_instance_id,
-            "harness_kind": "codex-thread",
+            "harness_kind": self.launch_profile.runtime_kind,
             "backend_kind": "herdr",
             "session_identity": spec.thread_id,
             "endpoint_identity": self.options.pane_id,
             "endpoint_generation": self._observed["endpoint_generation"],
             "routing_name": callsign.lower(),
-            "display_agent": "codex",
+            "display_agent": self.options.provider_kind,
             "capabilities": list(spec.capabilities),
         }
 
@@ -991,6 +1102,65 @@ class HerdrShotcallerBootstrapAdapter:
                 "title": current_title,
                 "tokens": dict(tokens),
             }
+            original_route = self._restore_baseline.get("routing_name")
+            if original_route is not None:
+                if routing_name != original_route:
+                    return False
+                ownership_absent = (
+                    tokens.get(TITLE_OWNER_TOKEN) in {None, ""}
+                    and tokens.get(TITLE_SOURCE_TOKEN) in {None, ""}
+                )
+                if baseline_exact and ownership_absent:
+                    return True
+                if not owned_display:
+                    return False
+                sequence = agent.get("state_change_seq")
+                if not isinstance(sequence, int):
+                    return False
+                self._run(
+                    (
+                        "herdr",
+                        "pane",
+                        "report-metadata",
+                        self.options.pane_id,
+                        "--source",
+                        "league-shotcaller-rollback",
+                        "--applies-to-source",
+                        authority_source,
+                        "--agent",
+                        self.options.runtime_kind,
+                        "--display-agent",
+                        self.options.provider_kind,
+                        "--title",
+                        str(previous_title),
+                        "--token",
+                        f"sidebar_name={previous_sidebar}",
+                        "--token",
+                        f"thread_title={previous_thread_title}",
+                        "--token",
+                        f"{TITLE_OWNER_TOKEN}=",
+                        "--token",
+                        f"{TITLE_SOURCE_TOKEN}=",
+                        "--seq",
+                        str(sequence + 1),
+                    ),
+                    "Herdr adopted Shotcaller metadata rollback",
+                    silent=True,
+                )
+                pane, agent = self._current()
+                restored_tokens = agent.get("tokens")
+                return bool(
+                    self._exact_placeholder(pane, agent)
+                    and self._routing_name(agent) == original_route
+                    and isinstance(restored_tokens, Mapping)
+                    and restored_tokens.get(TITLE_OWNER_TOKEN) in {None, ""}
+                    and restored_tokens.get(TITLE_SOURCE_TOKEN) in {None, ""}
+                    and str(restored_tokens.get("sidebar_name", ""))
+                    == previous_sidebar
+                    and str(restored_tokens.get("thread_title", ""))
+                    == previous_thread_title
+                    and (self._presentation_title(agent) or "") == previous_title
+                )
             self._run(
                 ("herdr", "agent", "rename", self.options.pane_id, "--clear"),
                 "Herdr Shotcaller routing rollback",
@@ -1002,7 +1172,7 @@ class HerdrShotcallerBootstrapAdapter:
                 if expected_tokens.get("routing_alias") == routing_name:
                     expected_tokens.pop("routing_alias", None)
                 if expected_tokens.get("orchestrator_identity") == (
-                    f"codex · {routing_name}"
+                    f"{self.options.runtime_kind} · {routing_name}"
                 ):
                     expected_tokens.pop("orchestrator_identity", None)
                 if (
@@ -1073,9 +1243,9 @@ class HerdrShotcallerBootstrapAdapter:
                     "--applies-to-source",
                     authority_source,
                     "--agent",
-                    "codex",
+                    self.options.runtime_kind,
                     "--display-agent",
-                    "codex",
+                    self.options.provider_kind,
                 ]
                 for key, value in restore_tokens:
                     arguments.extend(("--token", f"{key}={value}"))
@@ -1127,9 +1297,9 @@ class HerdrShotcallerBootstrapAdapter:
                     "--applies-to-source",
                     authority_source,
                     "--agent",
-                    "codex",
+                    self.options.runtime_kind,
                     "--display-agent",
-                    "codex",
+                    self.options.provider_kind,
                     "--title",
                     str(previous_title),
                     "--token",
@@ -1183,7 +1353,7 @@ class HerdrShotcallerBootstrapAdapter:
             return False
         worktree = str(Path(self.options.worktree).resolve())
         return bool(
-            agent.get("agent") == "codex"
+            agent.get("agent") == self.options.runtime_kind
             and isinstance(agent.get("agent_status"), str)
             and agent.get("agent_status") in LIVE_STATUSES
             and agent.get("workspace_id") == self.options.workspace_id
@@ -1206,7 +1376,7 @@ class HerdrShotcallerBootstrapAdapter:
 
 
 class ShotcallerBootstrapService:
-    """Reserve, annotate, activate, and receipt one existing Codex endpoint."""
+    """Reserve, annotate, activate, and receipt one existing agent endpoint."""
 
     def __init__(self, store: Storage, adapter: HerdrShotcallerBootstrapAdapter, clock: Any) -> None:
         self.store = store
@@ -1275,27 +1445,50 @@ class ShotcallerBootstrapService:
                 spec.assignment_id, 1, receipt, self.clock.now()
             )
         at = self.clock.now()
-        reserved = self.store.allocate_callsign(
-            spec.assignment_id,
-            spec.agent_id,
-            "shotcaller",
-            "shotcaller",
-            spec.agent_id,
-            spec.capabilities,
-            at,
-            recovery_baseline=self.adapter.recovery_baseline(),
-            recovery_thread_id=spec.thread_id,
-        )
+        recovery_baseline = self.adapter.recovery_baseline()
+        try:
+            reserved = self.store.allocate_callsign(
+                spec.assignment_id,
+                spec.agent_id,
+                "shotcaller",
+                "shotcaller",
+                spec.agent_id,
+                spec.capabilities,
+                at,
+                recovery_baseline=recovery_baseline,
+                recovery_thread_id=spec.thread_id,
+                expected_callsign=observed.get("routing_name"),
+            )
+        except StorageRefusal as exc:
+            if exc.code == "callsign_expectation_mismatch":
+                raise StorageRefusal(
+                    "shotcaller_identity_unverified",
+                    "calling runtime route does not match the next eligible Shotcaller callsign",
+                ) from exc
+            raise
         published = observed.get("routing_name") == str(reserved["callsign"]).lower()
         try:
+            if observed.get("routing_name") is not None and not published:
+                raise StorageRefusal(
+                    "shotcaller_callsign_mismatch",
+                    "calling runtime route does not match the allocated Shotcaller callsign",
+                )
             if baseline is None:
                 baseline = self.store.shotcaller_bootstrap_baseline(spec.assignment_id)
                 if baseline is None:
+                    initial_baseline = (
+                        recovery_baseline
+                        if observed.get("routing_name") is not None
+                        else self.adapter.restoration_baseline()
+                    )
                     baseline = self.store.record_shotcaller_bootstrap_baseline(
-                        spec.assignment_id, 1, self.adapter.restoration_baseline()
+                        spec.assignment_id, 1, initial_baseline
                     )["baseline"]
                 self.adapter.use_restoration_baseline(baseline)
-            if baseline.get("schema") == "league.shotcaller-bootstrap-baseline.v2":
+            if baseline.get("schema") in {
+                "league.shotcaller-bootstrap-baseline.v2",
+                "league.shotcaller-bootstrap-baseline.v3",
+            }:
                 if fault:
                     fault("after_shotcaller_recovery_reserved")
                 if publication is None:

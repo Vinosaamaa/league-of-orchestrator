@@ -3,18 +3,16 @@
 from __future__ import annotations
 
 import hashlib
-import json
-import re
 from pathlib import Path
 from typing import Any, Mapping, Protocol
 
+from .adapter_types import OpaqueIdentity
+from .agent_adapters import adapter_kind_from_runtime, builtin_agent_adapter_registry
+from .multiplexer_adapters import builtin_multiplexer_adapter_registry
 from .storage import Storage, StorageRefusal
 from .visible_launch import CommandRunner, SubprocessRunner
 
 
-THREAD_UUID = re.compile(
-    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
-)
 LIVE_STATUSES = {"active", "blocked", "done", "idle", "waiting", "working"}
 CLOSED_STATUSES = {"closed", "completed", "failed", "stopped"}
 
@@ -69,25 +67,19 @@ class HerdrDescendantRuntimeAdapter:
 
     def __init__(self, runner: CommandRunner | None = None) -> None:
         self.runner = runner or SubprocessRunner()
+        self.multiplexer = builtin_multiplexer_adapter_registry(
+            herdr_runner=self.runner, herdr_binary="herdr"
+        ).adapter("herdr")
 
     def verify(
         self, target: Mapping[str, Any], runtime_instance_id: str
     ) -> dict[str, Any]:
-        completed = self.runner.run(("herdr", "agent", "list"), timeout_seconds=30)
         try:
-            envelope = json.loads(completed.stdout)
-            result = envelope["result"]
-            agents = result["agents"]
-        except (KeyError, TypeError, json.JSONDecodeError) as exc:
+            agents = self.multiplexer.discover()
+        except StorageRefusal as exc:
             raise StorageRefusal(
                 "descendant_runtime_unverified", "Herdr agent inventory is malformed"
             ) from exc
-        if completed.returncode != 0 or not isinstance(agents, list) or any(
-            not isinstance(item, Mapping) for item in agents
-        ):
-            raise StorageRefusal(
-                "descendant_runtime_unverified", "Herdr agent inventory refused verification"
-            )
         expected_pane = target.get("address")
         expected_route = target.get("routing_name")
         expected_thread = target.get("thread_id")
@@ -120,16 +112,26 @@ class HerdrDescendantRuntimeAdapter:
         worktree = Path(str(target.get("worktree", "")))
         terminal_id = agent.get("terminal_id")
         state_change_seq = agent.get("state_change_seq")
+        try:
+            adapter_kind = adapter_kind_from_runtime(str(target.get("kind", "")))
+            agent_adapter = builtin_agent_adapter_registry().adapter(adapter_kind)
+            agent_adapter.contract.require("identify")
+            OpaqueIdentity(adapter_kind, str(expected_thread))
+        except StorageRefusal as exc:
+            raise StorageRefusal(
+                "descendant_runtime_mismatch",
+                f"{locator}: canonical agent adapter identity is unsupported",
+            ) from exc
         exact = (
-            target.get("kind") == "codex-thread"
+            target.get("kind") == agent_adapter.launch_profile.runtime_kind
             and target.get("backend") == "herdr"
-            and agent.get("agent") == "codex"
+            and agent.get("agent") == adapter_kind
             and _herdr_interactive_ready(agent)
             and agent.get("pane_id") == expected_pane
             and agent.get("name") == expected_route
             and _session(agent) == expected_thread
             and isinstance(expected_thread, str)
-            and THREAD_UUID.fullmatch(expected_thread) is not None
+            and bool(expected_thread)
             and worktree.is_absolute()
             and worktree.is_dir()
             and not worktree.is_symlink()
@@ -155,7 +157,7 @@ class HerdrDescendantRuntimeAdapter:
             "champion_agent_id": target["champion_agent_id"],
             "task_id": target["task_id"],
             "runtime_instance_id": runtime_instance_id,
-            "harness_kind": "codex-thread",
+            "harness_kind": agent_adapter.launch_profile.runtime_kind,
             "backend_kind": "herdr",
             "session_ref": expected_thread,
             "endpoint": expected_pane,

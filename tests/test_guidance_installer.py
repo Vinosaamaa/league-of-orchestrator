@@ -137,13 +137,105 @@ def test_rollback_size_bounds(root: Path, source: Path) -> None:
 
 def source_contract(source: Path) -> bytes:
     original = source.read_bytes()
+    triage = " ".join(
+        original.decode("utf-8")
+        .split("## Durable prompt and request triage\n", 1)[1]
+        .split("\n## ", 1)[0]
+        .split()
+    )
+    for required_clause in (
+        "Only Codex `UserPromptSubmit`, Cursor `beforeSubmitPrompt`, and Pi `input` "
+        "from an exactly bound canonical League runtime capture its exact local prompt "
+        "bytes once and wake its verified Shotcaller.",
+        "An unbound, non-League, or otherwise unverifiable runtime is left untouched "
+        "and unrecorded.",
+        "Prompt intake activates only after exact canonical binding; it never "
+        "backfills pre-binding prompts or mines transcripts.",
+        "Stop feedback is an operational continuation, not new Summoner steering. "
+        "If it names an untriaged prompt, reconcile that prompt through the canonical "
+        "request turn before attempting to end again.",
+        "A routine Stop block never authorizes hook disablement, `service-start`, "
+        "detachment, request cancellation, `/new`, or `allow-stop --once`; use the "
+        "named recovery only for its exact refusal, and reserve the one-shot allowance "
+        "for an explicit Summoner stop after work is paused.",
+    ):
+        assert required_clause in triage, required_clause
+    for contradictory_clause in (
+        b"UserPromptSubmit and beforeSubmitPrompt capture exact local prompt bytes once",
+        b"Missing runtime identity quarantines and deduplicates the exact prompt",
+        b"It binds later only to one verified runtime",
+        b"Every prompt item is classified",
+    ):
+        assert contradictory_clause not in original, contradictory_clause
+    delegation = " ".join(
+        original.decode("utf-8")
+        .split("## Issue binding and delegation\n", 1)[1]
+        .split("\n## ", 1)[0]
+        .split()
+    )
+    for required_clause in (
+        "A Champion starts from the exact assigned issue, acceptance criteria, "
+        "worktree, branch, and intended handoff",
+        "Champion implementation uses the smallest source-managed change and fastest "
+        "faithful focused check first",
+        "While an in-scope action remains, continue it directly",
+        "do not substitute status narration, unchanged polling, unrelated "
+        "investigation, or speculative refactoring",
+        "One authoritative blocker or repeated identical failure stops retries",
+        "Champion completion reports changed files, exact verification, and any "
+        "remaining blocker",
+        "never publish, merge, release, install, clean up, or keep monitoring unless "
+        "explicitly assigned",
+    ):
+        assert required_clause in delegation, required_clause
+    delivery = " ".join(
+        original.decode("utf-8")
+        .split("## Delivery and supervision\n", 1)[1]
+        .split("\n## ", 1)[0]
+        .split()
+    )
+    for required_clause in (
+        "Hooks first verify an exact canonical runtime binding and role.",
+        "If a Codex, Pi, or Cursor CLI runtime is unbound or non-League, "
+        "`UserPrompt`, pre-mutation, and `Stop` allow/no-op immediately with zero "
+        "canonical mutation.",
+        "An attached Shotcaller with any owner or delegated obligation blocks every "
+        "`Stop` attempt unless the Summoner explicitly requested a final stop and the "
+        "Shotcaller armed the exact one-shot allowance after pausing work.",
+        "When the Summoner requests all work paused, the Shotcaller reaches a safe "
+        "boundary for its own work, sends a pause-and-preserve instruction to every "
+        "owned active Champion, then runs `$HOME/.local/bin/agent-watcher "
+        "--shotcaller <callsign> allow-stop --once` immediately before `Stop`.",
+        "An attached Shotcaller waits for material League work with one "
+        "`$HOME/.local/bin/agent-watcher --shotcaller <callsign> wait` invocation.",
+        "`attach-shotcaller` requires the exact live supervisor binding and makes the "
+        "Shotcaller terminal-attached.",
+        "`detach-shotcaller` requests token-saving terminal detachment without "
+        "pausing supervision.",
+        "Detachment may let the Shotcaller end only when no owner-actionable work "
+        "remains and the persistent watcher lease, runtime generation, locator, fence, and "
+        "wake/delivery path exactly match its durable detachment receipt.",
+        "The watcher remains live and later wakes and delivers exactly once.",
+        "`service-pause` and `service-resume` are deprecated aliases for "
+        "`detach-shotcaller` and `attach-shotcaller`, respectively.",
+        "For a bound Shotcaller, a missing, stale, or ambiguous watcher, fence, "
+        "binding, or wake path refuses detachment and keeps `Stop` blocked.",
+        "Codex, Pi regardless of model provider, and Cursor CLI share this "
+        "provider-neutral contract.",
+    ):
+        assert required_clause in delivery, required_clause
     assert b"Read the universal `~/.agents/AGENTS.md` first" in original
     assert b"request turn" in original
     assert b"exact repository issue" in original
     assert b"one or two words" in original
     assert b"autonomous_delivery" in original
     assert b"exact-thread reopen" in original
-    assert b"terminal-environment-toolkit issue #45" in original
+    assert b"belong to the terminal-environment-toolkit repository" in original
+    assert b"universal bounded-read-only rule" not in original
+    assert (
+        b"Tiny direct work follows the universal authority and engineering rules"
+        in original
+    )
     for forbidden_overlap in (
         b"Repository writer ->",
         b"Fast lane ->",

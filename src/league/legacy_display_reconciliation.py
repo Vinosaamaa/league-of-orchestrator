@@ -27,7 +27,7 @@ from .visible_launch import (
 THREAD_UUID = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
 )
-LIVE_STATUSES = {"active", "blocked", "idle", "waiting", "working"}
+PRESENT_STATUSES = {"active", "blocked", "done", "idle", "waiting", "working"}
 OWNERSHIP_TOKENS = {
     "launch_title_owner",
     "launch_title_source",
@@ -41,6 +41,17 @@ OWNERSHIP_TOKENS = {
 LEGACY_OWNERSHIP_TOKENS = {
     key for key in OWNERSHIP_TOKENS if key.startswith("legacy_display_")
 }
+_LAST_METADATA_SEQUENCE = 0
+
+
+def _next_metadata_sequence() -> int:
+    """Return a process-monotonic sequence for League's metadata source."""
+    global _LAST_METADATA_SEQUENCE
+    candidate = time.time_ns()
+    if candidate <= _LAST_METADATA_SEQUENCE:
+        candidate = _LAST_METADATA_SEQUENCE + 1
+    _LAST_METADATA_SEQUENCE = candidate
+    return candidate
 
 
 def _stable_json(value: Any) -> str:
@@ -52,8 +63,55 @@ def _digest(value: Any) -> str:
 
 
 def _canonical_title(agent: Mapping[str, Any]) -> str:
+    tokens = agent.get("tokens")
+    if (
+        isinstance(tokens, Mapping)
+        and isinstance(tokens.get("legacy_display_source"), str)
+        and str(tokens.get("legacy_display_source")).startswith("league-legacy-")
+        and isinstance(tokens.get("thread_title"), str)
+    ):
+        target = str(tokens["thread_title"])
+        rendered = str(agent.get("title") or "")
+        marker = "Codex | "
+        if marker in rendered and rendered.split(marker, 1)[1].strip() == target:
+            return target
+        return ""
     title = agent.get("terminal_title_stripped", agent.get("terminal_title", ""))
-    return str(title) if isinstance(title, str) else ""
+    value = str(title) if isinstance(title, str) else ""
+    return value.removesuffix(" | codex")
+
+
+def _effect_sequence_exact(
+    spec: "LegacyDisplayReconciliationSpec", observed: Any
+) -> bool:
+    expected = spec.expected_state_change_seq
+    return bool(
+        type(expected) is int
+        and type(observed) is int
+        and observed in {expected, expected + 1}
+    )
+
+
+def _presentation_authority(
+    agent: Mapping[str, Any], tokens: Mapping[str, Any], session_source: str | None
+) -> str | None:
+    for key in ("legacy_display_applies_to", "launch_title_applies_to"):
+        owned_authority = tokens.get(key)
+        if isinstance(owned_authority, str) and owned_authority:
+            return owned_authority
+    if (
+        tokens.get("identity_title_mode") == "tokens-only"
+        and tokens.get("identity_thread_id") == _session_id(agent)
+        and tokens.get("harness") == agent.get("agent")
+        and isinstance(tokens.get("provider_label"), str)
+        and bool(tokens.get("provider_label"))
+        and isinstance(tokens.get("sidebar_name"), str)
+        and bool(tokens.get("sidebar_name"))
+        and isinstance(tokens.get("thread_title"), str)
+        and bool(tokens.get("thread_title"))
+    ):
+        return session_source
+    return session_source
 
 
 @dataclass(frozen=True)
@@ -74,6 +132,9 @@ class LegacyDisplayReconciliationSpec:
     target_task_label: str
     owner_authorized: bool
     expected_agent_status: str | None = None
+    previous_worktree: str | None = None
+    previous_branch: str | None = None
+    branch: str | None = None
 
 
 class HerdrLegacyDisplayAdapter:
@@ -112,19 +173,97 @@ class HerdrLegacyDisplayAdapter:
         )
         return _agent_object(result)
 
+    def _wait_for_plugin_action(self, action: Mapping[str, Any]) -> None:
+        log = action.get("log")
+        if not isinstance(log, Mapping):
+            raise StorageRefusal(
+                "legacy_display_unverified",
+                "legacy Champion status refresh returned no exact log",
+            )
+        log_id = log.get("log_id")
+        status = log.get("status")
+        if not isinstance(log_id, str) or not log_id:
+            raise StorageRefusal(
+                "legacy_display_unverified",
+                "legacy Champion status refresh returned no exact log identity",
+            )
+        for attempt in range(51):
+            if status == "succeeded":
+                return
+            if status not in {"queued", "running"}:
+                raise StorageRefusal(
+                    "legacy_display_unverified",
+                    "legacy Champion status refresh did not succeed",
+                )
+            if attempt == 50:
+                break
+            time.sleep(0.1)
+            result = self._run(
+                (
+                    "herdr",
+                    "plugin",
+                    "log",
+                    "list",
+                    "--plugin",
+                    "local.tab-status",
+                    "--limit",
+                    "50",
+                ),
+                "legacy Champion status refresh log inspection",
+            )
+            logs = result.get("logs")
+            matches = (
+                [
+                    item
+                    for item in logs
+                    if isinstance(item, Mapping) and item.get("log_id") == log_id
+                ]
+                if isinstance(logs, list)
+                else []
+            )
+            if not matches:
+                continue
+            if len(matches) != 1:
+                raise StorageRefusal(
+                    "legacy_display_unverified",
+                    "legacy Champion status refresh log is ambiguous",
+                )
+            status = matches[0].get("status")
+        raise StorageRefusal(
+            "legacy_display_unverified",
+            "legacy Champion status refresh did not finish in time",
+        )
+
     def _observe(
         self, spec: LegacyDisplayReconciliationSpec
     ) -> tuple[dict[str, Any], dict[str, str]]:
         agent = self._agent(spec.routing_name)
         tokens = agent.get("tokens")
-        source = agent.get("metadata_source")
-        authority = _session_source(agent)
+        session_source = _session_source(agent)
+        explicit_source = agent.get("metadata_source")
+        source = (
+            explicit_source
+            if "metadata_source" in agent
+            else (
+                tokens.get("legacy_display_source")
+                if isinstance(tokens, Mapping)
+                and isinstance(tokens.get("legacy_display_source"), str)
+                and tokens.get("legacy_display_source")
+                else session_source
+            )
+        )
+        authority = (
+            _presentation_authority(agent, tokens, session_source)
+            if isinstance(tokens, Mapping)
+            else session_source
+        )
         sequence = agent.get("state_change_seq")
         worktree = str(Path(spec.worktree).resolve())
         status_exact = (
             agent.get("agent_status") == spec.expected_agent_status
             if spec.expected_agent_status is not None
-            else agent.get("agent_status") in LIVE_STATUSES
+            else isinstance(agent.get("agent_status"), str)
+            and agent.get("agent_status") in PRESENT_STATUSES
         )
         exact = bool(
             agent.get("agent") == "codex"
@@ -224,6 +363,8 @@ class HerdrLegacyDisplayAdapter:
             "task_label": spec.target_task_label,
             "thread_title": target,
             ORCHESTRATOR_ROLE_TOKEN: role,
+            "identity_title": f"Codex | {target}",
+            "identity_title_mode": "tokens-only",
             "legacy_display_owner": owner,
             "legacy_display_assignment": reconciliation_id,
             "legacy_display_source": source,
@@ -280,7 +421,7 @@ class HerdrLegacyDisplayAdapter:
                     "--clear-display-agent",
                     *clear_arguments,
                     "--seq",
-                    str(sequence),
+                    str(max(sequence, _next_metadata_sequence())),
                 ),
                 "legacy Champion display rollback",
                 silent=True,
@@ -341,8 +482,7 @@ class HerdrLegacyDisplayAdapter:
         return bool(
             observation.get("presentation_source") == source
             and observation.get("title") == target
-            and observation.get("state_change_seq")
-            == int(spec.expected_state_change_seq) + 1
+            and _effect_sequence_exact(spec, observation.get("state_change_seq"))
             and all(tokens.get(key) == value for key, value in expected.items())
             and not (OWNERSHIP_TOKENS - set(expected)).intersection(tokens)
         )
@@ -380,8 +520,9 @@ class HerdrLegacyDisplayAdapter:
             )
 
         # A second fresh read is the ordering barrier. Herdr sequences are scoped
-        # per metadata source, so the effect uses a dedicated League source and
-        # the global observation sequence detects any interleaved presentation.
+        # per metadata source, so the effect uses a fresh process-monotonic value
+        # on League's dedicated source. The agent state sequence remains the
+        # independent guard for interleaved native presentation changes.
         current, current_tokens = self._observe(spec)
         if current != baseline or current_tokens != baseline_tokens:
             raise StorageRefusal(
@@ -391,10 +532,11 @@ class HerdrLegacyDisplayAdapter:
         target = f"{spec.callsign} · {spec.target_task_label}"
         source = self._metadata_source(reconciliation_id)
         authority = str(current["authority_source"])
-        sequence = int(current["state_change_seq"]) + 1
+        sequence = _next_metadata_sequence()
         reconciliation_tokens = self._reconciliation_tokens(
             spec, reconciliation_id, source, authority
         )
+        token_only_status = current_tokens.get("identity_title_mode") == "tokens-only"
         token_arguments = tuple(
             part
             for key, value in reconciliation_tokens.items()
@@ -413,8 +555,7 @@ class HerdrLegacyDisplayAdapter:
             "codex",
             "--display-agent",
             "codex",
-            "--title",
-            target,
+            *(("--clear-title",) if token_only_status else ("--title", target)),
             *token_arguments,
             "--seq",
             str(sequence),
@@ -436,6 +577,35 @@ class HerdrLegacyDisplayAdapter:
                 "legacy_display_unverified",
                 "legacy Champion compare-and-set metadata write was refused",
             ) from exc
+        if token_only_status:
+            try:
+                action = self._run(
+                    (
+                        "herdr",
+                        "plugin",
+                        "action",
+                        "invoke",
+                        "local.tab-status.sync",
+                    ),
+                    "legacy Champion status presentation refresh",
+                    silent=True,
+                )
+                self._wait_for_plugin_action(action)
+            except StorageRefusal as exc:
+                observed, tokens = self._observe(spec)
+                if self._owns_overlay(
+                    spec, reconciliation_id, observed, tokens
+                ):
+                    self._clear_owned_overlay(
+                        spec,
+                        reconciliation_id,
+                        authority,
+                        max(sequence + 1, int(observed["state_change_seq"]) + 1),
+                    )
+                raise StorageRefusal(
+                    "legacy_display_unverified",
+                    "legacy Champion status presentation refresh failed",
+                ) from exc
         expected_tokens = {
             **baseline_tokens,
             **reconciliation_tokens,
@@ -455,7 +625,7 @@ class HerdrLegacyDisplayAdapter:
                 observed["presentation_source"] == source
                 and observed["authority_source"] == authority
                 and observed["title"] == target
-                and observed["state_change_seq"] == sequence
+                and _effect_sequence_exact(spec, observed["state_change_seq"])
                 and tokens == expected_tokens
             )
             if not exact:

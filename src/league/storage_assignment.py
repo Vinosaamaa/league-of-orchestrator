@@ -25,6 +25,7 @@ class PrepareAssignmentCommand:
     assignment_role: str = "champion"
     dispatch_id: Optional[str] = None
     promoted_from_assignment_id: Optional[str] = None
+    excluded_callsigns: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -62,6 +63,9 @@ class LegacyDisplayReconciliationCommand:
     owner_authorized: bool
     at: str
     expected_agent_status: Optional[str] = None
+    previous_worktree: Optional[str] = None
+    previous_branch: Optional[str] = None
+    branch: Optional[str] = None
 
 
 class AssignmentStorage(Protocol):

@@ -42,13 +42,17 @@ class RecordingHerdr:
         worktree: Path,
         *,
         thread_id: str = THREAD_ID,
+        agent_kind: str = "codex",
+        provider_kind: str | None = None,
         publish_mismatch: bool = False,
         delayed_auto_title_reads: int | None = None,
-        session_source: str = "herdr:codex",
+        session_source: str | None = None,
     ) -> None:
         self.worktree = str(worktree.resolve())
         self.thread_id = thread_id
-        self.session_source = session_source
+        self.session_source = session_source or f"herdr:{agent_kind}"
+        self.agent_kind = agent_kind
+        self.provider_kind = provider_kind or agent_kind
         self.terminal_id = "terminal:1"
         self.agent_status = "working"
         self.publish_mismatch = publish_mismatch
@@ -58,7 +62,7 @@ class RecordingHerdr:
         self.routing_alias_field: object | None = None
         self.tokens: dict[str, str] | None = {}
         self.title = ""
-        self.metadata_source = "herdr:codex"
+        self.metadata_source = f"herdr:{agent_kind}"
         self.expose_metadata_source = True
         self.provider_managed_presentation = False
         self.source_sequences: dict[str, int] = {}
@@ -74,7 +78,7 @@ class RecordingHerdr:
         if stripped_title.endswith(" | codex"):
             stripped_title = stripped_title[: -len(" | codex")]
         value: dict[str, object] = {
-            "agent": "codex",
+            "agent": self.agent_kind,
             "agent_status": self.agent_status,
             "agent_session": {"source": self.session_source, "value": self.thread_id},
             "cwd": self.worktree,
@@ -113,7 +117,7 @@ class RecordingHerdr:
         if self.pending_auto_title_reads > 0:
             return
         self.pending_auto_title_reads = None
-        self.metadata_source = "herdr:codex"
+        self.metadata_source = f"herdr:{self.agent_kind}"
         self.state_change_seq += 1
         self.title = "Create the Shotcaller for this pane | codex"
 
@@ -136,15 +140,15 @@ class RecordingHerdr:
                 callsign = self.name[0].upper() + self.name[1:]
                 self.tokens = {
                     "callsign": callsign,
-                    "harness": "codex",
+                    "harness": self.agent_kind,
                     "identity_thread_id": self.thread_id,
-                    "identity_title": f"Codex | {callsign}",
-                    "orchestrator_identity": f"codex · {self.name}",
+                    "identity_title": f"{self.agent_kind.title()} | {callsign}",
+                    "orchestrator_identity": f"{self.agent_kind} · {self.name}",
                     "routing_alias": self.name,
                     "sidebar_name": callsign,
                     "thread_title": callsign,
                 }
-                self.title = f"{callsign} | codex"
+                self.title = f"{callsign} | {self.agent_kind}"
             result = {"agent": self._agent()}
         elif command[:3] == ("herdr", "pane", "report-metadata"):
             source = command[command.index("--source") + 1]
@@ -310,6 +314,49 @@ class ProviderPresentationAfterPublishHerdr(RecordingHerdr):
                 "user_badge": "preserve",
             }
         )
+
+
+class BenignSequenceAdvanceAfterPublishHerdr(RecordingHerdr):
+    """A status refresh advances the global sequence after exact publication."""
+
+    def run(
+        self, arguments, *, timeout_seconds: int = 30
+    ) -> subprocess.CompletedProcess[str]:
+        command = tuple(arguments)
+        result = super().run(arguments, timeout_seconds=timeout_seconds)
+        if (
+            command[:3] == ("herdr", "pane", "report-metadata")
+            and "--source" in command
+            and command[command.index("--source") + 1].startswith(
+                "league-shotcaller-"
+            )
+            and command[command.index("--source") + 1]
+            != "league-shotcaller-rollback"
+        ):
+            self.state_change_seq += 3
+        return result
+
+
+class StableSequenceAfterPublishHerdr(RecordingHerdr):
+    """Exact metadata publication need not advance the agent state sequence."""
+
+    def run(
+        self, arguments, *, timeout_seconds: int = 30
+    ) -> subprocess.CompletedProcess[str]:
+        command = tuple(arguments)
+        prior_sequence = self.state_change_seq
+        result = super().run(arguments, timeout_seconds=timeout_seconds)
+        if (
+            command[:3] == ("herdr", "pane", "report-metadata")
+            and "--source" in command
+            and command[command.index("--source") + 1].startswith(
+                "league-shotcaller-"
+            )
+            and command[command.index("--source") + 1]
+            != "league-shotcaller-rollback"
+        ):
+            self.state_change_seq = prior_sequence
+        return result
 
 
 class CrashAfterRenameHerdr(RecordingHerdr):
@@ -728,7 +775,7 @@ def test_in_place_bootstrap_creates_shotcaller_without_layout_or_squad_registrat
     turn_pid = turn.pid
     assert turn.stdin is not None and turn.stdout is not None
     intake = json.loads(turn.stdout.readline())
-    assert intake["result"]["phase"] == "intake"
+    assert intake.get("result", {}).get("phase") == "intake", intake
     assert [row["body"] for row in intake["result"]["prompts"]] == [prompt_body]
     turn.stdin.write(
         json.dumps(
@@ -915,6 +962,343 @@ def test_cursor_authority_shotcaller_role_token_is_owned_and_retry_safe(
             call[:3] == ("herdr", "pane", "report-metadata")
             for call in runner.calls[calls_before_icon:]
         )
+def test_in_place_bootstrap_is_provider_neutral_and_never_creates_layout(
+    root: Path,
+) -> None:
+    cases = (
+        ("codex", "codex", THREAD_ID, "codex-thread"),
+        ("cursor", "cursor", "77777777-7777-4777-8777-777777777777", "cursor-thread"),
+        ("pi", "codex", "/synthetic/pi/sessions/shotcaller.jsonl", "pi-thread"),
+        ("pi", "cursor", "/synthetic/pi/sessions/cursor-shotcaller.jsonl", "pi-thread"),
+    )
+    for index, (runtime_kind, provider_kind, session_ref, harness_kind) in enumerate(cases):
+        state, _ = migrated_state(root, f"in-place-shotcaller-{index}")
+        worktree = root / f"in-place-shotcaller-{index}" / "worktree"
+        worktree.mkdir()
+        clock = FakeClock()
+        runner = RecordingHerdr(
+            worktree,
+            thread_id=session_ref,
+            agent_kind=runtime_kind,
+            provider_kind=provider_kind,
+        )
+        spec = ShotcallerBootstrapSpec(
+            assignment_id=f"callsign-assignment:bootstrap:provider-{index}",
+            agent_id=f"agent:shotcaller:provider-{index}",
+            runtime_instance_id=f"runtime:shotcaller:provider-{index}",
+            thread_id=session_ref,
+            capabilities=("request.triage", "rollover.accept"),
+        )
+        options = ShotcallerBootstrapOptions(
+            workspace_id="w1",
+            tab_id="w1:t1",
+            pane_id="w1:p1",
+            worktree=str(worktree.resolve()),
+            runtime_kind=runtime_kind,
+            provider_kind=provider_kind,
+        )
+        with SQLiteStorage(state) as store:
+            _seed_available_ashe(store, clock)
+            created = ShotcallerBootstrapService(
+                store,
+                HerdrShotcallerBootstrapAdapter(
+                    options,
+                    runner,
+                    environment={
+                        "HERDR_ENV": "1",
+                        "HERDR_WORKSPACE_ID": "w1",
+                        "HERDR_TAB_ID": "w1:t1",
+                        "HERDR_PANE_ID": "w1:p1",
+                    },
+                ),
+                clock,
+            ).bootstrap(spec)
+            assert created["state"] == "active"
+            row = store.connection.execute(
+                "SELECT kind,thread_id,display_agent FROM agent_instances WHERE agent_id=?",
+                (spec.agent_id,),
+            ).fetchone()
+            assert tuple(row) == (harness_kind, session_ref, provider_kind)
+        forbidden = {
+            ("herdr", "tab", "create"),
+            ("herdr", "pane", "split"),
+            ("herdr", "workspace", "create"),
+            ("herdr", "agent", "start"),
+        }
+        assert not any(call[:3] in forbidden for call in runner.calls)
+
+
+def _tet_pi_projection(
+    runner: RecordingHerdr, *, name: str | None, sidebar_name: str
+) -> None:
+    runner.expose_metadata_source = False
+    runner.name = name
+    runner.title = f"π - {sidebar_name} - Project"
+    thread_title = f"{sidebar_name} · Project"
+    runner.tokens = {
+        "callsign": sidebar_name,
+        "harness": "pi",
+        "identity_thread_id": "sha256:"
+        + hashlib.sha256(runner.thread_id.encode("utf-8")).hexdigest(),
+        "identity_title": f"Pi | {thread_title}",
+        "provider_label": "piCodex",
+        "sidebar_name": sidebar_name,
+        "thread_title": thread_title,
+    }
+    if name is not None:
+        runner.tokens.update(
+            {
+                "orchestrator_identity": f"pi · {name}",
+                "routing_alias": name,
+            }
+        )
+
+
+def test_in_place_bootstrap_adopts_exact_named_tet_pi_session(root: Path) -> None:
+    state, _ = migrated_state(root, "named-tet-pi")
+    worktree = root / "named-tet-pi" / "worktree"
+    worktree.mkdir()
+    clock = FakeClock()
+    session = "/synthetic/pi/sessions/shotcaller.jsonl"
+    runner = RecordingHerdr(
+        worktree, thread_id=session, agent_kind="pi", provider_kind="codex"
+    )
+    _tet_pi_projection(runner, name="ashe", sidebar_name="Ashe")
+    spec = ShotcallerBootstrapSpec(
+        assignment_id="callsign-assignment:bootstrap:named-tet-pi",
+        agent_id="agent:shotcaller:named-tet-pi",
+        runtime_instance_id="runtime:shotcaller:named-tet-pi",
+        thread_id=session,
+        capabilities=("request.triage", "rollover.accept"),
+    )
+    options = ShotcallerBootstrapOptions(
+        workspace_id="w1",
+        tab_id="w1:t1",
+        pane_id="w1:p1",
+        worktree=str(worktree.resolve()),
+        runtime_kind="pi",
+        provider_kind="codex",
+    )
+    with SQLiteStorage(state) as store:
+        _seed_available_ashe(store, clock)
+        created = ShotcallerBootstrapService(
+            store,
+            HerdrShotcallerBootstrapAdapter(
+                options,
+                runner,
+                environment={
+                    "HERDR_ENV": "1",
+                    "HERDR_WORKSPACE_ID": "w1",
+                    "HERDR_TAB_ID": "w1:t1",
+                    "HERDR_PANE_ID": "w1:p1",
+                },
+            ),
+            clock,
+        ).bootstrap(spec)
+        assert created["state"] == "active"
+        assert created["callsign"] == "Ashe"
+        assert runner.name == "ashe"
+        assert not any(
+            call[:3] == ("herdr", "agent", "rename") for call in runner.calls
+        )
+
+
+def test_in_place_bootstrap_refuses_named_tet_pi_callsign_mismatch(root: Path) -> None:
+    state, _ = migrated_state(root, "named-tet-pi-mismatch")
+    worktree = root / "named-tet-pi-mismatch" / "worktree"
+    worktree.mkdir()
+    clock = FakeClock()
+    session = "/synthetic/pi/sessions/shotcaller.jsonl"
+    runner = RecordingHerdr(
+        worktree, thread_id=session, agent_kind="pi", provider_kind="codex"
+    )
+    _tet_pi_projection(runner, name="ambessa", sidebar_name="Ambessa")
+    options = ShotcallerBootstrapOptions(
+        workspace_id="w1",
+        tab_id="w1:t1",
+        pane_id="w1:p1",
+        worktree=str(worktree.resolve()),
+        runtime_kind="pi",
+        provider_kind="codex",
+    )
+    spec = ShotcallerBootstrapSpec(
+        assignment_id="callsign-assignment:bootstrap:named-tet-pi-mismatch",
+        agent_id="agent:shotcaller:named-tet-pi-mismatch",
+        runtime_instance_id="runtime:shotcaller:named-tet-pi-mismatch",
+        thread_id=session,
+        capabilities=("request.triage", "rollover.accept"),
+    )
+    with SQLiteStorage(state) as store:
+        _seed_available_ashe(store, clock)
+        service = ShotcallerBootstrapService(
+            store,
+            HerdrShotcallerBootstrapAdapter(
+                options,
+                runner,
+                environment={
+                    "HERDR_ENV": "1",
+                    "HERDR_WORKSPACE_ID": "w1",
+                    "HERDR_TAB_ID": "w1:t1",
+                    "HERDR_PANE_ID": "w1:p1",
+                },
+            ),
+            clock,
+        )
+        try:
+            service.bootstrap(spec)
+        except StorageRefusal as exc:
+            assert exc.code == "shotcaller_identity_unverified"
+        else:
+            raise AssertionError("named Pi route replaced a different queue-front callsign")
+        assignment = store.callsign_assignment_status(spec.assignment_id)
+        assert assignment is None
+        assert runner.name == "ambessa"
+        assert not any(
+            call[:3] in {
+                ("herdr", "agent", "rename"),
+                ("herdr", "pane", "report-metadata"),
+            }
+            for call in runner.calls
+        )
+
+
+def test_named_tet_pi_publication_rollback_preserves_original_route(root: Path) -> None:
+    worktree = root / "named-tet-pi-rollback" / "worktree"
+    worktree.mkdir(parents=True)
+    session = "/synthetic/pi/sessions/shotcaller.jsonl"
+    runner = RecordingHerdr(
+        worktree, thread_id=session, agent_kind="pi", provider_kind="codex"
+    )
+    _tet_pi_projection(runner, name="ashe", sidebar_name="Ashe")
+    spec = ShotcallerBootstrapSpec(
+        assignment_id="callsign-assignment:bootstrap:named-tet-pi-rollback",
+        agent_id="agent:shotcaller:named-tet-pi-rollback",
+        runtime_instance_id="runtime:shotcaller:named-tet-pi-rollback",
+        thread_id=session,
+        capabilities=("request.triage", "rollover.accept"),
+    )
+    adapter = HerdrShotcallerBootstrapAdapter(
+        ShotcallerBootstrapOptions(
+            workspace_id="w1",
+            tab_id="w1:t1",
+            pane_id="w1:p1",
+            worktree=str(worktree.resolve()),
+            runtime_kind="pi",
+            provider_kind="codex",
+        ),
+        runner,
+        environment={
+            "HERDR_ENV": "1",
+            "HERDR_WORKSPACE_ID": "w1",
+            "HERDR_TAB_ID": "w1:t1",
+            "HERDR_PANE_ID": "w1:p1",
+        },
+    )
+    adapter.inspect(spec)
+    baseline = adapter.recovery_baseline()
+    assert baseline["schema"] == "league.shotcaller-bootstrap-baseline.v3"
+    adapter.use_restoration_baseline(baseline)
+    adapter.publish(spec, "Ashe")
+    assert adapter.restore() is True
+    assert runner.name == "ashe"
+    assert runner.tokens["sidebar_name"] == baseline["sidebar_name"]
+    assert runner.tokens["thread_title"] == baseline["thread_title"]
+    assert "shotcaller_title_owner" not in runner.tokens
+    assert "shotcaller_title_source" not in runner.tokens
+
+
+def test_named_tet_pi_accepts_benign_sequence_advance_after_publication(
+    root: Path,
+) -> None:
+    state, _ = migrated_state(root, "named-tet-pi-sequence-advance")
+    worktree = root / "named-tet-pi-sequence-advance" / "worktree"
+    worktree.mkdir()
+    clock = FakeClock()
+    session = "/synthetic/pi/sessions/shotcaller.jsonl"
+    runner = BenignSequenceAdvanceAfterPublishHerdr(
+        worktree, thread_id=session, agent_kind="pi", provider_kind="codex"
+    )
+    _tet_pi_projection(runner, name="ashe", sidebar_name="Ashe")
+    spec = ShotcallerBootstrapSpec(
+        assignment_id="callsign-assignment:bootstrap:named-tet-pi-sequence-advance",
+        agent_id="agent:shotcaller:named-tet-pi-sequence-advance",
+        runtime_instance_id="runtime:shotcaller:named-tet-pi-sequence-advance",
+        thread_id=session,
+        capabilities=("request.triage", "rollover.accept"),
+    )
+    options = ShotcallerBootstrapOptions(
+        workspace_id="w1",
+        tab_id="w1:t1",
+        pane_id="w1:p1",
+        worktree=str(worktree.resolve()),
+        runtime_kind="pi",
+        provider_kind="codex",
+    )
+    with SQLiteStorage(state) as store:
+        _seed_available_ashe(store, clock)
+        created = ShotcallerBootstrapService(
+            store,
+            HerdrShotcallerBootstrapAdapter(
+                options,
+                runner,
+                environment={
+                    "HERDR_ENV": "1",
+                    "HERDR_WORKSPACE_ID": "w1",
+                    "HERDR_TAB_ID": "w1:t1",
+                    "HERDR_PANE_ID": "w1:p1",
+                },
+            ),
+            clock,
+        ).bootstrap(spec)
+        assert created["state"] == "active"
+        assert created["callsign"] == "Ashe"
+
+
+def test_named_tet_pi_accepts_exact_publication_without_sequence_advance(
+    root: Path,
+) -> None:
+    state, _ = migrated_state(root, "named-tet-pi-stable-sequence")
+    worktree = root / "named-tet-pi-stable-sequence" / "worktree"
+    worktree.mkdir()
+    clock = FakeClock()
+    session = "/synthetic/pi/sessions/shotcaller.jsonl"
+    runner = StableSequenceAfterPublishHerdr(
+        worktree, thread_id=session, agent_kind="pi", provider_kind="codex"
+    )
+    _tet_pi_projection(runner, name="ashe", sidebar_name="Ashe")
+    spec = ShotcallerBootstrapSpec(
+        assignment_id="callsign-assignment:bootstrap:named-tet-pi-stable-sequence",
+        agent_id="agent:shotcaller:named-tet-pi-stable-sequence",
+        runtime_instance_id="runtime:shotcaller:named-tet-pi-stable-sequence",
+        thread_id=session,
+        capabilities=("request.triage", "rollover.accept"),
+    )
+    options = ShotcallerBootstrapOptions(
+        workspace_id="w1",
+        tab_id="w1:t1",
+        pane_id="w1:p1",
+        worktree=str(worktree.resolve()),
+        runtime_kind="pi",
+        provider_kind="codex",
+    )
+    with SQLiteStorage(state) as store:
+        _seed_available_ashe(store, clock)
+        created = ShotcallerBootstrapService(
+            store,
+            HerdrShotcallerBootstrapAdapter(
+                options,
+                runner,
+                environment={
+                    "HERDR_ENV": "1",
+                    "HERDR_WORKSPACE_ID": "w1",
+                    "HERDR_TAB_ID": "w1:t1",
+                    "HERDR_PANE_ID": "w1:p1",
+                },
+            ),
+            clock,
+        ).bootstrap(spec)
+        assert created["state"] == "active"
+        assert created["callsign"] == "Ashe"
 
 
 def test_in_place_bootstrap_retries_transient_malformed_identity_read_without_layout(
@@ -4183,6 +4567,12 @@ def main() -> None:
         root = Path(temporary)
         test_in_place_bootstrap_creates_shotcaller_without_layout_or_squad_registration(root)
         test_cursor_authority_shotcaller_role_token_is_owned_and_retry_safe(root)
+        test_in_place_bootstrap_is_provider_neutral_and_never_creates_layout(root)
+        test_in_place_bootstrap_adopts_exact_named_tet_pi_session(root)
+        test_in_place_bootstrap_refuses_named_tet_pi_callsign_mismatch(root)
+        test_named_tet_pi_publication_rollback_preserves_original_route(root)
+        test_named_tet_pi_accepts_benign_sequence_advance_after_publication(root)
+        test_named_tet_pi_accepts_exact_publication_without_sequence_advance(root)
         test_in_place_bootstrap_retries_transient_malformed_identity_read_without_layout(root)
         test_in_place_bootstrap_refuses_persistently_malformed_identity_without_mutation(root)
         test_bootstrap_refuses_later_provider_title_without_overwriting_it(root)

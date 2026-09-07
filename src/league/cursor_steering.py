@@ -9,7 +9,8 @@ import subprocess
 from pathlib import PurePath
 from typing import Any, Callable, Mapping
 
-from .request_services import DeliveryReceipt, DeliveryUnavailable
+from .request_services import DeliveryAmbiguous, DeliveryReceipt, DeliveryUnavailable
+from .operational_input import render_operational_input
 from .storage_types import StorageRefusal
 
 
@@ -48,7 +49,8 @@ def structured_delivery_prompt(
         "delivery": dict(envelope),
         "actions": actions,
     }
-    return "LEAGUE ROUTED DELIVERY " + _stable_json(routed)
+    content = "LEAGUE ROUTED DELIVERY " + _stable_json(routed)
+    return render_operational_input("routed-delivery", envelope, content)
 
 
 class HerdrCursorSteeringAdapter:
@@ -69,6 +71,10 @@ class HerdrCursorSteeringAdapter:
     def _unavailable(reason: str) -> DeliveryUnavailable:
         return DeliveryUnavailable(reason)
 
+    @staticmethod
+    def _ambiguous(reason: str) -> DeliveryAmbiguous:
+        return DeliveryAmbiguous(reason)
+
     def _command(self, *arguments: str) -> list[str]:
         command = ["herdr"]
         if os.environ.get("HERDR_SESSION"):
@@ -86,8 +92,15 @@ class HerdrCursorSteeringAdapter:
                 timeout=15,
             )
         except (OSError, subprocess.SubprocessError) as exc:
-            raise self._unavailable(reason) from exc
+            error = (
+                self._ambiguous(reason)
+                if reason == "cursor_steering_outcome_ambiguous"
+                else self._unavailable(reason)
+            )
+            raise error from exc
         if completed.returncode != 0:
+            if reason == "cursor_steering_outcome_ambiguous":
+                raise self._ambiguous(reason)
             raise self._unavailable(reason)
         return completed
 
@@ -219,7 +232,9 @@ class HerdrCursorSteeringAdapter:
             },
             self.at,
         )
-        raise self._unavailable(reason)
+        if phase == "pre_effect":
+            raise self._unavailable(reason)
+        raise self._ambiguous(reason)
 
     def send(
         self, target: Mapping[str, Any], envelope: Mapping[str, Any]
@@ -246,10 +261,11 @@ class HerdrCursorSteeringAdapter:
                     effect_id=str(existing["effect_id"]),
                 )
             if existing["state"] == "refused" and isinstance(existing.get("receipt"), dict):
-                raise self._unavailable(
-                    str(existing["receipt"].get("reason", "cursor_steering_refused"))
-                )
-            raise self._unavailable("cursor_steering_outcome_ambiguous")
+                reason = str(existing["receipt"].get("reason", "cursor_steering_refused"))
+                if existing["receipt"].get("phase") == "pre_effect":
+                    raise self._unavailable(reason)
+                raise self._ambiguous(reason)
+            raise self._ambiguous("cursor_steering_outcome_ambiguous")
         prompt = structured_delivery_prompt(
             target, envelope, state_root=str(self.store.state_root)
         )
@@ -286,8 +302,11 @@ class HerdrCursorSteeringAdapter:
                     effect_id=str(begun["effect_id"]),
                 )
             if begun["state"] == "refused" and isinstance(begun.get("receipt"), dict):
-                raise self._unavailable(str(begun["receipt"].get("reason", "cursor_steering_refused")))
-            raise self._unavailable("cursor_steering_outcome_ambiguous")
+                reason = str(begun["receipt"].get("reason", "cursor_steering_refused"))
+                if begun["receipt"].get("phase") == "pre_effect":
+                    raise self._unavailable(reason)
+                raise self._ambiguous(reason)
+            raise self._ambiguous("cursor_steering_outcome_ambiguous")
         intent_digest = str(begun["intent_digest"])
         before_effect = self._observe(pane_id, target)
         if not self._same_binding(initial, before_effect):

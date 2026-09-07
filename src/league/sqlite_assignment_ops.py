@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .sqlite_request_ops import _active_claim, _bounded_public_text, _request_row, _time
+from .sqlite_runtime_replacement_ops import assert_runtime_replacement_mutation_allowed
 from .sqlite_project_ops import canonical_repository, resolve_project_routing_identity
 from .sqlite_callsign_ops import (
     _reserve_in_transaction,
@@ -215,6 +216,19 @@ def _validate_assignment_command(command: PrepareAssignmentCommand) -> None:
             "hidden scientist assignment requires one dispatch and no issue or worktree lifecycle",
         )
     capabilities(command.required_capabilities)
+    if (
+        len(set(value.casefold() for value in command.excluded_callsigns))
+        != len(command.excluded_callsigns)
+        or any(
+            not isinstance(value, str)
+            or not value
+            or len(value.encode("utf-8")) > 64
+            for value in command.excluded_callsigns
+        )
+    ):
+        raise StorageRefusal(
+            "invalid_assignment", "live multiplexer name fence is invalid"
+        )
 
 
 def _assignment_retry(
@@ -406,6 +420,7 @@ def _persist_assignment_reservation(
         command.task_id,
         capabilities(command.required_capabilities),
         command.at,
+        excluded_callsigns=command.excluded_callsigns,
     )
     hidden_input = json.loads(hidden_dispatch["input_json"]) if hidden_dispatch is not None else {}
     hidden_signals = hidden_input.get("signals", {}) if isinstance(hidden_input, dict) else {}
@@ -731,10 +746,44 @@ def activate_assignment(
                 if assignment["assignment_role"] == "hidden-worker"
                 else champion_required
             )
-            if set(receipt) != required or receipt.get("verified") is not True:
+            routing_fields = {"runtime_kind", "provider_kind", "routing"}
+            allowed_shapes = {frozenset(required)}
+            if assignment["assignment_role"] == "champion":
+                allowed_shapes.add(frozenset(required | routing_fields))
+            if frozenset(receipt) not in allowed_shapes or receipt.get("verified") is not True:
                 raise StorageRefusal(
                     "receipt_unverified", "assignment activation requires one exact role-specific receipt"
                 )
+            if routing_fields <= set(receipt):
+                routing = receipt["routing"]
+                runtime_kind = receipt["runtime_kind"]
+                provider_kind = receipt["provider_kind"]
+                route_exact = bool(
+                    isinstance(routing, dict)
+                    and isinstance(runtime_kind, str)
+                    and bool(runtime_kind)
+                    and isinstance(provider_kind, str)
+                    and bool(provider_kind)
+                    and routing.get("provider") == provider_kind
+                    and isinstance(routing.get("model"), str)
+                    and bool(routing["model"])
+                    and isinstance(routing.get("effort"), str)
+                    and bool(routing["effort"])
+                    and isinstance(routing.get("explicit"), dict)
+                    and set(routing["explicit"])
+                    == {"runtime", "provider", "model", "effort"}
+                    and all(
+                        isinstance(value, bool)
+                        for value in routing["explicit"].values()
+                    )
+                    and receipt["harness_kind"] == f"{runtime_kind}-thread"
+                    and receipt["display_agent"] == provider_kind
+                )
+                if not route_exact:
+                    raise StorageRefusal(
+                        "receipt_mismatch",
+                        "launch receipt runtime, provider, and routing decision disagree",
+                    )
             if assignment["state"] == "active":
                 stored = json.loads(assignment["acceptance_receipt_json"])
                 if stored != receipt:
@@ -806,7 +855,6 @@ def activate_assignment(
                 and agent["role"] == assignment["assignment_role"]
                 and role_exact
                 and receipt["routing_name"] == str(assignment["callsign"]).lower()
-                and receipt["backend_kind"] in {"herdr", "tmux"}
                 and all(
                     isinstance(receipt[name], str) and receipt[name]
                     for name in required
@@ -1652,7 +1700,7 @@ def assignment_launch_context(store: Any, assignment_id: str) -> dict[str, Any]:
             reconciliation_id = f"legacy-display:{intent_digest[:24]}"
             expected_source = f"league-legacy-{intent_digest[:24]}"
             expected_sequence = legacy_intent.get("expected_state_change_seq")
-            intent_keys = {
+            intent_keys_v1 = {
                 "schema",
                 "assignment_id",
                 "expected_version",
@@ -1672,18 +1720,77 @@ def assignment_launch_context(store: Any, assignment_id: str) -> dict[str, Any]:
                 "owner_authorized",
             }
             retained_done = legacy_intent.get("expected_agent_status") == "done"
-            if retained_done:
-                intent_keys.update(
-                    {"expected_agent_status", "canonical_lifecycle"}
+            intent_keys_v2 = intent_keys_v1 | {
+                "previous_worktree",
+                "previous_branch",
+                "branch",
+            }
+            intent_keys_v3 = intent_keys_v2 | {
+                "previous_runtime_generation",
+                "runtime_generation",
+            }
+            intent_keys_v4 = intent_keys_v1 | {
+                "previous_runtime_generation",
+                "runtime_generation",
+            }
+            intent_shape_exact = bool(
+                (
+                    legacy_intent.get("schema")
+                    == "league.legacy-display-reconciliation-intent.v1"
+                    and set(legacy_intent) == intent_keys_v1
                 )
+                or (
+                    legacy_intent.get("schema")
+                    == "league.legacy-display-reconciliation-intent.v2"
+                    and set(legacy_intent) == intent_keys_v2
+                    and all(
+                        isinstance(legacy_intent.get(key), str)
+                        and bool(legacy_intent[key])
+                        for key in ("previous_worktree", "previous_branch", "branch")
+                    )
+                )
+                or (
+                    legacy_intent.get("schema")
+                    == "league.legacy-display-reconciliation-intent.v3"
+                    and set(legacy_intent) == intent_keys_v3
+                    and all(
+                        isinstance(legacy_intent.get(key), str)
+                        and bool(legacy_intent[key])
+                        for key in (
+                            "previous_worktree",
+                            "previous_branch",
+                            "branch",
+                            "previous_runtime_generation",
+                            "runtime_generation",
+                        )
+                    )
+                    and legacy_intent["previous_runtime_generation"]
+                    != legacy_intent["runtime_generation"]
+                )
+                or (
+                    legacy_intent.get("schema")
+                    == "league.legacy-display-reconciliation-intent.v4"
+                    and set(legacy_intent) == intent_keys_v4
+                    and all(
+                        isinstance(legacy_intent.get(key), str)
+                        and bool(legacy_intent[key])
+                        for key in (
+                            "previous_runtime_generation",
+                            "runtime_generation",
+                        )
+                    )
+                    and legacy_intent["previous_runtime_generation"]
+                    != legacy_intent["runtime_generation"]
+                )
+            )
+            intent_shape_exact = intent_shape_exact or bool(
+                legacy_intent.get("schema") == "league.legacy-display-reconciliation-intent.v5"
+                and set(legacy_intent) == intent_keys_v1 | {"expected_agent_status", "canonical_lifecycle"}
+                and retained_done
+                and legacy_intent.get("canonical_lifecycle") == "terminal"
+            )
             exact_result = bool(
-                set(legacy_intent) == intent_keys
-                and legacy_intent.get("schema")
-                == (
-                    "league.legacy-display-reconciliation-intent.v2"
-                    if retained_done
-                    else "league.legacy-display-reconciliation-intent.v1"
-                )
+                intent_shape_exact
                 and legacy_intent.get("owner_authorized") is True
                 and type(legacy_intent.get("expected_version")) is int
                 and legacy_intent["expected_version"] >= 1
@@ -1705,7 +1812,7 @@ def assignment_launch_context(store: Any, assignment_id: str) -> dict[str, Any]:
                 == legacy_intent.get("target_title")
                 and legacy_receipt["terminal_title"]
                 == legacy_intent.get("target_title")
-                and legacy_receipt["state_change_seq"] == expected_sequence + 1
+                and legacy_receipt["state_change_seq"] in {expected_sequence, expected_sequence + 1}
                 and legacy_receipt.get(ORCHESTRATOR_ROLE_TOKEN) in {None, "champion"}
                 and legacy_receipt.get("schema")
                 == (
@@ -1769,10 +1876,19 @@ def _legacy_display_detail(
         "target_title": f"{command.callsign} · {command.target_task_label}",
         "owner_authorized": command.owner_authorized,
     }
-    if command.expected_agent_status is not None:
+    if command.previous_worktree is not None:
         detail.update(
             {
                 "schema": "league.legacy-display-reconciliation-intent.v2",
+                "previous_worktree": command.previous_worktree,
+                "previous_branch": command.previous_branch,
+                "branch": command.branch,
+            }
+        )
+    if command.expected_agent_status is not None:
+        detail.update(
+            {
+                "schema": "league.legacy-display-reconciliation-intent.v5",
                 "expected_agent_status": command.expected_agent_status,
                 "canonical_lifecycle": canonical_lifecycle,
             }
@@ -1794,6 +1910,22 @@ def _validate_legacy_display_command(
             and command.expected_state_change_seq >= 0,
         )
     )
+    transition_values = (
+        command.previous_worktree,
+        command.previous_branch,
+        command.branch,
+    )
+    transition_requested = any(value is not None for value in transition_values)
+    transition_valid = bool(
+        not transition_requested
+        or (
+            all(isinstance(value, str) and bool(value) for value in transition_values)
+            and _physical_worktree_exact(
+                command.previous_worktree, command.previous_worktree
+            )
+            and command.previous_worktree != command.worktree
+        )
+    )
     identity = (
         command.assignment_id,
         command.champion_agent_id,
@@ -1811,6 +1943,7 @@ def _validate_legacy_display_command(
         or not _physical_worktree_exact(command.worktree, command.worktree)
         or command.expected_version < 1
         or not tuple_supplied
+        or not transition_valid
         or len(command.target_task_label.split()) != 2
         or " ".join(command.target_task_label.split()) != command.target_task_label
         or len(command.target_task_label) > 48
@@ -1874,6 +2007,45 @@ def _validate_legacy_display_command(
         f"{command.terminal_id}\0{command.thread_id}".encode("utf-8")
     ).hexdigest()[:24]
     runtime = runtime_rows[0] if len(runtime_rows) == 1 else None
+    agent_on_target = bool(
+        _physical_worktree_exact(agent["worktree"], command.worktree)
+        and (
+            not transition_requested
+            or agent["branch"] == command.branch
+        )
+    ) if agent is not None else False
+    agent_on_previous = bool(
+        transition_requested
+        and _physical_worktree_exact(
+            agent["worktree"], command.previous_worktree
+        )
+        and agent["branch"] == command.previous_branch
+    ) if agent is not None else False
+    receipt_worktree = (
+        command.previous_worktree if transition_requested else command.worktree
+    )
+    receipt_branch_exact = bool(
+        not transition_requested
+        or receipt.get("branch") == command.previous_branch
+    ) if isinstance(receipt, dict) else False
+    receipt_generation = (
+        receipt.get("runtime_generation") if isinstance(receipt, dict) else None
+    )
+    generation_transition = bool(
+        isinstance(receipt_generation, str)
+        and receipt_generation
+        and receipt_generation != expected_generation
+    )
+    runtime_generation_exact = bool(
+        runtime is not None
+        and (
+            runtime["runtime_generation"] == expected_generation
+            or (
+                generation_transition
+                and runtime["runtime_generation"] == receipt_generation
+            )
+        )
+    )
     exact = bool(
         agent is not None
         and runtime is not None
@@ -1882,13 +2054,13 @@ def _validate_legacy_display_command(
         and agent["callsign"] == command.callsign
         and agent["address"] == command.pane_id
         and agent["thread_id"] == command.thread_id
-        and _physical_worktree_exact(agent["worktree"], command.worktree)
+        and (agent_on_target or agent_on_previous)
         and agent["routing_name"] == command.routing_name
         and agent["backend"] == "herdr"
         and runtime["runtime_instance_id"] == command.runtime_instance_id
         and runtime["session_ref"] == command.thread_id
         and runtime["endpoint"] == command.pane_id
-        and runtime["runtime_generation"] == expected_generation
+        and runtime_generation_exact
         and bool(runtime["verified"])
         and task is not None
         and callsign_assignment is not None
@@ -1904,9 +2076,11 @@ def _validate_legacy_display_command(
         and receipt.get("callsign") == command.callsign
         and receipt.get("endpoint") == command.pane_id
         and receipt.get("thread_id") == command.thread_id
-        and _physical_worktree_exact(receipt.get("worktree"), command.worktree)
+        and _physical_worktree_exact(receipt.get("worktree"), receipt_worktree)
+        and receipt_branch_exact
         and receipt.get("routing_name") == command.routing_name
-        and receipt.get("runtime_generation") == expected_generation
+        and isinstance(receipt_generation, str)
+        and bool(receipt_generation)
         and receipt.get("backend_kind") == "herdr"
     )
     if not exact:
@@ -1978,6 +2152,23 @@ def _validate_legacy_display_command(
             "terminal" if command.expected_agent_status == "done" else None
         ),
     )
+    if command.expected_agent_status is not None and (transition_requested or generation_transition):
+        raise StorageRefusal(
+            "legacy_display_conflict",
+            "retained-done display repair cannot also relocate or replace a runtime generation",
+        )
+    if generation_transition:
+        detail.update(
+            {
+                "schema": (
+                    "league.legacy-display-reconciliation-intent.v3"
+                    if transition_requested
+                    else "league.legacy-display-reconciliation-intent.v4"
+                ),
+                "previous_runtime_generation": receipt_generation,
+                "runtime_generation": expected_generation,
+            }
+        )
     reconciliation_id = "legacy-display:" + hashlib.sha256(
         _json(detail).encode("utf-8")
     ).hexdigest()[:24]
@@ -2127,7 +2318,10 @@ def finalize_legacy_display_reconciliation(
                 and bool(re.fullmatch(r"[0-9a-f]{64}", receipt["observation_digest"]))
                 and receipt.get("source") == expected_source
                 and int(receipt["state_change_seq"])
-                == int(command.expected_state_change_seq) + 1
+                in {
+                    int(command.expected_state_change_seq),
+                    int(command.expected_state_change_seq) + 1,
+                }
                 and (
                     command.expected_agent_status is None
                     or receipt.get("endpoint_status")
@@ -2159,6 +2353,111 @@ def finalize_legacy_display_reconciliation(
                         "legacy display reconciliation final receipt conflicts with history",
                     )
             else:
+                if detail["schema"] in {
+                    "league.legacy-display-reconciliation-intent.v3",
+                    "league.legacy-display-reconciliation-intent.v4",
+                }:
+                    collision = store.connection.execute(
+                        """
+                        SELECT runtime_instance_id FROM runtime_instances
+                         WHERE actor_agent_id=? AND runtime_generation=?
+                           AND runtime_instance_id<>?
+                         LIMIT 1
+                        """,
+                        (
+                            command.champion_agent_id,
+                            detail["runtime_generation"],
+                            command.runtime_instance_id,
+                        ),
+                    ).fetchone()
+                    if collision is not None:
+                        raise StorageRefusal(
+                            "legacy_display_conflict",
+                            "restored runtime generation belongs to another runtime",
+                        )
+                    runtime_changed = store.connection.execute(
+                        """
+                        UPDATE runtime_instances
+                           SET runtime_generation=?,last_seen_at=?
+                         WHERE runtime_instance_id=? AND actor_agent_id=?
+                           AND session_ref=? AND endpoint=?
+                           AND runtime_generation=?
+                           AND status IN ('active','idle') AND verified=1
+                        """,
+                        (
+                            detail["runtime_generation"],
+                            at,
+                            command.runtime_instance_id,
+                            command.champion_agent_id,
+                            command.thread_id,
+                            command.pane_id,
+                            detail["previous_runtime_generation"],
+                        ),
+                    ).rowcount
+                    if runtime_changed != 1:
+                        current_runtime = store.connection.execute(
+                            """
+                            SELECT runtime_generation FROM runtime_instances
+                             WHERE runtime_instance_id=? AND actor_agent_id=?
+                               AND session_ref=? AND endpoint=?
+                               AND status IN ('active','idle') AND verified=1
+                            """,
+                            (
+                                command.runtime_instance_id,
+                                command.champion_agent_id,
+                                command.thread_id,
+                                command.pane_id,
+                            ),
+                        ).fetchone()
+                        if (
+                            current_runtime is None
+                            or current_runtime["runtime_generation"]
+                            != detail["runtime_generation"]
+                        ):
+                            raise StorageRefusal(
+                                "legacy_display_conflict",
+                                "legacy Champion runtime changed before final reconciliation",
+                            )
+                if command.previous_worktree is not None:
+                    current_agent = store.connection.execute(
+                        """
+                        SELECT worktree,branch FROM agent_instances
+                         WHERE agent_id=? AND retired_at IS NULL
+                        """,
+                        (command.champion_agent_id,),
+                    ).fetchone()
+                    if (
+                        current_agent is None
+                        or current_agent["branch"] != command.previous_branch
+                        or not _physical_worktree_exact(
+                            current_agent["worktree"], command.previous_worktree
+                        )
+                    ):
+                        raise StorageRefusal(
+                            "legacy_display_conflict",
+                            "legacy Champion worktree changed before final reconciliation",
+                        )
+                    changed = store.connection.execute(
+                        """
+                        UPDATE agent_instances
+                           SET worktree=?,branch=?,version=version+1,updated_at=?
+                         WHERE agent_id=? AND retired_at IS NULL
+                           AND worktree=? AND branch=?
+                        """,
+                        (
+                            command.worktree,
+                            command.branch,
+                            at,
+                            command.champion_agent_id,
+                            current_agent["worktree"],
+                            current_agent["branch"],
+                        ),
+                    ).rowcount
+                    if changed != 1:
+                        raise StorageRefusal(
+                            "legacy_display_conflict",
+                            "legacy Champion worktree changed before final reconciliation",
+                        )
                 event_status = (
                     "completed"
                     if detail.get("canonical_lifecycle") == "terminal"
@@ -2941,6 +3240,15 @@ def _validated_transition_context(
     assignment = store.connection.execute(
         "SELECT * FROM task_assignments WHERE task_id=?", (task_id,)
     ).fetchone()
+    assert_runtime_replacement_mutation_allowed(
+        store,
+        task_id=task_id,
+        assignment_id=(
+            None
+            if assignment is None
+            else str(assignment["task_assignment_id"])
+        ),
+    )
     if task is None or assignment is None or assignment["state"] != "active":
         raise StorageRefusal("assignment_inactive", "task has no active verified assignment")
     if assignment["assignment_role"] == "hidden-worker":

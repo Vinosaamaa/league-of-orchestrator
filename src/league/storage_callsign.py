@@ -69,6 +69,7 @@ class CallsignQueueStorage(Protocol):
         fault: Optional[FaultInjector] = None,
         recovery_baseline: Optional[Mapping[str, Any]] = None,
         recovery_thread_id: Optional[str] = None,
+        expected_callsign: Optional[str] = None,
     ) -> dict[str, Any]: ...
 
     def activate_callsign(

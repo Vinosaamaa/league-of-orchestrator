@@ -32,11 +32,13 @@ $HOME/.local/bin/league --state-root "$HOME/.local/state/league"
 
 ## Durable prompt and request triage
 
-- UserPromptSubmit and beforeSubmitPrompt capture exact local prompt bytes once
-  and wake the verified Shotcaller. They never rewrite bodies, inject control
-  text, mine transcripts, infer semantic splits, or fabricate missed prompts.
-- Missing runtime identity quarantines and deduplicates the exact prompt. It
-  binds later only to one verified runtime and does not block ordinary input.
+- Only Codex `UserPromptSubmit`, Cursor `beforeSubmitPrompt`, and Pi `input`
+  from an exactly bound canonical League runtime capture its exact local prompt
+  bytes once and wake its verified Shotcaller. An unbound, non-League, or
+  otherwise unverifiable runtime is left untouched and unrecorded.
+- Prompt intake activates only after exact canonical binding; it never backfills
+  pre-binding prompts or mines transcripts. It never rewrites bodies, injects
+  control text, infers semantic splits, or fabricates missed prompts.
 - At the start of a Shotcaller turn, start exactly one bounded process and keep
   it through commit:
 
@@ -52,13 +54,21 @@ $HOME/.local/bin/league --state-root "$HOME/.local/state/league" request turn \
   League holds no transaction while the model reasons between them.
 - Exact retries are idempotent. Missing, reordered, duplicated, conflicting,
   stale-version, cross-owner, or partial batches refuse without partial commit.
-- Every prompt item is classified as a new request, follow-up, context,
-  acknowledgement, duplicate, or deferred item; no text disappears silently.
+- Every captured bound prompt item is classified as a new request, follow-up,
+  context, acknowledgement, duplicate, or deferred item; no text disappears
+  silently.
 - Before reply, wait, handoff, or end, the turn's final boundary accounts for
-  every request, untriaged prompt, delivery, assignment, task, Champion, and
-  cleanup obligation.
+  every bound request, captured untriaged prompt, delivery, assignment, task,
+  Champion, and cleanup obligation.
 - Stop is an omission backstop, not the normal triage mechanism. Genuine user
   steering rearms it and outranks material-event waits.
+- Stop feedback is an operational continuation, not new Summoner steering. If
+  it names an untriaged prompt, reconcile that prompt through the canonical
+  request turn before attempting to end again.
+- A routine Stop block never authorizes hook disablement, `service-start`,
+  detachment, request cancellation, `/new`, or `allow-stop --once`; use the
+  named recovery only for its exact refusal, and reserve the one-shot allowance
+  for an explicit Summoner stop after work is paused.
 
 ## Issue binding and delegation
 
@@ -70,10 +80,11 @@ $HOME/.local/bin/league --state-root "$HOME/.local/state/league" request turn \
   reopen path for genuine closed recurrence with prior linkage, and create a
   new issue only for distinct work. Bind the immutable selection receipt to the
   canonical task; a positive issue number alone is not proof.
-- Tiny direct work must satisfy the universal bounded-read-only rule. Durable
-  research, benchmarks, release or operational work, confirmed debugging,
-  fixtures, tests, and repository changes require an issue-bound visible
-  Champion. Shotcallers do not implement repository work directly by default.
+- Tiny direct work follows the universal authority and engineering rules.
+  Durable research, benchmarks, release or operational work, confirmed
+  debugging, fixtures, tests, and repository changes require an issue-bound
+  visible Champion. Shotcallers do not implement repository work directly by
+  default.
 - Hidden workers stop at their bounded advisory perimeter and never own work
   that requires a visible Champion.
 - One issue assignment creates exactly one visible Champion. Do not add a
@@ -81,16 +92,39 @@ $HOME/.local/bin/league --state-root "$HOME/.local/state/league" request turn \
   worktree.
 - Independently fixable work may run in parallel only through separate issues,
   tasks, assignments, branches, and worktrees.
+- A Champion starts from the exact assigned issue, acceptance criteria,
+  worktree, branch, and intended handoff; inspect only task-relevant source and
+  existing changes.
+- Champion implementation uses the smallest source-managed change and fastest
+  faithful focused check first; broaden verification only for concrete risk or
+  failure.
+- While an in-scope action remains, continue it directly; do not substitute
+  status narration, unchanged polling, unrelated investigation, or speculative
+  refactoring.
+- One authoritative blocker or repeated identical failure stops retries; report
+  the exact command, refusal, preserved state, and required owner action once.
+- Champion completion reports changed files, exact verification, and any
+  remaining blocker; never publish, merge, release, install, clean up, or keep
+  monitoring unless explicitly assigned.
 - The Shotcaller remains the user-facing owner for prioritization,
   supervision, review, landing, release, verification, repair, and cleanup.
 
 ## Placement and launch
 
-- `league shotcaller create` converts only the calling live Codex pane in
-  place. League verifies exact workspace, tab, pane, terminal, thread,
-  worktree, route, and displayed identity before activation.
-- `league assign run` creates a distinct Codex runtime in a new Herdr tab root;
-  it never splits or reuses the Shotcaller pane.
+- `league shotcaller create` converts only the calling live registered-agent
+  pane in place. League verifies the adapter, multiplexer, workspace, tab, pane,
+  terminal, session, worktree, route, and displayed identity before activation.
+- `league assign run` creates the selected registered runtime in a distinct new
+  multiplexer tab; it never splits or reuses the Shotcaller pane. Ordinary
+  launch defaults to Pi with the Codex provider and consumes one exact persisted
+  `ModelRouter` decision. Explicit runtime, provider, model, and effort
+  overrides remain exact; missing or mismatched routing refuses before launch.
+- `league assign replace-runtime` freezes one active Champion assignment and
+  dispatches predecessor A and successor B through their registered adapters.
+  It publishes the ownership switch only after B verifies, retires A before
+  releasing one handoff outbox, and adopts or compensates exact retries without
+  allowing overlapping writes. Ambiguous native state remains a durable
+  recovery obligation.
 - Display labels contain one or two words. Routing identity remains separate
   from the human-visible label.
 - Dispatch, claim, execution mode, and the exact duplicate-preflight selection
@@ -104,6 +138,35 @@ $HOME/.local/bin/league --state-root "$HOME/.local/state/league" request turn \
 
 ## Delivery and supervision
 
+- Hooks first verify an exact canonical runtime binding and role. If a Codex,
+  Pi, or Cursor CLI runtime is unbound or non-League, `UserPrompt`,
+  pre-mutation, and `Stop` allow/no-op immediately with zero canonical mutation.
+- An attached Shotcaller with any owner or delegated obligation blocks every
+  `Stop` attempt unless the Summoner explicitly requested a final stop and the
+  Shotcaller armed the exact one-shot allowance after pausing work.
+- When the Summoner requests all work paused, the Shotcaller reaches a safe
+  boundary for its own work, sends a pause-and-preserve instruction to every
+  owned active Champion, then runs
+  `$HOME/.local/bin/agent-watcher --shotcaller <callsign> allow-stop --once`
+  immediately before `Stop`. The next Stop consumes the allowance; it never
+  disables hooks, changes supervision mode, or authorizes a later Stop.
+- An attached Shotcaller waits for material League work with one
+  `$HOME/.local/bin/agent-watcher --shotcaller <callsign> wait` invocation.
+  This provider-neutral foreground wait applies to Codex, Pi, and Cursor CLI;
+  do not poll with multiplexer-specific wait commands.
+- `attach-shotcaller` requires the exact live supervisor binding and makes the
+  Shotcaller terminal-attached. `detach-shotcaller` requests token-saving
+  terminal detachment without pausing supervision.
+- Detachment may let the Shotcaller end only when no owner-actionable work
+  remains and the persistent watcher lease, runtime generation, locator, fence,
+  and wake/delivery path exactly match its durable detachment receipt. The
+  watcher remains live and later wakes and delivers exactly once.
+- `service-pause` and `service-resume` are deprecated aliases for
+  `detach-shotcaller` and `attach-shotcaller`, respectively.
+- For a bound Shotcaller, a missing, stale, or ambiguous watcher, fence,
+  binding, or wake path refuses detachment and keeps `Stop` blocked.
+- Codex, Pi regardless of model provider, and Cursor CLI share this
+  provider-neutral contract.
 - Material task transitions use the exact task, runtime, expected version,
   transition identity, event, outbox, recipient Shotcaller, update, next
   action, blocker, and time.
@@ -171,4 +234,4 @@ $HOME/.local/bin/league --state-root "$HOME/.local/state/league" request turn \
   blocker. Never hand-edit canonical or retired storage.
 
 This file owns only League orchestration deltas. Changes to the universal guide
-belong to terminal-environment-toolkit issue #45.
+belong to the terminal-environment-toolkit repository.

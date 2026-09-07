@@ -16,6 +16,7 @@ from .request_services import AssignmentSpec, LaunchAdapterError
 from .presentation import canonical_display_metadata
 from .storage_types import StorageRefusal
 from .visible_launch import MAX_CONTEXT_BYTES, CommandRunner, SubprocessRunner
+from .multiplexer_adapters import RestoredEndpoint, builtin_multiplexer_adapter_registry
 from .worktree import exact_launch_cwd_binding
 
 
@@ -187,6 +188,7 @@ class HerdrPiLaunchAdapter:
         *,
         at: str,
         runner: CommandRunner | None = None,
+        multiplexer: Any | None = None,
         startup_timeout_ms: int = 120_000,
         environment: Mapping[str, str] | None = None,
     ) -> None:
@@ -194,6 +196,9 @@ class HerdrPiLaunchAdapter:
         self.descriptor = dict(descriptor)
         self.at = at
         self.runner = runner or SubprocessRunner()
+        self.multiplexer = multiplexer or builtin_multiplexer_adapter_registry(
+            herdr_runner=self.runner, herdr_binary="herdr"
+        ).adapter("herdr")
         self.startup_timeout_ms = startup_timeout_ms
         self.environment = dict(environment or os.environ)
         self._created: dict[str, str] | None = None
@@ -208,6 +213,30 @@ class HerdrPiLaunchAdapter:
         completed = self.runner.run(arguments, timeout_seconds=timeout)
         if completed.returncode != 0:
             raise StorageRefusal("launch_adapter_failed", f"{label} refused or failed")
+
+    def occupied_routing_names(self) -> tuple[str, ...]:
+        agents = self._command(("herdr", "agent", "list"), "Herdr agent list").get(
+            "agents"
+        )
+        if not isinstance(agents, list) or any(
+            not isinstance(item, Mapping) for item in agents
+        ):
+            raise StorageRefusal(
+                "launch_identity_unverified", "Herdr agent inventory is malformed"
+            )
+        return tuple(
+            str(item["name"])
+            for item in agents
+            if isinstance(item.get("name"), str) and item["name"]
+        )
+
+    @property
+    def created_endpoint(self) -> bool:
+        return self._created is not None
+
+    @property
+    def launch_receipt(self) -> Mapping[str, Any] | None:
+        return dict(self._receipt) if self._receipt is not None else None
 
     def _agent(self) -> dict[str, Any]:
         agent = self._command(
@@ -425,42 +454,27 @@ class HerdrPiLaunchAdapter:
 
     def _allocate(self) -> dict[str, str]:
         env = pi_launch_environment(self.descriptor, str(self.descriptor["descriptor_digest"]))
-        if self.descriptor["role"] == "champion":
-            result = self._command(
-                (
-                    "herdr", "tab", "create", "--workspace", str(self.descriptor["workspace_id"]),
-                    "--cwd", str(self.descriptor["cwd"]), "--label",
-                    f"{self.descriptor['callsign']} · {self.descriptor['project_code']}|{self.descriptor['task_label']}",
-                    *env, "--no-focus",
-                ),
-                "Herdr Pi Champion tab creation",
-            )
-            tab, pane = result.get("tab"), result.get("root_pane")
-        else:
-            result = self._command(
-                (
-                    "herdr", "pane", "split", str(self.descriptor["creator_pane_id"]),
-                    "--direction", "right", "--cwd", str(self.descriptor["cwd"]),
-                    *env, "--no-focus",
-                ),
-                "Herdr Pi Shotcaller sibling creation",
-            )
-            pane = result.get("pane")
-            tab = {"tab_id": result.get("tab_id")}
-        if not isinstance(tab, Mapping) or not isinstance(pane, Mapping):
-            raise StorageRefusal("launch_identity_unverified", "Herdr Pi placement receipt is incomplete")
-        endpoint = {
-            "tab_id": str(tab.get("tab_id", "")),
-            "pane_id": str(pane.get("pane_id", "")),
-            "terminal_id": str(pane.get("terminal_id", "")),
-        }
-        if not all(endpoint.values()):
-            raise StorageRefusal("launch_identity_unverified", "Herdr Pi endpoint identity is incomplete")
         label = (
             str(self.descriptor["callsign"])
             if self.descriptor["role"] == "shotcaller"
             else f"{self.descriptor['callsign']} · {self.descriptor['project_code']}|{self.descriptor['task_label']}"
         )
+        placed = self.multiplexer.placement(
+            {
+                "descriptor_id": str(self.descriptor["descriptor_id"]),
+                "workspace_id": str(self.descriptor["workspace_id"]),
+                "role": str(self.descriptor["role"]),
+                "cwd": str(self.descriptor["cwd"]),
+                "label": label,
+                "creator_pane_id": self.descriptor.get("creator_pane_id"),
+                "environment_arguments": env,
+            }
+        )
+        endpoint = {
+            "tab_id": placed.tab_id,
+            "pane_id": placed.pane_id,
+            "terminal_id": placed.terminal_id,
+        }
         self._effect_command(("herdr", "pane", "rename", endpoint["pane_id"], label), "Herdr Pi canonical pane label")
         return endpoint
 
@@ -477,7 +491,7 @@ class HerdrPiLaunchAdapter:
         self.descriptor.update(
             {
                 "callsign": str(spec.callsign),
-                "routing_name": str(spec.callsign).lower(),
+                "routing_name": spec.routing_name or str(spec.callsign).lower(),
                 "cwd": str(worktree.resolve()),
                 "assignment_id": spec.assignment_id,
                 "worktree_binding": binding,
@@ -538,7 +552,7 @@ class HerdrPiLaunchAdapter:
             "runtime_generation": runtime_generation,
             "harness_kind": "pi-thread",
             "backend_kind": "herdr",
-            "routing_name": str(spec.callsign).lower(),
+            "routing_name": spec.routing_name or str(spec.callsign).lower(),
             "display_agent": self.descriptor["provider_kind"],
             "repository": spec.repository,
             "issue": spec.issue,
@@ -546,6 +560,14 @@ class HerdrPiLaunchAdapter:
             "worktree": spec.worktree,
             "capabilities": list(spec.required_capabilities),
         }
+        if self.descriptor.get("routing"):
+            self._receipt.update(
+                {
+                    "runtime_kind": "pi",
+                    "provider_kind": self.descriptor["provider_kind"],
+                    "routing": dict(self.descriptor["routing"]),
+                }
+            )
         return dict(self._receipt)
 
     def deliver_context(self, receipt: Mapping[str, Any], context: str) -> dict[str, Any]:
@@ -553,11 +575,8 @@ class HerdrPiLaunchAdapter:
         if not body or len(body) > MAX_CONTEXT_BYTES:
             raise LaunchAdapterError("launch_context_invalid", cleanup_required=True)
         self._display_sample(receipt)
-        prompt_effect = self._command(
-            ("herdr", "agent", "prompt", str(receipt["routing_name"]), context,
-             "--wait", "--timeout", "30000"),
-            "Herdr Pi context delivery",
-            timeout=35,
+        prompt_effect = self.multiplexer.delivery(
+            str(receipt["routing_name"]), context, wait=True
         )
         observation = self.verify_active_title(receipt)
         return {
@@ -683,16 +702,19 @@ class HerdrPiLaunchAdapter:
     def cleanup(self, _receipt: Mapping[str, Any] | None) -> bool:
         if self._created is None:
             return True
-        target = (
-            ("herdr", "tab", "close", self._created["tab_id"])
-            if self.descriptor["role"] == "champion"
-            else ("herdr", "pane", "close", self._created["pane_id"])
-        )
         try:
-            completed = self.runner.run(target, timeout_seconds=30)
+            endpoint = RestoredEndpoint(
+                str(self.descriptor["descriptor_id"]),
+                str(self.descriptor["workspace_id"]),
+                self._created["tab_id"],
+                self._created["pane_id"],
+                self._created["terminal_id"],
+            )
+            self.multiplexer.close(
+                endpoint,
+                placement="tab" if self.descriptor["role"] == "champion" else "pane",
+            )
         except Exception:
-            return False
-        if completed.returncode != 0:
             return False
         self._created = None
         return True
@@ -706,6 +728,7 @@ def resume_pi_after_restart(
     pane_id: str,
     at: str,
     runner: CommandRunner | None = None,
+    multiplexer: Any | None = None,
     startup_timeout_ms: int = 120_000,
     environment: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
@@ -734,6 +757,7 @@ def resume_pi_after_restart(
         descriptor,
         at=at,
         runner=runner,
+        multiplexer=multiplexer,
         startup_timeout_ms=startup_timeout_ms,
         environment=environment,
     )

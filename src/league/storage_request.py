@@ -15,6 +15,13 @@ MAX_TASK_RESULT_SOURCES = 128
 
 
 @dataclass(frozen=True)
+class OwnerStopControl:
+    control_id: str
+    prompt_id: str
+    interrupt_delegates: bool
+
+
+@dataclass(frozen=True)
 class DispatchRequestCommand:
     request_id: str
     claim_token: str
@@ -159,6 +166,16 @@ class RequestStorage(Protocol):
         owner_agent_id: str,
         actions: tuple[AnswerRequestCommand | RequestResultCommand, ...],
         at: str,
+    ) -> dict[str, Any]: ...
+
+    def commit_interactive_request_turn(
+        self,
+        owner_agent_id: str,
+        turn_token: str,
+        actions: tuple[AnswerRequestCommand | RequestResultCommand, ...],
+        at: str,
+        *,
+        owner_controls: tuple[OwnerStopControl, ...] = (),
     ) -> dict[str, Any]: ...
 
     def request_turn_boundary(self, owner_agent_id: str) -> dict[str, Any]: ...

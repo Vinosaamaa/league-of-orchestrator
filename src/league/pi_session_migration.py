@@ -204,6 +204,7 @@ def migrate_pi_session(
     *,
     at: str,
     runner: CommandRunner | None = None,
+    multiplexer: Any | None = None,
 ) -> dict[str, Any]:
     """Migrate one stopped legacy Pi session and bind its exact resume descriptor."""
     required = {
@@ -308,7 +309,14 @@ def migrate_pi_session(
         )
     descriptor["worktree_binding"] = binding
     pane_id = str(endpoint.get("pane_id", ""))
-    _verify_stopped_pane(runner or SubprocessRunner(), pane_id, str(source_header["cwd"]))
+    if multiplexer is None:
+        _verify_stopped_pane(
+            runner or SubprocessRunner(), pane_id, str(source_header["cwd"])
+        )
+    else:
+        multiplexer.verify_stopped_provider_endpoint(
+            pane_id=pane_id, cwd=str(source_header["cwd"])
+        )
 
     prepared_descriptor = store.prepare_provider_launch(descriptor, at)
     intent = {

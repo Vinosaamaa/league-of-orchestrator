@@ -241,7 +241,7 @@ def test_stop_command(root: Path) -> None:
         ),
         "hook.stop",
     )
-    assert stop["status"] == "blocked_once" and stop["decision"] == "block"
+    assert stop["status"] == "blocked_attached" and stop["decision"] == "block"
 
 
 def test_triage_refuses_oversized_json_before_decode(root: Path) -> None:

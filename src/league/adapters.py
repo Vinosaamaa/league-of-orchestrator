@@ -179,38 +179,11 @@ class AdapterRegistry:
 
 
 def builtin_harness_contracts() -> tuple[DeclaredHarnessAdapter, ...]:
-    return (
-        DeclaredHarnessAdapter(
-            AdapterContract(
-                "codex",
-                "harness",
-                frozenset(HARNESS_CAPABILITIES - {"resume"}),
-                "inherited-contract",
-                "available",
-                "Compatibility contract for the proven Codex watcher behavior; real cutover canary is issue #23.",
-            )
-        ),
-        DeclaredHarnessAdapter(
-            AdapterContract(
-                "cursor",
-                "harness",
-                frozenset(HARNESS_CAPABILITIES),
-                "inherited-contract",
-                "available",
-                "Operational visible Cursor lifecycle through the production Herdr driver.",
-            )
-        ),
-        DeclaredHarnessAdapter(
-            AdapterContract(
-                "pi",
-                "harness",
-                frozenset(HARNESS_CAPABILITIES),
-                "inherited-contract",
-                "available",
-                "Operational visible Pi lifecycle through the scoped League integration and Herdr driver.",
-            )
-        ),
-    )
+    # Compatibility facade: established RuntimeLifecycle callers keep this
+    # import while contracts now come from the explicit provider registry.
+    from .agent_adapters import builtin_agent_adapter_registry
+
+    return tuple(builtin_agent_adapter_registry().adapters())
 
 
 @dataclass(frozen=True)
@@ -278,24 +251,44 @@ def builtin_contract_registry() -> AdapterRegistry:
 
 
 def production_capability_matrix() -> dict[str, Any]:
-    """Report the real visible driver separately from the generic contract-only core.
+    """Report low-level compatibility honestly and list semantic facades separately.
 
-    `assign run` and production cleanup own the Herdr process effects.  Keeping
-    this projection separate prevents the generic RuntimeLifecycle registry from
-    pretending that it can allocate a live terminal without assignment context.
+    ``RuntimeLifecycle`` still consumes the original low-level harness/backend
+    contract, so its operations remain ``driver_unavailable`` for built-ins.
+    Repository lifecycle commands use the explicit semantic registries exposed
+    in ``lifecycle_operations``; the two surfaces must not be conflated.
     """
 
+    from .agent_adapters import builtin_agent_adapter_registry
+    from .multiplexer_adapters import builtin_multiplexer_adapter_registry
+
     pairs = builtin_contract_registry().capability_matrix()["pairs"]
+    agents = builtin_agent_adapter_registry()
+    multiplexers = builtin_multiplexer_adapter_registry()
     for pair in pairs:
-        if pair["backend"] != "herdr":
-            continue
-        pair["availability"] = "operational"
-        pair["evidence"] = "inherited-contract"
-        for capability, status in tuple(pair["operations"].items()):
-            if status == "driver_unavailable":
-                pair["operations"][capability] = "supported"
+        multiplexer = multiplexers.adapter(str(pair["backend"]))
+        agent = agents.adapter(str(pair["harness"]))
+        pair["lifecycle_operations"] = {}
+        for operation in sorted(agent.lifecycle_operations):
+            required = agent.multiplexer_requirements.get(
+                operation, frozenset()
+            )
+            pair["lifecycle_operations"][operation] = (
+                "supported"
+                if required <= multiplexer.capabilities
+                else "driver_unavailable"
+            )
+        pair["multiplexer_operations"] = {
+            operation: "supported"
+            for operation in sorted(multiplexer.capabilities)
+        }
+        pair["semantic_availability"] = (
+            "operational"
+            if "visible_launch" in multiplexer.capabilities
+            else "contract-only"
+        )
     return {
         "schema": "league.adapter-matrix.v1",
-        "driver": "visible-assignment+production-cleanup",
+        "driver": "low-level-contract+explicit-semantic-facades",
         "pairs": pairs,
     }

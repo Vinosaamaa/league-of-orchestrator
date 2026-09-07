@@ -26,8 +26,12 @@ REQUEST_LIFECYCLE_TESTS := \
 	tests/test_cursor_steering.py \
 	tests/test_pi_provider_launch.py \
 	tests/test_shotcaller_stop.py \
+	tests/test_owner_stop_control.py \
 	tests/test_canonical_watcher.py \
 	tests/test_persistent_supervisor.py \
+	tests/test_multisquad_supervisor.py \
+	tests/test_supervisor_service.py \
+	tests/test_supervisor_delivery.py \
 	tests/test_calm_supervision.py \
 	tests/test_request_reconciliation.py \
 	tests/test_request_lifecycle_cli.py
@@ -39,7 +43,11 @@ BENCHMARK_TESTS := \
 	tests/test_inline_triage_prompt_shapes.py
 
 RUNTIME_LIFECYCLE_TESTS := \
+	tests/test_provider_hook_bootstrap.py \
 	tests/test_runtime_adapters.py \
+	tests/test_multiplexer_metadata.py \
+	tests/test_runtime_replacement.py \
+	tests/test_stopped_agent_retirement.py \
 	tests/test_cleanup_lifecycle.py \
 	tests/test_production_cleanup.py \
 	tests/test_repository_artifacts.py \

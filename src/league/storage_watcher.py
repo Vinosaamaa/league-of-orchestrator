@@ -35,13 +35,41 @@ class WatcherStorage(Protocol):
         at: str,
         *,
         block_on_obligations: bool = True,
+        expected_watcher_id: str | None = None,
+        expected_fence: int | None = None,
     ) -> dict[str, Any]: ...
 
     def supervisor_binding(self, callsign: Optional[str] = None) -> dict[str, Any]: ...
 
+    def supervisor_bindings(
+        self, *, limit: int = 64
+    ) -> tuple[dict[str, Any], ...]: ...
+
+    def resolve_supervisor_scope(
+        self, actor_agent_id: str, callsign: Optional[str] = None
+    ) -> dict[str, Any]: ...
+
+    def supervision_owner(self, actor_agent_id: str) -> Optional[str]: ...
+
+    def begin_shotcaller_turn(
+        self, actor_agent_id: str, turn_token: str, at: str
+    ) -> dict[str, Any]: ...
+
+    def commit_shotcaller_turn(
+        self, actor_agent_id: str, turn_token: str, at: str
+    ) -> dict[str, Any]: ...
+
+    def abort_shotcaller_turn(
+        self, actor_agent_id: str, turn_token: str, at: str
+    ) -> dict[str, Any]: ...
+
     def watcher_registration(
         self, actor_agent_id: str
     ) -> Optional[dict[str, Any]]: ...
+
+    def watcher_registrations(
+        self, actor_agent_ids: tuple[str, ...], *, limit: int = 64
+    ) -> dict[str, dict[str, Any]]: ...
 
     def watcher_readiness(
         self, actor_agent_id: str
@@ -68,6 +96,17 @@ class WatcherStorage(Protocol):
         mode: str,
         unreachable_grace_seconds: int,
         at: str,
+    ) -> dict[str, Any]: ...
+
+    def set_supervision_attachment(
+        self,
+        scope_id: str,
+        actor_agent_id: str,
+        mode: str,
+        at: str,
+        *,
+        expected_watcher_id: Optional[str] = None,
+        expected_fence: Optional[int] = None,
     ) -> dict[str, Any]: ...
 
     def apply_supervision_delivery_policy(
@@ -124,7 +163,7 @@ class WatcherStorage(Protocol):
         self,
         scope_id: str,
         actor_agent_id: str,
-        terminal_generation: str,
+        terminal_generation: str | None,
         body: str,
     ) -> bool: ...
 
@@ -133,6 +172,27 @@ class WatcherStorage(Protocol):
     ) -> dict[str, Any]: ...
 
     def set_allow_stop_once(self, scope_id: str, actor_agent_id: str) -> dict[str, Any]: ...
+
+    def prepare_owner_stop_control(
+        self,
+        actor_agent_id: str,
+        control_id: str,
+        prompt_id: str,
+        interrupt_delegates: bool,
+        at: str,
+    ) -> dict[str, Any]: ...
+
+    def pending_owner_stop_controls(
+        self, scope_ids: tuple[str, ...], *, limit: int = 64
+    ) -> tuple[dict[str, Any], ...]: ...
+
+    def finalize_owner_stop_control(
+        self, actor_agent_id: str, control_id: str, at: str
+    ) -> dict[str, Any]: ...
+
+    def fail_owner_stop_control(
+        self, actor_agent_id: str, control_id: str, reason: str, at: str
+    ) -> dict[str, Any]: ...
 
     def stop_decision(
         self,

@@ -18,7 +18,7 @@ import stat
 import tempfile
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
@@ -50,13 +50,16 @@ from .adapter_types import (
     RuntimeObservation,
 )
 from .adapters import AdapterRegistry, builtin_harness_contracts, builtin_registry
+from .agent_adapters import builtin_agent_adapter_kinds
 from .cleanup import (
     CLEANUP_ADAPTER_KINDS,
     CleanupAdapterRegistry,
     CleanupExecutor,
     CleanupPlanner,
 )
+from .guidance import is_universal_guidance_target
 from .importer import build_import_plan
+from .issue_first import issue_scope_digest, normalize_issue_title, semantic_scope_digest
 from .orchestration import OrchestrationSignals
 from .request_services import (
     AssignmentService,
@@ -65,6 +68,7 @@ from .request_services import (
     DeliveryService,
 )
 from .runtime import RuntimeCreateSpec, RuntimeLifecycle
+from .sqlite_project_ops import canonical_repository
 from .sqlite_store import CURRENT_SCHEMA_VERSION, SQLiteStorage
 from .supervision_policy import (
     CONSECUTIVE_OBSERVATIONS,
@@ -77,6 +81,7 @@ from .storage import (
     RuntimeRegistrationCommand,
     StorageRefusal,
 )
+from .storage_issue import BeginIssueSelectionCommand, CompleteIssueSelectionCommand
 
 
 PLAN_SCHEMA = "league.pre-cutover-plan.v1"
@@ -115,12 +120,22 @@ TARGET_KINDS = frozenset(
         "archive_root",
     }
 )
-HARNESS_KINDS = frozenset({"codex", "cursor", "pi"})
+HARNESS_KINDS = frozenset(builtin_agent_adapter_kinds())
 SHOTCALLER_ID = "11111111-1111-4111-8111-111111111111"
 CHAMPION_ID = "55555555-5555-4555-8555-555555555555"
 BASE_TASK_ID = "synthetic-task-19"
 LIFECYCLE_TASK_ID = "synthetic-precutover-task"
 SYNTHETIC_REPOSITORY = "https://example.invalid/league.git"
+SYNTHETIC_ISSUE_TITLE = "Synthetic pre-cutover task"
+SYNTHETIC_ISSUE_BODY = """## Objective
+Exercise the deterministic pre-cutover lifecycle.
+
+## Verification
+Prove assignment, delivery, transition, and cleanup using isolated doubles.
+
+## Hard boundaries
+Do not represent synthetic evidence as a live-runtime receipt.
+"""
 
 
 def _decode_json_object(path: Path, *, label: str) -> dict[str, Any]:
@@ -407,6 +422,13 @@ def _validate_plan(path: Path) -> dict[str, Any]:
         if kind not in TARGET_KINDS or not isinstance(required, bool):
             raise StorageRefusal("plan_invalid", "current target kind or requirement is invalid")
         target_path = _absolute_path(item["path"], "current target path")
+        if is_universal_guidance_target(
+            target_path
+        ) or is_universal_guidance_target(target_path.resolve(strict=False)):
+            raise StorageRefusal(
+                "universal_guidance_forbidden",
+                "League cannot target the universal agent guide",
+            )
         if target_id in target_ids or target_path in target_paths:
             raise StorageRefusal("plan_invalid", "current target identity is duplicated")
         if required and not os.path.lexists(target_path):
@@ -1084,6 +1106,87 @@ class _Ids:
         return f"synthetic-{kind}-{self.sequence:04d}"
 
 
+def _synthetic_issue_bound_spec(
+    store: SQLiteStorage, spec: AssignmentSpec, at: str
+) -> AssignmentSpec:
+    """Persist explicitly synthetic issue evidence for isolated acceptance."""
+    repository_key = canonical_repository(spec.repository)[1]
+    normalized_title = normalize_issue_title(SYNTHETIC_ISSUE_TITLE)
+    scope_digest = semantic_scope_digest(SYNTHETIC_ISSUE_BODY)
+    selection_identity = "\0".join(
+        (repository_key, normalized_title, scope_digest)
+    ).encode("utf-8")
+    selection_key = f"issue-scope:{hashlib.sha256(selection_identity).hexdigest()}"
+    attempt_id = f"attempt:{spec.task_id}"
+    acquired = store.begin_issue_selection(
+        BeginIssueSelectionCommand(
+            selection_key=selection_key,
+            task_id=spec.task_id,
+            task_summary=spec.task_summary,
+            coordinator_agent_id=spec.coordinator_agent_id,
+            repository=spec.repository,
+            repository_key=repository_key,
+            normalized_title=normalized_title,
+            semantic_scope_digest=scope_digest,
+            owner_attempt_id=attempt_id,
+            lease_expires_at="2099-01-01T00:00:00Z",
+            at=at,
+        )
+    )
+    if acquired["state"] == "completed":
+        selected = acquired["receipt"]
+    else:
+        selected = store.complete_issue_selection(
+            CompleteIssueSelectionCommand(
+                selection_key=selection_key,
+                expected_version=acquired["version"],
+                owner_attempt_id=attempt_id,
+                task_id=spec.task_id,
+                task_summary=spec.task_summary,
+                coordinator_agent_id=spec.coordinator_agent_id,
+                repository=spec.repository,
+                repository_key=repository_key,
+                normalized_title=normalized_title,
+                semantic_scope_digest=scope_digest,
+                decision="reuse_open",
+                issue=spec.issue,
+                issue_url=f"https://{repository_key}/issues/{spec.issue}",
+                issue_title=SYNTHETIC_ISSUE_TITLE,
+                issue_body_digest=hashlib.sha256(
+                    SYNTHETIC_ISSUE_BODY.encode("utf-8")
+                ).hexdigest(),
+                duplicate_matches=1,
+                reopen_action_receipt_digest=None,
+                at=at,
+            )
+        )
+    receipt: dict[str, Any] = {
+        "schema": "league.repository-issue.v1",
+        "repository": spec.repository,
+        "repository_key": repository_key,
+        "issue": spec.issue,
+        "issue_url": f"https://{repository_key}/issues/{spec.issue}",
+        "issue_state": "open",
+        "issue_title": SYNTHETIC_ISSUE_TITLE,
+        "normalized_title": normalized_title,
+        "issue_body_digest": hashlib.sha256(
+            SYNTHETIC_ISSUE_BODY.encode("utf-8")
+        ).hexdigest(),
+        "semantic_scope_digest": scope_digest,
+        "task_scope_digest": issue_scope_digest(
+            spec.repository, spec.issue, spec.task_id, spec.task_summary
+        ),
+        "issue_selection_receipt_digest": selected["receipt_digest"],
+        "verifier_kind": "synthetic-fixture",
+        "verified_at": at,
+    }
+    canonical = json.dumps(receipt, sort_keys=True, separators=(",", ":")).encode(
+        "utf-8"
+    )
+    receipt["receipt_digest"] = hashlib.sha256(canonical).hexdigest()
+    return replace(spec, issue_receipt=receipt)
+
+
 class _LaunchDouble:
     def launch(self, specification: AssignmentSpec) -> dict[str, Any]:
         return {
@@ -1250,10 +1353,10 @@ def _integrated_lifecycle(home: Path, source_root: Path) -> dict[str, Any]:
         )
         store.register_watcher(
             "synthetic-precutover-scope",
-            "watcher:synthetic-precutover",
+            "watcher:persistent:synthetic-precutover",
             SHOTCALLER_ID,
             "runtime:precutover-shotcaller",
-            "wake:synthetic-precutover",
+            "unix:/tmp/league-precutover-synthetic.sock",
             clock.after(600),
             1,
             clock.now(),
@@ -1303,8 +1406,7 @@ def _integrated_lifecycle(home: Path, source_root: Path) -> dict[str, Any]:
                 orchestration=OrchestrationSignals(False, False, False, 0, 0),
             )
         )
-        assignment = AssignmentService(store, _LaunchDouble(), clock, ids).assign(
-            AssignmentSpec(
+        assignment_spec = AssignmentSpec(
                 assignment_id="assignment:synthetic-precutover",
                 request_id="synthetic-precutover-request",
                 claim_token="claim:synthetic-precutover",
@@ -1317,7 +1419,10 @@ def _integrated_lifecycle(home: Path, source_root: Path) -> dict[str, Any]:
                 issue=23,
                 branch="agent/synthetic/23-precutover",
                 worktree="/synthetic/worktrees/23-precutover",
+                issue_receipt=None,
             )
+        assignment = AssignmentService(store, _LaunchDouble(), clock, ids).assign(
+            _synthetic_issue_bound_spec(store, assignment_spec, clock.now())
         )
         DeliveryService(
             store,
@@ -1410,6 +1515,12 @@ def _integrated_lifecycle(home: Path, source_root: Path) -> dict[str, Any]:
                 event_id="event:synthetic-precutover-answered",
                 at=clock.now(),
             )
+        )
+        store.set_supervision_attachment(
+            "synthetic-precutover-scope",
+            SHOTCALLER_ID,
+            "detached",
+            clock.now(),
         )
         stop_after = store.stop_decision(
             "synthetic-precutover-scope",
@@ -1540,7 +1651,8 @@ def _runtime_canaries(home: Path, source_root: Path) -> dict[str, Any]:
         ):
             backend = _BackendDouble(backend_kind)
             backend.sequence = index * 100
-            lifecycle = RuntimeLifecycle(store, _registry_for(harness_kind, backend))
+            registry = _registry_for(harness_kind, backend)
+            lifecycle = RuntimeLifecycle(store, registry)
             binding_id = f"binding:{harness_kind}:{backend_kind}:{index}"
             created = lifecycle.create(
                 RuntimeCreateSpec(
@@ -1556,7 +1668,9 @@ def _runtime_canaries(home: Path, source_root: Path) -> dict[str, Any]:
             )
             lifecycle.prompt(binding_id, "Synthetic pre-cutover prompt")
             lifecycle.wake(binding_id, "synthetic-precutover-event")
-            lifecycle.interrupt(binding_id)
+            harness = registry.harness(harness_kind)
+            if "interrupt" in harness.contract.capabilities:
+                lifecycle.interrupt(binding_id)
             if harness_kind == "pi":
                 lifecycle.resume(binding_id)
             lifecycle.guarded_exit(
@@ -1596,7 +1710,7 @@ def _runtime_canaries(home: Path, source_root: Path) -> dict[str, Any]:
             endpoint.encoded,
             "attached-precutover-generation",
             {
-                "harness": ["create", "exit", "hook", "identify", "interrupt", "prompt", "status", "title"],
+                "harness": ["create", "exit", "hook", "identify", "prompt", "status", "title"],
                 "backend": ["close", "input", "inspect"],
                 "evidence": {"harness": "inherited-contract", "backend": "isolated-double"},
             },
@@ -1605,7 +1719,6 @@ def _runtime_canaries(home: Path, source_root: Path) -> dict[str, Any]:
         tmux_lifecycle = RuntimeLifecycle(store, builtin_registry((tmux,)))
         tmux_lifecycle.prompt("binding:codex:tmux:attached", "Synthetic attached prompt")
         tmux_lifecycle.wake("binding:codex:tmux:attached", "synthetic-attached-event")
-        tmux_lifecycle.interrupt("binding:codex:tmux:attached")
         tmux_lifecycle.guarded_exit(
             "binding:codex:tmux:attached",
             expected_version=1,
@@ -2093,7 +2206,7 @@ def _migration_and_install_phase(
     live_shadow = _read_only_shadow(home, plan)
     if fault is not None:
         fault("after_live_shadow")
-    staged = _staged_install(home / "staged", source)
+    staged = _staged_install(home / "staged", source, fault=fault)
     staged["inactive_after_checks"] = staged["rollback"]["completed"]
     staged["global_install_performed"] = False
     staged["supervision"] = _staged_supervision_check(staged, home)

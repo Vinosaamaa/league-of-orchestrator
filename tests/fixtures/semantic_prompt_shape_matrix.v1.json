@@ -1,0 +1,98 @@
+{
+  "schema": "league.semantic-prompt-shape-matrix.v1",
+  "cases": [
+    {
+      "id": "short-1",
+      "size": "short",
+      "prompt": "Thanks for the earlier check. Please summarize the current request-turn latency evidence in three bullets and keep all machine-specific details out.",
+      "intents": [
+        {"key": "latency-summary", "summary": "Summarize current request-turn latency evidence publicly in three bullets."}
+      ]
+    },
+    {
+      "id": "short-3",
+      "size": "short",
+      "prompt": "Good catch. First rerun the focused schema check; second explain the failure plainly; third rerun that same schema check only if the explanation reveals a fixture mismatch.",
+      "intents": [
+        {"key": "schema-check", "summary": "Run the focused schema check."},
+        {"key": "failure-explanation", "summary": "Explain the schema-check failure plainly."},
+        {"key": "schema-check-repeat", "summary": "Run the focused schema check.", "repeat_of": "schema-check"}
+      ]
+    },
+    {
+      "id": "short-6",
+      "size": "short",
+      "prompt": "Proceed in order: inspect the hook binding, report its version, verify exact prompt capture, check Stop suppression, list remaining blockers, and do not install anything.",
+      "intents": [
+        {"key": "inspect-hook", "summary": "Inspect the installed hook binding."},
+        {"key": "report-version", "summary": "Report the installed hook version."},
+        {"key": "verify-capture", "summary": "Verify exact prompt capture."},
+        {"key": "check-stop", "summary": "Check Stop feedback suppression."},
+        {"key": "list-blockers", "summary": "List remaining acceptance blockers."},
+        {"key": "preserve-install", "summary": "Preserve the no-install boundary."}
+      ]
+    },
+    {
+      "id": "medium-1",
+      "size": "medium",
+      "prompt": "I agree with keeping SQLite, and the earlier receipt is useful context. For this turn, please produce one bounded recommendation that compares the current inline semantic-triage path with the old synchronous classifier. Include the measured local commit cost, distinguish it from model time, name any unmeasured installed behavior, and avoid changing model routing. This is a correction to the framing, not permission to install, publish, merge, or touch the live service.",
+      "intents": [
+        {"key": "inline-recommendation", "summary": "Recommend inline triage versus the synchronous classifier with measured and unmeasured boundaries."}
+      ]
+    },
+    {
+      "id": "medium-3",
+      "size": "medium",
+      "prompt": "The last update was mostly right, but revise it in three concrete ways. First, add a deterministic same-owner request shortlist to the pre-decision intake, using local lexical overlap and recency without another model call. Second, add a focused test showing a direct answer still proceeds when the total inventory exceeds the shortlist. Third, add a separate test showing Champion delegation refuses when the inventory snapshot changes before dispatch. Keep the acknowledgement that SQLite itself is not the dominant latency source, and do not broaden into embeddings or transcript search.",
+      "intents": [
+        {"key": "candidate-shortlist", "summary": "Add a deterministic same-owner candidate shortlist to pre-decision intake."},
+        {"key": "direct-truncation-test", "summary": "Test that direct answers proceed with a truncated shortlist."},
+        {"key": "external-cas-test", "summary": "Test that changed candidate state fences Champion dispatch."}
+      ]
+    },
+    {
+      "id": "medium-6",
+      "size": "medium",
+      "prompt": "Thanks; keep the existing architecture recommendation. Work through these six requests in order: diagnose why UserPromptSubmit cannot open canonical state from the model sandbox; route capture through the persistent owner service; prove exact-event idempotency; prove a later steer in the same turn is distinct; prove Stop feedback is suppressed rather than captured; and document the source-only install boundary. The second and fifth requests are related corrections to the same hook path, but both need explicit evidence. Do not start a launch service or mutate the installed hook while doing this.",
+      "intents": [
+        {"key": "diagnose-capability", "summary": "Diagnose the hook canonical-state capability failure."},
+        {"key": "broker-capture", "summary": "Route prompt capture through the persistent owner service."},
+        {"key": "exact-idempotency", "summary": "Prove exact source-event prompt idempotency."},
+        {"key": "same-turn-steer", "summary": "Prove a later same-turn steer is captured distinctly."},
+        {"key": "stop-suppression", "summary": "Prove exact Stop feedback is suppressed."},
+        {"key": "install-boundary", "summary": "Document that live installation remains unauthorized."}
+      ]
+    },
+    {
+      "id": "long-1",
+      "size": "long",
+      "prompt": "Context for one bounded decision: the owner observed long Working stalls while SQLite microbenchmarks remained in the low-millisecond range. The retained Luna xhigh diagnostic used 120 very short prompts and a separate classifier process, so it is evidence about an obsolete synchronous architecture rather than the target production path. The target now keeps semantic triage but requires the already-active Shotcaller to emit ordered triage items as a sideband of the same turn, after receiving a small canonical shortlist of potentially related open requests. A persistent service outside model turns owns the database, prompt hook broker, fenced watcher lease, and Champion wake channel. Truncation of the shortlist must not block a direct owner answer, although incomplete duplicate checking must fence irreversible external delegation. Stop remains omission detection and never performs a semantic merge. Given that context, write one recommendation stating whether the next acceptance milestone should prioritize the inline critical path or a larger fallback-classifier benchmark, and justify the choice with the owner-response boundary. Preserve the no-install and no-live-cutover constraint.",
+      "intents": [
+        {"key": "priority-recommendation", "summary": "Recommend the next acceptance priority using the inline owner-response boundary."}
+      ]
+    },
+    {
+      "id": "long-3",
+      "size": "long",
+      "prompt": "Please treat the following as a correction plus three ordered requests, not as permission to broaden scope. The baseline report correctly separated SQLite from model latency, but it did not give the active Shotcaller enough canonical state to classify duplicates reliably. The system now needs a small deterministic shortlist selected locally from same-owner active requests, and any external delegation must be fenced if the full candidate check is incomplete or stale. Stop must remain a read-only omission backstop; if two requests were already minted, the Shotcaller must explicitly reconcile the duplicate under expected versions while preserving both prompt sources. First, update the request-turn intake and decision validation to carry the shortlist and exact versions. Second, add the explicit same-owner duplicate reconciliation transition and prove it is idempotent. Third, update the request-turn intake and decision validation to carry the shortlist and exact versions; this repeats the first request intentionally and should be collapsed rather than creating another request. Keep direct answers available when the shortlist is truncated, and keep live installation unauthorized.",
+      "intents": [
+        {"key": "shortlist-contract", "summary": "Carry the bounded candidate shortlist and versions in request-turn intake and decisions."},
+        {"key": "reconciliation-transition", "summary": "Add and test explicit same-owner duplicate reconciliation."},
+        {"key": "shortlist-contract-repeat", "summary": "Carry the bounded candidate shortlist and versions in request-turn intake and decisions.", "repeat_of": "shortlist-contract"}
+      ]
+    },
+    {
+      "id": "long-6",
+      "size": "long",
+      "prompt": "Owner context: persistent supervision is currently off in the installed environment, UserPromptSubmit is configured but cannot access the canonical state root from the active model sandbox, and the previous synchronous semantic classifier imposed seconds to tens of seconds of isolated wall time. The implementation must stay source-only until separate install authority, preserve exact event provenance, and avoid transcript mining. Please handle six requests in this order. First, add a same-user authenticated Unix-socket broker so the persistent service, not the hook subprocess, owns SQLite access. Second, make its watcher lease renewable and fenced and prove stale ownership recovery. Third, add a low-row, low-byte same-owner request shortlist ranked locally by exact routing keys when present, normalized lexical overlap, and recency. Fourth, keep direct owner responses available when that shortlist is truncated but fence Champion or other external dispatch until the complete snapshot is checked. Fifth, add an agent-authored reconciliation that marks only request B superseded by request A under expected versions, preserving all sources and refusing execution already begun. Sixth, add an asynchronous orphan/backlog recovery adapter and probe it with Sol xhigh without putting that classifier on the owner-response path. Acknowledgement: the old Luna receipt remains immutable. Correction: Stop only reports omissions and summaries; it never performs request merging. Do not install, load launchd, rewrite hooks, merge, or cut over live state.",
+      "intents": [
+        {"key": "socket-broker", "summary": "Add a same-user persistent Unix-socket hook broker."},
+        {"key": "renewable-lease", "summary": "Add renewable fenced supervision with stale-owner recovery."},
+        {"key": "ranked-shortlist", "summary": "Add a small deterministic same-owner candidate shortlist."},
+        {"key": "external-dispatch-fence", "summary": "Fence external dispatch when the complete candidate check is unavailable or stale."},
+        {"key": "request-reconciliation", "summary": "Add versioned same-owner duplicate-request reconciliation."},
+        {"key": "async-recovery", "summary": "Add and probe asynchronous orphan/backlog semantic recovery."}
+      ]
+    }
+  ]
+}

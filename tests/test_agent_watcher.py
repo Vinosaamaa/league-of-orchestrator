@@ -128,10 +128,24 @@ def test_controls_and_stop_hook(root: Path, state: Path, environment: dict[str, 
     run(["disable"], root=root, state=state, environment=environment)
     assert json.loads(run(["status"], root=root, state=state, environment=environment).stdout)["enabled"] is False
     run(["enable"], root=root, state=state, environment=environment)
-    run(["allow-stop", "--once"], root=root, state=state, environment=environment)
-    assert json.loads(run(["codex-stop-hook"], root=root, state=state, environment=environment).stdout) == {}
+    state_file = state / "state.json"
+    before_control = state_file.read_bytes()
+    rejected_once = run(
+        ["allow-stop", "--once"],
+        root=root,
+        state=state,
+        environment=environment,
+        check=False,
+    )
+    assert rejected_once.returncode != 0
+    assert state_file.read_bytes() == before_control
+    legacy = json.loads(state_file.read_text(encoding="utf-8"))
+    legacy["allow_stop_once"] = True
+    state_file.write_text(json.dumps(legacy) + "\n", encoding="utf-8")
     blocked = json.loads(run(["codex-stop-hook"], root=root, state=state, environment=environment).stdout)
-    assert blocked["decision"] == "block"
+    repeated = json.loads(run(["codex-stop-hook"], root=root, state=state, environment=environment).stdout)
+    assert blocked["decision"] == repeated["decision"] == "block"
+    assert "Every unchanged Stop remains blocked" in repeated["reason"]
     assert (root / "Garen" / "champions" / "Zilean" / "status.json").read_bytes() == before
 
 
@@ -242,6 +256,9 @@ def main():
     with tempfile.TemporaryDirectory(prefix="agent-watcher-test.") as directory:
         temporary = Path(directory)
         environment = fake_process_environment(temporary)
+        environment["LEAGUE_WRITER_POINTER"] = str(
+            temporary / "absent-writer-pointer.json"
+        )
         root = temporary / "records"
         state = temporary / "state"
         test_controls_and_stop_hook(root, state, environment)
@@ -250,7 +267,7 @@ def main():
         test_bounded_failure_fails_open(root / "failure", state / "failure", environment)
         test_teardown_fails_closed(root / "teardown", state / "teardown", environment)
         test_legacy_teardown_proof_is_refused(root / "teardown-plan", state / "teardown-plan", environment)
-    print("PASS: controls, one-shot Stop permission, durable offsets/deduplication, silent liveness, material wake, bounded failure, and fail-closed teardown")
+    print("PASS: controls, retired one-shot refusal, repeated attached Stop blocking, durable offsets/deduplication, silent liveness, material wake, bounded failure, and fail-closed teardown")
 
 
 if __name__ == "__main__":

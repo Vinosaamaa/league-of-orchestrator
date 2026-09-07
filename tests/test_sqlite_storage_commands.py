@@ -18,6 +18,7 @@ LEAGUE = ROOT / "bin/league"
 sys.path[:0] = [str(ROOT / "src"), str(ROOT / "tests")]
 
 import league.cli as cli  # noqa: E402
+import league.sqlite_store as sqlite_store_module  # noqa: E402
 from league.sqlite_store import CURRENT_SCHEMA_VERSION  # noqa: E402
 from storage_fixture import (  # noqa: E402
     CHAMPION_ID,
@@ -55,7 +56,7 @@ def test_launcher_help_and_schemas() -> None:
     )
     assert "SQL is not exposed" in " ".join(launcher.stdout.split())
     assert (
-        "{storage,agent,callsign,rollover,delivery,project,roster,evidence,artifact,report,squad,task,runtime,skill,routing,resource,cleanup,request,assign,hook,help,acceptance}"
+        "{storage,agent,callsign,shotcaller,rollover,delivery,project,roster,evidence,artifact,report,squad,task,runtime,skill,routing,resource,cleanup,continuation,request,assign,hook,mode,issue,provider-hooks,help,acceptance}"
         in launcher.stdout
     )
     parser = cli._parser()
@@ -69,11 +70,17 @@ def test_launcher_help_and_schemas() -> None:
     )
     artifact_help = groups.choices["artifact"].format_help()
     assert all(name in artifact_help for name in ("declare", "publish", "status"))
+    provider_hook_help = groups.choices["provider-hooks"].format_help()
+    assert all(name in provider_hook_help for name in ("upgrade", "rollback"))
     rollover_help = groups.choices["rollover"].format_help()
     assert all(
         name in rollover_help
-        for name in ("prepare", "bindings", "acknowledge", "commit", "abort", "drain", "status")
+        for name in (
+            "prepare", "bindings", "acknowledge", "commit", "intake-plan",
+            "reconcile-intake", "reconcile-descendant", "abort", "drain", "status",
+        )
     )
+    assert "create" in groups.choices["shotcaller"].format_help()
     squad_help = groups.choices["squad"].format_help()
     assert all(name in squad_help for name in ("register", "accept", "status"))
     request_actions = next(
@@ -92,7 +99,13 @@ def test_launcher_help_and_schemas() -> None:
         )
     )
     assignment_help = groups.choices["assign"].format_help()
-    assert all(name in assignment_help for name in ("reconcile-runtime", "finish-hidden"))
+    assert all(name in assignment_help for name in ("run", "reconcile-runtime", "finish-hidden"))
+    mode_help = groups.choices["mode"].format_help()
+    assert all(name in mode_help for name in ("authorize", "status", "use", "settle", "transition", "revoke"))
+    issue_help = groups.choices["issue"].format_help()
+    assert "select" in issue_help
+    request_help = groups.choices["request"].format_help()
+    assert "untriaged" in request_help and "turn" in request_help
     for name in (
         "league-command-output.schema.json",
         "league-import-report.schema.json",
@@ -423,6 +436,27 @@ def test_admin_export_and_operational_envelope(root: Path) -> None:
     refusal(json.loads(output.getvalue()), "storage.integrity", "operation_failed")
 
 
+def test_inaccessible_database_has_actionable_error(root: Path) -> None:
+    _, state, _ = seeded_state(root, "inaccessible-root")
+    original = sqlite_store_module.sqlite3.connect
+
+    def unavailable(*args, **kwargs):
+        del args, kwargs
+        raise sqlite_store_module.sqlite3.OperationalError(
+            "unable to open database file"
+        )
+
+    try:
+        sqlite_store_module.sqlite3.connect = unavailable
+        payload = invoke_cli(
+            state, "storage", "integrity", expected=2
+        )
+    finally:
+        sqlite_store_module.sqlite3.connect = original
+    refusal(payload, "storage.integrity", "state_root_unavailable")
+    assert "exact canonical root" in payload["error"]["message"]
+
+
 def main() -> None:
     test_launcher_help_and_schemas()
     with tempfile.TemporaryDirectory(prefix="league-storage-command-") as temporary:
@@ -431,6 +465,7 @@ def main() -> None:
         test_agent_and_delivery_commands(root)
         test_callsign_project_and_task_commands(root)
         test_admin_export_and_operational_envelope(root)
+        test_inaccessible_database_has_actionable_error(root)
     print("PASS: focused CLI groups, schemas, envelopes, lease recovery, and launcher smoke")
 
 

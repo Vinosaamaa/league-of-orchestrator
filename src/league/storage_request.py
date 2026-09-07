@@ -9,7 +9,16 @@ from .orchestration import OrchestrationSignals
 
 
 MAX_TRIAGE_JSON_BYTES = 65_536
+MAX_TRIAGE_TURN_BYTES = 1_000_000
+MAX_TRIAGE_TURN_PROMPTS = 25
 MAX_TASK_RESULT_SOURCES = 128
+
+
+@dataclass(frozen=True)
+class OwnerStopControl:
+    control_id: str
+    prompt_id: str
+    interrupt_delegates: bool
 
 
 @dataclass(frozen=True)
@@ -87,6 +96,24 @@ class AnswerRequestCommand:
     at: str
 
 
+@dataclass(frozen=True)
+class TurnDispatchPlan:
+    runtime_instance_id: str
+    claim_token: str
+    leased_until: str
+    command: DispatchRequestCommand
+
+
+@dataclass(frozen=True)
+class ReconcileDuplicateRequestCommand:
+    duplicate_request_id: str
+    canonical_request_id: str
+    owner_agent_id: str
+    expected_duplicate_version: int
+    expected_canonical_version: int
+    at: str
+
+
 class RequestStorage(Protocol):
     def intake_prompt(
         self,
@@ -113,11 +140,64 @@ class RequestStorage(Protocol):
     ) -> dict[str, Any]: ...
     def triage_prompt(self, prompt_id: str, items: list[dict[str, Any]], at: str) -> dict[str, Any]: ...
 
+    def triage_prompt_batch(
+        self,
+        owner_agent_id: str,
+        expected_prompt_ids: tuple[str, ...],
+        decisions: list[dict[str, Any]],
+        at: str,
+    ) -> dict[str, Any]: ...
+
+    def begin_request_turn(
+        self,
+        owner_agent_id: str,
+        expected_prompt_ids: tuple[str, ...],
+        decisions: list[dict[str, Any]],
+        plans: tuple[TurnDispatchPlan, ...],
+        at: str,
+        *,
+        expected_candidate_digest: Optional[str] = None,
+        candidate_limit: int = 12,
+        candidate_max_bytes: int = 24_576,
+    ) -> dict[str, Any]: ...
+
+    def commit_request_turn(
+        self,
+        owner_agent_id: str,
+        actions: tuple[AnswerRequestCommand | RequestResultCommand, ...],
+        at: str,
+    ) -> dict[str, Any]: ...
+
+    def commit_interactive_request_turn(
+        self,
+        owner_agent_id: str,
+        turn_token: str,
+        actions: tuple[AnswerRequestCommand | RequestResultCommand, ...],
+        at: str,
+        *,
+        owner_controls: tuple[OwnerStopControl, ...] = (),
+    ) -> dict[str, Any]: ...
+
+    def request_turn_boundary(self, owner_agent_id: str) -> dict[str, Any]: ...
+
+    def reconcile_duplicate_request(
+        self, command: ReconcileDuplicateRequestCommand
+    ) -> dict[str, Any]: ...
+
     def claim_request(
         self,
         request_id: str,
         runtime_instance_id: str,
         claim_token: str,
+        leased_until: str,
+        at: str,
+    ) -> dict[str, Any]: ...
+
+    def accept_routed_delivery(
+        self,
+        event_id: str,
+        recipient_agent_id: str,
+        runtime_instance_id: str,
         leased_until: str,
         at: str,
     ) -> dict[str, Any]: ...
@@ -175,3 +255,17 @@ class RequestStorage(Protocol):
         limit: int = 100,
         before_action: Optional[str] = None,
     ) -> dict[str, Any]: ...
+
+    def untriaged_intake(
+        self,
+        owner_agent_id: str,
+        *,
+        limit: int = 20,
+        max_bytes: int = 1_000_000,
+        candidate_limit: int = 12,
+        candidate_max_bytes: int = 24_576,
+        candidate_after: Optional[str] = None,
+        candidate_page: bool = False,
+    ) -> dict[str, Any]: ...
+
+    def semantic_recovery_backlog(self, *, limit: int = 20) -> dict[str, Any]: ...

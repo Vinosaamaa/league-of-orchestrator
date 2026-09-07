@@ -3,7 +3,9 @@
 This slice implements issues
 [#7](https://github.com/Vinosaamaa/league-of-orchestrator/issues/7),
 [#11](https://github.com/Vinosaamaa/league-of-orchestrator/issues/11), and
-[#14](https://github.com/Vinosaamaa/league-of-orchestrator/issues/14) behind
+[#14](https://github.com/Vinosaamaa/league-of-orchestrator/issues/14), with
+issue [#83](https://github.com/Vinosaamaa/league-of-orchestrator/issues/83)
+implementing the accepted issue-#15 continuation policy behind
 the existing `Storage` facade. It does not install, migrate live records, or
 claim a real harness/backend canary. Issue
 [#23](https://github.com/Vinosaamaa/league-of-orchestrator/issues/23) owns that
@@ -39,21 +41,6 @@ Pi test covers create → identify → route/prompt → durable transition → w
 interrupt → resume → exact guarded exit. It is never reported as real-runtime
 proof. Separate deterministic contract tests cover Codex+Herdr creation and
 Codex+tmux attach/input/inspect/close behavior without launching either backend.
-
-Shotcaller rollover adds a narrower configured-provider command boundary,
-`league.rollover-provider-adapters.v1`. It maps an opaque harness kind to one
-absolute local command and never branches in core code on Codex, Cursor, or a
-future provider name. `league rollover run` sends that command one bounded JSON
-request for `acknowledge`, `abort`, or `drain`; the command must return the exact
-verified receipt schema. Input and output are capped, command time is bounded,
-nonzero/timeout outcomes are retryable with the same idempotency key, and raw
-stdout/stderr never becomes public League output. Both predecessor and
-successor harness adapters are preflighted before owner commit. The normalized
-configuration digest is part of the durable handoff plan and must match on
-every retry; the command paths themselves remain local adapter input. Each
-adapter must durably reconcile the request's idempotency key before applying an
-external effect and echo that exact key in its verified receipt, so a crash
-before the local transition can retrieve the same outcome without repeating it.
 
 Issue #10's `league skill matrix` reuses this generated adapter matrix as its
 runtime-pair evidence. Skill requirements remain a separate provider/model-
@@ -122,6 +109,104 @@ this executor. Shotcaller cleanup is accepted only when the archived plan still
 matches the exact switched rollover predecessor and version. Completion derives
 the rollover drain receipt from immutable cleanup action receipts; retries reuse
 the same cleanup operation and rollover receipt.
+
+## Already-stopped total retirement
+
+Issue [#127](https://github.com/Vinosaamaa/league-of-orchestrator/issues/127)
+adds a narrow retirement path for an exact Champion whose provider process and
+multiplexer pane are already absent while an imported runtime remains active.
+This is not repository cleanup. `runtime retire-stopped-agent` never exits,
+closes, resumes, launches, prompts, steers, deletes, or rewrites external state.
+
+Core resolves the runtime kind and multiplexer kind only through their adapter
+registries. The agent adapter validates its provider and process vocabulary;
+the multiplexer adapter proves that the exact endpoint, route, native session,
+pane, and registered provider process names have no live or ambiguous inventory
+match. An unsupported pair refuses without a fallback. Herdr uses structured
+`agent list` and exact-pane `process-info`; only an explicit structured
+`pane_not_found` failure envelope on stderr with exit status 1 establishes pane
+absence. Successful process inspection is accepted only as bounded structured
+JSON on stdout. Both streams require finite JSON and exactly one top-level
+member: `result` on success or `error` on failure. Mixed result/error envelopes
+and non-finite constants fail closed. Duplicate JSON members at any depth also
+fail closed before shape or identity evaluation. tmux remains explicitly
+unsupported until its adapter can provide equivalent owner-source evidence.
+
+One bounded `BEGIN IMMEDIATE` transaction rechecks the immutable runtime/session/
+endpoint/generation, expected agent and callsign versions, unique active runtime
+and callsign ownership, and transferred-task boundary before performing that
+external read-only proof. It then marks the runtime
+closed and unverified, releases the exact callsign at the queue tail,
+terminalizes and retires the Champion, removes only that Champion's Squad
+membership, records immutable proof and receipt digests, and emits a retirement
+event. A fault at either internal boundary rolls everything back. Reopening the
+store and retrying the same operation returns the stored receipt without
+consulting or changing the multiplexer again. Supported League launch and resume
+paths also require canonical write ownership, so they cannot interleave between
+proof and settlement; the concurrency acceptance holds the proof open and
+observes an exact retryable writer refusal. Same-user raw process injection is
+outside League's process-security boundary, while any pane or registered
+provider process present when proof runs is still refused. Repository coordinates are
+retained only as immutable agent history; no filesystem adapter participates.
+
+Retirement identity fields and serialized proof bytes are bounded before
+persistence. Supported provider aliases normalize to the adapter's canonical
+provider before comparison, digesting, and receipt storage. Composite indexes
+bound the unique active-callsign and active-assignment checks.
+
+Focused acceptance uses synthetic SQLite state, temporary retained bytes, and
+fake adapter inventories. It covers direct Codex, direct Cursor CLI, Pi with
+Cursor, Pi with Codex, an injected non-Herdr multiplexer, imported callsign/runtime
+binding, live/ambiguous/mismatched/orphan-process refusal, unsupported pairs,
+proof-versus-resume concurrency, transaction rollback, and exact retry after
+storage restart.
+
+## Issue-coupled cleanup and exact-thread continuation
+
+Migration v16 is named
+`issue-coupled-cleanup-and-exact-thread-continuation`. It retains historical
+runtime rows while limiting `(harness_kind, session_ref)` uniqueness to live
+`active` or `idle` runtimes. This permits a later runtime incarnation to carry
+the same opaque provider thread identity only after every recorded incarnation
+in that lineage is closed. Unlinked reuse, multiple live rows, or a thread that
+appears outside its lineage refuses.
+
+Issue-coupled cleanup is opt-in and restricted to a completed Champion whose
+`pr_ci` or `deployed_service` proof is complete. The manifest adds an exact
+provider-thread archive and one final `issue_close` action. The planner checks
+that the archive matches the canonical task owner, runtime, callsign,
+repository, issue, branch, worktree, completed acceptance, cleanup proof,
+instruction/policy digests, context health, and declared durable/exact/safe
+resume capabilities. It inserts the lineage/archive/incarnation with the cleanup
+plan in one transaction. External action order remains proof archive, resources,
+session exit, endpoint close, Git cleanup, callsign release, then issue close.
+Any earlier retryable failure leaves the issue open. An already-closed exact
+issue is reconciled without repeating the external action. The provider-thread
+archive becomes `available` only after the issue-close action receipt and final
+teardown receipt commit together.
+
+Continuation is never automatic. `league continuation prepare` takes one
+archive ID plus the intended successor assignment/task/agent and exact new Git
+binding. The store exclusively claims it only when the archive is available,
+all linked runtimes are closed, context is healthy, exact resume and safe
+worktree rebinding are declared, no current agent owns the new worktree, and
+governing instruction drift has an explicit reconciliation digest. A concrete
+benefit must be one of same-task recovery, same-artifact revision, or an
+unresolved decision chain; otherwise the caller must choose a fresh thread.
+
+`league continuation reopen` uses version, fence, executor, and lease
+preconditions around the exact owning-issue reopen. A crash before recording the
+receipt is recovered by observing that same issue already open. Only then may
+the predeclared assignment run. The Codex/Herdr driver invokes `codex resume`
+with the archived thread UUID, binds the new worktree, skips the fresh-thread
+identity handshake, and refuses unless Herdr reports that exact thread on the
+new endpoint. Activation uses the normal callsign queue; it never reserves the
+historical callsign specially. It writes a new runtime incarnation and retains
+the prior task, cleanup, close, and reopen receipts permanently.
+
+The current operational exact-resume driver is Codex on Herdr. A provider with
+no exact durable resume or no safe worktree-rebind declaration fails closed;
+the core continues to store provider identifiers as opaque namespaced strings.
 
 Runtime exit uses the same recoverable shape: it atomically claims a binding
 version and monotonically increasing exit fence before sending exit or close,

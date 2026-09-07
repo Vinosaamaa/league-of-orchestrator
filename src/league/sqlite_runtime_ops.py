@@ -8,6 +8,7 @@ import sqlite3
 from datetime import datetime
 from typing import Any, Mapping, Optional
 
+from .cleanup import require_cleanup_task_disposition, select_cleanup_policy
 from .storage_types import StorageRefusal
 
 
@@ -51,6 +52,300 @@ def runtime_cleanup_identity(
     ):
         raise StorageRefusal("cleanup_identity_mismatch", "runtime cleanup identity changed")
     return dict(runtime)
+
+
+def reconcile_restored_runtime(
+    store: Any,
+    runtime_instance_id: str,
+    actor_agent_id: str,
+    thread_id: str,
+    session_ref: str,
+    backend_kind: str,
+    expected_endpoint: str,
+    expected_generation: str,
+    observed_endpoint: str,
+    observed_generation: str,
+    at: str,
+) -> dict[str, Any]:
+    """CAS one restored endpoint onto an existing immutable agent session."""
+
+    _time(at, "restored runtime reconciliation time", "runtime_reconcile_invalid")
+    if not all(
+        (
+            runtime_instance_id,
+            actor_agent_id,
+            thread_id,
+            session_ref,
+            backend_kind,
+            expected_endpoint,
+            expected_generation,
+            observed_endpoint,
+            observed_generation,
+        )
+    ):
+        raise StorageRefusal(
+            "runtime_reconcile_invalid", "restored runtime identity is incomplete"
+        )
+    try:
+        with store._transaction():
+            runtime = store.connection.execute(
+                """
+                SELECT r.*,a.address,a.thread_id,a.role,a.retired_at,a.version AS agent_version,
+                       a.status AS agent_status,a.task_id
+                  FROM runtime_instances r JOIN agent_instances a
+                    ON a.agent_id=r.actor_agent_id
+                 WHERE r.runtime_instance_id=?
+                """,
+                (runtime_instance_id,),
+            ).fetchone()
+            if (
+                runtime is None
+                or runtime["actor_agent_id"] != actor_agent_id
+                or runtime["session_ref"] != session_ref
+                or runtime["backend_kind"] != backend_kind
+                or runtime["status"] not in {"active", "idle"}
+                or not bool(runtime["verified"])
+                or runtime["retired_at"] is not None
+                or runtime["role"] not in {"shotcaller", "champion"}
+                or runtime["thread_id"] != thread_id
+            ):
+                raise StorageRefusal(
+                    "runtime_reconcile_identity_mismatch",
+                    "restored runtime does not match one active canonical session",
+                )
+            current_exact = bool(
+                runtime["endpoint"] == observed_endpoint
+                and runtime["runtime_generation"] == observed_generation
+                and runtime["address"] == observed_endpoint
+            )
+            if current_exact:
+                return {
+                    "runtime_instance_id": runtime_instance_id,
+                    "actor_agent_id": actor_agent_id,
+                    "endpoint": observed_endpoint,
+                    "runtime_generation": observed_generation,
+                    "status": str(runtime["status"]),
+                    "idempotent": True,
+                }
+            if (
+                runtime["endpoint"] != expected_endpoint
+                or runtime["runtime_generation"] != expected_generation
+                or runtime["address"] not in {expected_endpoint, observed_endpoint}
+            ):
+                raise StorageRefusal(
+                    "runtime_reconcile_version_conflict",
+                    "canonical runtime changed before restored endpoint CAS",
+                )
+            collision = store.connection.execute(
+                """
+                SELECT runtime_instance_id FROM runtime_instances
+                 WHERE actor_agent_id=? AND runtime_generation=?
+                   AND runtime_instance_id<>?
+                 LIMIT 1
+                """,
+                (actor_agent_id, observed_generation, runtime_instance_id),
+            ).fetchone()
+            if collision is not None:
+                raise StorageRefusal(
+                    "runtime_reconcile_generation_conflict",
+                    "restored runtime generation already belongs to another runtime",
+                )
+            changed = store.connection.execute(
+                """
+                UPDATE runtime_instances
+                   SET endpoint=?,runtime_generation=?,last_seen_at=?
+                 WHERE runtime_instance_id=? AND actor_agent_id=? AND session_ref=?
+                   AND endpoint=? AND runtime_generation=?
+                   AND status IN ('active','idle') AND verified=1
+                """,
+                (
+                    observed_endpoint,
+                    observed_generation,
+                    at,
+                    runtime_instance_id,
+                    actor_agent_id,
+                    session_ref,
+                    expected_endpoint,
+                    expected_generation,
+                ),
+            )
+            if changed.rowcount != 1:
+                raise StorageRefusal(
+                    "runtime_reconcile_version_conflict",
+                    "restored runtime CAS lost its canonical precondition",
+                )
+            next_version = int(runtime["agent_version"]) + 1
+            agent_changed = store.connection.execute(
+                """
+                UPDATE agent_instances
+                   SET address=?,version=?,updated_at=?,update_text='restored runtime reconciled'
+                 WHERE agent_id=? AND version=? AND retired_at IS NULL
+                   AND thread_id=? AND address IN (?,?)
+                """,
+                (
+                    observed_endpoint,
+                    next_version,
+                    at,
+                    actor_agent_id,
+                    runtime["agent_version"],
+                    thread_id,
+                    expected_endpoint,
+                    observed_endpoint,
+                ),
+            )
+            if agent_changed.rowcount != 1:
+                raise StorageRefusal(
+                    "runtime_reconcile_version_conflict",
+                    "restored agent endpoint changed before canonical CAS",
+                )
+            event_suffix = hashlib.sha256(
+                f"{observed_endpoint}\0{observed_generation}".encode("utf-8")
+            ).hexdigest()[:16]
+            store.connection.execute(
+                """
+                INSERT INTO events
+                  (event_id,agent_id,task_id,entity_version,event_type,status,update_text,
+                   occurred_at,detail_json,aggregate_kind,aggregate_id)
+                VALUES(?,?,?,?, 'runtime_restored','active','restored runtime reconciled',
+                       ?,?,'runtime',?)
+                """,
+                (
+                    f"runtime:{runtime_instance_id}:restored:{event_suffix}",
+                    actor_agent_id,
+                    None,
+                    next_version,
+                    at,
+                    _json(
+                        {
+                            "previous_endpoint": expected_endpoint,
+                            "previous_generation": expected_generation,
+                            "restored_endpoint": observed_endpoint,
+                            "restored_generation": observed_generation,
+                            "session_ref": session_ref,
+                        }
+                    ),
+                    runtime_instance_id,
+                ),
+            )
+    except StorageRefusal:
+        raise
+    except sqlite3.DatabaseError as exc:
+        raise store._translate_database_error(
+            exc, "restored runtime reconciliation conflicted with canonical state"
+        ) from exc
+    return {
+        "runtime_instance_id": runtime_instance_id,
+        "actor_agent_id": actor_agent_id,
+        "endpoint": observed_endpoint,
+        "runtime_generation": observed_generation,
+        "status": str(runtime["status"]),
+        "idempotent": False,
+    }
+
+
+def record_restored_runtime_recovery(
+    store: Any,
+    runtime_instance_id: str,
+    actor_agent_id: str,
+    failure_code: str,
+    at: str,
+) -> dict[str, Any]:
+    """Persist one retry obligation after a restore effect crossed its CAS boundary."""
+
+    _time(at, "restored runtime recovery time", "runtime_reconcile_invalid")
+    if not all((runtime_instance_id, actor_agent_id, failure_code)):
+        raise StorageRefusal(
+            "runtime_reconcile_invalid", "restored recovery identity is incomplete"
+        )
+    digest = hashlib.sha256(runtime_instance_id.encode()).hexdigest()[:24]
+    obligation_id = f"obligation:runtime-restore:{digest}"
+    dedupe_key = f"runtime-restore:{runtime_instance_id}"
+    with store._transaction():
+        agent = store.connection.execute(
+            "SELECT role,shotcaller_agent_id,retired_at FROM agent_instances WHERE agent_id=?",
+            (actor_agent_id,),
+        ).fetchone()
+        runtime = store.connection.execute(
+            "SELECT actor_agent_id FROM runtime_instances WHERE runtime_instance_id=?",
+            (runtime_instance_id,),
+        ).fetchone()
+        if (
+            agent is None
+            or runtime is None
+            or runtime["actor_agent_id"] != actor_agent_id
+            or agent["retired_at"] is not None
+        ):
+            raise StorageRefusal(
+                "runtime_reconcile_identity_mismatch",
+                "restored recovery obligation does not bind an active canonical runtime",
+            )
+        owner = (
+            actor_agent_id
+            if agent["role"] == "shotcaller"
+            else agent["shotcaller_agent_id"]
+        )
+        if not isinstance(owner, str) or not owner:
+            owner = actor_agent_id
+        details = _json(
+            {
+                "schema": "league.runtime-restore-recovery.v1",
+                "runtime_instance_id": runtime_instance_id,
+                "failure_code": failure_code,
+                "next_action": "retry runtime reconcile-restored-agent with the same multiplexer",
+            }
+        )
+        existing = store.connection.execute(
+            "SELECT * FROM obligations WHERE dedupe_key=?", (dedupe_key,)
+        ).fetchone()
+        if existing is None:
+            store.connection.execute(
+                """
+                INSERT INTO obligations
+                  (obligation_id,owner_agent_id,kind,aggregate_id,dedupe_key,state,
+                   next_attention_at,details_json,created_at,updated_at)
+                VALUES(?,?, 'runtime_restore',?,?, 'open',?,?,?,?)
+                """,
+                (
+                    obligation_id,
+                    owner,
+                    runtime_instance_id,
+                    dedupe_key,
+                    at,
+                    details,
+                    at,
+                    at,
+                ),
+            )
+            return {"obligation_id": obligation_id, "state": "open", "idempotent": False}
+        store.connection.execute(
+            """
+            UPDATE obligations SET state='open',next_attention_at=?,details_json=?,updated_at=?
+             WHERE obligation_id=?
+            """,
+            (at, details, at, obligation_id),
+        )
+        return {"obligation_id": obligation_id, "state": "open", "idempotent": True}
+
+
+def satisfy_restored_runtime_recovery(
+    store: Any, runtime_instance_id: str, at: str
+) -> dict[str, Any]:
+    _time(at, "restored runtime recovery time", "runtime_reconcile_invalid")
+    dedupe_key = f"runtime-restore:{runtime_instance_id}"
+    with store._transaction():
+        existing = store.connection.execute(
+            "SELECT obligation_id,state FROM obligations WHERE dedupe_key=?",
+            (dedupe_key,),
+        ).fetchone()
+        if existing is None:
+            return {"state": "absent", "idempotent": True}
+        if existing["state"] == "satisfied":
+            return {"state": "satisfied", "idempotent": True}
+        store.connection.execute(
+            "UPDATE obligations SET state='satisfied',next_attention_at=NULL,updated_at=? WHERE obligation_id=?",
+            (at, existing["obligation_id"]),
+        )
+        return {"state": "satisfied", "idempotent": False}
 
 
 def register_runtime_binding(
@@ -486,6 +781,17 @@ def task_resources(store: Any, task_id: str) -> list[dict[str, Any]]:
 def plan_cleanup(store: Any, plan: Mapping[str, Any]) -> dict[str, Any]:
     try:
         with store._transaction():
+            task = store.connection.execute(
+                "SELECT state FROM tasks WHERE task_id=?", (plan["task_id"],)
+            ).fetchone()
+            if task is None:
+                raise StorageRefusal(
+                    "cleanup_owner_refused",
+                    "cleanup owner is not the exact terminal task owner",
+                )
+            require_cleanup_task_disposition(
+                str(task["state"]), str(plan["disposition"])
+            )
             obligation = store.connection.execute(
                 "SELECT * FROM cleanup_obligations WHERE task_id=?", (plan["task_id"],)
             ).fetchone()
@@ -602,6 +908,9 @@ def plan_cleanup(store: Any, plan: Mapping[str, Any]) -> dict[str, Any]:
                      action["adapter_kind"], action["resource_id"], _json(action["expected_identity"]),
                      _json(action["intended_state"])),
                 )
+            from .sqlite_continuation_ops import record_thread_archive_for_cleanup
+
+            record_thread_archive_for_cleanup(store, plan)
     except StorageRefusal:
         raise
     except sqlite3.DatabaseError as exc:
@@ -757,8 +1066,6 @@ def cleanup_execution_context(store: Any, operation_id: str) -> dict[str, Any]:
     archive = actions[0]["intended_state"]
     if not isinstance(archive, dict):
         raise StorageRefusal("cleanup_operation_invalid", "cleanup archive payload is malformed")
-    from .cleanup import select_cleanup_policy
-
     expected_policy = select_cleanup_policy(str(row["task_class"]), str(row["disposition"]))
     owner = archive.get("owner")
     proof = archive.get("proof")
@@ -798,12 +1105,6 @@ def cleanup_execution_context(store: Any, operation_id: str) -> dict[str, Any]:
         if observed_rollover != rollover:
             raise StorageRefusal("cleanup_owner_refused", "rollover predecessor cleanup identity changed")
     else:
-        terminal_task_states = {
-            "completed": {"completed", "complete", "ready_to_land"},
-            "rejected": {"rejected", "blocked", "cancelled", "canceled"},
-            "cancelled": {"cancelled", "canceled"},
-            "failed": {"failed", "blocked"},
-        }
         if (
             row["owner_role"] != owner.get("role")
             or row["owner_task_id"] != row["task_id"]
@@ -811,9 +1112,11 @@ def cleanup_execution_context(store: Any, operation_id: str) -> dict[str, Any]:
                 row["owner_retired_at"] is not None
                 and operation["state"] != "completed"
             )
-            or row["task_state"] not in terminal_task_states.get(str(row["disposition"]), set())
         ):
             raise StorageRefusal("cleanup_owner_refused", "cleanup owner is not the exact terminal task owner")
+        require_cleanup_task_disposition(
+            str(row["task_state"]), str(row["disposition"])
+        )
     resources = []
     for resource in store.connection.execute(
         "SELECT * FROM task_resources WHERE task_id=? ORDER BY resource_id",
@@ -1139,7 +1442,7 @@ def finalize_cleanup(store: Any, operation_id: str, fence: int, at: str) -> dict
         with store._transaction():
             operation = store.connection.execute(
                 """
-                SELECT o.*,c.task_id,c.version AS cleanup_version,c.cleanup_state
+                SELECT o.*,c.task_id,c.version AS cleanup_version,c.cleanup_state,c.required_policy
                   FROM cleanup_operations o JOIN cleanup_obligations c
                     ON c.cleanup_obligation_id=o.cleanup_obligation_id
                  WHERE o.operation_id=?
@@ -1167,10 +1470,14 @@ def finalize_cleanup(store: Any, operation_id: str, fence: int, at: str) -> dict
                 "SELECT receipt_hash FROM cleanup_action_receipts WHERE operation_id=? ORDER BY action_id", (operation_id,)
             )]
             digest = hashlib.sha256(_json({"operation_id": operation_id, "receipts": receipts}).encode("utf-8")).hexdigest()
+            receipt_id = f"teardown:{operation_id}"
             store.connection.execute(
                 "INSERT INTO teardown_receipts(receipt_id,operation_id,task_id,policy_version,receipt_hash,completed_at) VALUES(?,?,?,?,?,?)",
-                (f"teardown:{operation_id}", operation_id, operation["task_id"], operation["plan_digest"], digest, at),
+                (receipt_id, operation_id, operation["task_id"], operation["required_policy"], digest, at),
             )
+            from .sqlite_continuation_ops import finalize_thread_archive_for_cleanup
+
+            finalize_thread_archive_for_cleanup(store, operation_id, receipt_id, at)
             store.connection.execute(
                 "UPDATE cleanup_operations SET state='completed',updated_at=? WHERE operation_id=?", (at, operation_id)
             )

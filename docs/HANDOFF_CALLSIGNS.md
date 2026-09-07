@@ -80,35 +80,7 @@ rewritten.
   callsign; and
 - `drain` — after the switch, require successor proof, zero predecessor intake
   or delivery obligations, exact predecessor runtime cleanup, archive/resource
-  receipts, and callsign release before closing the predecessor; and
-- `run` — recoverably compose those same stages from one strict manifest and
-  configured provider-adapter registry. It creates no second lifecycle state.
-
-`run` freezes the plan first, waits safely if the separately launched successor
-has not yet completed exact runtime acceptance, retrieves every immutable
-binding page, passes the bounded startup context to the successor's configured
-harness adapter, commits only its exact acknowledgement, and invokes the
-predecessor adapter only after request, delivery, and durable obligation counts
-are all zero. Both runtime harness kinds must have configured adapters before
-the owner switch, and the normalized adapter configuration SHA-256 is stored in
-the durable public-safe plan so a retry cannot silently substitute commands.
-Adapter commands receive stable action idempotency keys;
-they must durably reconcile and echo the key before applying an effect. Unknown
-outcomes remain retryable with that same key, a pre-switch `--abort` uses the existing
-abort transition, and a retry after the switch resumes drain without another
-owner event or outbox row. Raw adapter output and private runtime locators are
-never copied into the public command envelope.
-
-`league agent startup-context` is the shared startup read for a newly activated
-Champion or successor Shotcaller. The caller supplies the exact agent and
-runtime IDs. The read refuses stale, duplicated, retired, unverified, or
-callsign-mismatched incarnations and returns at most 65,536 bytes and 128
-obligations. Its fields are limited to verified role/callsign identity,
-owning/requesting Shotcallers, task/request state, stable Squad and routing
-context, a redacted runtime binding, permitted next commands, and pending
-obligations. Session, endpoint, generation, repository, branch, worktree,
-prompt, transcript, and adapter-command values are absent; runtime generation
-is represented only by a SHA-256 digest.
+  receipts, and callsign release before closing the predecessor.
 
 The handoff stores a reference to the active-Champion snapshot, never the full
 binding map. Every page repeats snapshot ID, version, total count, page bound,
@@ -142,7 +114,66 @@ task, merge, deploy, install, teardown, or publication authority. Direct SQL is
 unsupported; callers use the stable command envelope and storage facade.
 
 Repository-local deterministic tests use temporary state roots and synthetic
-configured adapters only. They prove both Codex-to-Cursor and Cursor-to-Codex
-orchestration directions without launching either provider. They do not
-establish real Herdr/tmux/Codex/Cursor support, installation, live migration,
-cutover, or smoke. Issue #23 must record those separately authorized receipts.
+adapters only. They do not establish real Herdr/tmux/Codex support, installation,
+live migration, cutover, or smoke. Issue #23 must record those separately
+authorized receipts.
+
+## Startup context and bounded runner (#8 / PR #54)
+
+`league agent startup-context --agent-id <id> --runtime-instance-id <id> --at <time>`
+reads one exact accepted Champion or successor Shotcaller runtime. It refuses
+ambiguous runtimes, unreconciled Champion owners, stale successor owner/intake
+fences, and missing native adapter capabilities. Its 64-KiB, 128-obligation
+output contains identities, task/request state, owning and original requesting
+Shotcallers, Squad/routing context, permitted actions and pending obligations.
+It excludes prompt bodies, summaries, raw provider output, thread/endpoint
+locators and local paths. Successor expiry follows the current snapshot revision,
+not the original plan's expiry. Historical requesters remain historical.
+
+`league rollover run --manifest <file> --at <time>` uses
+`league-shotcaller-rollover-run.schema.json` and the existing staged storage
+APIs. Initial invocation prepares and returns one bounded binding page. The
+successor reads all pages through `rollover bindings`, then explicitly supplies
+the existing pages receipt with `run --pages <file>` or uses `rollover acknowledge`.
+Reading a page never acknowledges it. A later `run` consumes the durable
+acknowledgement and commits the existing atomic owner/intake/event/outbox switch.
+Exact retries inspect the persisted operation, including after original plan
+expiry; they do not re-prepare, launch a runtime, or deliver another owner event.
+
+The switched result names the existing descendant/intake reconciliation and
+guarded cleanup commands. Those commands keep their exact per-row identity,
+version, authority and cleanup-plan gates. `run --abort-receipt <file>` and
+`run --drain-receipt <file>` consume the existing cleanup receipt schemas through
+the existing stages; they never close a process, mark a runtime closed, or
+manufacture a cleanup receipt. Drain still refuses remaining obligations or a
+live predecessor. `cleanup execute` already derives the final drain receipt
+for its exact switched predecessor, so a subsequent plain `run` observes completion.
+No bulk descendant/obligation rewrite or second cleanup mechanism is added.
+
+The runner uses the registered native runtime kinds `codex-thread`,
+`cursor-thread` (the Cursor CLI adapter), and `pi-thread`, plus registered
+multiplexer capabilities. It adds no executable-command adapter registry.
+`runtime matrix` reports source support, not live acceptance. The focused suite
+uses temporary canonical records and synthetic runtime observations for both
+Codex-to-Cursor and Cursor-to-Codex directions. Installed, native bidirectional
+end-to-end acceptance remains a separately authorized release gate. `run`
+requires explicit authority; automatic grants retain the protected staged path.
+
+### Switched recovery when the active set has changed
+
+`snapshot_refresh_set_changed` remains a hard refusal: never shrink or replace
+the frozen set to make refresh pass. For an unchanged surviving frozen binding,
+the supported `rollover reconcile-descendant` path does not require snapshot
+refresh or unexpired snapshot paging. It requires the retained original snapshot
+digest and row receipt, current exact versions, fresh registered-adapter runtime
+verification, and the exact pending descendant outbox IDs. It rechecks the row,
+membership, owner fence and runtime before its atomic reconciliation; retry
+reuses the same reconciliation identity. Other descendants remain untouched.
+
+The focused expired/changed-set regression proves refresh refusal and exact
+survivor reconciliation/retry without changing the snapshot or Champion identity.
+This is conditional recovery, not proof that any live survivor matches. If a
+survivor's binding changed, preserve the precise refusal. If its original page
+receipt is unavailable, do not backdate a read, use direct SQL, or reconstruct
+its digest: a bounded read-only historical-receipt accessor would be the smallest
+missing surface, not a weaker snapshot refresh or another state machine.

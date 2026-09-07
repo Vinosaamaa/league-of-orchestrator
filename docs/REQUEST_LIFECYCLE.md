@@ -48,21 +48,6 @@ registration contract. Registration cannot activate routing; acceptance
 atomically creates stable Squad/intake/event/requester-outbox state, and active
 replacement remains a guarded rollover operation.
 
-`league agent startup-context` is the only startup read for an activated
-Champion or successor Shotcaller. It requires one exact active verified runtime
-and callsign acceptance, rejects ambiguous or stale identity, and returns only
-bounded task/request, owning/requesting Shotcaller, stable Squad/routing,
-permitted-action, and pending-obligation facts. It never returns prompt bodies,
-summaries, transcripts, session/endpoint values, or repository/worktree paths.
-
-`league rollover run` composes the existing prepare/bindings/acknowledge/commit/
-abort/drain/status operations. The commit atomically redirects open durable
-Shotcaller obligations with Squad intake and pending delivery ownership while
-leaving every Champion task, thread, runtime, worktree, callsign, and historical
-coordinator binding unchanged. The provider-backed predecessor drain is not
-invoked until the predecessor has zero direct request, delivery, and durable
-obligation rows.
-
 `league assign` exposes the shared durable state machine: `prepare` commits the
 role-specific reservation, `launching` commits external-launch intent,
 `activate` accepts only the exact machine-readable Champion or hidden-scientist
@@ -82,11 +67,39 @@ fair per-recipient backlog. An active watcher owns delivery; verified direct
 fallback is eligible only when no active watcher registration exists.
 
 `league hook stop` combines active Champion tasks, pending assignments,
-unresolved requests, pending deliveries, and cleanup obligations. It yields to
-fresh ordinary user messages, blocks at most once for one fresh wait
-generation, reports stale terminal generations without reusing their output,
-honors explicit allow-stop-once, and otherwise allows the turn to end. It does
-not create a polling model loop.
+unresolved requests, pending deliveries, and cleanup obligations. Attached
+owners block every unchanged Stop while those obligations remain. The retired
+generic `allow-stop-once` command refuses without mutation; only a structured
+semantic owner stop or verified detached watcher handoff can authorize an
+otherwise blocked Shotcaller Stop. Every invocation re-evaluates durable state
+and supervision policy. Stop does not parse prompt text or create a polling
+model loop.
+
+Semantic owner-stop invariants:
+
+- **Intake:** the sole prompt decision may contain
+  `{"owner_control":{"action":"stop","interrupt_delegates":BOOLEAN}}` beside
+  one complete acknowledgement. Arbitrary prompt language is never parsed as
+  control.
+- **Atomic recording:** the final request-turn transaction binds the control to
+  that exact latest prompt and user-message generation. When interruption is
+  requested, the same transaction records one deterministic event/outbox for
+  each active Champion or hidden worker owned by the Shotcaller and requires
+  exactly one verified runtime per recipient.
+- **Asynchronous effect:** external provider steering occurs only after the
+  request transaction commits. The persistent supervisor recovers pending or
+  failed controls from their exact active scopes. Pending pre-dispatch work is
+  retried; once external steering starts, a missing receipt becomes
+  `awaiting_receipt` and cannot be resent until exact reconciliation.
+- **Exact routing:** provider adapters use their declared steering capability.
+  Owner control bypasses an attached watcher and targets only the delegated
+  runtime identity captured by the owner decision, preventing cross-runtime or
+  cross-Squad delivery.
+- **Authorization:** all requested outboxes need exact receipts. A transient
+  authorization write stays recoverable rather than becoming a false delivery
+  failure. The first matching Stop consumes the authorization, an identical
+  terminal-generation retry is idempotently allowed, and a new owner prompt
+  cannot reuse it. Pending or failed delivery is an actionable refusal.
 
 `league help inventory` emits the versioned command, state, lease, and schema
 inventory without opening a state root.

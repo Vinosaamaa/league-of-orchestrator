@@ -157,9 +157,10 @@ def seed(store: SQLiteStorage) -> None:
             """
             INSERT INTO prompts
               (prompt_id,intake_actor_id,runtime_instance_id,adapter_kind,session_ref,source_event_key,
-               triage_state,triage_digest,created_at)
+               triage_state,triage_digest,created_at,current_owner_agent_id,
+               current_owner_runtime_instance_id)
             VALUES('evidence:prompt','actor:garen','operation:runtime','codex','session:synthetic',
-                   'source:synthetic','complete',?,?)
+                   'source:synthetic','complete',?,?,'actor:garen','operation:runtime')
             """,
             (HASH, AT1),
         )

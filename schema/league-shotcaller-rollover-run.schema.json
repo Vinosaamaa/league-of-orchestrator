@@ -16,7 +16,7 @@
     "callsign_assignment_id": {"$ref": "#/$defs/id"},
     "expected_owner_version": {"type": "integer", "minimum": 1},
     "expected_owner_fence": {"type": "integer", "minimum": 1},
-    "authority_kind": {"enum": ["explicit", "automatic"]},
+    "authority_kind": {"const": "explicit"},
     "authority_digest": {"$ref": "#/$defs/id"},
     "required_capabilities": {"type": "array", "maxItems": 64, "uniqueItems": true, "items": {"type": "string", "pattern": "^[a-z][a-z0-9._-]{0,63}$"}},
     "plan": {"$ref": "league-shotcaller-handoff-plan.schema.json"},

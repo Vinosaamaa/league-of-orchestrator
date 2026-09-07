@@ -23,7 +23,7 @@ from league.storage import (  # noqa: E402
     RequestResultCommand,
     StorageRefusal,
 )
-from lifecycle_fakes import FakeDeliveryAdapter, FakeIds, FakeLaunchAdapter  # noqa: E402
+from lifecycle_fakes import FakeDeliveryAdapter, FakeIds, FakeLaunchAdapter, issue_bound_spec  # noqa: E402
 from request_lifecycle_fixture import (  # noqa: E402
     AHRI_ID,
     GAREN_RUNTIME,
@@ -52,8 +52,7 @@ def assign(
     champion: str,
     callsign: str,
 ) -> dict:
-    return AssignmentService(store, FakeLaunchAdapter(), clock, ids).assign(
-        AssignmentSpec(
+    spec = AssignmentSpec(
             assignment_id=assignment_id,
             request_id=request_id,
             claim_token=claim,
@@ -66,7 +65,10 @@ def assign(
             issue=17,
             branch=f"agent/synthetic/{task_id}",
             worktree=f"/synthetic/worktrees/{task_id}",
+            issue_receipt=None,
         )
+    return AssignmentService(store, FakeLaunchAdapter(), clock, ids).assign(
+        issue_bound_spec(store, spec, clock.now())
     )
 
 

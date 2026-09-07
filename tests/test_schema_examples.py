@@ -119,6 +119,7 @@ def main() -> None:
         "league-report.schema.json",
         "league-outbound-receipt.schema.json",
         "league-project-catalog.schema.json",
+        "league-supervisor-service-status.schema.json",
     ):
         schema = load_json(ROOT / "schema" / name)
         assert schema["$schema"] == "https://json-schema.org/draft/2020-12/schema"
@@ -132,6 +133,23 @@ def main() -> None:
     assert status_schema["properties"]["routing_name"]["pattern"] == (
         "^[a-z][a-z0-9_-]{0,31}$"
     )
+    supervisor_schema = load_json(
+        ROOT / "schema" / "league-supervisor-status.schema.json"
+    )
+    assert supervisor_schema["additionalProperties"] is False
+    assert supervisor_schema["properties"]["mode"]["enum"] == [
+        "all_material",
+        "calm",
+    ]
+    assert supervisor_schema["properties"]["runtime_state"]["enum"] == [
+        "supervising",
+        "paused",
+    ]
+    assert supervisor_schema["properties"]["wake_policy"]["enum"] == [
+        "normal",
+        "calm",
+        "calm_paused",
+    ]
 
     print("PASS: strict synthetic examples, latest-event parity, routing config, and JSON schemas")
 

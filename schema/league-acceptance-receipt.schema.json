@@ -100,6 +100,7 @@
         "hook_fixtures",
         "permissions_checked",
         "path_leaks",
+        "guidance",
         "rollback"
       ],
       "properties": {
@@ -131,6 +132,36 @@
         },
         "permissions_checked": {"const": true},
         "path_leaks": {"const": false},
+        "guidance": {
+          "type": "object",
+          "required": [
+            "source",
+            "target",
+            "source_sha256",
+            "installed_sha256",
+            "prior_sha256",
+            "restored_sha256",
+            "universal_before_sha256",
+            "universal_after_install_sha256",
+            "universal_after_rollback_sha256",
+            "universal_unchanged",
+            "rollback_completed"
+          ],
+          "properties": {
+            "source": {"const": "global-agent-instructions/league/AGENTS.md"},
+            "target": {"const": "league/AGENTS.md"},
+            "source_sha256": {"$ref": "#/$defs/sha256"},
+            "installed_sha256": {"$ref": "#/$defs/sha256"},
+            "prior_sha256": {"$ref": "#/$defs/sha256"},
+            "restored_sha256": {"$ref": "#/$defs/sha256"},
+            "universal_before_sha256": {"$ref": "#/$defs/sha256"},
+            "universal_after_install_sha256": {"$ref": "#/$defs/sha256"},
+            "universal_after_rollback_sha256": {"$ref": "#/$defs/sha256"},
+            "universal_unchanged": {"const": true},
+            "rollback_completed": {"const": true}
+          },
+          "additionalProperties": false
+        },
         "rollback": {
           "type": "object",
           "required": ["completed", "restored_target", "observed_version"],
@@ -250,16 +281,19 @@
       "properties": {
         "schema": {"const": "league.migration.v1"},
         "from_version": {"const": 0},
-        "to_version": {"const": 11},
+        "to_version": {"const": 24},
         "applied": {
           "type": "array",
           "prefixItems": [
             {"const": 1}, {"const": 2}, {"const": 3}, {"const": 4},
             {"const": 5}, {"const": 6}, {"const": 7}, {"const": 8},
-            {"const": 9}, {"const": 10}, {"const": 11}
+            {"const": 9}, {"const": 10}, {"const": 11}, {"const": 12},
+            {"const": 13}, {"const": 14}, {"const": 15}, {"const": 16},
+            {"const": 17}, {"const": 18}, {"const": 19}, {"const": 20},
+            {"const": 21}, {"const": 22}, {"const": 23}, {"const": 24}
           ],
-          "minItems": 11,
-          "maxItems": 11
+          "minItems": 24,
+          "maxItems": 24
         },
         "backup": {"type": "null"},
         "policy": {"$ref": "#/$defs/connectionPolicy"}

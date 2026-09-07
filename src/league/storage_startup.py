@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Protocol
+from typing import Any, Mapping, Protocol
 
 
 class StartupContextStorage(Protocol):
@@ -12,3 +12,5 @@ class StartupContextStorage(Protocol):
         runtime_instance_id: str,
         at: str,
     ) -> dict[str, Any]: ...
+
+    def rollover_run_context(self, manifest: Mapping[str, Any]) -> dict[str, Any]: ...

@@ -1,5 +1,25 @@
 # Source provenance
 
+## Issue #66 native prompt availability
+
+Native Codex, Cursor and Pi prompt hooks now commit through canonical SQLite
+before notifying the persistent watcher. Previously, an unresponsive broker
+followed by a held service lock, existing socket or unexpired lease could
+reject human input with `supervisor_ownership_uncertain`. The old supervisor
+tests explicitly required that refusal for prompt intake.
+
+The deliberate difference is limited to native prompt intake: exact binding
+is revalidated in the capture transaction; event identity, original bytes,
+duplicate suppression and user-priority generation remain canonical. No
+supervisor lease, fence, authorization or task is replaced to accept input.
+The wake notification follows commit with its existing quarter-second bound;
+notification failure cannot reject an already-committed prompt. Stop and
+mutation-authorization fallback retain their service-ownership fence.
+
+Synthetic native-command regressions cover all three providers with a locked,
+unresponsive supervisor and preserve the mutation refusal. These tests do not
+prove native composer delivery, installed behavior or healthy watcher startup.
+
 ## Issue #66 request-turn pipe transport
 
 `request turn` now rejects terminal stdin with `triage_transport_unsupported`

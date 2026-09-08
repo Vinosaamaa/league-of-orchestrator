@@ -10,6 +10,7 @@ import hmac
 import json
 import os
 import secrets
+import sqlite3
 import sys
 import time
 from dataclasses import dataclass
@@ -968,7 +969,7 @@ def handle_brokered_hook(
     *,
     context: BrokeredHookContext | None = None,
 ) -> dict[str, Any]:
-    """Execute one validated hook inside the persistent canonical-state owner."""
+    """Execute one validated hook through canonical storage."""
 
     resolved = context or brokered_hook_context(store, hook)
     command = resolved.command
@@ -1085,6 +1086,57 @@ def handle_brokered_hook(
             "state": captured.get("triage_state") or captured.get("state"),
         },
     }
+
+
+def _native_prompt_hook(
+    args: argparse.Namespace,
+    payload: dict[str, Any],
+    capture_event_id: str | None,
+) -> dict[str, Any]:
+    """Commit exact native intake before a bounded, best-effort watcher wake.
+
+    Intake does not authorize work or acquire supervisor ownership. Its SQLite
+    transaction validates the bound runtime and deduplicates the event even if
+    a broker later receives that same event. The supervisor service lock still
+    fences mutation authorization and Stop; it cannot fence human input.
+    """
+
+    try:
+        store = SQLiteStorage(
+            _state_root(), busy_timeout_ms=PROMPT_BUSY_TIMEOUT_MS, request_wal=False
+        )
+    except StorageRefusal as exc:
+        if exc.code in {"invalid_root", "store_missing"}:
+            return _native_hook_output(args.command, {}, bound=False)
+        raise
+    hook = {
+        "command": args.command,
+        "shotcaller": args.shotcaller,
+        "session_id": args.session_id,
+        "payload": payload,
+        "capture_event_id": capture_event_id,
+    }
+    with store:
+        # An unbound session must remain inert, including under writer contention.
+        if brokered_hook_context(store, hook).actor is None:
+            return _native_hook_output(args.command, {}, bound=False)
+        try:
+            with store._transaction():
+                context = brokered_hook_context(store, hook)
+                response = handle_brokered_hook(store, hook, context=context)
+        except sqlite3.DatabaseError as exc:
+            raise store._translate_database_error(exc, "native prompt intake failed") from exc
+        capture = response.get("capture")
+        if isinstance(capture, dict):
+            try:
+                _notify_direct_user_priority(
+                    store, context.actor_id, context.actor_role, capture
+                )
+            except StorageRefusal:
+                # Capture and its wake generation are already durable. A wake
+                # lookup failure must not reject or replay the user's prompt.
+                pass
+        return response["hook_output"]
 
 
 def _broker_hook(
@@ -1493,6 +1545,9 @@ def main(argv: list[str] | None = None) -> int:
         and _needs_invocation_identity(args.command)
         else None
     )
+    if args.command in PROMPT_HOOK_ADAPTERS:
+        _emit(_native_prompt_hook(args, payload, capture_event_id))
+        return 0
     fallback_store = None
     if args.command in BROKERED_HOOK_COMMANDS:
         try:

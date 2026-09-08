@@ -732,13 +732,15 @@ def main() -> None:
             "PYTHONDONTWRITEBYTECODE": "1",
         }
         refused = subprocess.run(
-            [str(ROOT / "bin/agent-watcher"), "codex-user-prompt-hook"],
+            [str(ROOT / "bin/agent-watcher"), "codex-pre-tool-hook"],
             input=json.dumps(
                 {
                     "session_id": f"session:{GAREN_RUNTIME}",
                     "turn_id": "turn:uncertain-owner",
-                    "hook_event_name": "UserPromptSubmit",
-                    "prompt": "Synthetic prompt must not fall back",
+                    "hook_event_name": "PreToolUse",
+                    "tool_use_id": "tool:uncertain-owner",
+                    "tool_name": "Write",
+                    "tool_input": {"file_path": "synthetic.txt", "content": "x"},
                 }
             ),
             capture_output=True,
@@ -762,13 +764,15 @@ def main() -> None:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         try:
             refused = subprocess.run(
-                [str(ROOT / "bin/agent-watcher"), "codex-user-prompt-hook"],
+                [str(ROOT / "bin/agent-watcher"), "codex-pre-tool-hook"],
                 input=json.dumps(
                     {
                         "session_id": f"session:{GAREN_RUNTIME}",
                         "turn_id": "turn:starting-owner",
-                        "hook_event_name": "UserPromptSubmit",
-                        "prompt": "Synthetic prompt fenced during supervisor startup",
+                        "hook_event_name": "PreToolUse",
+                        "tool_use_id": "tool:starting-owner",
+                        "tool_name": "Write",
+                        "tool_input": {"file_path": "synthetic.txt", "content": "x"},
                     }
                 ),
                 capture_output=True,

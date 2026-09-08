@@ -2481,3 +2481,13 @@ all identity and publication checks, rejects unrelated failure classes and
 unverified runtimes, and accepts a closed runtime only with the same operation's
 durable cleanup proof. Synthetic production-cleanup tests cover byte-preserving
 retention and crash/resume at both endpoint and callsign boundaries.
+# Issue #66: Completion after retained runtime recovery
+
+Exact runtime recovery leaves stale assignments cleanup-pending. The task
+transition guard previously required active assignment state even for accepting
+finished work, preventing retirement of a verified retained Champion. Permit
+only completed transitions for the stale-runtime case with its launch receipt
+and unchanged task owner; retain every runtime, version, recipient and state
+progression check. No reactivation, process effect or cleanup clearance occurs.
+The focused assignment fixture covers successful recovery and atomic refusals;
+installed acceptance remains a separate gate.

@@ -1295,6 +1295,14 @@ def _validate_cleanup_resources(
     return resource_actions
 
 
+def _all_cleanup_actions_receipted(store: Any, operation_id: str) -> bool:
+    rows = store.connection.execute(
+        "SELECT a.state,r.receipt_hash FROM cleanup_actions a LEFT JOIN cleanup_action_receipts r "
+        "ON r.action_id=a.action_id WHERE a.operation_id=?", (operation_id,),
+    ).fetchall()
+    return bool(rows) and all(row["state"] == "completed" and row["receipt_hash"] for row in rows)
+
+
 def cleanup_execution_context(store: Any, operation_id: str) -> dict[str, Any]:
     """Load one exact execution context exclusively from canonical SQLite rows."""
 
@@ -1373,6 +1381,7 @@ def cleanup_execution_context(store: Any, operation_id: str) -> dict[str, Any]:
                 row["owner_retired_at"] is not None
                 and operation["state"] != "completed"
                 and not retained_release
+                and not _all_cleanup_actions_receipted(store, operation_id)
             )
         ):
             raise StorageRefusal("cleanup_owner_refused", "cleanup owner is not the exact terminal task owner")
@@ -1474,8 +1483,15 @@ def claim_cleanup_operation(
                 raise StorageRefusal("cleanup_fence_conflict", "cleanup operation fence changed")
             if current["state"] == "completed":
                 return {"operation_id": operation_id, "fence": expected_fence, "state": "completed", "idempotent": True}
+            prior_block = None
             if current["state"] == "blocked":
-                raise StorageRefusal("cleanup_blocked", "cleanup operation is durably blocked")
+                prior_block = store.connection.execute(
+                    "SELECT * FROM teardown_receipts WHERE operation_id=?", (operation_id,),
+                ).fetchone()
+                if (prior_block is None
+                        or prior_block["policy_version"] != "blocked:cleanup_identity_mismatch"
+                        or not _all_cleanup_actions_receipted(store, operation_id)):
+                    raise StorageRefusal("cleanup_blocked", "cleanup operation is durably blocked")
             lease_expiry = _time(leased_until, "cleanup lease expiry")
             if lease_expiry <= claim_time:
                 raise StorageRefusal("cleanup_lease_invalid", "cleanup lease expiry must be after claim time")
@@ -1490,6 +1506,21 @@ def claim_cleanup_operation(
                     retryable=True,
                 )
             next_fence = expected_fence + 1
+            if prior_block is not None:
+                # Preserve the failed final receipt before retrying bookkeeping.
+                # All actions are already receipted: the executor reinspects them
+                # and refuses changed state, never replays their external effects.
+                store.connection.execute(
+                    "INSERT INTO events (event_id,agent_id,task_id,entity_version,event_type,status,"
+                    "update_text,occurred_at,detail_json) VALUES(?,NULL,?,?,'cleanup_finalization_retried',"
+                    "'working','Reinspect completed actions and retry final receipt',?,?)",
+                    (f"cleanup:{operation_id}:finalization-retry:{next_fence}", prior_block["task_id"], next_fence, at,
+                     _json({"operation_id": operation_id, "prior_blocked_receipt": dict(prior_block)})),
+                )
+                store.connection.execute(
+                    "DELETE FROM teardown_receipts WHERE operation_id=? AND receipt_hash=?",
+                    (operation_id, prior_block["receipt_hash"]),
+                )
             store.connection.execute(
                 """
                 UPDATE cleanup_operations SET state='executing',fence=?,executor_id=?,leased_until=?,updated_at=?
@@ -1771,7 +1802,8 @@ def finalize_cleanup(store: Any, operation_id: str, fence: int, at: str) -> dict
                             or runtime["runtime_generation"] != endpoint.get("runtime_generation")
                             or callsign is None or callsign["state"] != "released"
                             or callsign["agent_id"] != assignment["champion_agent_id"]
-                            or callsign["runtime_instance_id"] != assignment["runtime_instance_id"]
+                            or (callsign["runtime_instance_id"] is not None
+                                and callsign["runtime_instance_id"] != assignment["runtime_instance_id"])
                             or callsign["release_receipt_digest"] != cleanup_action_digest(release)):
                         raise StorageRefusal("cleanup_identity_mismatch", "assignment has no exact closed runtime and callsign release")
                     if assignment["cleanup_receipt"] not in {None, digest}:

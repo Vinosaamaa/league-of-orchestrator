@@ -1,5 +1,22 @@
 # Source provenance
 
+## Issue #66 legacy final cleanup receipt recovery
+
+Installed acceptance of the prior cleanup repair exposed an older callsign row
+with no runtime pointer. The task assignment and released callsign still bind
+the same exact Champion, but the new redundant pointer comparison refused the
+final receipt after all six external actions had succeeded. No uncommitted work
+was removed. The accepted remote branch remains preserved.
+
+Finalization now permits a missing legacy pointer, never a conflicting pointer.
+An exact fenced retry is allowed only for an identity-refused final receipt
+whose every action is already completed and receipted. The failed final receipt
+is preserved verbatim in a task audit event before replacing its current slot.
+The executor reinspects all completed actions and refuses changed state rather
+than applying them again. Pending-action blocks retain their existing refusal.
+The synthetic production fixture covers the missing pointer, final failure,
+receipt-history preservation, completed assignment and idempotent retry.
+
 ## Issue #66 accepted cleanup reconciliation
 
 Ordinary completed cleanup now settles its exact Champion assignment with the

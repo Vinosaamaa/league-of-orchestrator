@@ -1,14 +1,17 @@
 # Dedicated prompt triage — issue #66
 
 Decision: approved for implementation, including the prompt-only ON/OFF switch.
-Status: local implementation in progress; not installed or accepted end to end.
+Status: consolidated source installed; background mode enabled for the approved
+owner. Real-model synthetic lifecycle smoke passes; live end-to-end acceptance
+and Champion cleanup remain open.
 
 Verification: local baseline passes. The affected lifecycle run passed through
 the existing Stop cases, then exposed obsolete automatic-acknowledgement
 assertions. Updated focused receive cases and the remaining lifecycle checks
 passed. Multi-request inbox coverage verifies distinct IDs without false task
-completion. Atomic idle-only send and native wait interruption remain unverified;
-these test results do not authorize declaring installed acceptance.
+completion. Native idle-only busy refusal is verified; consumer delivery and
+native wait interruption remain open. These results do not establish full
+installed acceptance.
 
 ## Active shipping goal
 
@@ -35,8 +38,15 @@ baseline and installed through the supported service installer. Repeated native
 health probes across renewal verified all three existing bindings with unchanged
 fences. A sandboxed probe instead returned `PermissionError`; its generic
 `process_unreachable` report was not evidence of service failure. Probe permission
-diagnostics are being corrected separately. Background triage remains excluded
-from this installed recovery; full product acceptance is still pending.
+diagnostics are corrected in the consolidated installed release. Background
+triage is now enabled for the approved owner; full product acceptance is pending.
+
+Installed source: `4b334ba5b0719b10573cf6bbeb6ae282a32bab1e`, schema 25.
+The opt-in installed-code smoke reused one classifier process for two real
+model turns and completed three synthetic requests through inbox receipt and
+answer. OFF prevented further classification. Calls took 8.631 and 7.847 seconds
+and used 10,023 and 10,164 input tokens; token efficiency is not solved. No live
+human prompt or Champion completion is claimed by this synthetic test.
 
 Acceptance: one persistent, League-owned classifier; compact internal delivery
 of canonical request IDs; prompt-only ON/OFF; no nested classifier agents;
@@ -108,9 +118,9 @@ read expires and can be claimed again. The foreground receive has its own
 30-second renewable lease; the older `wait_active` flag also describes general
 supervision and must not suppress push delivery by itself. A killed wait loses
 its receive lease without deleting any notifications.
-Until this path
-is implemented and tested, do not enable background triage live or claim that
-Champion delivery alone supplies in-turn triage results.
+This path is implemented and covered by focused receive tests and the installed
+synthetic lifecycle smoke. Live consumer acceptance remains open; Champion
+delivery alone is not evidence of in-turn triage receipt.
 
 Firstmate source comparison: its Codex supervision protocol uses explicit
 `fm-wake-drain.sh` reads and a foreground checkpoint only at a genuine idle
@@ -203,5 +213,6 @@ instruction overhead remains measurable and must not be called free or minimal.
   switch OFF/ON, and unchanged Champion updates before declaring completion.
 
 Implementation lane: solo owner, existing issue #66 worktree, branch
-`fix/66-background-prompt-triage`; one follow-up PR with focused synthetic
-coverage and end-to-end acceptance before enabling the feature live.
+`fix/66-background-prompt-triage`; consolidated PR 220. Focused synthetic coverage
+and installed real-model smoke preceded owner-scoped activation. Complete live
+end-to-end acceptance remains required before declaring the product finished.

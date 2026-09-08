@@ -1,7 +1,7 @@
 ---
 schemaVersion: 1
 id: "change-note-supervisor-scheduling"
-revision: 6
+revision: 7
 type: "change-note"
 status: "draft"
 title: "Keep user-facing supervision out of discretionary background scheduling"
@@ -63,7 +63,7 @@ was not proof of a dead service. The source diagnostic now reports
 `probe_permission_denied` in that case, preserving the failed health result and
 all ownership gates. Synthetic coverage checks aggregate and single-owner
 permission failures separately from refused connections. This diagnostic change
-is not yet installed.
+is included in the consolidated installation recorded below.
 
 This recovery slice does not enable background prompt classification, alter
 Champion state, clear obligations, or claim that the complete orchestrator ships.
@@ -92,7 +92,7 @@ deadlines or identity checks. Coverage includes two requests from one prompt,
 distinct checklist IDs, no false completion, expired-read recovery, exact idle
 identity, unavailable receivers, native hook activation, and supervisor renewal.
 
-This consolidated source is not installed. The consumer now uses the distinct
+The consolidated source is now installed, as recorded below. The consumer uses the distinct
 native conditional delivery operation supplied by the cross-linked toolkit
 issue. Installed consumer delivery acceptance remains open. Short database polling does not prove host-level
 wait interruption. Installed end-to-end acceptance and cleanup remain open.
@@ -171,3 +171,31 @@ directory. Native preflight found that the prior service PATH could not resolve
 the installed classifier command. The actual maintained launcher accepted
 app-server initialization and its exact test process shut down; no model turn
 was requested. Synthetic service/source-hash/rollback verification passes.
+
+## Consolidated installation and bounded real-model smoke
+
+Source `4b334ba5b0719b10573cf6bbeb6ae282a32bab1e` installed with manifest
+`be5eaff67b772994a8aa3e9e95082f795c11fdb20593c8fc3d2398df3d2fb2a3`.
+The supported database backup, schema-25 migration and service installer
+completed. All three existing supervisor bindings verified healthy afterward;
+no Champion process was restarted or marked complete. The approved owner's
+background policy is enabled at version 1, with zero pending classifications
+and no recorded worker failure at the verification boundary.
+
+`scripts/verify-installed-prompt-worker.py` checks the installed manifest and
+uses only synthetic lifecycle records. Its explicitly opted-in real-model run
+reused one classifier process for two prompts, producing one and two distinct
+request IDs. Inbox read, exact acknowledgement, direct dispatch and answer
+receipts completed for all three synthetic requests. OFF retained its input
+without another inference call; the exact test child exited afterward.
+
+Classification through commit took 8.631 and 7.847 seconds. Reported input tokens
+were 10,023 and 10,164, output tokens 37 and 64, with zero cached tokens. Compact
+application input/output does not establish low total provider overhead; token
+efficiency remains unresolved. These measurements are not inline-triage timings.
+
+This is installed-code, real-model, synthetic-lifecycle evidence, not a human
+native-capture or full product acceptance result. Live checklist delivery,
+host-level wait interruption, outstanding request reconciliation and eligible
+Champion cleanup remain separate gates. Toolkit PR 152 is merged and its native
+busy-receiver refusal is verified; that does not replace consumer acceptance.

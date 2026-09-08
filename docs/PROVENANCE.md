@@ -1,5 +1,22 @@
 # Source provenance
 
+## Issue #66 accepted cleanup reconciliation
+
+Ordinary completed cleanup now settles its exact Champion assignment with the
+final teardown receipt, as retained-repository cleanup already did. Previously,
+the endpoint and callsign could be closed while the assignment remained active
+or stale with no cleanup receipt. The production crash/resume fixture reproduced
+that mismatch. Finalization now requires the exact closed runtime and released
+callsign receipt; it never invents task completion or restarts a worker.
+
+Squash cleanup additionally accepts an exact reconstructed merge tree when
+unrelated base changes make the accepted branch tree differ from its squash.
+The recorded merge must be in the published base. Git reconstructs the merge
+against its sole parent without changing any worktree or ref, and the full tree
+must match. Conflicts, unpublished merges and unshipped follow-up commits refuse.
+Focused real-Git fixtures and production cleanup fixtures pass. Installation and
+actual endpoint cleanup remain separate acceptance steps.
+
 ## Issue #66 exact retained Champion identity recovery
 
 `runtime reconcile-champion-identity` recovers one explicitly identified retained

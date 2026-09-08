@@ -249,7 +249,10 @@ from .sqlite_protected_gate_schema import (
 
 
 WAL_MINIMUM = (3, 51, 3)
-CURRENT_SCHEMA_VERSION = 24
+from .sqlite_prompt_triage_schema import MIGRATION_NAME as PROMPT_TRIAGE_MIGRATION_NAME
+from .sqlite_prompt_triage_schema import STATEMENTS as PROMPT_TRIAGE_MIGRATION_STATEMENTS
+
+CURRENT_SCHEMA_VERSION = 25
 DATABASE_NAME = "league.sqlite3"
 DEFAULT_BUSY_TIMEOUT_MS = 500
 MAX_BUSY_TIMEOUT_MS = 10_000
@@ -1296,6 +1299,7 @@ MIGRATIONS = (
         STOPPED_RETIREMENT_MIGRATION_NAME,
         STOPPED_RETIREMENT_MIGRATION_STATEMENTS,
     ),
+    Migration(25, PROMPT_TRIAGE_MIGRATION_NAME, PROMPT_TRIAGE_MIGRATION_STATEMENTS),
 )
 
 
@@ -1540,6 +1544,7 @@ _EXPORT_TABLES = (
     "runtime_instances",
     "prompt_quarantine",
     "prompts",
+    "prompt_triage_settings",
     "prompt_payloads",
     "prompt_items",
     "requests",
@@ -1627,6 +1632,7 @@ _EXPORT_ORDER = {
     "runtime_instances": "runtime_instance_id",
     "prompt_quarantine": "created_at,prompt_id",
     "prompts": "created_at,prompt_id",
+    "prompt_triage_settings": "owner_agent_id",
     "prompt_payloads": "prompt_id",
     "prompt_items": "prompt_id,ordinal,prompt_item_id",
     "requests": "created_at,request_id",

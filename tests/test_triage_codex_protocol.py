@@ -9,7 +9,7 @@ import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 
-from league.triage_codex import CodexClassifier
+from league.triage_codex import CodexClassifier, INSTRUCTIONS
 from league.storage import StorageRefusal
 
 
@@ -28,6 +28,8 @@ def fake_server():
             result = {'config': {'mcp_servers': {'fixture': {}}, 'plugins': {'fixture': {}}}}
         if method == 'thread/start':
             params = message['params']
+            assert params['baseInstructions'] == params['developerInstructions'] == INSTRUCTIONS
+            assert 'preserve the uncertainty' in params['baseInstructions']
             assert params['ephemeral'] and params['sandbox'] == 'read-only'
             assert params['config']['mcp_servers']['fixture']['enabled'] is False
             assert params['config']['plugins']['fixture']['enabled'] is False
@@ -37,6 +39,16 @@ def fake_server():
             assert turns == 1 and message['params']['threadId'] == 'fixture-thread'
             turns = 0
         if method == 'turn/start':
+            variants = message['params']['outputSchema']['properties']['items']['items']['anyOf']
+            rules = {kind: variant['properties'] for variant in variants
+                     for kind in variant['properties']['k']['enum']}
+            for kind in ('new_request', 'context', 'acknowledgement'):
+                assert rules[kind]['r'] == {'type': 'null'}
+                assert rules[kind]['d'] == {'type': 'null'}
+            for kind in ('follow_up', 'duplicate', 'deferred'):
+                assert rules[kind]['r'] == {'type': 'integer', 'minimum': 1}
+            assert rules['deferred']['d'] == {'type': 'integer', 'minimum': 1}
+            assert rules['follow_up']['d'] == rules['duplicate']['d'] == {'type': 'null'}
             assert turns == 0
             turns += 1
             emit({'id': message['id'], 'result': {'turn': {'id': 'fixture-turn'}}})

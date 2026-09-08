@@ -1,7 +1,7 @@
 ---
 schemaVersion: 1
 id: "change-note-supervisor-scheduling"
-revision: 5
+revision: 6
 type: "change-note"
 status: "draft"
 title: "Keep user-facing supervision out of discretionary background scheduling"
@@ -151,3 +151,23 @@ The handoff tests verify read-only planning, failed observation recovery,
 idempotent retries, watcher failure/retry, refusal on changed identity, and no
 task/request/delivery/cleanup completion effects. Neither these checks nor native
 binary installation proves the full orchestrator acceptance or Champion cleanup.
+
+## Worker activation preflight
+
+The additive schema-25 migration now has explicit fault-injection coverage:
+failure restores the exact logical schema-24 database, successful migration
+creates no enabled background policies, and existing/default prompts remain
+inline. The earlier migration checksum fixture had omitted the new migration;
+the corrected complete migration suite passes without changing old checksums.
+
+A source-managed inline-service fallback understands schema 25 but has no
+background classifier. It is for activation failure before background policies
+are enabled; it avoids restoring an older database over newly captured prompts.
+Its Stop, identity recovery and synthetic service install/start/rollback checks
+pass. It is not a promise of restoring old feature behavior after ON is enabled.
+
+The service's deterministic PATH now includes the standard user-local bin
+directory. Native preflight found that the prior service PATH could not resolve
+the installed classifier command. The actual maintained launcher accepted
+app-server initialization and its exact test process shut down; no model turn
+was requested. Synthetic service/source-hash/rollback verification passes.

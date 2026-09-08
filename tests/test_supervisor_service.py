@@ -200,6 +200,7 @@ def test_launchd_environment_starts_the_canonical_watcher(root: Path) -> None:
         else:
             raise AssertionError("invalid session selector accepted")
     assert "/opt/homebrew/bin" in environment["PATH"].split(os.pathsep)
+    assert os.fspath(Path.home() / '.local' / 'bin') in environment['PATH'].split(os.pathsep)
     assert value["StandardErrorPath"] == os.fspath(state.resolve() / "supervisor-startup.stderr.log")
     assert environment["LEAGUE_WRITER_POINTER"] == os.fspath(
         state.resolve().parent / "league-writer-pointer.json"

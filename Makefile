@@ -32,6 +32,7 @@ REQUEST_LIFECYCLE_TESTS := \
 	tests/test_stop_continuation.py \
 	tests/test_hook_runtime_regressions.py \
 	tests/test_runtime_identity.py \
+	tests/test_runtime_handoff.py \
 	tests/test_issue66_shipping.py \
 	tests/test_persistent_supervisor.py \
 	tests/test_multisquad_supervisor.py \

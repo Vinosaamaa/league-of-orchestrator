@@ -135,7 +135,17 @@ older discrepancies remain reported and untouched. The first read-only installed
 probe refused a verifier that assumed all shell-launched Codex processes ended
 with a resume argument. Source coverage now includes model options after resume
 and matching fresh-launch arguments, preserving exact executable, parent, group,
-process start and session checks. Successful installed recovery is not yet claimed.
+process start and session checks.
+
+The corrected installed-base source is
+`a6b4208ca0e0a31397095b5d240801e4c8012ed5`. Its focused handoff and launcher
+tests passed; native check-only verification then passed for four exact matches.
+After an integrity-checked backup, the supported command recovered all four
+without process or task-completion effects. A subsequent read-only verification
+passed and all three existing supervisor bindings were healthy. The affected
+Shotcaller fence advanced once; the unrelated bindings were unchanged.
+The installed native conditional-send method also rejected a working receiver
+with `agent_not_idle`. This is native refusal proof, not full consumer acceptance.
 
 The handoff tests verify read-only planning, failed observation recovery,
 idempotent retries, watcher failure/retry, refusal on changed identity, and no

@@ -14,6 +14,14 @@ cover the new template with existing install, restart and exact rollback gates.
 No service timeout, ownership check, security control or installed manifest is
 relaxed. Source acceptance remains separate from installation and live health.
 
+The committed scheduling candidate passed exported-source baseline tests and
+native installed health probes across renewal. A restricted caller separately
+failed socket access with PermissionError. Status now distinguishes that probe
+failure as `probe_permission_denied`, rather than implying a dead process. It
+still reports unverified health as false; no permission or ownership guard is
+bypassed. Synthetic aggregate and single-owner probes cover both denied access
+and refused connections.
+
 ## Issue #66 expired exact-owner renewal
 
 A delayed persistent watcher reused its previous fence after its lease expired.

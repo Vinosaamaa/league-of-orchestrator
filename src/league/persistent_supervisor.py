@@ -92,6 +92,14 @@ class BoundedRuntimeCommandRunner:
 class SupervisorUnavailable(RuntimeError):
     """The exact persistent supervisor could not accept a wake."""
 
+    @property
+    def reason(self) -> str:
+        # A restricted caller cannot establish service health. Do not mistake
+        # its access failure for evidence that the service process is dead.
+        if isinstance(self.__cause__, PermissionError):
+            return "probe_permission_denied"
+        return "process_unreachable"
+
 
 class WakeAdapter(Protocol):
     def send(self, binding: dict[str, Any], envelope: dict[str, Any]) -> None: ...
@@ -1643,6 +1651,7 @@ def supervisor_status(state_root: Path, callsign: str | None = None) -> dict[str
             or not str(registration["wake_locator"]).startswith("unix:")
             for registration in registrations.values()
         )
+        reason = "registration_missing" if missing else "process_unreachable"
         if not missing:
             first = registrations[bindings[0]["actor_agent_id"]]
             assert first is not None
@@ -1653,9 +1662,8 @@ def supervisor_status(state_root: Path, callsign: str | None = None) -> dict[str
                     timeout_seconds=0.5,
                 )
                 return {key: value for key, value in response.items() if key != "ok"}
-            except SupervisorUnavailable:
-                pass
-        reason = "registration_missing" if missing else "process_unreachable"
+            except SupervisorUnavailable as exc:
+                reason = exc.reason
         return {
             "schema": "league.supervisor-service-status.v1",
             "live": False,
@@ -1703,12 +1711,12 @@ def supervisor_status(state_root: Path, callsign: str | None = None) -> dict[str
             {"kind": "ping", "actor_agent_id": binding["actor_agent_id"]},
             timeout_seconds=0.5,
         )
-    except SupervisorUnavailable:
+    except SupervisorUnavailable as exc:
         return {
             **base,
             "live": False,
             "monitor_live": False,
-            "reason": "process_unreachable",
+            "reason": exc.reason,
         }
     lease_valid = datetime.fromisoformat(str(registration["leased_until"])) > _now()
     identity_valid = (

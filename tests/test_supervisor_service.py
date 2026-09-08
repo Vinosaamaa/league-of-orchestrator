@@ -21,6 +21,7 @@ sys.path[:0] = [str(ROOT / "src"), str(ROOT / "tests")]
 
 from league.persistent_supervisor import (  # noqa: E402
     PersistentSupervisor,
+    SupervisorUnavailable,
     attach_shotcaller,
     stop_supervisor,
     supervisor_status,
@@ -265,6 +266,19 @@ def test_install_restart_and_exact_rollback(root: Path) -> None:
     first_fences = {
         item["actor_agent_id"]: item["fence"] for item in first["bindings"]
     }
+
+    for cause, expected_reason in (
+        (PermissionError(1, "synthetic caller restriction"), "probe_permission_denied"),
+        (ConnectionRefusedError(), "process_unreachable"),
+    ):
+        failure = SupervisorUnavailable("synthetic probe failure")
+        failure.__cause__ = cause
+        with patch("league.persistent_supervisor.send_supervisor_message", side_effect=failure):
+            aggregate = supervisor_status(state)
+            assert not aggregate["live"] and not aggregate["monitor_live"]
+            assert all(item["reason"] == expected_reason for item in aggregate["bindings"])
+            individual = supervisor_status(state, first["bindings"][0]["callsign"])
+            assert not individual["live"] and individual["reason"] == expected_reason
 
     backup.unlink()
     try:

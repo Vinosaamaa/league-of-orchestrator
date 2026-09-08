@@ -1,7 +1,7 @@
 ---
 schemaVersion: 1
 id: "change-note-supervisor-scheduling"
-revision: 1
+revision: 2
 type: "change-note"
 status: "draft"
 title: "Keep user-facing supervision out of discretionary background scheduling"
@@ -10,7 +10,7 @@ capabilityIds: ["persistent-supervision"]
 createdAt: "2026-09-08T04:14:00Z"
 reconstructed: false
 confidence: "verified"
-unknowns: ["Installed startup and sustained healthy supervision require live acceptance."]
+unknowns: ["Complete installed triage, delivery, and cleanup acceptance remains pending."]
 modules: ["supervisor-service"]
 interfaces: ["launchd-service-install"]
 seams: []
@@ -50,12 +50,24 @@ renewal fix remains part of the baseline.
 
 ## Acceptance boundary
 
-Synthetic service tests pass. Local grouped baseline runs still encountered
-timing failures; isolated read-only provider-hook timings were 1.226, 0.770 and
-0.886 seconds without relaxing the existing two-second limit. These isolated
-results do not replace the full baseline or installed acceptance.
+Synthetic service tests and the full baseline passed against the immutable
+committed-source export. Earlier grouped runs encountered timing failures;
+isolated read-only provider-hook timings were 1.226, 0.770 and 0.886 seconds
+without relaxing the existing two-second limit.
+
+The scheduling candidate installed through the supported installer. Two native
+health probes across renewal verified all three existing bindings with unchanged
+ownership fences. A restricted probe returned a socket PermissionError while
+the unrestricted probe remained healthy; the generic process-unreachable label
+was not proof of a dead service. The source diagnostic now reports
+`probe_permission_denied` in that case, preserving the failed health result and
+all ownership gates. Synthetic coverage checks aggregate and single-owner
+permission failures separately from refused connections. This diagnostic change
+is not yet installed.
 
 This recovery slice does not enable background prompt classification, alter
 Champion state, clear obligations, or claim that the complete orchestrator ships.
-Its candidate must prove source parity, supported installation, live status,
-renewal and rollback separately. The broader issue remains open.
+The installed candidate proves source parity, supported installation, live status
+and renewal; rollback remains backed by the retained installer receipt and
+synthetic rollback test, not a destructive live rollback rehearsal. The broader
+issue remains open.

@@ -2545,3 +2545,12 @@ instruction is supplied in both instruction fields for every fresh context;
 semantic acceptance requires real classifier output, not the fake model fixture.
 The structured output schema also enforces the existing disposition/reference
 contract: context, acknowledgement and new requests cannot carry a linked ID.
+
+## Shotcaller-scoped callsign reporting (issue #22)
+
+Callsign reconciliation records the valid `shotcaller` scope with an agent ID.
+Reports now render that scope using the existing public actor identifier mapping,
+just as worker-scoped callsigns do. Previously the incomplete scope lookup raised
+KeyError and prevented owner reports. No stored record or lifecycle state changes.
+The synthetic reporting regression covers reservation, activation and release
+in both local-diagnostic and public-safe output.

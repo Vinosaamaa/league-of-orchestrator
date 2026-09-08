@@ -651,7 +651,8 @@ def _source_facts(
                     "role": row["role"],
                     "scope_kind": row["scope_kind"],
                     "scope_id": _public_id(
-                        {"squad": "squad", "task": "task", "worker": "actor"}[row["scope_kind"]],
+                        {"squad": "squad", "task": "task", "worker": "actor",
+                         "shotcaller": "actor"}[row["scope_kind"]],
                         row["scope_id"],
                     ),
                     "queue_version": int(row["queue_version"]),

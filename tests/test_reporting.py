@@ -870,10 +870,35 @@ def test_completion_scan_is_bounded(root: Path) -> None:
             report_ops.MAX_REPORT_FACTS = original_bound
 
 
+def test_shotcaller_callsign_scope(root: Path) -> None:
+    state, _ = migrated_state(root, "shotcaller-report")
+    with SQLiteStorage(state) as store:
+        seed(store)
+        with store._transaction():
+            store.connection.execute(
+                """UPDATE callsign_assignments
+                      SET scope_kind='shotcaller',scope_id='actor:janna',
+                          state='released',activated_at=?,released_at=?,
+                          release_receipt_digest=?
+                    WHERE callsign_assignment_id='assignment:janna-shotcaller'""",
+                (AT4, AT5, HASH),
+            )
+        for local in (False, True):
+            report = generate(store, scope_kind="owner", scope_id="actor:janna",
+                              local_diagnostic=local)
+            facts = [fact for fact in report["chronological"]
+                     if fact["category"] == "callsign_assignment"]
+            assert {fact["action"] for fact in facts} == {"reserved", "activated", "released"}
+            assert all(fact["details"]["scope_kind"] == "shotcaller" for fact in facts)
+            assert all(fact["details"]["scope_id"] == report_ops._public_id("actor", "actor:janna")
+                       for fact in facts)
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="league-reporting-") as temporary:
         test_report_contract(Path(temporary))
         test_completion_scan_is_bounded(Path(temporary))
+        test_shotcaller_callsign_scope(Path(temporary))
     print("PASS: deterministic scopes, completion gates, pagination, since/show reproduction, and JSON-derived renderers")
 
 

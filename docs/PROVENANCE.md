@@ -2427,3 +2427,11 @@ again; OFF-period input remains explicitly skipped.
 Focused synthetic policy and inbox tests exercise shared Champion/triage reads,
 source-digest rejection, exact retries, no false completion, and ON/OFF
 accounting. Provider integration and installed acceptance remain open.
+
+Retained-repository cleanup additionally accepts an exact recovered runtime whose
+assignment still carries `cleanup_pending` / `stale_runtime`. Recovery itself
+does not rewrite task acceptance. The deliberate compatibility change preserves
+all identity and publication checks, rejects unrelated failure classes and
+unverified runtimes, and accepts a closed runtime only with the same operation's
+durable cleanup proof. Synthetic production-cleanup tests cover byte-preserving
+retention and crash/resume at both endpoint and callsign boundaries.

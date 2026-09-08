@@ -1,7 +1,7 @@
 ---
 schemaVersion: 1
 id: "change-note-supervisor-scheduling"
-revision: 7
+revision: 8
 type: "change-note"
 status: "draft"
 title: "Keep user-facing supervision out of discretionary background scheduling"
@@ -199,3 +199,18 @@ native-capture or full product acceptance result. Live checklist delivery,
 host-level wait interruption, outstanding request reconciliation and eligible
 Champion cleanup remain separate gates. Toolkit PR 152 is merged and its native
 busy-receiver refusal is verified; that does not replace consumer acceptance.
+
+## Recovered retained-repository cleanup
+
+An installed cleanup plan refused an accepted standalone-repository Champion
+because exact runtime recovery intentionally preserved its assignment's
+`cleanup_pending` / `stale_runtime` marker. No plan or destructive action was
+committed by that refusal. The retention validator now permits only that marked
+assignment with its exact verified active runtime, or the same cleanup's durable
+session-exit/release receipt plus endpoint reinspection on retry. Owner, session, runtime generation,
+callsign, terminal task acceptance, repository publication and retention checks
+remain required. Other failure classes and unresolved runtimes still refuse.
+
+Focused synthetic coverage exercises retained clone byte parity, stale-runtime
+refusals, crash recovery after endpoint close and after callsign release, and
+duplicate completion. This correction still requires installed execution proof.

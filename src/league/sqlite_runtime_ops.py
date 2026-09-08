@@ -968,7 +968,8 @@ def _validate_retained_repository_owner(
     ] + ["session_exit", "endpoint_close", "callsign_release"]
     if kinds not in (expected_kinds, expected_kinds + ["issue_close"]):
         raise StorageRefusal("cleanup_retention_refused", "retention may release only exact endpoints and this task's leases")
-    backend = next(a for a in actions if a["action_kind"] == "endpoint_close")["expected_identity"]
+    endpoint_action = next(a for a in actions if a["action_kind"] == "endpoint_close")
+    backend = endpoint_action["expected_identity"]
     release = next(a for a in actions if a["action_kind"] == "callsign_release")
     expected = release["expected_identity"]
     callsign = store.connection.execute(
@@ -981,6 +982,22 @@ def _validate_retained_repository_owner(
     assignments = store.connection.execute(
         "SELECT * FROM task_assignments WHERE task_id=?", (task_id,),
     ).fetchall()
+    released = (callsign is not None and len(runtimes) == 1
+                and callsign["state"] == "released"
+                and callsign["version"] == expected.get("expected_version", -1) + 1
+                and callsign["release_receipt_digest"] == cleanup_action_digest(release)
+                and runtimes[0]["status"] == "closed")
+    # Identity recovery deliberately preserves assignment/task state. A stale
+    # assignment may therefore still request cleanup of its now verified runtime.
+    session_action = next(a for a in actions if a["action_kind"] == "session_exit")
+    # Closing the endpoint can commit before its action receipt. The exact
+    # preceding session-exit receipt permits reinspection, not blind completion.
+    closed_here = (len(runtimes) == 1 and runtimes[0]["status"] == "closed"
+                   and session_action.get("state") == "completed"
+                   and bool(session_action.get("receipt")))
+    recovered = (released or closed_here or
+                 (len(runtimes) == 1 and runtimes[0]["verified"] == 1
+                  and runtimes[0]["status"] in {"active", "idle"}))
     if (callsign is None or callsign["agent_id"] != owner_id
             or callsign["callsign"] != expected.get("callsign")
             or len(runtimes) != 1
@@ -991,12 +1008,12 @@ def _validate_retained_repository_owner(
             or any(a["champion_agent_id"] != owner_id
                    or a["runtime_instance_id"] != backend.get("runtime_instance_id")
                    or a["acceptance_receipt_json"] is None
-                   or a["state"] not in {"active", "completed"} for a in assignments)):
+                   or (a["state"] not in {"active", "completed"}
+                       and not (a["state"] == "cleanup_pending"
+                                and a["failure_class"] == "stale_runtime"
+                                and a["cleanup_required"] == 1 and recovered))
+                   for a in assignments)):
         raise StorageRefusal("cleanup_identity_mismatch", "retention endpoint, callsign, or assignment ownership changed")
-    released = (callsign["state"] == "released"
-                and callsign["version"] == expected.get("expected_version", -1) + 1
-                and callsign["release_receipt_digest"] == cleanup_action_digest(release)
-                and runtimes[0]["status"] == "closed")
     if not released and (callsign["state"] != "active"
                          or callsign["version"] != expected.get("expected_version")
                          or owner["retired_at"] is not None):

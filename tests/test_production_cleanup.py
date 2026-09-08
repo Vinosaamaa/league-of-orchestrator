@@ -450,6 +450,46 @@ def test_production_cleanup_crash_resume_and_lease_scope(
             at=AT_RESUME,
         )
         assert duplicate["execution"]["idempotent"] is True
+        if not recovered_stale:
+            # Older releases completed external cleanup but left this row active.
+            before_operation = store.cleanup_operation(planned["operation_id"])
+            store.connection.execute(
+                "UPDATE task_assignments SET state='active',cleanup_receipt=NULL WHERE task_id=?",
+                (LIFECYCLE_TASK_ID,),
+            )
+            for statement, restore, parameters in (
+                ("UPDATE task_assignments SET cleanup_receipt='foreign' WHERE task_id=?",
+                 "UPDATE task_assignments SET cleanup_receipt=NULL WHERE task_id=?", (LIFECYCLE_TASK_ID,)),
+                ("UPDATE teardown_receipts SET receipt_hash='foreign' WHERE operation_id=?",
+                 "UPDATE teardown_receipts SET receipt_hash=? WHERE operation_id=?", (planned["operation_id"],)),
+            ):
+                store.connection.execute(statement, parameters)
+                before = tuple(store.connection.iterdump())
+                try:
+                    store.finalize_cleanup(planned["operation_id"], resume_fence + 1, AT_RESUME)
+                except StorageRefusal as exc:
+                    assert exc.code == "cleanup_receipt_conflict", exc.code
+                else:
+                    raise AssertionError("conflicting prior receipt accepted")
+                assert tuple(store.connection.iterdump()) == before
+                store.connection.execute(restore, parameters if "NULL" in restore else
+                    (resumed["execution"]["receipt_hash"], planned["operation_id"]))
+            repaired = service.execute(planned["operation_id"], expected_fence=resume_fence + 1,
+                executor_id="executor:prior-receipt", leased_until=LEASE_RESUME, at=AT_RESUME)
+            assignment = store.connection.execute(
+                "SELECT state,cleanup_receipt FROM task_assignments WHERE task_id=?", (LIFECYCLE_TASK_ID,),
+            ).fetchone()
+            assert assignment["state"] == "completed", dict(assignment)
+            assert assignment["cleanup_receipt"] == resumed["execution"]["receipt_hash"]
+            assert repaired["execution"]["assignment_reconciled"] is True
+            assert store.cleanup_operation(planned["operation_id"]) == before_operation
+            assert not runner.pane and not Path(git["worktree"]).exists()
+            again = service.execute(planned["operation_id"], expected_fence=resume_fence + 1,
+                executor_id="executor:prior-receipt", leased_until=LEASE_RESUME, at=AT_RESUME)
+            assert again["execution"]["idempotent"] is True
+            assert store.connection.execute(
+                "SELECT COUNT(*) FROM events WHERE event_type='cleanup_assignment_reconciled'",
+            ).fetchone()[0] == 1
         assert store.connection.execute(
             "SELECT COUNT(*) FROM teardown_receipts WHERE operation_id=?",
             (planned["operation_id"],),

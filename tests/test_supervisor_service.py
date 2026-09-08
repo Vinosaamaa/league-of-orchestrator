@@ -21,6 +21,7 @@ sys.path[:0] = [str(ROOT / "src"), str(ROOT / "tests")]
 
 from league.persistent_supervisor import (  # noqa: E402
     PersistentSupervisor,
+    SupervisorUnavailable,
     attach_shotcaller,
     stop_supervisor,
     supervisor_status,
@@ -172,6 +173,19 @@ def test_launchd_environment_starts_the_canonical_watcher(root: Path) -> None:
     with patch.dict(os.environ, {"HERDR_SESSION": "synthetic-session"}):
         rendered, _ = render_launchd_plist(template, agent_watcher, state.resolve())
     value = plistlib.loads(rendered)
+    # The watcher serves foreground input/control; do not opt it into Darwin's
+    # discretionary Background CPU and I/O scheduling class.
+    assert value["ProcessType"] == "Standard"
+    background_template = root / "background-template.plist"
+    background_template.write_bytes(
+        template.read_bytes().replace(b"<string>Standard</string>", b"<string>Background</string>")
+    )
+    try:
+        render_launchd_plist(background_template, agent_watcher, state.resolve())
+    except StorageRefusal as exc:
+        assert exc.code == "supervisor_service_template_invalid"
+    else:
+        raise AssertionError("background scheduling template accepted")
     environment = value["EnvironmentVariables"]
     assert environment["HERDR_SESSION"] == "synthetic-session"
     assert "HERDR_SOCKET_PATH" not in environment and "HERDR_PANE_ID" not in environment
@@ -186,6 +200,7 @@ def test_launchd_environment_starts_the_canonical_watcher(root: Path) -> None:
         else:
             raise AssertionError("invalid session selector accepted")
     assert "/opt/homebrew/bin" in environment["PATH"].split(os.pathsep)
+    assert os.fspath(Path.home() / '.local' / 'bin') in environment['PATH'].split(os.pathsep)
     assert value["StandardErrorPath"] == os.fspath(state.resolve() / "supervisor-startup.stderr.log")
     assert environment["LEAGUE_WRITER_POINTER"] == os.fspath(
         state.resolve().parent / "league-writer-pointer.json"
@@ -252,6 +267,19 @@ def test_install_restart_and_exact_rollback(root: Path) -> None:
     first_fences = {
         item["actor_agent_id"]: item["fence"] for item in first["bindings"]
     }
+
+    for cause, expected_reason in (
+        (PermissionError(1, "synthetic caller restriction"), "probe_permission_denied"),
+        (ConnectionRefusedError(), "process_unreachable"),
+    ):
+        failure = SupervisorUnavailable("synthetic probe failure")
+        failure.__cause__ = cause
+        with patch("league.persistent_supervisor.send_supervisor_message", side_effect=failure):
+            aggregate = supervisor_status(state)
+            assert not aggregate["live"] and not aggregate["monitor_live"]
+            assert all(item["reason"] == expected_reason for item in aggregate["bindings"])
+            individual = supervisor_status(state, first["bindings"][0]["callsign"])
+            assert not individual["live"] and individual["reason"] == expected_reason
 
     backup.unlink()
     try:

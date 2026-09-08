@@ -152,8 +152,12 @@ def source_contract(source: Path) -> bytes:
         "Prompt intake activates only after exact canonical binding; it never "
         "backfills pre-binding prompts or mines transcripts.",
         "Stop feedback is an operational continuation, not new Summoner steering. "
-        "If it names an untriaged prompt, reconcile that prompt through the canonical "
-        "request turn before attempting to end again.",
+        "Resolve untriaged input through its configured classifier; inspect a worker "
+        "failure once instead of repeatedly attempting Stop or reclassifying inline.",
+        "Background mode: the dedicated League worker classifies new prompts; consume "
+        "its canonical request checklist through the inbox.",
+        "OFF pauses pending classification and records new prompts as skipped; it never "
+        "cancels existing requests, Champion work, deliveries, supervision, or cleanup.",
         "A routine Stop block never authorizes hook disablement, `service-start`, "
         "detachment, request cancellation, `/new`, or `allow-stop --once`; use the "
         "named recovery only for its exact refusal, and reserve the one-shot allowance "

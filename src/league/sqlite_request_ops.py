@@ -396,7 +396,7 @@ def intake_prompt(
             existing = store.connection.execute(
                 """
                 SELECT p.prompt_id,p.intake_actor_id,p.runtime_instance_id,p.created_at,p.triage_state,
-                       pp.body_hash,pp.byte_count
+                       pp.body_hash,pp.byte_count,p.triage_mode
                   FROM prompts p JOIN prompt_payloads pp ON pp.prompt_id=p.prompt_id
                  WHERE p.adapter_kind=? AND p.session_ref=? AND p.source_event_key=?
                 """,
@@ -416,7 +416,7 @@ def intake_prompt(
                     )
                 return {
                     "prompt_id": existing["prompt_id"],
-                    "triage_state": existing["triage_state"],
+                    "triage_state": "skipped" if existing["triage_mode"] == "off" else existing["triage_state"],
                     "idempotent": True,
                     "wake_committed": False,
                 }
@@ -457,13 +457,23 @@ def intake_prompt(
                 raise StorageRefusal(
                     "owner_superseded", "Shotcaller is no longer the stable Squad owner"
                 )
+            triage_policy = store.connection.execute(
+                "SELECT mode,version FROM prompt_triage_settings WHERE owner_agent_id=?",
+                (intake_actor_id,),
+            ).fetchone()
+            triage_mode = "inline" if triage_policy is None else triage_policy["mode"]
+            triage_state = "complete" if triage_mode == "off" else "untriaged"
+            triage_digest = (
+                _digest(f"prompt-triage-off:{triage_policy['version']}")
+                if triage_mode == "off" else None
+            )
             store.connection.execute(
                 """
                 INSERT INTO prompts
                   (prompt_id,intake_actor_id,runtime_instance_id,adapter_kind,session_ref,
                    source_event_key,triage_state,triage_digest,created_at,current_owner_agent_id,
-                   current_owner_runtime_instance_id)
-                VALUES(?,?,?,?,?,?,'untriaged',NULL,?,?,?)
+                   current_owner_runtime_instance_id,triage_mode)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     prompt_id,
@@ -472,9 +482,12 @@ def intake_prompt(
                     adapter_kind,
                     session_ref,
                     source_event_key,
+                    triage_state,
+                    triage_digest,
                     at,
                     intake_actor_id,
                     runtime_instance_id,
+                    triage_mode,
                 ),
             )
             store.connection.execute(
@@ -512,7 +525,8 @@ def intake_prompt(
         raise store._translate_database_error(exc, "prompt intake conflicted with canonical state") from exc
     return {
         "prompt_id": prompt_id,
-        "triage_state": "untriaged",
+        "triage_state": "skipped" if triage_mode == "off" else triage_state,
+        "triage_mode": triage_mode,
         "idempotent": False,
         "wake_committed": wake_scope_id is not None,
     }
@@ -887,15 +901,20 @@ def _triage_prompt_in_transaction(
     at: str,
     *,
     expected_owner_agent_id: str | None = None,
+    background: bool = False,
 ) -> dict[str, Any]:
     counts = _triage_counts()
     prompt = store.connection.execute(
-        "SELECT intake_actor_id,current_owner_agent_id,triage_state,triage_digest "
+        "SELECT intake_actor_id,current_owner_agent_id,triage_state,triage_digest,triage_mode "
         "FROM prompts WHERE prompt_id=?",
         (prompt_id,),
     ).fetchone()
     if prompt is None:
         raise StorageRefusal("prompt_unknown", "prompt does not exist")
+    if prompt["triage_mode"] == "off":
+        raise StorageRefusal("prompt_triage_disabled", "this prompt was explicitly skipped while triage was off")
+    if prompt["triage_mode"] == "background" and not background:
+        raise StorageRefusal("triage_owned_by_worker", "this prompt is owned by the dedicated triage worker")
     if (
         expected_owner_agent_id is not None
         and prompt["current_owner_agent_id"] != expected_owner_agent_id
@@ -977,6 +996,8 @@ def triage_prompt_batch(
     expected_prompt_ids: tuple[str, ...],
     decisions: list[dict[str, Any]],
     at: str,
+    *,
+    background: bool = False,
 ) -> dict[str, Any]:
     """Commit one exact turn's model-authored decisions in one transaction."""
 
@@ -1026,6 +1047,7 @@ def triage_prompt_batch(
                     digest,
                     at,
                     expected_owner_agent_id=owner_agent_id,
+                    background=background,
                 )
                 for prompt_id, normalized, digest in prepared
             ]
@@ -2607,7 +2629,9 @@ def unresolved_requests(
     )
     untriaged_prompt_count = int(
         store.connection.execute(
-            "SELECT COUNT(*) FROM prompts WHERE current_owner_agent_id=? AND triage_state='untriaged'",
+            "SELECT COUNT(*) FROM prompts p WHERE current_owner_agent_id=? AND triage_state='untriaged' "
+            "AND NOT EXISTS (SELECT 1 FROM prompt_triage_settings s "
+            "WHERE s.owner_agent_id=p.current_owner_agent_id AND s.mode='off')",
             (owner_agent_id,),
         ).fetchone()[0]
     )
@@ -2617,6 +2641,8 @@ def unresolved_requests(
                pp.body_hash,pp.byte_count
           FROM prompts p JOIN prompt_payloads pp ON pp.prompt_id=p.prompt_id
          WHERE p.current_owner_agent_id=? AND p.triage_state='untriaged'
+           AND NOT EXISTS (SELECT 1 FROM prompt_triage_settings s
+                           WHERE s.owner_agent_id=p.current_owner_agent_id AND s.mode='off')
          ORDER BY p.created_at,p.prompt_id
          LIMIT ?
         """,
@@ -2818,6 +2844,8 @@ def untriaged_intake(
     candidate_max_bytes: int = 24_576,
     candidate_after: str | None = None,
     candidate_page: bool = False,
+    background: bool = False,
+    background_prompt_id: str | None = None,
 ) -> dict[str, Any]:
     """Return exact prompts plus bounded canonical semantic-dedup candidates."""
 
@@ -2839,10 +2867,11 @@ def untriaged_intake(
         raise StorageRefusal(
             "owner_invalid", "untriaged intake requires one live Shotcaller owner"
         )
+    triage_mode = "background" if background else "inline"
     total = int(
         store.connection.execute(
-            "SELECT COUNT(*) FROM prompts WHERE current_owner_agent_id=? AND triage_state='untriaged'",
-            (owner_agent_id,),
+            "SELECT COUNT(*) FROM prompts WHERE current_owner_agent_id=? AND triage_state='untriaged' AND triage_mode=? AND (? IS NULL OR prompt_id=?)",
+            (owner_agent_id, triage_mode, background_prompt_id, background_prompt_id),
         ).fetchone()[0]
     )
     rows = store.connection.execute(
@@ -2851,11 +2880,12 @@ def untriaged_intake(
                p.adapter_kind,p.session_ref,p.source_event_key,p.created_at,
                pp.body,pp.body_hash,pp.byte_count,pp.pruned_at
           FROM prompts p JOIN prompt_payloads pp ON pp.prompt_id=p.prompt_id
-         WHERE p.current_owner_agent_id=? AND p.triage_state='untriaged'
+         WHERE p.current_owner_agent_id=? AND p.triage_state='untriaged' AND p.triage_mode=?
+           AND (? IS NULL OR p.prompt_id=?)
          ORDER BY p.created_at,p.prompt_id
          LIMIT ?
         """,
-        (owner_agent_id, limit),
+        (owner_agent_id, triage_mode, background_prompt_id, background_prompt_id, limit),
     ).fetchall()
     prompts: list[dict[str, Any]] = []
     returned_bytes = 0

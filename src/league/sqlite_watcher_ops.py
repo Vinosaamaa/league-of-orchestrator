@@ -108,6 +108,8 @@ def _stop_obligation_summaries(
             SELECT pp.body,COUNT(*) OVER() AS total FROM prompts p
             LEFT JOIN prompt_payloads pp ON pp.prompt_id=p.prompt_id
              WHERE p.current_owner_agent_id=? AND p.triage_state='untriaged'
+               AND NOT EXISTS (SELECT 1 FROM prompt_triage_settings s
+                               WHERE s.owner_agent_id=p.current_owner_agent_id AND s.mode='off')
              ORDER BY p.created_at,p.prompt_id LIMIT ?
             """,
             (actor_agent_id, MAX_STOP_DETAIL_ROWS),
@@ -1056,6 +1058,12 @@ def apply_supervision_delivery_policy(
                 ).fetchone()
             )
             active_turn = None if scope is None else _shotcaller_turn(_scope_metadata(scope))
+            foreground = None if scope is None else _scope_metadata(scope).get('foreground_inbox')
+            if (row['state'] == 'pending' and row['event_type'] != 'owner_stop_control'
+                and isinstance(foreground, dict)
+                and _time(foreground['expires_at'], 'foreground receive expiry') > _time(at, 'delivery time')):
+                return {'action': 'defer', 'reason': 'foreground_wait',
+                        'state': 'pending', 'idempotent': False}
             if (
                 row["state"] == "pending"
                 and active_turn is not None
@@ -2877,8 +2885,10 @@ def obligation_counts(store: Any, actor_agent_id: str) -> dict[str, int]:
               AND state IN ('pending','launching','cleanup_pending')) pending_assignments,
           (SELECT COUNT(*) FROM requests
             WHERE owner_agent_id=? AND state NOT IN ('answered','cancelled'))
-          + (SELECT COUNT(*) FROM prompts
-              WHERE current_owner_agent_id=? AND triage_state='untriaged') unresolved_requests,
+          + (SELECT COUNT(*) FROM prompts p
+              WHERE current_owner_agent_id=? AND triage_state='untriaged'
+                AND NOT EXISTS (SELECT 1 FROM prompt_triage_settings s
+                                WHERE s.owner_agent_id=p.current_owner_agent_id AND s.mode='off')) unresolved_requests,
           (SELECT COUNT(*) FROM delivery_outbox
             WHERE recipient_agent_id=?
               AND state IN ('pending','in_flight','awaiting_receipt')) pending_deliveries,
@@ -2897,8 +2907,10 @@ def _owner_actionable_counts(store: Any, actor_agent_id: str) -> dict[str, int]:
     row = store.connection.execute(
         """
         SELECT
-          (SELECT COUNT(*) FROM prompts
-            WHERE current_owner_agent_id=? AND triage_state='untriaged') untriaged_prompts,
+          (SELECT COUNT(*) FROM prompts p
+            WHERE current_owner_agent_id=? AND triage_state='untriaged'
+              AND NOT EXISTS (SELECT 1 FROM prompt_triage_settings s
+                              WHERE s.owner_agent_id=p.current_owner_agent_id AND s.mode='off')) untriaged_prompts,
           (SELECT COUNT(*) FROM requests r
             WHERE r.owner_agent_id=? AND r.state NOT IN ('answered','cancelled')
               AND (

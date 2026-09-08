@@ -187,7 +187,15 @@ def test_transition_commits_then_service_delivers_once(root: Path, *, detached: 
                 if item.envelope["event_id"] == first["event_id"]
             ]
             time.sleep(0.01)
-        assert len(matching) == 1
+        with SQLiteStorage(state) as observer:
+            delivery_evidence = dict(observer.connection.execute(
+                'SELECT state,last_outcome,attempt_count FROM delivery_outbox WHERE outbox_id=?',
+                (first['outbox_id'],),
+            ).fetchone())
+            policy_evidence = observer.apply_supervision_delivery_policy(
+                first['outbox_id'], first['event_id'], SHOTCALLER_ID, clock.now(),
+            )
+        assert len(matching) == 1, (delivery_evidence, policy_evidence, errors)
         if detached:
             assert matching[0].channel == 'direct'
             assert time.monotonic() - began < 1, 'attention delivery waited for the 30-second recovery sweep'

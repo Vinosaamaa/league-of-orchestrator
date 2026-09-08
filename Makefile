@@ -18,6 +18,11 @@ STORAGE_TESTS := \
 	tests/test_issue_selection.py
 
 REQUEST_LIFECYCLE_TESTS := \
+	tests/test_prompt_triage_policy.py \
+	tests/test_prompt_triage_worker.py \
+	tests/test_triage_codex_protocol.py \
+	tests/test_in_turn_inbox.py \
+	tests/test_receive_guard.py \
 	tests/test_request_lifecycle.py \
 	tests/test_request_turn_batch.py \
 	tests/test_delegation_policy.py \
@@ -29,8 +34,10 @@ REQUEST_LIFECYCLE_TESTS := \
 	tests/test_shotcaller_stop.py \
 	tests/test_owner_stop_control.py \
 	tests/test_canonical_watcher.py \
+	tests/test_stop_continuation.py \
 	tests/test_hook_runtime_regressions.py \
 	tests/test_runtime_identity.py \
+	tests/test_runtime_handoff.py \
 	tests/test_issue66_shipping.py \
 	tests/test_persistent_supervisor.py \
 	tests/test_multisquad_supervisor.py \

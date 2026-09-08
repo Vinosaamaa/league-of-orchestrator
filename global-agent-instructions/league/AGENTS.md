@@ -39,22 +39,30 @@ $HOME/.local/bin/league --state-root "$HOME/.local/state/league"
 - Prompt intake activates only after exact canonical binding; it never backfills
   pre-binding prompts or mines transcripts. It never rewrites bodies, injects
   control text, infers semantic splits, or fabricates missed prompts.
-- At the start of a Shotcaller turn, start exactly one bounded process and keep
-  it through commit:
+- At the start of a Shotcaller turn, inspect `league request triage-status
+  --owner-agent-id <id>`. Unconfigured owners retain inline classification.
+- Inline mode only: start exactly one bounded process and keep it through commit:
 
 ```sh
 $HOME/.local/bin/league --state-root "$HOME/.local/state/league" request turn \
   --owner-agent-id <shotcaller-agent-id>
 ```
 
-- The Shotcaller model performs semantic triage and routing. The adapter may
+- Inline mode: the Shotcaller model performs semantic triage and routing. The adapter may
   manufacture only mechanical IDs, claim tokens, JSON, timestamps, hashes,
   locators, and command arguments.
+- Background mode: the dedicated League worker classifies new prompts; consume
+  its canonical request checklist through the inbox. Do not classify again or
+  mark unknown subrequests answered before that checklist arrives.
+- Explicit prompt-triage ON/OFF uses `league request triage-mode --owner-agent-id
+  <id> --mode on|off --expected-version <version> --at <time>`. OFF pauses pending
+  classification and records new prompts as skipped; it never cancels existing
+  requests, Champion work, deliveries, supervision, or cleanup.
 - Begin and commit are separate atomic transactions on the same connection.
   League holds no transaction while the model reasons between them.
 - Exact retries are idempotent. Missing, reordered, duplicated, conflicting,
   stale-version, cross-owner, or partial batches refuse without partial commit.
-- Every captured bound prompt item is classified as a new request, follow-up,
+- Every enabled captured bound prompt item is classified as a new request, follow-up,
   context, acknowledgement, duplicate, or deferred item; no text disappears
   silently.
 - Before reply, wait, handoff, or end, the turn's final boundary accounts for
@@ -62,9 +70,9 @@ $HOME/.local/bin/league --state-root "$HOME/.local/state/league" request turn \
   Champion, and cleanup obligation.
 - Stop is an omission backstop, not the normal triage mechanism. Genuine user
   steering rearms it and outranks material-event waits.
-- Stop feedback is an operational continuation, not new Summoner steering. If
-  it names an untriaged prompt, reconcile that prompt through the canonical
-  request turn before attempting to end again.
+- Stop feedback is an operational continuation, not new Summoner steering.
+  Resolve untriaged input through its configured classifier; inspect a worker
+  failure once instead of repeatedly attempting Stop or reclassifying inline.
 - A routine Stop block never authorizes hook disablement, `service-start`,
   detachment, request cancellation, `/new`, or `allow-stop --once`; use the
   named recovery only for its exact refusal, and reserve the one-shot allowance
@@ -145,12 +153,29 @@ $HOME/.local/bin/league --state-root "$HOME/.local/state/league" request turn \
 
 ## Delivery and supervision
 
+- During work, read `league delivery inbox --owner-agent-id <id>
+  --runtime-instance-id <runtime> --at <time>` at a task boundary and before
+  reporting request completion. It returns pending Champion and triage updates
+  without submitting a prompt; an empty inbox requires no immediate repeat.
+- After receiving an inbox or wait result, acknowledge its exact saved receipt
+  with `league delivery ack-inbox --receipt <file> --at <time>`. Receipt removes
+  pending delivery only; report request/task completion separately with evidence.
+- An interrupted read leaves an expiring claim, not a receipt. Read again after
+  expiry; never synthesize acknowledgement IDs or erase queued updates.
+- Only an outstanding foreground receive leases tool-result delivery. General
+  supervision and `wait_active` are not proof that a receive tool is waiting.
+- Busy receivers consume updates through inbox checkpoints; waiting receivers
+  receive tool results. Wake prompts require verified idle identity; unknown
+  activity retains updates. Native idle-check/send races remain a release gate.
 - Hooks first verify an exact canonical runtime binding and role. If a Codex,
   Pi, or Cursor CLI runtime is unbound or non-League, `UserPrompt`,
   pre-mutation, and `Stop` allow/no-op immediately with zero canonical mutation.
-- An attached Shotcaller with any owner or delegated obligation blocks every
-  `Stop` attempt unless the Summoner explicitly requested a final stop and the
-  Shotcaller armed the exact one-shot allowance after pausing work.
+- A Shotcaller Stop reports unresolved work, but a native Codex Stop continuation
+  already notified at the unchanged wait generation ends quietly. New captured
+  steering rearms the reminder. This does not complete work, acknowledge delivery,
+  pause Champions, or claim a healthy supervisor handoff.
+- Other Stop attempts retain their obligation checks and the explicit one-shot
+  owner-stop path; never clear records merely to make a turn end.
 - When the Summoner requests all work paused, the Shotcaller reaches a safe
   boundary for its own work, sends a pause-and-preserve instruction to every
   owned active Champion, then runs

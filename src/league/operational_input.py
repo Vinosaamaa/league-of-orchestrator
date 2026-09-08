@@ -95,6 +95,8 @@ def parse_operational_input(body: str) -> dict[str, str] | None:
 def transition_content(envelope: Mapping[str, Any]) -> str:
     """Render the human/model-facing content of one material transition."""
 
+    if envelope.get("event_type") == "prompt_triaged":
+        return f"PROMPT TRIAGE [{envelope['event_id']}] {envelope.get('summary', '')}"
     summary = " ".join(str(envelope.get("summary", "")).split())
     return (
         f"CHAMPION TRANSITION [{envelope['event_id']}] "

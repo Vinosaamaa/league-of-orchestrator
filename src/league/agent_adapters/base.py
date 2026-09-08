@@ -29,8 +29,9 @@ def deliver_via_multiplexer(
             "multiplexer_delivery_unsupported",
             "selected multiplexer has no delivery transport",
         )
-    multiplexer.delivery(
-        routing_target,
+    from ..receive_guard import deliver_idle_notification
+    deliver_idle_notification(
+        multiplexer, target,
         render_operational_input(
             "delivery", envelope, transition_content(envelope)
         ),

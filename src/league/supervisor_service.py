@@ -238,7 +238,7 @@ def render_launchd_plist(
         }
         or value.get("RunAtLoad") is not True
         or value.get("KeepAlive") != {"SuccessfulExit": False}
-        or value.get("ProcessType") != "Background"
+        or value.get("ProcessType") != "Standard"
         or value.get("ThrottleInterval") != 5
         or value.get("StandardErrorPath") not in (
             None, "@@STATE_ROOT@@/supervisor-startup.stderr.log"
@@ -256,6 +256,7 @@ def render_launchd_plist(
         dict.fromkeys(
             (
                 python_directory,
+                os.fspath(Path.home() / '.local' / 'bin'),
                 "/opt/homebrew/bin",
                 "/usr/local/bin",
                 "/usr/bin",

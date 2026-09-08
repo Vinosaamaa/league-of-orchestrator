@@ -424,7 +424,9 @@ def test_production_cleanup_crash_resume_and_lease_scope(root: Path) -> None:
         assert receipt_policy == policy
 
 
-def test_standalone_repository_retention(root: Path, crash_action: str = "endpoint_close") -> None:
+def test_standalone_repository_retention(
+    root: Path, crash_action: str = "endpoint_close", *, recovered_stale: bool = False,
+) -> None:
     """Production execution closes only the exact fake endpoint, never the clone."""
     root = root.resolve()
     root.mkdir(parents=True)
@@ -471,6 +473,29 @@ def test_standalone_repository_retention(root: Path, crash_action: str = "endpoi
             "SELECT version FROM agent_instances WHERE agent_id=?", (CHAMPION_ID,),
         ).fetchone()[0]
         store.transition(CHAMPION_ID, owner_version, "completed", "Synthetic accepted completion", AT_PLAN)
+        if recovered_stale:
+            store.connection.execute(
+                "UPDATE task_assignments SET state='cleanup_pending',failure_class='stale_runtime',"
+                "cleanup_required=1 WHERE task_id=?", (LIFECYCLE_TASK_ID,),
+            )
+            # Recovery must be exact: an unresolved runtime or a different
+            # assignment failure still refuses, with zero cleanup mutations.
+            for mutation, restore in (
+                ("UPDATE runtime_instances SET verified=0", "UPDATE runtime_instances SET verified=1"),
+                ("UPDATE runtime_instances SET status='failed'", "UPDATE runtime_instances SET status='active'"),
+                ("UPDATE task_assignments SET failure_class='launch_failed'",
+                 "UPDATE task_assignments SET failure_class='stale_runtime'"),
+            ):
+                store.connection.execute(mutation)
+                refused_before = store.export_bytes(format_name="json", purpose="rollback", max_records=1000)
+                try:
+                    CleanupPlanner(store).plan(manifest, operation_id="operation:unrecovered", at=AT_PLAN)
+                except StorageRefusal as exc:
+                    assert exc.code == "cleanup_identity_mismatch", exc.code
+                else:
+                    raise AssertionError("unrecovered stale retention planned")
+                assert store.export_bytes(format_name="json", purpose="rollback", max_records=1000) == refused_before
+                store.connection.execute(restore)
         before_plan = store.export_bytes(format_name="json", purpose="rollback", max_records=1000)
         invalid = []
         for key in ("repository_retention",):
@@ -804,6 +829,8 @@ def main() -> None:
         test_production_cleanup_crash_resume_and_lease_scope(root / "e2e")
         test_standalone_repository_retention(root / "standalone-retention")
         test_standalone_repository_retention(root / "standalone-release-retry", "callsign_release")
+        test_standalone_repository_retention(root / "recovered-stale-retention", recovered_stale=True)
+        test_standalone_repository_retention(root / "recovered-stale-release", "callsign_release", recovered_stale=True)
         test_ready_to_land_owner_cancellation_recovers_planned_fence_zero_after_reopen(
             root / "ready-to-land-cancelled"
         )

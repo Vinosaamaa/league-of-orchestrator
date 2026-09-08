@@ -152,6 +152,7 @@ def test_transactional_upgrade_backup_and_rollback(root: Path) -> None:
             (22, "pi-provider-launch-descriptor", "00db025c97fd622984900c4db9712a2e3f3ea34125bed2af770c1e04d8aed83f"),
             (23, "adapter-neutral-champion-runtime-replacement", "b7c70f0db8bd4ccc8135f7d3d8b7471a470220cad6b86e86614f67415df75251"),
             (24, "stopped-agent-total-retirement", "2f99523b608e0023aa958ba865946c276f2eb5b7cca4051e135c593af389f635"),
+            (25, "dedicated-prompt-triage-policy", "f6dc980f8baa204a58b0499c48408fa8a93f49e5652592df83c9ae43d72bc878"),
         ]
         assert store.connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
 
@@ -692,6 +693,31 @@ def test_backup_collision_and_corruption(root: Path) -> None:
     refused(lambda: SQLiteStorage(corrupt), "database_error")
 
 
+def test_v24_to_v25_rolls_back_and_retains_inline_default(root: Path) -> None:
+    state, _ = migrated_state(root, 'v24-to-v25', target_version=24)
+    with SQLiteStorage.for_migration(state) as store:
+        before = '\n'.join(store.connection.iterdump())
+
+        def crash(point: str) -> None:
+            if point == 'after_migration_25':
+                raise InjectedCrash(point)
+
+        try:
+            store.migrate(backup_name='before-failed-v25.sqlite3', fault=crash)
+        except InjectedCrash:
+            pass
+        else:
+            raise AssertionError('migration failure was not injected')
+        assert store.connection.execute('PRAGMA user_version').fetchone()[0] == 24
+        assert '\n'.join(store.connection.iterdump()) == before
+        result = store.migrate(backup_name='before-successful-v25.sqlite3')
+        assert result['from_version'] == 24 and result['to_version'] == 25
+        assert result['backup']['integrity'] == 'ok'
+        assert store.connection.execute('SELECT COUNT(*) FROM prompt_triage_settings').fetchone()[0] == 0
+        column = next(row for row in store.connection.execute('PRAGMA table_info(prompts)') if row['name'] == 'triage_mode')
+        assert column['dflt_value'] == "'inline'"
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="league-storage-migration-") as temporary:
         root = Path(temporary)
@@ -708,6 +734,7 @@ def main() -> None:
         test_v21_to_v22_rolls_back_unified_pi_migration_tables(root)
         test_v3_upgrade_preserves_cleanup_and_indexes_legacy_project(root)
         test_backup_collision_and_corruption(root)
+        test_v24_to_v25_rolls_back_and_retains_inline_default(root)
     print("PASS: SQLite runtime gate, migrations, verified backup, rollback, drift, and corruption refusal")
 
 

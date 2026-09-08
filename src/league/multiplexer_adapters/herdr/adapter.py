@@ -55,7 +55,7 @@ def _foreground_process(runner: CommandRunner, info: Any, agent: Mapping[str, An
                         *, verify_native: bool = False) -> dict[str, Any]:
     """Bind current Herdr's PID inventory to OS start/parent/group evidence.
 
-    A Codex resume launcher may remain alongside its one direct Codex child.
+    A Codex shell launcher may remain alongside its one direct Codex child.
     Other multi-process layouts remain ambiguous; no process is terminated.
     """
     def refuse() -> None:
@@ -111,10 +111,20 @@ def _foreground_process(runner: CommandRunner, info: Any, agent: Mapping[str, An
         selected = codex[0]
         launcher = next(p for p in processes if p["pid"] != selected["pid"])
         if (Path(launcher["argv"][0]).name not in {"sh", "bash", "zsh"}
-            or len(launcher["argv"]) < 4 or Path(launcher["argv"][1]).name != "codex"
+            or len(launcher["argv"]) < 2 or Path(launcher["argv"][1]).name != "codex"
             or launcher["pid"] != group
-            or records[selected["pid"]]["parent"] != launcher["pid"]
-            or any(p["argv"][-2:] != ["resume", session] for p in processes)):
+            or records[selected["pid"]]["parent"] != launcher["pid"]):
+            refuse()
+        child_args, launcher_args = selected['argv'][1:], launcher['argv'][2:]
+        # The maintained launcher adds this display-only flag to the child.
+        if child_args[:1] == ['--no-alt-screen'] and launcher_args[:1] != ['--no-alt-screen']:
+            child_args = child_args[1:]
+        if child_args != launcher_args:
+            refuse()
+        # Resume may be followed by model/config options; fresh sessions have
+        # no resume argument and retain their exact native session observation.
+        resumes = [index for index, arg in enumerate(child_args) if arg == 'resume']
+        if resumes and (len(resumes) != 1 or child_args[resumes[0] + 1:resumes[0] + 2] != [session]):
             refuse()
     return {**selected, "process_start": records[selected["pid"]]["process_start"],
             "process_group_proof": [records[pid] for pid in sorted(records)]}

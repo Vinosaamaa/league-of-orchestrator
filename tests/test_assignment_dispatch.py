@@ -760,6 +760,58 @@ def test_task_transition_matrix_refuses_illegal_and_terminal_progression(root: P
     store.close()
 
 
+def test_recovered_stale_assignment_can_complete_without_reactivation(root: Path) -> None:
+    store, clock = champion_context(root, "recovered-completion")
+    bound = issue_bound_spec(store, spec("claim-r3", suffix="recovered"), clock.now())
+    active = AssignmentService(store, FakeLaunchAdapter(), clock, FakeIds()).assign(bound)
+    runtime_id = active["runtime_instance_id"]
+    store.connection.execute(
+        "UPDATE task_assignments SET state='cleanup_pending',failure_class='stale_runtime',cleanup_required=1 WHERE task_id=?",
+        (active["task_id"],))
+    store.connection.execute("UPDATE runtime_instances SET status='failed',verified=0 WHERE runtime_instance_id=?", (runtime_id,))
+    def complete(state="completed", version=3):
+        return store.transition_task(active["task_id"], runtime_id, version, state,
+            "Verified accepted source and installed result", "Clean the retained endpoint", None,
+            "transition:recovered:completed", "transition-key:recovered:completed",
+            "event:recovered:completed", "outbox:recovered:completed", SHOTCALLER_ID, clock.now())
+    def reject(code, **kw):
+        before = tuple(store.connection.iterdump())
+        try:
+            complete(**kw)
+        except StorageRefusal as exc:
+            assert exc.code == code, exc.code
+        else:
+            raise AssertionError("unverified recovered assignment completed")
+        assert tuple(store.connection.iterdump()) == before
+    reject("runtime_unverified")
+    runtime = store.connection.execute("SELECT * FROM runtime_instances WHERE runtime_instance_id=?", (runtime_id,)).fetchone()
+    actor = store.connection.execute("SELECT * FROM agent_instances WHERE agent_id=?", (LUX_ID,)).fetchone()
+    store.reconcile_restored_runtime(runtime_id, LUX_ID, actor["thread_id"], runtime["session_ref"],
+        runtime["backend_kind"], runtime["endpoint"], runtime["runtime_generation"], runtime["endpoint"],
+        "recovered-generation", clock.now(), recover_observed_failure=True,
+        expected_owner_agent_id=SHOTCALLER_ID, expected_agent_version=actor["version"])
+    reject("assignment_inactive", state="working")
+    reject("version_conflict", version=99)
+    receipt = store.connection.execute("SELECT acceptance_receipt_json FROM task_assignments WHERE task_id=?", (active["task_id"],)).fetchone()[0]
+    for column, bad, original in (("failure_class", "launch_title_restore_refused", "stale_runtime"),
+                                   ("cleanup_required", 0, 1),
+                                   ("acceptance_receipt_json", None, receipt)):
+        store.connection.execute(f"UPDATE task_assignments SET {column}=? WHERE task_id=?", (bad, active["task_id"]))
+        reject("assignment_inactive")
+        store.connection.execute(f"UPDATE task_assignments SET {column}=? WHERE task_id=?", (original, active["task_id"]))
+    store.connection.execute("UPDATE tasks SET current_owner_agent_id=? WHERE task_id=?", (SHOTCALLER_ID, active["task_id"]))
+    reject("assignment_inactive")
+    store.connection.execute("UPDATE tasks SET current_owner_agent_id=? WHERE task_id=?", (LUX_ID, active["task_id"]))
+    result = complete()
+    assert result["state"] == "completed" and result["version"] == 4
+    assert complete()["idempotent"]
+    assignment = store.connection.execute("SELECT * FROM task_assignments WHERE task_id=?", (active["task_id"],)).fetchone()
+    assert assignment["state"] == "cleanup_pending" and assignment["cleanup_required"] == 1
+    assert assignment["cleanup_receipt"] is None
+    assert store.connection.execute("SELECT COUNT(*) FROM delivery_outbox WHERE event_id='event:recovered:completed'").fetchone()[0] == 1
+    store.close()
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="league-assignment-dispatch-") as temporary:
         root = Path(temporary)
@@ -781,6 +833,7 @@ def main() -> None:
         test_unwrapped_adapter_failure_cannot_strand_launching(root)
         test_assignment_retry_compares_complete_launch_identity(root)
         test_task_transition_matrix_refuses_illegal_and_terminal_progression(root)
+        test_recovered_stale_assignment_can_complete_without_reactivation(root)
     print("PASS: explicit dispatch, exact assignment identity, verified receipt, and all launch failures recover through cleanup-pending")
 
 

@@ -3494,7 +3494,17 @@ def _validated_transition_context(
             else str(assignment["task_assignment_id"])
         ),
     )
-    if task is None or assignment is None or assignment["state"] != "active":
+    # Exact identity recovery intentionally leaves the cleanup obligation in
+    # place. Permit accepting finished work, not resuming that stale assignment.
+    recovered_completion = bool(
+        task is not None and assignment is not None and state == "completed"
+        and assignment["state"] == "cleanup_pending"
+        and assignment["failure_class"] == "stale_runtime"
+        and assignment["cleanup_required"] == 1
+        and assignment["acceptance_receipt_json"] is not None
+        and task["current_owner_agent_id"] == assignment["champion_agent_id"]
+    )
+    if task is None or assignment is None or (assignment["state"] != "active" and not recovered_completion):
         raise StorageRefusal("assignment_inactive", "task has no active verified assignment")
     if assignment["assignment_role"] == "hidden-worker":
         raise StorageRefusal(

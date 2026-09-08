@@ -1,7 +1,7 @@
 ---
 schemaVersion: 1
 id: "change-note-supervisor-scheduling"
-revision: 2
+revision: 3
 type: "change-note"
 status: "draft"
 title: "Keep user-facing supervision out of discretionary background scheduling"
@@ -10,7 +10,7 @@ capabilityIds: ["persistent-supervision"]
 createdAt: "2026-09-08T04:14:00Z"
 reconstructed: false
 confidence: "verified"
-unknowns: ["Complete installed triage, delivery, and cleanup acceptance remains pending."]
+unknowns: ["Atomic provider idle-check-and-send is not implemented.", "Host-level wait interruption and complete installed triage, delivery, and cleanup acceptance remain pending."]
 modules: ["supervisor-service"]
 interfaces: ["launchd-service-install"]
 seams: []
@@ -71,3 +71,28 @@ The installed candidate proves source parity, supported installation, live statu
 and renewal; rollback remains backed by the retained installer receipt and
 synthetic rollback test, not a destructive live rollback rehearsal. The broader
 issue remains open.
+
+## Consolidated prompt classification and receive work
+
+The same draft now includes the approved dedicated classification lane and
+prompt-only ON/OFF switch. One lazily started stdio process classifies prompts;
+it does not execute tasks or launch nested classifiers. Compact semantic output
+is committed with canonical request IDs and its internal notification. No model
+call occurs while idle. OFF preserves existing requests and Champion obligations.
+
+An explicit inbox read and acknowledgement reuse durable outbox leases. Waiting
+recipients receive a tool result, not a prompt; acknowledgement removes pending
+delivery but does not complete the referenced work. Interrupted reads remain
+recoverable. Fresh busy or unknown runtime observations refuse prompt delivery.
+
+The local baseline and affected lifecycle checks pass. The grouped lifecycle run
+exposed old assertions that treated a wait result as automatic acknowledgement;
+corrected focused receive cases and the remaining suite passed without relaxing
+deadlines or identity checks. Coverage includes two requests from one prompt,
+distinct checklist IDs, no false completion, expired-read recovery, exact idle
+identity, unavailable receivers, native hook activation, and supervisor renewal.
+
+This consolidated source is not installed. The idle check and send are still
+separate operations, so this draft does not satisfy the strict busy/idle race
+acceptance criterion. Short database polling likewise does not prove host-level
+wait interruption. Installed end-to-end acceptance and cleanup remain open.

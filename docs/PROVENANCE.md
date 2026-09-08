@@ -1,5 +1,25 @@
 # Source provenance
 
+## Issue #66 in-turn inbox and foreground receive
+
+Champion and triage notifications share bounded outbox read/ack leases. Reading
+does not mark a request complete. Interrupted reads can be reclaimed after
+expiry; superseded or altered receipts refuse, and exact acknowledgements are
+idempotent. The installed command path has not yet passed live acceptance.
+
+A dedicated expiring foreground-receive lease defers prompt delivery while an
+actual wait tool is outstanding. The first implementation incorrectly reused
+`wait_active`, which is also set by persistent supervisor registration. The
+existing supervisor-delivery test reproduced the resulting indefinite deferral.
+The corrected implementation separates these states and passes that test;
+synthetic inbox coverage also verifies expired waits and stale-reader fencing.
+
+Fresh native idle observation refuses busy or unknown recipients. Herdr's
+installed prompt CLI exposes no conditional idle-only send; the concurrent
+idle-to-busy submission race remains unresolved and blocks live enablement of
+the new default delivery contract. A successful synthetic adapter is not proof
+of this native boundary.
+
 ## Issue #66 supervisor scheduling
 
 The service template now requires launchd `ProcessType=Standard` instead of
@@ -2387,3 +2407,20 @@ deduplication. No production prompt identity or result guard changes.
 ## Engineering gate (#217)
 
 The receipt validator and immutable v1 schemas are reused from Interview Arc Live at `85c18e0e45824cb15a0bedb92f212f4b22207ef2`. The receipt scaffold is reused from Interview Arc Voice at `a17be67cd9659a1769d3a8ed254e9bd04c89afba` with League repository identity. The deliberate addition is repository CI and Engineering publication metadata; orchestration runtime behavior is unchanged. Synthetic gate tests verify accepted and rejected receipts.
+# Issue #66 in-turn inbox and prompt-only policy
+
+The new `delivery inbox` command presents pending Champion and prompt-triage
+events as tool output using existing bounded outbox leases. `delivery ack-inbox`
+records explicit receipt against the source digest and exact recipient runtime;
+it does not answer requests or complete tasks. Interrupted reads retain pending
+work for lease-expiry recovery. Owner-stop controls remain on their executor
+path. This is a receive primitive, not automatic busy-agent context injection.
+
+Prompt triage OFF pauses pre-existing classification without counting that
+paused queue as owner-actionable work. It preserves every request, Champion,
+delivery and cleanup obligation. Reenabling makes the paused queue actionable
+again; OFF-period input remains explicitly skipped.
+
+Focused synthetic policy and inbox tests exercise shared Champion/triage reads,
+source-digest rejection, exact retries, no false completion, and ON/OFF
+accounting. Provider integration and installed acceptance remain open.

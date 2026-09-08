@@ -1301,6 +1301,8 @@ def _supervise(
     *,
     own_watcher_registration: bool = True,
 ) -> dict[str, Any]:
+    from .sqlite_inbox_ops import foreground_wait
+
     if poll_seconds <= 0:
         raise StorageRefusal("invalid_supervision", "poll interval must be positive")
     lock_path = _state_root() / f".{hashlib.sha256(scope.encode()).hexdigest()}.supervise.lock"
@@ -1308,6 +1310,8 @@ def _supervise(
     lock = lock_path.open("a+")
     acquired = False
     watcher_id: str | None = None
+    receive_token = secrets.token_hex(16)
+    receive_runtime: str | None = None
     try:
         try:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -1362,6 +1366,10 @@ def _supervise(
                 now.isoformat(timespec="seconds"),
                 block_on_obligations=True,
             )
+        receive_runtime = str(runtimes[0]['runtime_instance_id'])
+        foreground_wait(store, scope, actor_id, receive_runtime, receive_token,
+                        datetime.now().astimezone().isoformat())
+        next_receive_renewal = time.monotonic() + 10
         store.rearm_wait(
             scope,
             actor_id,
@@ -1373,7 +1381,11 @@ def _supervise(
         # prevents an immediate user/event wake from falling into a gap.
         baseline = initial
         while True:
-            time.sleep(max(poll_seconds, 0.01))
+            time.sleep(min(max(poll_seconds, 0.01), 1.0))
+            if time.monotonic() >= next_receive_renewal:
+                foreground_wait(store, scope, actor_id, receive_runtime, receive_token,
+                                datetime.now().astimezone().isoformat())
+                next_receive_renewal = time.monotonic() + 10
             current = _supervision_snapshot(store, scope, actor_id)
             if current["user_message_generation"] != baseline["user_message_generation"]:
                 return {
@@ -1382,6 +1394,15 @@ def _supervise(
                     "shotcaller": callsign,
                     "writer": "sqlite",
                 }
+            if current['obligations']['pending_deliveries']:
+                from .sqlite_inbox_ops import read as read_inbox
+                inbox = read_inbox(store, actor_id, str(runtimes[0]['runtime_instance_id']),
+                                   datetime.now().astimezone().isoformat())
+                if inbox['items']:
+                    # The caller acknowledges this exact tool result after
+                    # receiving it. A cancelled tool leaves only bounded leases.
+                    return {'event': 'inbox-updates', 'inbox': inbox,
+                            'shotcaller': callsign, 'writer': 'sqlite'}
             if current["watcher_delivery"] != baseline["watcher_delivery"]:
                 delivered = current["watcher_delivery"]
                 if delivered is not None:
@@ -1446,6 +1467,9 @@ def _supervise(
     finally:
         try:
             if acquired:
+                if receive_runtime is not None:
+                    foreground_wait(store, scope, actor_id, receive_runtime, receive_token,
+                                    datetime.now().astimezone().isoformat(), release=True)
                 with store._transaction():
                     store.connection.execute(
                         "UPDATE watcher_scopes SET wait_active=0 WHERE scope_id=? AND actor_agent_id=?",

@@ -116,6 +116,11 @@ class ReconcileDuplicateRequestCommand:
 
 
 class RequestStorage(Protocol):
+    def prompt_triage_policy(self, owner_agent_id: str) -> dict[str, Any]: ...
+    def configure_prompt_triage(
+        self, owner_agent_id: str, enabled: bool, expected_version: int, at: str
+    ) -> dict[str, Any]: ...
+
     def intake_prompt(
         self,
         prompt_id: str,

@@ -498,6 +498,13 @@ def _add_rollover_commands(groups: argparse._SubParsersAction) -> None:
 def _add_delivery_commands(groups: argparse._SubParsersAction) -> None:
     delivery = groups.add_parser("delivery", help="Claim, acknowledge, or fail exact event delivery.")
     commands = delivery.add_subparsers(dest="action", required=True)
+    inbox = commands.add_parser("inbox", help="Read pending updates during work without injecting a prompt.")
+    for field in ("owner-agent-id", "runtime-instance-id", "at"):
+        inbox.add_argument(f"--{field}", required=True)
+    inbox.add_argument("--limit", type=int, default=10)
+    inbox_ack = commands.add_parser("ack-inbox", help="Acknowledge an exact inbox read, not task completion.")
+    inbox_ack.add_argument("--receipt", type=Path, required=True)
+    inbox_ack.add_argument("--at", required=True)
     for name in ("inspect-outbox", "reconcile-received"):
         command = commands.add_parser(name, help="Inspect or explicitly acknowledge one uncertain delivery read by its recipient.")
         for field in ("outbox-id", "event-id", "recipient-agent-id"):
@@ -1009,6 +1016,13 @@ def _add_request_commands(groups: argparse._SubParsersAction) -> None:
         "request", help="Capture, triage, claim, route, resolve, answer, and reconcile requests."
     )
     commands = request.add_subparsers(dest="action", required=True)
+    triage_status = commands.add_parser("triage-status", help="Read prompt-only triage policy.")
+    triage_status.add_argument("--owner-agent-id", required=True)
+    triage_mode = commands.add_parser("triage-mode", help="Toggle only prompt triage; preserve Champion work.")
+    triage_mode.add_argument("--owner-agent-id", required=True)
+    triage_mode.add_argument("--mode", choices=("on", "off"), required=True)
+    triage_mode.add_argument("--expected-version", type=int, required=True)
+    triage_mode.add_argument("--at", required=True)
     intake = commands.add_parser("intake", help="Capture one complete prompt exactly once.")
     for name in (
         "prompt-id",
@@ -2055,6 +2069,21 @@ def _delivery_ack(store: Storage, args: argparse.Namespace) -> CommandResult:
 def _delivery_inspect_outbox(store: Storage, args: argparse.Namespace) -> CommandResult:
     from .sqlite_outbox_ops import inspect_outbox
     return inspect_outbox(store, args.outbox_id, args.event_id, args.recipient_agent_id), None
+
+
+def _delivery_inbox(store: Storage, args: argparse.Namespace) -> CommandResult:
+    from .sqlite_inbox_ops import read
+    return read(store, args.owner_agent_id, args.runtime_instance_id, args.at, args.limit), None
+
+
+def _delivery_ack_inbox(store: Storage, args: argparse.Namespace) -> CommandResult:
+    from .sqlite_inbox_ops import acknowledge
+    receipt = _read_json_object(args.receipt)
+    if receipt.get('command') == 'delivery.inbox' and receipt.get('ok') is True:
+        receipt = receipt.get('result')
+    elif receipt.get('event') == 'inbox-updates':
+        receipt = receipt.get('inbox')
+    return acknowledge(store, receipt, args.at), None
 
 
 def _delivery_reconcile_received(store: Storage, args: argparse.Namespace) -> CommandResult:
@@ -3278,6 +3307,22 @@ def _request_untriaged(store: Storage, args: argparse.Namespace) -> CommandResul
     ), None
 
 
+def _request_triage_status(store: Storage, args: argparse.Namespace) -> CommandResult:
+    from .sqlite_prompt_triage_ops import status
+    return status(store, args.owner_agent_id), None
+
+
+def _request_triage_mode(store: Storage, args: argparse.Namespace) -> CommandResult:
+    result = store.configure_prompt_triage(
+        args.owner_agent_id, args.mode == "on", args.expected_version, args.at
+    )
+    from .persistent_supervisor import notify_user_message
+    result['worker_notified'] = notify_user_message(
+        store, args.owner_agent_id, '', kind='triage-ready',
+    )
+    return result, None
+
+
 def _request_reconcile_duplicate(
     store: Storage, args: argparse.Namespace
 ) -> CommandResult:
@@ -4061,6 +4106,8 @@ HANDLERS: dict[str, CommandHandler] = {
     "delivery.claim-outbox": _delivery_claim_outbox,
     "delivery.ack-outbox": _delivery_ack_outbox,
     "delivery.inspect-outbox": _delivery_inspect_outbox,
+    "delivery.inbox": _delivery_inbox,
+    "delivery.ack-inbox": _delivery_ack_inbox,
     "delivery.reconcile-received": _delivery_reconcile_received,
     "delivery.fail-outbox": _delivery_fail_outbox,
     "delivery.backlog": _delivery_backlog,
@@ -4120,6 +4167,8 @@ HANDLERS: dict[str, CommandHandler] = {
     "request.answer": _request_answer,
     "request.unresolved": _request_unresolved,
     "request.untriaged": _request_untriaged,
+    "request.triage-status": _request_triage_status,
+    "request.triage-mode": _request_triage_mode,
     "request.reconcile-duplicate": _request_reconcile_duplicate,
     "assign.prepare": _assign_prepare,
     "assign.run": _assign_launch,

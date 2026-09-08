@@ -17,6 +17,7 @@ from .request_services import (
 )
 from .agent_adapters import adapter_kind_from_runtime, builtin_agent_adapter_registry
 from .multiplexer_adapters import builtin_multiplexer_adapter_registry
+from .storage import StorageRefusal
 from .persistent_supervisor import (
     CallableMultiplexerRunner,
     SupervisorUnavailable,
@@ -98,6 +99,10 @@ class InstalledDeliveryAdapter:
                 )
             except (DeliveryAmbiguous, DeliveryUnavailable):
                 raise
+            except StorageRefusal as exc:
+                if exc.code in {'receiver_busy', 'receiver_activity_unknown'}:
+                    raise DeliveryUnavailable(exc.code) from exc
+                raise DeliveryAmbiguous('receiver_outcome_ambiguous') from exc
             except Exception as exc:
                 raise DeliveryAmbiguous("receiver_outcome_ambiguous") from exc
             if isinstance(delivered, DeliveryReceipt):

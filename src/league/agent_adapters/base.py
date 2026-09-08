@@ -29,6 +29,8 @@ def deliver_via_multiplexer(
             "multiplexer_delivery_unsupported",
             "selected multiplexer has no delivery transport",
         )
+    from ..receive_guard import require_idle_receiver
+    require_idle_receiver(multiplexer, target)
     multiplexer.delivery(
         routing_target,
         render_operational_input(

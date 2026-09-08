@@ -265,6 +265,8 @@ class HerdrWakeAdapter:
                     "multiplexer_delivery_unsupported",
                     "selected multiplexer has no delivery transport",
                 )
+            from .receive_guard import require_idle_receiver
+            require_idle_receiver(multiplexer, binding)
             multiplexer.delivery(
                 str(routing_target),
                 render_operational_input(
@@ -410,7 +412,10 @@ def send_supervisor_message(
     return response
 
 
-def notify_user_message(store: Any, actor_agent_id: str, prompt_id: str) -> bool:
+def notify_user_message(store: Any, actor_agent_id: str, prompt_id: str,
+                        *, kind: str = 'user-message') -> bool:
+    if kind not in {'user-message', 'triage-ready'}:
+        raise ValueError('unsupported prompt notification kind')
     target = store.delivery_target(actor_agent_id, _at())
     if target is None or target.get("channel") != "watcher":
         return False
@@ -421,7 +426,7 @@ def notify_user_message(store: Any, actor_agent_id: str, prompt_id: str) -> bool
         response = send_supervisor_message(
             locator,
             {
-                "kind": "user-message",
+                "kind": kind,
                 "actor_agent_id": actor_agent_id,
                 "prompt_id": prompt_id,
                 "fence": target["fence"],
@@ -431,7 +436,7 @@ def notify_user_message(store: Any, actor_agent_id: str, prompt_id: str) -> bool
         )
     except (SupervisorUnavailable, StorageRefusal):
         return False
-    return response.get("priority") == "user"
+    return response.get("priority") == ('user' if kind == 'user-message' else 'triage')
 
 
 def handoff_transition_delivery(
@@ -526,6 +531,7 @@ class PersistentSupervisor:
         runtime_observer: RuntimeObservationAdapter | None = None,
         store_factory: Callable[[Path], Any] = SQLiteStorage,
         max_accepted_work: int = MAX_ACCEPTED_WORK,
+        triage_factory: Callable[[], Any] | None = None,
     ) -> None:
         if (
             lease_seconds <= 0
@@ -552,6 +558,8 @@ class PersistentSupervisor:
         self.recovery_adapter = recovery_adapter
         self.runtime_observer = runtime_observer or HerdrRuntimeObservationAdapter()
         self.store_factory = store_factory
+        self._triage_factory = triage_factory
+        self._triage_worker: Any | None = None
         self.socket_path = _socket_path(self.state_root)
         self.lock_path = self.state_root / LOCK_NAME
         self.stop_requested = threading.Event()
@@ -596,6 +604,26 @@ class PersistentSupervisor:
                 )
                 self._user_priority_generation += 1
                 self.user_priority.set()
+        if self._triage_worker is not None:
+            self._triage_worker.wake()
+
+    def _make_triage_backend(self) -> Any:
+        if self._triage_factory is not None:
+            return self._triage_factory()
+        import shutil
+        from .triage_codex import CodexClassifier
+        executable = shutil.which('codex')
+        if executable is None:
+            raise StorageRefusal('triage_backend_unavailable', 'configured classifier executable is unavailable')
+        workspace = self.state_root / 'triage-workspace'
+        workspace.mkdir(mode=0o700, exist_ok=True)
+        return CodexClassifier(Path(executable).absolute(), workspace,
+                               model=os.environ.get('LEAGUE_TRIAGE_MODEL', 'gpt-6-astra'),
+                               effort=os.environ.get('LEAGUE_TRIAGE_EFFORT', 'high'))
+
+    def _triage_committed(self, receipt: dict[str, Any]) -> None:
+        self._submit(self._recover_outbox, receipt['outbox_id'], receipt['event_id'],
+                     receipt['recipient_agent_id'])
 
     def _submit(
         self, function: Callable[..., Any], *args: Any, control: bool = False, delivery: bool = False
@@ -1037,11 +1065,14 @@ class PersistentSupervisor:
             or message.get("runtime_generation") != state["runtime_generation"]
         ):
             raise SupervisorUnavailable("supervisor wake identity is stale")
-        if kind == "user-message":
+        if kind in {"user-message", "triage-ready"}:
             with self.store_factory(self.state_root) as store:
                 self._assert_fenced_registration(store, state, fence)
-            self._publish_user_priority(str(state["actor_agent_id"]))
-            self._response(connection, {"ok": True, "priority": "user", "fence": fence})
+            if kind == 'user-message':
+                self._publish_user_priority(str(state["actor_agent_id"]))
+            elif self._triage_worker is not None:
+                self._triage_worker.wake()
+            self._response(connection, {"ok": True, "priority": "user" if kind == 'user-message' else 'triage', "fence": fence})
             return
         if kind == "outbox-ready":
             if (
@@ -1251,6 +1282,8 @@ class PersistentSupervisor:
         self._submit(self.recovery_adapter.recover, self.state_root, prompt_ids)
 
     def _recover_semantic_backlog(self) -> None:
+        if self._triage_worker is not None:
+            self._triage_worker.wake()
         if self.recovery_adapter is None:
             return
         try:
@@ -1515,6 +1548,12 @@ class PersistentSupervisor:
             server.settimeout(min(0.25, self.renew_seconds))
             receipt = self._register()
             self.registration_receipt = receipt
+            from .triage_worker import PromptTriageWorker
+            self._triage_worker = PromptTriageWorker(
+                self.state_root, self._make_triage_backend, self._triage_committed,
+                store_factory=self.store_factory,
+            )
+            self._triage_worker.start()
             self.ready.set()
             if emit_ready:
                 with self._fence_lock:
@@ -1617,6 +1656,9 @@ class PersistentSupervisor:
             return 0
         finally:
             self.stop_requested.set()
+            if self._triage_worker is not None:
+                self._triage_worker.close()
+                self._triage_worker = None
             if server is not None:
                 server.close()
             request_executor.shutdown(wait=True)

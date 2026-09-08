@@ -384,7 +384,9 @@ def _wait_for_watcher_registration(
                     f"watcher exited before canonical registration: {output}{error}"
                 )
             registered = observer.connection.execute(
-                "SELECT 1 FROM watcher_registrations WHERE actor_agent_id=?",
+                "SELECT 1 FROM watcher_registrations w JOIN watcher_scopes s "
+                "ON s.actor_agent_id=w.actor_agent_id WHERE w.actor_agent_id=? "
+                "AND json_extract(s.metadata_json,'$.foreground_inbox.token') IS NOT NULL",
                 (SHOTCALLER_ID,),
             ).fetchone() is not None
             if registered:
@@ -408,14 +410,21 @@ def _register_garen_runtime(
     *,
     session_ref: str | None = None,
     harness_kind: str = "codex-thread",
+    native_terminal_id: str | None = None,
 ) -> str:
     runtime_id = f"runtime:installed:{suffix}"
+    session_ref = session_ref or f"session:{suffix}"
+    generation = f"generation:{suffix}"
+    if native_terminal_id is not None:
+        generation = "herdr:" + hashlib.sha256(
+            f"{native_terminal_id}\0{session_ref}".encode()
+        ).hexdigest()[:24]
     # These hooks exercise synthetic opaque adapter identities. Native CLI
     # session/actor validation has separate coverage in test_runtime_identity.
     with SQLiteStorage(state) as store:
         store.register_runtime(RuntimeRegistrationCommand(
             runtime_id, SHOTCALLER_ID, harness_kind, "herdr",
-            session_ref or f"session:{suffix}", "garen", f"generation:{suffix}",
+            session_ref, "garen", generation,
             "active", True, AT2,
         ))
     return runtime_id
@@ -443,7 +452,10 @@ def _fake_herdr(root: Path, env: dict[str, str]) -> Path:
     prompt_log = root / "prompts.log"
     fake = fake_bin / "herdr"
     fake.write_text(
-        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$PROMPT_LOG\"\n"
+        "#!/bin/sh\n"
+        "if [ \"$1\" = agent ] && [ \"$2\" = list ]; then\n"
+        "  printf '%s\\n' \"$FAKE_HERDR_AGENTS\"; exit 0\nfi\n"
+        "printf '%s\\n' \"$*\" >> \"$PROMPT_LOG\"\n"
         "printf '%s\\n' '{\"result\":{\"submitted\":true}}'\n",
         encoding="utf-8",
     )
@@ -655,14 +667,24 @@ def test_supervise_wakes_and_stop_allows_after_settlement(root: Path) -> None:
         "--at",
         AT2,
     )
-    assert settled["result"]["delivery"]["state"] == "delivered", settled
+    assert settled["result"]["delivery"]["state"] == "pending", settled
+    assert settled['result']['delivery']['reason'] == 'foreground_wait'
     output, error = waiter.communicate(timeout=5)
     assert not error, error
     wake = json.loads(output)
-    assert wake["event"] == "champion-update"
-    assert wake["event_id"] == settled["result"]["event_id"]
-    assert wake["status"] == "completed"
+    assert wake["event"] == "inbox-updates"
+    assert len(wake['inbox']['items']) == 1
+    envelope = wake['inbox']['items'][0]['envelope']
+    assert envelope['event_id'] == settled['result']['event_id']
+    assert envelope['status'] == 'completed'
     assert wake["writer"] == "sqlite"
+    assert not (root / 'supervise' / 'prompts.log').exists(), 'wait result injected a prompt'
+    receipt_file = root / 'supervise' / 'inbox-receipt.json'
+    receipt_file.write_text(json.dumps(wake), encoding='utf-8')
+    acknowledged = _league_env(state, env, 'delivery', 'ack-inbox',
+                               '--receipt', str(receipt_file), '--at', AT2)
+    assert acknowledged['ok'], acknowledged
+    assert acknowledged['result']['received'][0]['state'] == 'delivered'
     status = _watcher(env, "--shotcaller", "Garen", "status")
     assert status == {"shotcaller": "Garen", "writer": "sqlite"}
     allowed = _watcher(
@@ -2164,17 +2186,33 @@ def test_material_delivery_watcher_direct_dedup_and_unavailable(root: Path) -> N
         "--at",
         "2026-01-01T00:02:00Z",
     )
-    assert transitioned["result"]["delivery"]["state"] == "delivered"
-    assert transitioned["result"]["delivery"]["effect_kind"] == "watcher_event"
+    assert transitioned["result"]["delivery"]["state"] == "pending", transitioned
+    assert transitioned["result"]["delivery"]["reason"] == "foreground_wait"
     output, error = waiter.communicate(timeout=5)
     assert not error, error
     wake = json.loads(output)
-    assert wake["event"] == "champion-update"
-    assert wake["event_id"] == transitioned["result"]["event_id"]
+    assert wake["event"] == "inbox-updates"
+    assert wake["inbox"]["items"][0]["envelope"]["event_id"] == transitioned["result"]["event_id"]
+    receipt_file = root / "watcher-delivery" / "inbox-receipt.json"
+    receipt_file.write_text(json.dumps(wake), encoding="utf-8")
+    acknowledged = _league_env(watcher_state, watcher_env, "delivery", "ack-inbox",
+                               "--receipt", str(receipt_file), "--at", AT2)
+    assert acknowledged["result"]["received"][0]["state"] == "delivered"
 
     _, direct_state, _ = seeded_state(root, "direct-delivery")
     direct_env = _environment(root / "direct-delivery", direct_state)
-    _register_garen_runtime(direct_state, "direct")
+    _register_garen_runtime(direct_state, "direct", native_terminal_id="terminal:direct")
+    with SQLiteStorage(direct_state) as store:
+        store.connection.execute(
+            "UPDATE agent_instances SET routing_name='garen',display_agent='codex' WHERE agent_id=?",
+            (SHOTCALLER_ID,),
+        )
+        target = store.direct_delivery_target(SHOTCALLER_ID, AT2)
+    direct_env["FAKE_HERDR_AGENTS"] = json.dumps({"result": {"agents": [{
+        "pane_id": target["locator"], "name": target["routing_name"],
+        "terminal_id": "terminal:direct", "agent": "codex", "agent_status": "idle",
+        "agent_session": {"value": target["session_ref"]},
+    }]}})
     prompt_log = _fake_herdr(root / "direct-delivery", direct_env)
     current = _league_env(
         direct_state, direct_env, "agent", "status", "--agent-id", CHAMPION_ID
@@ -2208,7 +2246,7 @@ def test_material_delivery_watcher_direct_dedup_and_unavailable(root: Path) -> N
         "--event-id",
         event_id,
     )
-    assert delivered["state"] == "delivered" and delivered["idempotent"] is False
+    assert delivered["state"] == "delivered" and delivered["idempotent"] is False, delivered
     assert prompt_log.read_text(encoding="utf-8").count("LEAGUE_OP: ") == 1
     retry = _watcher(
         direct_env,
@@ -2347,14 +2385,20 @@ def test_task_transition_cli_dispatches_exact_watcher_receipt(root: Path) -> Non
         "--at",
         clock.now(),
     )
-    assert transitioned["result"]["delivery"]["state"] == "delivered"
-    assert transitioned["result"]["delivery"]["effect_kind"] == "watcher_event"
+    assert transitioned["result"]["delivery"]["state"] == "pending", transitioned
+    assert transitioned["result"]["delivery"]["reason"] == "foreground_wait"
     output, error = waiter.communicate(timeout=5)
     assert not error, error
     wake = json.loads(output)
-    assert wake["event"] == "champion-update"
-    assert wake["event_id"] == transitioned["result"]["event_id"]
-    assert wake["status"] == "working"
+    assert wake["event"] == "inbox-updates"
+    envelope = wake["inbox"]["items"][0]["envelope"]
+    assert envelope["event_id"] == transitioned["result"]["event_id"]
+    assert envelope["status"] == "working"
+    receipt_file = root / "task-transition-cli-delivery" / "inbox-receipt.json"
+    receipt_file.write_text(json.dumps(wake), encoding="utf-8")
+    acknowledged = _league_env(state, env, "delivery", "ack-inbox",
+                               "--receipt", str(receipt_file), "--at", clock.now())
+    assert acknowledged["result"]["received"][0]["state"] == "delivered"
 
 
 def test_watcher_readiness_timeout_terminates_exact_supervisor(root: Path) -> None:

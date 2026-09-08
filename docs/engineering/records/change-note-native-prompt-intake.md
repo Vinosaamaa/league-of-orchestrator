@@ -43,8 +43,12 @@ Codex, Cursor and Pi native prompt hooks now validate the exact runtime and comm
 
 The same PR refuses terminal stdin for `request turn` before storage or claims. The supported one-process pipe avoids terminal line-buffer truncation and stalls.
 
+Persistent renewal also reacquires an expired lease with a higher fence only when the exact prior registration still belongs to this process. Ordinary live renewal retains its fence. Atomic expected-owner checks prevent a stale process from replacing a successor, whether that successor's lease is live or expired.
+
 ## Verification boundary
 
 The stalled-supervisor regression failed before the fix and passes for all three providers afterward. A separate reader sees committed bytes before an injected notification failure; exact native and delayed broker retries retain one prompt and one generation advance. The canonical watcher suite passes. The persistent-supervisor suite passes in isolation after a concurrent run exceeded one existing two-second timing assertion by approximately 0.07 seconds; that threshold was not relaxed.
 
 These are synthetic source results. They do not prove installed native composer delivery, a healthy OS-managed watcher, or complete product acceptance. The previously recorded separate-model benchmark is diagnostic only and is not evidence of an extra classifier in normal prompt handling.
+
+A deterministic clock-advance regression reproduced `watcher_fenced` before the renewal fix and passes after it, covering live renewal, expired exact-owner reacquisition and successor protection. The cause of installed scheduling delays remains unverified.

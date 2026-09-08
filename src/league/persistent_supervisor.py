@@ -612,15 +612,13 @@ class PersistentSupervisor:
             return False
         return True
 
-    def _lease_expiry(self) -> str:
-        return _at(_now() + timedelta(seconds=self.lease_seconds))
-
     def _register_binding(
         self, store: Any, binding: dict[str, Any]
     ) -> dict[str, Any]:
         actor_agent_id = str(binding["actor_agent_id"])
         existing = store.watcher_registration(actor_agent_id)
         previous = self._bindings.get(actor_agent_id)
+        now = _now()
         watcher_digest = hashlib.sha256(
             f"{actor_agent_id}\0{self.state_root}".encode("utf-8")
         ).hexdigest()[:24]
@@ -646,6 +644,13 @@ class PersistentSupervisor:
             ) + 1
         elif same_binding:
             fence = int(previous["fence"])
+            if existing is not None and datetime.fromisoformat(
+                str(existing["leased_until"])
+            ) <= now:
+                # A paused process must reacquire an expired lease, not renew
+                # its old fence. The expected identity below still rejects a
+                # different owner that won the registration in the meantime.
+                fence += 1
         else:
             fence = max(
                 int(previous["fence"]), int(binding.get("fence_floor", 0))
@@ -656,9 +661,9 @@ class PersistentSupervisor:
             actor_agent_id,
             binding["runtime_instance_id"],
             _locator(self.socket_path),
-            self._lease_expiry(),
+            _at(now + timedelta(seconds=self.lease_seconds)),
             fence,
-            _at(),
+            _at(now),
             block_on_obligations=True,
             expected_watcher_id=(
                 None if previous is None else str(previous["watcher_id"])

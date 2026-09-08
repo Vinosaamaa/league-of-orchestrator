@@ -1,5 +1,20 @@
 # Source provenance
 
+## Issue #66 expired exact-owner renewal
+
+A delayed persistent watcher reused its previous fence after its lease expired.
+Canonical storage correctly refused that stale fence, but the still-exact owner
+could not resume renewal. A deterministic clock-advance fixture reproduces the
+same `watcher_fenced` refusal seen in watcher exit logs; it does not establish
+why the installed process was delayed.
+
+Renewal now advances the fence only when the stored lease has expired, using
+one timestamp for the expiry decision and replacement lease. Expected watcher
+identity and fence remain mandatory in the atomic registration, so an older
+process cannot replace a successor even after that successor's lease expires.
+Live routine renewal preserves the existing fence. No direct live-state repair,
+lease-length increase, retry loop or ownership-check bypass is introduced.
+
 ## Issue #66 native prompt availability
 
 Native Codex, Cursor and Pi prompt hooks now commit through canonical SQLite

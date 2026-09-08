@@ -1,5 +1,16 @@
 # Source provenance
 
+## Issue #66 prior completed cleanup assignment settlement
+
+Historical cleanup receipts can predate assignment settlement, leaving retired
+Champions queued as active. Completed-operation retry now validates its final
+digest and every action receipt before using the existing exact assignment,
+closed-runtime and callsign-release checks. It settles only that assignment,
+records one audit event and preserves the original operation, actions, receipt
+and task state. No external effect is replayed. Conflicting receipts refuse
+atomically; the synthetic production cleanup regression verifies recovery and
+idempotency. Installed historical reconciliation remains a separate gate.
+
 ## Issue #66 legacy final cleanup receipt recovery
 
 Installed acceptance of the prior cleanup repair exposed an older callsign row

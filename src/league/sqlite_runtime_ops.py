@@ -1744,11 +1744,8 @@ def finalize_cleanup(store: Any, operation_id: str, fence: int, at: str) -> dict
             ).fetchone()
             if operation is None or int(operation["fence"]) != fence:
                 raise StorageRefusal("cleanup_fence_conflict", "cleanup finalization has a stale fence")
-            if operation["state"] == "completed":
-                receipt = store.connection.execute(
-                    "SELECT receipt_hash FROM teardown_receipts WHERE operation_id=?", (operation_id,)
-                ).fetchone()
-                return {"operation_id": operation_id, "state": "cleanup_completed", "receipt_hash": receipt["receipt_hash"], "idempotent": True}
+            was_completed = operation["state"] == "completed"
+            assignment_reconciled = False
             pending = store.connection.execute(
                 "SELECT COUNT(*) FROM cleanup_actions WHERE operation_id=? AND state!='completed'", (operation_id,)
             ).fetchone()[0]
@@ -1763,6 +1760,14 @@ def finalize_cleanup(store: Any, operation_id: str, fence: int, at: str) -> dict
                 "SELECT receipt_hash FROM cleanup_action_receipts WHERE operation_id=? ORDER BY action_id", (operation_id,)
             )]
             digest = hashlib.sha256(_json({"operation_id": operation_id, "receipts": receipts}).encode("utf-8")).hexdigest()
+            if was_completed:
+                receipt = store.connection.execute(
+                    "SELECT receipt_hash,policy_version FROM teardown_receipts WHERE operation_id=?", (operation_id,)
+                ).fetchone()
+                if (receipt is None or receipt["receipt_hash"] != digest
+                        or receipt["policy_version"] != operation["required_policy"]
+                        or not _all_cleanup_actions_receipted(store, operation_id)):
+                    raise StorageRefusal("cleanup_receipt_conflict", "completed cleanup has no matching final action receipts")
             receipt_id = f"teardown:{operation_id}"
             archive = json.loads(store.connection.execute(
                 "SELECT intended_state_json FROM cleanup_actions WHERE operation_id=? AND ordinal=0",
@@ -1808,12 +1813,26 @@ def finalize_cleanup(store: Any, operation_id: str, fence: int, at: str) -> dict
                         raise StorageRefusal("cleanup_identity_mismatch", "assignment has no exact closed runtime and callsign release")
                     if assignment["cleanup_receipt"] not in {None, digest}:
                         raise StorageRefusal("cleanup_receipt_conflict", "assignment already has foreign cleanup evidence")
-                    store.connection.execute(
-                        """UPDATE task_assignments SET state='completed',cleanup_required=0,
+                    if (assignment["state"] != "completed" or assignment["cleanup_required"] != 0
+                            or assignment["cleanup_receipt"] != digest):
+                        store.connection.execute(
+                            """UPDATE task_assignments SET state='completed',cleanup_required=0,
                                    cleanup_receipt=?,version=version+1,updated_at=?
                              WHERE task_assignment_id=? AND version=?""",
-                        (digest, at, assignment["task_assignment_id"], assignment["version"]),
+                            (digest, at, assignment["task_assignment_id"], assignment["version"]),
+                        )
+                        assignment_reconciled = True
+            if was_completed:
+                if assignment_reconciled:
+                    store.connection.execute(
+                        "INSERT INTO events (event_id,agent_id,task_id,entity_version,event_type,status,"
+                        "update_text,occurred_at,detail_json) VALUES(?,NULL,?,?,'cleanup_assignment_reconciled',"
+                        "'completed','Settled assignment from verified prior cleanup receipt',?,?)",
+                        (f"cleanup:{operation_id}:assignment-reconciled", operation["task_id"], fence, at,
+                         _json({"operation_id": operation_id, "receipt_hash": digest})),
                     )
+                return {"operation_id": operation_id, "state": "cleanup_completed", "receipt_hash": digest,
+                        "idempotent": not assignment_reconciled, "assignment_reconciled": assignment_reconciled}
             store.connection.execute(
                 "INSERT INTO teardown_receipts(receipt_id,operation_id,task_id,policy_version,receipt_hash,completed_at) VALUES(?,?,?,?,?,?)",
                 (receipt_id, operation_id, operation["task_id"], operation["required_policy"], digest, at),

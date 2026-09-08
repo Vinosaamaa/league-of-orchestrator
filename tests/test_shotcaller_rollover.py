@@ -731,6 +731,9 @@ def _seed_legacy_null_route_refresh(
             generation = "herdr:" + hashlib.sha256(
                 f"{agent['terminal_id']}\0{thread_id}".encode("utf-8")
             ).hexdigest()[:24]
+            hook_digest = hashlib.sha256(
+                f"codex\0{thread_id}\0herdr\0{pane_id}".encode()
+            ).hexdigest()
             store.connection.execute(
                 """
                 INSERT INTO runtime_instances
@@ -739,11 +742,11 @@ def _seed_legacy_null_route_refresh(
                 VALUES(?,?,'codex-thread','herdr',?,?,?,'idle',1,?,'["hook.capture"]')
                 """,
                 (
-                    f"runtime:materialized:{label}:{ordinal}",
+                    f"runtime:hook:{hook_digest}" if legacy_hook else f"runtime:materialized:{label}:{ordinal}",
                     champion_id,
                     thread_id,
                     pane_id,
-                    generation,
+                    f"hook:{hook_digest}" if legacy_hook else generation,
                     AT5,
                 ),
             )
@@ -4869,6 +4872,74 @@ def test_one_row_recovery_adopts_null_route_and_preserves_hook_history(root: Pat
             assert len(runner.calls) == calls_before
 
 
+def test_one_row_recovery_accepts_exact_hook_added_after_snapshot(root: Path) -> None:
+    state, _ = migrated_state(root, "one-row-late-hook")
+    with SQLiteStorage(state) as store:
+        seed = _seed_legacy_null_route_refresh(
+            store, root, "late-hook", legacy_hook=True, named_route=True,
+            materialize_runtime_after_snapshot=True,
+        )
+        inputs = _recovery_target_inputs(store, seed, "late-hook")
+        runtime = dict(store.connection.execute(
+            "SELECT * FROM runtime_instances WHERE actor_agent_id=?",
+            (inputs["champion_agent_id"],),
+        ).fetchone())
+        frozen = [tuple(row) for row in store.connection.execute(
+            "SELECT * FROM active_champion_snapshot_rows ORDER BY snapshot_id,ordinal"
+        )]
+        runner = FakeHerdrInventory(seed["agents"])
+        service = RolloverDescendantService(store, HerdrDescendantRuntimeAdapter(runner))
+        arguments = {**inputs, "runtime_instance_id": runtime["runtime_instance_id"],
+                     "pending_outbox_ids": (), "at": "2026-01-01T02:00:00Z"}
+        result = service.reconcile(**arguments)
+        assert result["created_runtime"] is False
+        assert store.agent_status(inputs["champion_agent_id"])["shotcaller_agent_id"] == NEW_ID
+        assert dict(store.connection.execute(
+            "SELECT * FROM runtime_instances WHERE runtime_instance_id=?",
+            (runtime["runtime_instance_id"],),
+        ).fetchone()) == runtime
+        assert [tuple(row) for row in store.connection.execute(
+            "SELECT * FROM active_champion_snapshot_rows ORDER BY snapshot_id,ordinal"
+        )] == frozen
+        calls_before = len(runner.calls)
+        assert service.reconcile(**arguments)["idempotent"] is True
+        assert len(runner.calls) == calls_before
+
+
+def test_one_row_late_hook_rechecks_frozen_identity_and_runtime(root: Path) -> None:
+    for label, mutation in (
+        ("branch", "UPDATE agent_instances SET branch='foreign' WHERE agent_id=?"),
+        ("generation", "UPDATE runtime_instances SET runtime_generation='hook:forged' WHERE actor_agent_id=?"),
+        ("unverified", "UPDATE runtime_instances SET verified=0 WHERE actor_agent_id=?"),
+    ):
+        state, _ = migrated_state(root, f"late-hook-refusal-{label}")
+        with SQLiteStorage(state) as store:
+            seed = _seed_legacy_null_route_refresh(
+                store, root, f"late-hook-{label}", legacy_hook=True, named_route=True,
+                materialize_runtime_after_snapshot=True,
+            )
+            inputs = _recovery_target_inputs(store, seed, label)
+            target = store.rollover_descendant_target(**inputs)
+            runtime_id = target["runtime"]["runtime_instance_id"]
+            receipt = HerdrDescendantRuntimeAdapter(FakeHerdrInventory(seed["agents"])).verify(target, runtime_id)
+            store.connection.execute(mutation, (inputs["champion_agent_id"],))
+            before = store.export_bytes(format_name="json", purpose="rollback", max_records=10000)
+            for commit in (False, True):
+                try:
+                    if commit:
+                        store.reconcile_rollover_descendant(
+                            **inputs, runtime_instance_id=runtime_id, runtime_receipt=receipt,
+                            pending_outbox_ids=(), at=AT6,
+                        )
+                    else:
+                        store.rollover_descendant_target(**inputs)
+                except StorageRefusal as exc:
+                    assert exc.code in {"descendant_snapshot_mismatch", "descendant_runtime_mismatch"}
+                else:
+                    raise AssertionError(f"late hook recovery accepted changed {label}")
+                assert store.export_bytes(format_name="json", purpose="rollback", max_records=10000) == before
+
+
 def test_one_row_recovery_refuses_foreign_live_and_stale_frozen_identity(root: Path) -> None:
     state, _ = migrated_state(root, "one-row-recovery-refusals")
     with SQLiteStorage(state) as store:
@@ -5245,6 +5316,8 @@ def main() -> None:
         test_descendant_reconciliation_refuses_ambiguous_runtime(root)
         test_descendant_reconciliation_requires_exact_pending_delivery_set(root)
         test_one_row_recovery_adopts_null_route_and_preserves_hook_history(root)
+        test_one_row_recovery_accepts_exact_hook_added_after_snapshot(root)
+        test_one_row_late_hook_rechecks_frozen_identity_and_runtime(root)
         test_one_row_recovery_refuses_foreign_live_and_stale_frozen_identity(root)
         test_one_row_recovery_outbox_preflight_and_atomic_faults(root)
         test_pre_switch_abort_restores_reservation(root)

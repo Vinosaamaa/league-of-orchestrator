@@ -1,5 +1,22 @@
 # Source provenance
 
+## Issue #66 exact post-snapshot hook registration
+
+Individual inherited-Champion reconciliation refused an otherwise unchanged
+frozen binding when native prompt hooks registered its runtime after the
+snapshot. All non-runtime identity fields still matched exactly. Reconciliation
+now recognizes only the existing, verified legacy hook producer whose identity
+hash matches the canonical actor, provider, session and endpoint, and whose
+pre-registration binding exactly matches the unchanged frozen digest. Exact
+imported legacy provenance is mandatory. The final transaction repeats these
+checks; neither the snapshot nor the hook runtime history is rewritten.
+
+The regression first reproduced the refusal, then proved individual recovery
+after snapshot expiry without refreshing unrelated descendants. Branch drift,
+forged generations and unverified runtimes refuse before any write and after
+live observation. Existing native identity, capability, outbox and version
+checks remain in force. Installed recovery is a separate acceptance gate.
+
 ## Issue #66 prior completed cleanup assignment settlement
 
 Historical cleanup receipts can predate assignment settlement, leaving retired

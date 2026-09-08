@@ -1,7 +1,7 @@
 ---
 schemaVersion: 1
 id: "change-note-supervisor-scheduling"
-revision: 4
+revision: 5
 type: "change-note"
 status: "draft"
 title: "Keep user-facing supervision out of discretionary background scheduling"
@@ -10,7 +10,7 @@ capabilityIds: ["persistent-supervision"]
 createdAt: "2026-09-08T04:14:00Z"
 reconstructed: false
 confidence: "verified"
-unknowns: ["Atomic provider idle-check-and-send is not implemented.", "Host-level wait interruption and complete installed triage, delivery, and cleanup acceptance remain pending."]
+unknowns: ["Installed consumer delivery acceptance remains pending after the native idle-only transport implementation.", "Host-level wait interruption and complete installed triage, delivery, and cleanup acceptance remain pending."]
 modules: ["supervisor-service"]
 interfaces: ["launchd-service-install"]
 seams: []
@@ -92,9 +92,9 @@ deadlines or identity checks. Coverage includes two requests from one prompt,
 distinct checklist IDs, no false completion, expired-read recovery, exact idle
 identity, unavailable receivers, native hook activation, and supervisor renewal.
 
-This consolidated source is not installed. The idle check and send are still
-separate operations, so this draft does not satisfy the strict busy/idle race
-acceptance criterion. Short database polling likewise does not prove host-level
+This consolidated source is not installed. The consumer now uses the distinct
+native conditional delivery operation supplied by the cross-linked toolkit
+issue. Installed consumer delivery acceptance remains open. Short database polling does not prove host-level
 wait interruption. Installed end-to-end acceptance and cleanup remain open.
 
 ## Bounded Stop-loop recovery
@@ -119,3 +119,25 @@ release. No schema migration, worker activation or supervisor restart occurred.
 A post-install native health probe verified all existing watcher bindings with
 unchanged ownership fences. Final real-turn Stop acceptance remains the next
 boundary; this is not acceptance of the unfinished consolidated worker release.
+
+## Conditional delivery and process-preserving handoff
+
+Toolkit issue 151 provides a distinct native idle-only delivery method. League
+supplies the exact terminal, provider session, provider kind and observed state
+sequence; unsupported transports and refused native sends never fall back to an
+unguarded prompt. Owner-requested steering remains a separate explicit path.
+
+Native handoff rotated terminal IDs while preserving the captured pane and
+provider-session inventory. A narrow schema-24 recovery command is source-managed
+and installed separately from the unfinished worker release. It verifies exact
+pre-handoff bindings and two native OS observations before rebinding a runtime;
+older discrepancies remain reported and untouched. The first read-only installed
+probe refused a verifier that assumed all shell-launched Codex processes ended
+with a resume argument. Source coverage now includes model options after resume
+and matching fresh-launch arguments, preserving exact executable, parent, group,
+process start and session checks. Successful installed recovery is not yet claimed.
+
+The handoff tests verify read-only planning, failed observation recovery,
+idempotent retries, watcher failure/retry, refusal on changed identity, and no
+task/request/delivery/cleanup completion effects. Neither these checks nor native
+binary installation proves the full orchestrator acceptance or Champion cleanup.

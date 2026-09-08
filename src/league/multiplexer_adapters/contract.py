@@ -18,6 +18,7 @@ MULTIPLEXER_OPERATIONS = frozenset(
         "title",
         "focus",
         "delivery",
+        "conditional_delivery",
         "steering_delivery",
         "close",
         "visible_launch",
@@ -39,6 +40,7 @@ MULTIPLEXER_OPERATION_METHODS = {
     "title": ("title",),
     "focus": ("focus",),
     "delivery": ("delivery",),
+    "conditional_delivery": ("delivery_if_idle",),
     "steering_delivery": ("steering_delivery",),
     "close": ("close",),
     "visible_launch": ("visible_launch_driver",),
@@ -75,6 +77,8 @@ class RestoredEndpoint:
 class MultiplexerAdapter(Protocol):
     kind: str
     capabilities: frozenset[str]
+
+    def delivery_if_idle(self, target: str, body: str, *, observed: Mapping[str, Any]) -> Mapping[str, Any]: ...
 
     def server_generation(self) -> str: ...
 

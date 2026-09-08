@@ -1256,7 +1256,7 @@ def test_adapter_capabilities_are_truthful() -> None:
     assert registry.adapter("herdr").capabilities == frozenset(
         {
             "calling_context", "discover", "routing", "placement", "metadata",
-            "title", "delivery", "steering_delivery", "close",
+            "title", "delivery", "conditional_delivery", "steering_delivery", "close",
             "visible_launch", "shotcaller_bootstrap", "rollover_reconciliation",
             "production_cleanup", "provider_session_lifecycle",
             "runtime_replacement", "stopped_retirement",
@@ -1318,6 +1318,14 @@ def test_native_launcher_process_proof() -> None:
     verified = _foreground_process(reader, info, agent)
     assert verified["pid"] == 8001 and verified["process_start"] == "Fri Sep 4 17:50:46 2026"
     assert len(verified["process_group_proof"]) == 2
+    for arguments in (
+        ['--approve-for-me', 'resume', session, '-m', 'synthetic-model', '-c', 'synthetic=true'],
+        ['--approve-for-me', '--model', 'synthetic-model', '--add-dir', '/synthetic/state'],
+    ):
+        configured = deepcopy(info)
+        configured['foreground_processes'][0]['argv'] = ['/synthetic/bin/codex', '--no-alt-screen', *arguments]
+        configured['foreground_processes'][1]['argv'] = ['/bin/zsh', '/synthetic/launcher/codex', *arguments]
+        assert _foreground_process(reader, configured, agent)['pid'] == 8001
     baseline = reader.output
     reader.output = baseline.replace("17:50:46", "17:51:00")
     assert verified != _foreground_process(reader, info, agent), "PID reuse must change the fingerprint"

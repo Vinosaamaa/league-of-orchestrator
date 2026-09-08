@@ -10,7 +10,7 @@ from .agent_adapters import adapter_kind_from_runtime
 from .storage import StorageRefusal
 
 
-def require_idle_receiver(multiplexer: Any, target: Mapping[str, Any]) -> None:
+def require_idle_receiver(multiplexer: Any, target: Mapping[str, Any]) -> Mapping[str, Any]:
     endpoint = target.get('endpoint') or target.get('locator')
     route = target.get('routing_name')
     session = target.get('session_ref')
@@ -34,3 +34,11 @@ def require_idle_receiver(multiplexer: Any, target: Mapping[str, Any]) -> None:
     if row.get('agent_status') not in {'idle', 'done'}:
         code = 'receiver_busy' if row.get('agent_status') in {'working', 'blocked', 'waiting', 'active'} else 'receiver_activity_unknown'
         raise StorageRefusal(code, 'notification remains pending for the in-turn inbox')
+    return row
+
+
+def deliver_idle_notification(multiplexer: Any, target: Mapping[str, Any], body: str) -> None:
+    observed = require_idle_receiver(multiplexer, target)
+    if 'conditional_delivery' not in multiplexer.capabilities:
+        raise StorageRefusal('receiver_activity_unknown', 'transport cannot conditionally wake an idle receiver')
+    multiplexer.delivery_if_idle(str(target['routing_name']), body, observed=observed)

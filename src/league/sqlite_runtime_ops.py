@@ -1738,13 +1738,42 @@ def finalize_cleanup(store: Any, operation_id: str, fence: int, at: str) -> dict
                 (operation_id,),
             ).fetchone()[0])
             if archive.get("repository_retention") is not None:
-                # No new successful-task transition: acceptance was already terminal.
-                # Settle only this bound assignment, in the final receipt transaction.
                 cleanup_execution_context(store, operation_id)
+            # Both ordinary removal and endpoint-only retention must settle the
+            # exact assignment. Otherwise a closed Champion remains queued as
+            # active or stale. Receipt is cleanup, never a new task completion.
+            if (archive["owner"]["role"] == "champion"
+                    and archive["policy"]["disposition"] == "completed"):
                 assignment = store.connection.execute(
                     "SELECT * FROM task_assignments WHERE task_id=?", (operation["task_id"],),
                 ).fetchone()
                 if assignment is not None:
+                    actions = cleanup_operation(store, operation_id)["actions"]
+                    endpoint = next(a for a in actions if a["action_kind"] == "endpoint_close")["expected_identity"]
+                    release = next(a for a in actions if a["action_kind"] == "callsign_release")
+                    callsign = store.connection.execute(
+                        "SELECT * FROM callsign_assignments WHERE callsign_assignment_id=?",
+                        (release["expected_identity"].get("assignment_id"),),
+                    ).fetchone()
+                    runtime = store.connection.execute(
+                        "SELECT * FROM runtime_instances WHERE runtime_instance_id=?",
+                        (endpoint.get("runtime_instance_id"),),
+                    ).fetchone()
+                    if (assignment["champion_agent_id"] != archive["owner"]["id"]
+                            or assignment["runtime_instance_id"] != endpoint.get("runtime_instance_id")
+                            or assignment["acceptance_receipt_json"] is None
+                            or (assignment["state"] not in {"active", "completed"}
+                                and not (assignment["state"] == "cleanup_pending"
+                                         and assignment["failure_class"] == "stale_runtime"))
+                            or runtime is None or runtime["status"] != "closed"
+                            or runtime["actor_agent_id"] != assignment["champion_agent_id"]
+                            or runtime["endpoint"] != endpoint.get("pane_id")
+                            or runtime["runtime_generation"] != endpoint.get("runtime_generation")
+                            or callsign is None or callsign["state"] != "released"
+                            or callsign["agent_id"] != assignment["champion_agent_id"]
+                            or callsign["runtime_instance_id"] != assignment["runtime_instance_id"]
+                            or callsign["release_receipt_digest"] != cleanup_action_digest(release)):
+                        raise StorageRefusal("cleanup_identity_mismatch", "assignment has no exact closed runtime and callsign release")
                     if assignment["cleanup_receipt"] not in {None, digest}:
                         raise StorageRefusal("cleanup_receipt_conflict", "assignment already has foreign cleanup evidence")
                     store.connection.execute(

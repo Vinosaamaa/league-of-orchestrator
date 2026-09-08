@@ -267,7 +267,7 @@ def _temporarily_register_late_resource(store: SQLiteStorage):
         )
 
 
-def test_production_cleanup_crash_resume_and_lease_scope(root: Path) -> None:
+def test_production_cleanup_crash_resume_and_lease_scope(root: Path, *, recovered_stale: bool = False) -> None:
     root.mkdir(parents=True, exist_ok=True)
     git = _create_git_canary(root)
     herdr = herdr_identity()
@@ -339,6 +339,11 @@ def test_production_cleanup_crash_resume_and_lease_scope(root: Path) -> None:
             SHOTCALLER_ID,
             "2026-01-01T01:01:00Z",
         )
+        if recovered_stale:
+            store.connection.execute(
+                "UPDATE task_assignments SET state='cleanup_pending',failure_class='stale_runtime',"
+                "cleanup_required=1 WHERE task_id=?", (LIFECYCLE_TASK_ID,),
+            )
         planned = CleanupPlanner(store).plan(
             manifest, operation_id="operation:production-cleanup", at=AT_PLAN
         )
@@ -400,6 +405,13 @@ def test_production_cleanup_crash_resume_and_lease_scope(root: Path) -> None:
         assert persistent["state"] == "active"
         assert not Path(git["worktree"]).exists()
         assert runner.pane is False
+        assignment = store.connection.execute(
+            "SELECT state,cleanup_required,cleanup_receipt FROM task_assignments WHERE task_id=?",
+            (LIFECYCLE_TASK_ID,),
+        ).fetchone()
+        assert assignment["state"] == "completed", dict(assignment)
+        assert assignment["cleanup_required"] == 0
+        assert assignment["cleanup_receipt"] == resumed["execution"]["receipt_hash"]
 
         duplicate = service.execute(
             planned["operation_id"],
@@ -827,6 +839,7 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="league-production-cleanup-") as temporary:
         root = Path(temporary)
         test_production_cleanup_crash_resume_and_lease_scope(root / "e2e")
+        test_production_cleanup_crash_resume_and_lease_scope(root / "recovered-stale", recovered_stale=True)
         test_standalone_repository_retention(root / "standalone-retention")
         test_standalone_repository_retention(root / "standalone-release-retry", "callsign_release")
         test_standalone_repository_retention(root / "recovered-stale-retention", recovered_stale=True)

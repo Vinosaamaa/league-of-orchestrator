@@ -449,6 +449,46 @@ def test_repository_artifact_squash_tree_is_cleanup_eligible(root: Path) -> None
     assert Path(git["repository"]).is_dir()
 
 
+def test_squash_on_advanced_base_requires_exact_reconstruction(root: Path) -> None:
+    identity = squash_git_fixture(root)
+    repository = identity["repository"]
+    base = run(("git", "-C", repository, "rev-parse", identity["merge_commit"] + "^"))
+    run(("git", "-C", repository, "switch", "--detach", base))
+    (Path(repository) / "UNRELATED.md").write_text("another accepted change\n", encoding="utf-8")
+    run(("git", "-C", repository, "add", "UNRELATED.md"))
+    run(("git", "-C", repository, "commit", "-m", "Advance base"))
+    advanced = run(("git", "-C", repository, "rev-parse", "HEAD"))
+    run(("git", "-C", repository, "merge", "--squash", identity["head"]))
+    run(("git", "-C", repository, "commit", "-m", "Accept exact report on advanced base"))
+    identity["merge_commit"] = run(("git", "-C", repository, "rev-parse", "HEAD"))
+    identity["base_ref"] = identity["merge_commit"]
+    adapter = GitAdapter(identity, SubprocessRunner())
+    assert adapter._branch_deletion_mode() == "squash-reconstructed-tree-equivalent"
+    assert run(("git", "-C", identity["worktree"], "status", "--porcelain")) == ""
+    assert run(("git", "-C", repository, "rev-parse", "HEAD")) == identity["merge_commit"]
+    # A matching merge that is not published cannot authorize deletion.
+    unpublished = GitAdapter({**identity, "base_ref": base}, SubprocessRunner())
+    refused(unpublished._branch_deletion_mode, "cleanup_identity_mismatch")
+    # A new branch commit not present in the accepted squash must survive.
+    (Path(identity["worktree"]) / "UNSHIPPED.md").write_text("preserve me\n", encoding="utf-8")
+    run(("git", "-C", identity["worktree"], "add", "UNSHIPPED.md"))
+    run(("git", "-C", identity["worktree"], "commit", "-m", "Unshipped follow-up"))
+    unshipped = run(("git", "-C", identity["worktree"], "rev-parse", "HEAD"))
+    refused(GitAdapter({**identity, "head": unshipped}, SubprocessRunner())._branch_deletion_mode,
+            "cleanup_identity_mismatch")
+    # A conflicting base cannot be accepted by ignoring merge-tree's exit code.
+    run(("git", "-C", repository, "switch", "--detach", advanced))
+    (Path(repository) / "REPORT.md").write_text("conflicting report\n", encoding="utf-8")
+    run(("git", "-C", repository, "add", "REPORT.md"))
+    run(("git", "-C", repository, "commit", "-m", "Conflict in base"))
+    run(("git", "-C", repository, "commit", "--allow-empty", "-m", "Unproven resolution"))
+    conflicting = run(("git", "-C", repository, "rev-parse", "HEAD"))
+    refused(GitAdapter({**identity, "merge_commit": conflicting, "base_ref": conflicting},
+                       SubprocessRunner())._branch_deletion_mode, "cleanup_identity_mismatch")
+    assert Path(identity["worktree"]).is_dir()
+    assert run(("git", "-C", identity["worktree"], "rev-parse", "HEAD")) == unshipped
+
+
 def test_backend_close_resumes_after_external_failure(root: Path) -> None:
     root.mkdir(parents=True)
     state, _ = migrated_state(root, "sqlite")
@@ -923,6 +963,7 @@ def main() -> None:
         test_herdr_and_callsign_exact_cleanup(root / "runtime")
         test_cursor_and_pi_use_provider_exit_contract()
         test_repository_artifact_squash_tree_is_cleanup_eligible(root / "artifact")
+        test_squash_on_advanced_base_requires_exact_reconstruction(root / "advanced-squash")
         test_backend_close_resumes_after_external_failure(root / "backend-retry")
         test_real_canary_sqlite_setup_uses_explicit_root(root / "canary-setup")
         test_failure_scope_removes_only_exact_git_resources(root / "failure-cleanup")

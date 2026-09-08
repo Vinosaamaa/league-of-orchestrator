@@ -442,6 +442,13 @@ class GitAdapter(_BaseAdapter):
         )
         if merged.returncode == 0:
             return "merged-ancestor"
+        published = self.runner.run(
+            ("git", "-C", self.identity["repository"], "merge-base", "--is-ancestor",
+             self.identity["merge_commit"], self.identity["base_ref"]),
+            allow_failure=True,
+        )
+        if published.returncode != 0:
+            raise StorageRefusal("cleanup_identity_mismatch", "accepted merge is not in the published base")
         head_tree = self.runner.run(
             (
                 "git",
@@ -460,12 +467,27 @@ class GitAdapter(_BaseAdapter):
                 f"{self.identity['merge_commit']}^{{tree}}",
             )
         ).stdout.strip()
-        if not head_tree or head_tree != merge_tree:
-            raise StorageRefusal(
-                "cleanup_identity_mismatch",
-                "Git branch is neither merged nor squash-tree equivalent",
+        if head_tree and head_tree == merge_tree:
+            return "squash-tree-equivalent"
+        # A squash may include unrelated base changes landed after the branch
+        # forked. Reconstruct that merge without changing any worktree or ref;
+        # its entire tree, not a whitespace-insensitive patch ID, must match.
+        parents = self.runner.run(
+            ("git", "-C", self.identity["repository"], "rev-list", "--parents", "-n", "1",
+             self.identity["merge_commit"]),
+        ).stdout.split()
+        if len(parents) == 2:
+            reconstructed = self.runner.run(
+                ("git", "-C", self.identity["repository"], "merge-tree", "--write-tree",
+                 "--no-messages", parents[1], self.identity["head"]),
+                allow_failure=True,
             )
-        return "squash-tree-equivalent"
+            if reconstructed.returncode == 0 and reconstructed.stdout.strip() == merge_tree:
+                return "squash-reconstructed-tree-equivalent"
+        raise StorageRefusal(
+            "cleanup_identity_mismatch",
+            "Git branch is neither merged nor exactly reconstructable from the published squash",
+        )
 
     def inspect(self, action: Mapping[str, Any]) -> Mapping[str, Any]:
         kind = action["action_kind"]

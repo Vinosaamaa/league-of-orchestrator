@@ -91,6 +91,7 @@ REPORTING_PRIVACY_TESTS := \
 
 .PHONY: test test-baseline test-storage test-project-roster test-acceptance test-request-lifecycle test-turn-benchmark test-runtime-lifecycle test-routing-policy test-skill-contracts test-handoff-callsigns test-reporting-privacy test-public-safety test-affected test-all
 test:
+	@PYTHONDONTWRITEBYTECODE=1 $(PYTHON) tests/test_engineering_gate.py
 	@$(MAKE) --no-print-directory test-baseline
 
 test-baseline:

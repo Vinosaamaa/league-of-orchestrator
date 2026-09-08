@@ -4087,6 +4087,7 @@ class SQLiteStorage(SQLiteTransactionCore):
         observed_endpoint: str,
         observed_generation: str,
         at: str,
+        *, recover_observed_failure: bool = False,
     ) -> dict[str, Any]:
         return sqlite_runtime_ops.reconcile_restored_runtime(
             self,
@@ -4100,6 +4101,7 @@ class SQLiteStorage(SQLiteTransactionCore):
             observed_endpoint,
             observed_generation,
             at,
+            recover_observed_failure=recover_observed_failure,
         )
 
     def pending_shotcaller_identity_repair(self, request: dict[str, Any], generation: str,

@@ -69,6 +69,7 @@ def reconcile_restored_runtime(
     observed_endpoint: str,
     observed_generation: str,
     at: str,
+    *, recover_observed_failure: bool = False,
 ) -> dict[str, Any]:
     """CAS one restored endpoint onto an existing immutable agent session."""
 
@@ -106,8 +107,8 @@ def reconcile_restored_runtime(
                 or runtime["actor_agent_id"] != actor_agent_id
                 or runtime["session_ref"] != session_ref
                 or runtime["backend_kind"] != backend_kind
-                or runtime["status"] not in {"active", "idle"}
-                or not bool(runtime["verified"])
+                or not ((runtime["status"] in {"active", "idle"} and bool(runtime["verified"]))
+                        or (recover_observed_failure and runtime["status"] == "failed"))
                 or runtime["retired_at"] is not None
                 or runtime["role"] not in {"shotcaller", "champion"}
                 or runtime["thread_id"] != thread_id
@@ -120,6 +121,8 @@ def reconcile_restored_runtime(
                 runtime["endpoint"] == observed_endpoint
                 and runtime["runtime_generation"] == observed_generation
                 and runtime["address"] == observed_endpoint
+                and runtime["status"] in {"active", "idle"}
+                and bool(runtime["verified"])
             )
             if current_exact:
                 return {
@@ -156,20 +159,22 @@ def reconcile_restored_runtime(
             changed = store.connection.execute(
                 """
                 UPDATE runtime_instances
-                   SET endpoint=?,runtime_generation=?,last_seen_at=?
+                   SET endpoint=?,runtime_generation=?,last_seen_at=?,status=?,verified=1
                  WHERE runtime_instance_id=? AND actor_agent_id=? AND session_ref=?
                    AND endpoint=? AND runtime_generation=?
-                   AND status IN ('active','idle') AND verified=1
+                   AND ((status IN ('active','idle') AND verified=1) OR (status='failed' AND ?))
                 """,
                 (
                     observed_endpoint,
                     observed_generation,
                     at,
+                    'active' if runtime['status'] == 'failed' else runtime['status'],
                     runtime_instance_id,
                     actor_agent_id,
                     session_ref,
                     expected_endpoint,
                     expected_generation,
+                    int(recover_observed_failure),
                 ),
             )
             if changed.rowcount != 1:
@@ -204,6 +209,8 @@ def reconcile_restored_runtime(
             event_suffix = hashlib.sha256(
                 f"{observed_endpoint}\0{observed_generation}".encode("utf-8")
             ).hexdigest()[:16]
+            if recover_observed_failure:
+                event_suffix += f":v{next_version}"
             store.connection.execute(
                 """
                 INSERT INTO events
@@ -241,7 +248,7 @@ def reconcile_restored_runtime(
         "actor_agent_id": actor_agent_id,
         "endpoint": observed_endpoint,
         "runtime_generation": observed_generation,
-        "status": str(runtime["status"]),
+        "status": 'active' if runtime['status'] == 'failed' else str(runtime["status"]),
         "idempotent": False,
     }
 

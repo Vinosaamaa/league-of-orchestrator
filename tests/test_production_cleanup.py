@@ -267,7 +267,9 @@ def _temporarily_register_late_resource(store: SQLiteStorage):
         )
 
 
-def test_production_cleanup_crash_resume_and_lease_scope(root: Path, *, recovered_stale: bool = False) -> None:
+def test_production_cleanup_crash_resume_and_lease_scope(
+    root: Path, *, recovered_stale: bool = False, legacy_final_retry: bool = False,
+) -> None:
     root.mkdir(parents=True, exist_ok=True)
     git = _create_git_canary(root)
     herdr = herdr_identity()
@@ -344,6 +346,8 @@ def test_production_cleanup_crash_resume_and_lease_scope(root: Path, *, recovere
                 "UPDATE task_assignments SET state='cleanup_pending',failure_class='stale_runtime',"
                 "cleanup_required=1 WHERE task_id=?", (LIFECYCLE_TASK_ID,),
             )
+        if legacy_final_retry:
+            store.connection.execute("UPDATE callsign_assignments SET runtime_instance_id=NULL")
         planned = CleanupPlanner(store).plan(
             manifest, operation_id="operation:production-cleanup", at=AT_PLAN
         )
@@ -389,9 +393,29 @@ def test_production_cleanup_crash_resume_and_lease_scope(root: Path, *, recovere
         assert interrupted["fence"] == 1
         assert runner.agent == "done"
 
+        resume_fence = 1
+        if legacy_final_retry:
+            original_finalize = store.finalize_cleanup
+            def fail_final(*_):
+                raise StorageRefusal("cleanup_identity_mismatch", "synthetic final receipt failure")
+            store.finalize_cleanup = fail_final
+            try:
+                service.execute(planned["operation_id"], expected_fence=1,
+                    executor_id="executor:final-failure", leased_until=LEASE_RESUME, at=AT_RESUME)
+            except StorageRefusal as exc:
+                assert exc.code == "cleanup_identity_mismatch"
+            else:
+                raise AssertionError("final receipt failure was not reproduced")
+            finally:
+                store.finalize_cleanup = original_finalize
+            blocked = store.cleanup_operation(planned["operation_id"])
+            assert blocked["state"] == "blocked"
+            assert all(action["state"] == "completed" for action in blocked["actions"])
+            old_block = blocked["final_receipt"]["receipt_hash"]
+            resume_fence = 2
         resumed = service.execute(
             planned["operation_id"],
-            expected_fence=1,
+            expected_fence=resume_fence,
             executor_id="executor:resume",
             leased_until=LEASE_RESUME,
             at=AT_RESUME,
@@ -412,10 +436,15 @@ def test_production_cleanup_crash_resume_and_lease_scope(root: Path, *, recovere
         assert assignment["state"] == "completed", dict(assignment)
         assert assignment["cleanup_required"] == 0
         assert assignment["cleanup_receipt"] == resumed["execution"]["receipt_hash"]
+        if legacy_final_retry:
+            audit = store.connection.execute(
+                "SELECT detail_json FROM events WHERE event_type='cleanup_finalization_retried'"
+            ).fetchone()
+            assert json.loads(audit[0])["prior_blocked_receipt"]["receipt_hash"] == old_block
 
         duplicate = service.execute(
             planned["operation_id"],
-            expected_fence=2,
+            expected_fence=resume_fence + 1,
             executor_id="executor:duplicate",
             leased_until=LEASE_RESUME,
             at=AT_RESUME,
@@ -840,6 +869,8 @@ def main() -> None:
         root = Path(temporary)
         test_production_cleanup_crash_resume_and_lease_scope(root / "e2e")
         test_production_cleanup_crash_resume_and_lease_scope(root / "recovered-stale", recovered_stale=True)
+        test_production_cleanup_crash_resume_and_lease_scope(
+            root / "legacy-final-retry", recovered_stale=True, legacy_final_retry=True)
         test_standalone_repository_retention(root / "standalone-retention")
         test_standalone_repository_retention(root / "standalone-release-retry", "callsign_release")
         test_standalone_repository_retention(root / "recovered-stale-retention", recovered_stale=True)

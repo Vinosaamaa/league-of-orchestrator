@@ -366,7 +366,52 @@ def test_expired_exact_lease_reacquires_without_stealing(root: Path) -> None:
         assert reader.watcher_registration(SHOTCALLER_ID)["fence"] == successor_receipt["fence"]
 
 
+def test_detached_prompt_notification() -> None:
+    """Prompt-worker notification follows service ownership, not terminal attachment."""
+    at = datetime.now().astimezone().isoformat()
+    target = {'channel': 'direct', 'runtime_instance_id': 'runtime:synthetic',
+              'generation': 'generation:synthetic'}
+    registration = {'actor_agent_id': SHOTCALLER_ID,
+                    'runtime_instance_id': target['runtime_instance_id'],
+                    'wake_locator': 'unix:/synthetic/supervisor.sock',
+                    'fence': 7, 'leased_until': _future(30)}
+
+    class Store:
+        def delivery_target(self, actor, now):
+            assert actor == SHOTCALLER_ID and now == at
+            return dict(target)
+
+        def watcher_registration(self, actor):
+            assert actor == SHOTCALLER_ID
+            return registration
+
+    with patch('league.persistent_supervisor._at', return_value=at), patch(
+        'league.persistent_supervisor.send_supervisor_message',
+        return_value={'priority': 'triage'},
+    ) as send:
+        assert notify_user_message(Store(), SHOTCALLER_ID, '', kind='triage-ready')
+        assert send.call_count == 1
+        assert send.call_args.args == (registration['wake_locator'], {
+            'kind': 'triage-ready', 'actor_agent_id': SHOTCALLER_ID, 'prompt_id': '',
+            'fence': 7, 'runtime_generation': target['generation'],
+        })
+        send.return_value = {'priority': 'user'}
+        assert notify_user_message(Store(), SHOTCALLER_ID, 'prompt:synthetic')
+        for field, invalid in (('actor_agent_id', 'foreign'),
+                               ('runtime_instance_id', 'foreign'),
+                               ('leased_until', at), ('wake_locator', 'not-a-socket')):
+            saved = registration[field]
+            registration[field] = invalid
+            send.reset_mock()
+            assert not notify_user_message(Store(), SHOTCALLER_ID, '', kind='triage-ready')
+            send.assert_not_called()
+            registration[field] = saved
+        send.side_effect = StorageRefusal('watcher_fenced', 'synthetic stale fence')
+        assert not notify_user_message(Store(), SHOTCALLER_ID, '', kind='triage-ready')
+
+
 def main() -> None:
+    test_detached_prompt_notification()
     test_runtime_inventory_output_is_bounded()
     with tempfile.TemporaryDirectory(prefix="l66-expired-renewal-") as temporary:
         test_expired_exact_lease_reacquires_without_stealing(Path(temporary))
@@ -648,6 +693,12 @@ def main() -> None:
             assert target is not None and target["channel"] == "watcher"
             assert str(target["locator"]).startswith("unix:")
             assert notify_user_message(observer, SHOTCALLER_ID, "prompt:synthetic")
+            before_priority = runtime.user_priority_generation
+            before_wakes = len(fake.calls)
+            with patch.object(observer, 'delivery_target', return_value={**target, 'channel': 'direct'}):
+                assert notify_user_message(observer, SHOTCALLER_ID, '', kind='triage-ready')
+            assert runtime.user_priority_generation == before_priority
+            assert len(fake.calls) == before_wakes
             with patch(
                 "league.persistent_supervisor.send_supervisor_message",
                 side_effect=StorageRefusal("watcher_fenced", "synthetic stale fence"),

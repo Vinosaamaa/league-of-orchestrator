@@ -1962,8 +1962,8 @@ def test_real_codex_stop_payload_rearms_per_prompt_event(root: Path) -> None:
         "stop_hook_active": True,
         "last_assistant_message": "Continuation end attempt.",
     }
-    assert _watcher(env, "codex-stop-hook", payload=retry)["decision"] == "block"
-    assert _watcher(env, "codex-stop-hook", payload=retry)["decision"] == "block"
+    assert _watcher(env, "codex-stop-hook", payload=retry) == {}
+    assert _watcher(env, "codex-stop-hook", payload=retry) == {}
 
     # Codex reuses turn_id for queued steers. A genuine second invocation is a
     # new durable event even when its prompt bytes deliberately repeat A.
@@ -1976,7 +1976,7 @@ def test_real_codex_stop_payload_rearms_per_prompt_event(root: Path) -> None:
     assert next_block["decision"] == "block"
     assert "Garen" in str(next_block["reason"])
     assert "turn:owner-visible-one" not in str(next_block["reason"])
-    assert _watcher(env, "codex-stop-hook", payload=retry)["decision"] == "block"
+    assert _watcher(env, "codex-stop-hook", payload=retry) == {}
 
     with SQLiteStorage(state, request_wal=False) as store:
         captured = store.connection.execute(

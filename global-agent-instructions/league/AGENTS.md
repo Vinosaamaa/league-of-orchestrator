@@ -148,9 +148,12 @@ $HOME/.local/bin/league --state-root "$HOME/.local/state/league" request turn \
 - Hooks first verify an exact canonical runtime binding and role. If a Codex,
   Pi, or Cursor CLI runtime is unbound or non-League, `UserPrompt`,
   pre-mutation, and `Stop` allow/no-op immediately with zero canonical mutation.
-- An attached Shotcaller with any owner or delegated obligation blocks every
-  `Stop` attempt unless the Summoner explicitly requested a final stop and the
-  Shotcaller armed the exact one-shot allowance after pausing work.
+- A Shotcaller Stop reports unresolved work, but a native Codex Stop continuation
+  already notified at the unchanged wait generation ends quietly. New captured
+  steering rearms the reminder. This does not complete work, acknowledge delivery,
+  pause Champions, or claim a healthy supervisor handoff.
+- Other Stop attempts retain their obligation checks and the explicit one-shot
+  owner-stop path; never clear records merely to make a turn end.
 - When the Summoner requests all work paused, the Shotcaller reaches a safe
   boundary for its own work, sends a pause-and-preserve instruction to every
   owned active Champion, then runs

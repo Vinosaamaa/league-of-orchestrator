@@ -154,6 +154,41 @@ def _read_only_pre_tool_output(command: str) -> dict[str, Any]:
     )
 
 
+def _stop_continuation_already_notified(
+    args: argparse.Namespace, payload: dict[str, Any]
+) -> bool:
+    """Bound Codex Stop feedback without retiring work or claiming a handoff.
+
+    The native flag distinguishes a continuation from a transport retry. The
+    durable wait generation distinguishes that continuation from genuine user
+    steering, including steering that reuses the native turn ID. This read runs
+    before contacting the supervisor, so an unavailable broker cannot repeat an
+    already-recorded reminder forever.
+    """
+    if args.command != "codex-stop-hook" or payload.get("stop_hook_active") is not True:
+        return False
+    try:
+        with SQLiteStorage(
+            _state_root(), busy_timeout_ms=STOP_BUSY_TIMEOUT_MS, request_wal=False
+        ) as observer:
+            actor = _actor(observer, args, payload, adapter_kind="codex")
+            if actor is None or str(actor[2]) != "shotcaller":
+                return False
+            scope = observer.connection.execute(
+                "SELECT wait_generation,last_blocked_wait_generation "
+                "FROM watcher_scopes WHERE scope_id=? AND actor_agent_id=?",
+                (_scope(observer, str(actor[0]), str(actor[1])), str(actor[0])),
+            ).fetchone()
+            return bool(
+                scope is not None
+                and scope["last_blocked_wait_generation"] == scope["wait_generation"]
+            )
+    except StorageRefusal as exc:
+        if exc.code in {"invalid_root", "store_missing", "busy"}:
+            return False
+        raise
+
+
 def _stop_output_mode(command: str) -> str:
     _, profile = _hook_profile(command, "stop_supervision")
     return str(profile.get("output_mode", "followup"))
@@ -1536,6 +1571,9 @@ def main(argv: list[str] | None = None) -> int:
         payload = _canonical_hook_payload(
             args.command, payload, explicit_shotcaller=args.shotcaller
         )
+        if _stop_continuation_already_notified(args, payload):
+            _emit(_native_hook_output(args.command, {}, bound=True))
+            return 0
         if _read_only_pre_tool(args.command, payload):
             _emit(_read_only_pre_tool_output(args.command))
             return 0

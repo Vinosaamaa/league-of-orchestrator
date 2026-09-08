@@ -1,5 +1,8 @@
 # Source provenance
 
+The native Codex every-Stop-blocks policy is deliberately bounded for unchanged
+continuations; see [the issue #66 Stop-loop correction](stop-loop-recovery.md).
+
 ## Issue #66 supervisor scheduling
 
 The service template now requires launchd `ProcessType=Standard` instead of

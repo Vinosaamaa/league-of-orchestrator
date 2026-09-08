@@ -29,6 +29,7 @@ REQUEST_LIFECYCLE_TESTS := \
 	tests/test_shotcaller_stop.py \
 	tests/test_owner_stop_control.py \
 	tests/test_canonical_watcher.py \
+	tests/test_stop_continuation.py \
 	tests/test_hook_runtime_regressions.py \
 	tests/test_runtime_identity.py \
 	tests/test_issue66_shipping.py \

@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import json
 import hashlib
+import fcntl
 import os
 import subprocess
+import socket
 import tempfile
 import threading
 import time
@@ -821,6 +823,134 @@ def test_long_lived_supervisor_allows_concurrent_prompt_and_stop(root: Path) -> 
     assert tuple(rows[0])[1:] == (
         hashlib.sha256(encoded).hexdigest(), len(encoded)
     )
+
+
+def test_native_prompt_capture_survives_unresponsive_supervisor(root: Path) -> None:
+    from league.persistent_supervisor import PersistentSupervisor
+
+    for kind, command, event, session_field, source_field in (
+        ("codex", "codex-user-prompt-hook", "UserPromptSubmit", "session_id", "turn_id"),
+        ("cursor", "cursor-before-submit-hook", "beforeSubmitPrompt", "conversation_id", "generation_id"),
+        ("pi", "pi-input-hook", "PiInput", "session_path", "input_id"),
+    ):
+        label = f"unresponsive-prompt-{kind}"
+        _, state, _ = seeded_state(root, label)
+        env = _environment(root / label, state)
+        session = str(root / f"{label}.jsonl") if kind == "pi" else f"session:{label}"
+        runtime_id = _register_garen_runtime(
+            state, label, session_ref=session, harness_kind=f"{kind}-thread"
+        )
+        runtime = PersistentSupervisor(state)
+        with SQLiteStorage(state) as store:
+            scope = store.resolve_supervisor_scope(SHOTCALLER_ID)["scope_id"]
+            store.register_watcher(
+                scope, f"watcher:{label}", SHOTCALLER_ID, runtime_id,
+                f"unix:{runtime.socket_path}", "2099-01-01T00:00:00+00:00", 7, AT2,
+            )
+            registration = dict(store.watcher_registration(SHOTCALLER_ID))
+            generation = store.connection.execute(
+                "SELECT user_message_generation FROM watcher_scopes WHERE scope_id=?", (scope,)
+            ).fetchone()[0]
+        body = "Accept my exact prompt.\nDo not clear unfinished work. 🧊"
+        payload = {
+            session_field: session, source_field: f"input:{label}",
+            "hook_event_name": event, "prompt": body,
+        }
+        if kind == "pi":
+            payload["session_id"] = f"session:{label}"
+        expected = {"continue": True} if kind == "cursor" else {"binding": "bound"} if kind == "pi" else {}
+        # A live service lock and socket are not proof that the broker can
+        # answer. Native intake must commit even when this peer never responds.
+        with runtime.lock_path.open("a+") as lock, socket.socket(socket.AF_UNIX) as stalled:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            stalled.bind(str(runtime.socket_path))
+            stalled.listen(8)
+            started = time.monotonic()
+            result = subprocess.run(
+                [env["TEST_INSTALLED_WATCHER"], command], input=json.dumps(payload),
+                text=True, capture_output=True, env=env, timeout=5, check=False,
+            )
+            elapsed = time.monotonic() - started
+            assert result.returncode == 0, result.stderr
+            assert json.loads(result.stdout) == expected
+            assert elapsed < MAX_HOOK_LAUNCH_SECONDS, elapsed
+            with SQLiteStorage(state) as store:
+                assert dict(store.watcher_registration(SHOTCALLER_ID)) == registration
+                assert store.connection.execute(
+                    "SELECT COUNT(*) FROM prompt_payloads WHERE body=?", (body,)
+                ).fetchone()[0] == 1
+                assert store.connection.execute(
+                    "SELECT user_message_generation FROM watcher_scopes WHERE scope_id=?", (scope,)
+                ).fetchone()[0] == generation + 1
+            if kind == "codex":
+                mutation = {
+                    "session_id": session, "turn_id": "turn:protected-write",
+                    "hook_event_name": "PreToolUse", "tool_use_id": "tool:protected-write",
+                    "tool_name": "Write", "tool_input": {"file_path": "synthetic.txt", "content": "x"},
+                }
+                refused = subprocess.run(
+                    [env["TEST_INSTALLED_WATCHER"], "codex-pre-tool-hook"],
+                    input=json.dumps(mutation), text=True, capture_output=True,
+                    env=env, timeout=5, check=False,
+                )
+                assert refused.returncode == 2, refused.stdout + refused.stderr
+                assert "supervisor_ownership_uncertain" in refused.stderr
+
+
+def test_native_prompt_wake_failure_preserves_committed_replay(root: Path) -> None:
+    from argparse import Namespace
+    from league.canonical_watcher import _native_prompt_hook
+    from league.sqlite_watcher_ops import ensure_watcher_scope
+    from league.storage import StorageRefusal
+
+    _, state, _ = seeded_state(root, "prompt-wake-failure")
+    session = "session:prompt-wake-failure"
+    _register_garen_runtime(state, "prompt-wake-failure", session_ref=session)
+    payload = {
+        "session_id": session,
+        "turn_id": "turn:prompt-wake-failure",
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": "Preserve this exact prompt.\n🧊",
+    }
+    args = Namespace(command="codex-user-prompt-hook", shotcaller=None, session_id=None)
+    capture_event_id = "codex-user-prompt:" + "e" * 32
+    hook = {
+        "command": args.command, "shotcaller": None, "session_id": None,
+        "payload": payload, "capture_event_id": capture_event_id,
+    }
+    with SQLiteStorage(state) as store:
+        with store._transaction():
+            scope = store.resolve_supervisor_scope(SHOTCALLER_ID)["scope_id"]
+            ensure_watcher_scope(store, scope, SHOTCALLER_ID, block_on_obligations=None)
+        before = store.connection.execute(
+            "SELECT user_message_generation FROM watcher_scopes WHERE actor_agent_id=?",
+            (SHOTCALLER_ID,),
+        ).fetchone()[0]
+
+    def failed_wake(*_args: object) -> bool:
+        # A separate connection sees the committed bytes before notification.
+        with SQLiteStorage(state) as reader:
+            assert reader.connection.execute(
+                "SELECT COUNT(*) FROM prompt_payloads WHERE body=?", (payload["prompt"],)
+            ).fetchone()[0] == 1
+        raise StorageRefusal("watcher_unavailable", "synthetic post-commit wake failure")
+
+    with patch("league.canonical_watcher._state_root", return_value=state), patch(
+        "league.canonical_watcher.notify_user_message", side_effect=failed_wake
+    ) as notify:
+        assert _native_prompt_hook(args, payload, capture_event_id) == {}
+        assert _native_prompt_hook(args, payload, capture_event_id) == {}
+        assert notify.called
+    with SQLiteStorage(state) as store:
+        replay = handle_brokered_hook(store, hook)
+        assert replay["capture"]["idempotent"] is True
+        assert store.connection.execute(
+            "SELECT COUNT(*) FROM prompt_payloads WHERE body=?", (payload["prompt"],)
+        ).fetchone()[0] == 1
+        assert store.connection.execute(
+            "SELECT user_message_generation FROM watcher_scopes WHERE actor_agent_id=?",
+            (SHOTCALLER_ID,),
+        ).fetchone()[0] == before + 1
 
 
 def test_provider_prompt_capture_identity_contracts(root: Path) -> None:
@@ -2434,6 +2564,8 @@ def main() -> None:
         test_working_and_progress_tasks_remain_supervised(root)
         test_supervise_user_priority(root)
         test_long_lived_supervisor_allows_concurrent_prompt_and_stop(root)
+        test_native_prompt_capture_survives_unresponsive_supervisor(root)
+        test_native_prompt_wake_failure_preserves_committed_replay(root)
         test_provider_prompt_capture_identity_contracts(root)
         test_provider_operational_wakes_never_become_user_prompt_intake(root)
         test_provider_pre_tool_policy_and_pi_stop_are_shared_and_fail_closed(root)

@@ -1,5 +1,49 @@
 # Issue #66 inline semantic triage and persistent supervision
 
+## 2026-09-07 installed diagnostic and transport incident
+
+The installed 0.2.75 diagnostic used the source driver at
+`299fbc79d11a9a57cffa8be61368928eb00124e6`, ten OFF/ON pairs per cell,
+requested Astra high, and isolated synthetic SQLite roots. OFF supplies a fixed
+semantic batch; ON starts a separate model process. It is an ablation, not the
+ordinary inline Shotcaller path or a native queued-prompt benchmark.
+
+| Batch | State | OFF p50 / p95 ms | ON p50 / p95 ms | Classification matches |
+| --- | --- | --- | --- | --- |
+| 1 | Cold | 404.767 / 504.883 | 8574.706 / 9878.868 | 10 / 10 |
+| 1 | Warm | 419.142 / 505.084 | 8366.834 / 10171.504 | 10 / 10 |
+| 25 | Cold | 428.183 / 530.430 | 62103.308 / 68893.221 | 249 / 250 |
+| 25 | Warm | 433.832 / 527.116 | 62436.184 / 68359.230 | 250 / 250 |
+
+The one mismatch is acknowledgement case `case-047` in cold sample 1.
+Process exit success means measurements completed, not perfect semantic
+correctness. Canonical requests were not used or closed by the benchmark.
+Receipt SHA-256:
+`db474d371416e8f836c7b1616ac551cba38f7f6e8857417f0ffca9595279082d`.
+
+A separate live triage attempt stalled while sending a roughly 3KB JSON line
+through terminal stdin. Inspection found canonical line buffering enabled; the
+complete line did not reach League. Clearing only that unsubmitted line and
+changing the temporary terminal mode allowed the same process to begin and
+commit the batch. Nine captured prompts were then triaged and five questions
+answered; unfinished engineering requests stayed open. This recovery is evidence
+of the transport failure, not a supported adapter recipe.
+
+The source fix refuses terminal stdin before storage is opened or a turn is
+claimed. Adapters must keep one process with `stdin=subprocess.PIPE`, flush a
+newline-delimited semantic batch after intake, read the begun receipt, then
+flush final actions and read the committed receipt. Large JSON is still bounded
+by the existing payload limit. Focused tests cover an actual open terminal that
+receives no input, refusal without storage access, and successful large pipe
+input. No new model, polling loop, automatic terminal-mode change, or canonical
+repair is introduced.
+
+Native prompt-to-first-visible-output timing, queued steering, watcher recovery,
+and the complete installed prompt-to-cleanup flow remain separate acceptance
+gates. These diagnostic results do not close them.
+
+## Historical implementation notes
+
 **Date:** 2026-08-30
 **Issue:** [#66](https://github.com/Vinosaamaa/league-of-orchestrator/issues/66)
 **Implementation measured:** `01964ae094ae6d34bfe6544ff589e95986d55ae7`

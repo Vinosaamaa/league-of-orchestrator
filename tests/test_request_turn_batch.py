@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import os
 from io import BytesIO
 import subprocess
 import tempfile
@@ -157,7 +158,8 @@ def test_interactive_turn_uses_one_process_and_one_ordered_batch(root: Path) -> 
         ],
         "plans": [_semantic_plan(), _semantic_plan()],
     }
-    process.stdin.write(json.dumps(decisions, separators=(",", ":")) + "\n")
+    # Larger than common terminal canonical-line limits; pipes preserve the batch.
+    process.stdin.write(" " * 16384 + json.dumps(decisions, separators=(",", ":")) + "\n")
     process.stdin.flush()
     begun = json.loads(process.stdout.readline())
     assert process.pid == turn_pid and process.poll() is None
@@ -885,9 +887,60 @@ def test_changed_candidates_fence_external_dispatch(root: Path) -> None:
     assert changed_refused["error"]["code"] == "version_conflict", changed_refused
 
 
+def test_terminal_input_refuses_before_storage_or_intake(root: Path) -> None:
+    source, sink = BytesIO(), BytesIO()
+    with patch.object(source, "isatty", return_value=True), patch("league.cli._open") as open_store:
+        status = league_main(
+            ["--state-root", str(root / "terminal-refusal"), "request", "turn",
+             "--owner-agent-id", SHOTCALLER_ID],
+            input_stream=source,
+            output=sink,
+        )
+    assert status == 2
+    open_store.assert_not_called()
+    assert source.tell() == 0
+    receipts = sink.getvalue().splitlines()
+    assert len(receipts) == 1
+    refused = json.loads(receipts[0])
+    assert refused["error"]["code"] == "triage_transport_unsupported", refused
+    assert "stdin=subprocess.PIPE" in refused["error"]["message"]
+    assert not (root / "terminal-refusal").exists()
+
+
+def test_real_pty_refuses_without_waiting_for_a_line(root: Path) -> None:
+    if os.name != "posix":
+        return
+    import pty
+
+    master, slave = pty.openpty()
+    process = None
+    state = root / "real-terminal-refusal"
+    try:
+        process = subprocess.Popen(
+            [sys.executable, str(ROOT / "bin/league"), "--state-root", str(state),
+             "request", "turn", "--owner-agent-id", SHOTCALLER_ID],
+            stdin=slave, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        # The terminal stays open and receives no newline or EOF.
+        stdout, stderr = process.communicate(timeout=5)
+        assert process.returncode == 2, (stdout, stderr)
+        receipts = stdout.splitlines()
+        assert len(receipts) == 1, stdout
+        assert json.loads(receipts[0])["error"]["code"] == "triage_transport_unsupported"
+        assert not state.exists()
+    finally:
+        if process is not None and process.poll() is None:
+            process.kill()
+            process.communicate(timeout=5)
+        os.close(slave)
+        os.close(master)
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="league-request-turn-") as temporary:
         root = Path(temporary)
+        test_terminal_input_refuses_before_storage_or_intake(root)
+        test_real_pty_refuses_without_waiting_for_a_line(root)
         test_interactive_turn_uses_one_process_and_one_ordered_batch(root)
         test_turn_handler_never_spawns_a_second_process(root)
         test_pr134_shaped_direct_implementation_refuses_before_completion(root)

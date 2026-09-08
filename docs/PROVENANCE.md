@@ -1,5 +1,54 @@
 # Source provenance
 
+## Issue #66 expired exact-owner renewal
+
+A delayed persistent watcher reused its previous fence after its lease expired.
+Canonical storage correctly refused that stale fence, but the still-exact owner
+could not resume renewal. A deterministic clock-advance fixture reproduces the
+same `watcher_fenced` refusal seen in watcher exit logs; it does not establish
+why the installed process was delayed.
+
+Renewal now advances the fence only when the stored lease has expired, using
+one timestamp for the expiry decision and replacement lease. Expected watcher
+identity and fence remain mandatory in the atomic registration, so an older
+process cannot replace a successor even after that successor's lease expires.
+Live routine renewal preserves the existing fence. No direct live-state repair,
+lease-length increase, retry loop or ownership-check bypass is introduced.
+
+## Issue #66 native prompt availability
+
+Native Codex, Cursor and Pi prompt hooks now commit through canonical SQLite
+before notifying the persistent watcher. Previously, an unresponsive broker
+followed by a held service lock, existing socket or unexpired lease could
+reject human input with `supervisor_ownership_uncertain`. The old supervisor
+tests explicitly required that refusal for prompt intake.
+
+The deliberate difference is limited to native prompt intake: exact binding
+is revalidated in the capture transaction; event identity, original bytes,
+duplicate suppression and user-priority generation remain canonical. No
+supervisor lease, fence, authorization or task is replaced to accept input.
+The wake notification follows commit with its existing quarter-second bound;
+notification failure cannot reject an already-committed prompt. Stop and
+mutation-authorization fallback retain their service-ownership fence.
+
+Synthetic native-command regressions cover all three providers with a locked,
+unresponsive supervisor and preserve the mutation refusal. These tests do not
+prove native composer delivery, installed behavior or healthy watcher startup.
+
+## Issue #66 request-turn pipe transport
+
+`request turn` now rejects terminal stdin with `triage_transport_unsupported`
+before opening storage, claiming a turn, or emitting intake. Previously a JSON
+line larger than a terminal's canonical input buffer could stall or truncate
+before reaching the existing payload-size check. A raw terminal is also refused:
+the supported adapter contract is one process with piped stdin, not terminal
+mode repair. The error describes the pipe and flush/read sequence.
+
+Focused request-turn coverage proves pre-storage refusal, an actual open PTY
+returning without input, and a complete one-process pipe turn with a decision
+line larger than common terminal buffer limits. These are synthetic local
+regressions, not installed native prompt, steering, or watcher acceptance.
+
 ## Issue #66 legacy acceptance issue compatibility (parent #23)
 
 The real cleanup gate reached its owner issue but rejected its existing

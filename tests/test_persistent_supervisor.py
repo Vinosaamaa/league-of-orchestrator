@@ -329,8 +329,47 @@ def test_runtime_inventory_output_is_bounded() -> None:
         raise AssertionError("oversized runtime inventory output was retained")
 
 
+def test_expired_exact_lease_reacquires_without_stealing(root: Path) -> None:
+    state, store, clock = create_context(root, "expired-renewal")
+    _close_secondary_runtime(store, clock.now())
+    store.close()
+    runtime = PersistentSupervisor(state, callsign="Garen")
+    initial = datetime.fromisoformat("2030-01-01T00:00:00+00:00")
+    with patch("league.persistent_supervisor._now", return_value=initial):
+        first = runtime._register()
+    with patch("league.persistent_supervisor._now", return_value=initial + timedelta(seconds=10)):
+        renewed = runtime._register()
+    assert renewed["fence"] == first["fence"]
+    resumed_at = initial + timedelta(seconds=71)
+    with patch("league.persistent_supervisor._now", return_value=resumed_at):
+        resumed = runtime._register()
+    assert resumed["fence"] == first["fence"] + 1
+    with SQLiteStorage(state) as reader:
+        registration = reader.watcher_registration(SHOTCALLER_ID)
+        assert registration["fence"] == resumed["fence"]
+        assert datetime.fromisoformat(registration["leased_until"]) > resumed_at
+
+    # Simulate an independently registered successor at the storage boundary.
+    # The old process must never use expiry recovery to overwrite that owner.
+    successor = PersistentSupervisor(state, callsign="Garen")
+    with patch("league.persistent_supervisor._now", return_value=resumed_at + timedelta(seconds=1)):
+        successor_receipt = successor._register()
+    for offset in (2, 62):
+        with patch("league.persistent_supervisor._now", return_value=resumed_at + timedelta(seconds=offset)):
+            try:
+                runtime._register()
+            except StorageRefusal as exc:
+                assert exc.code == "watcher_fenced", exc.code
+            else:
+                raise AssertionError("an old process overwrote its successor")
+    with SQLiteStorage(state) as reader:
+        assert reader.watcher_registration(SHOTCALLER_ID)["fence"] == successor_receipt["fence"]
+
+
 def main() -> None:
     test_runtime_inventory_output_is_bounded()
+    with tempfile.TemporaryDirectory(prefix="l66-expired-renewal-") as temporary:
+        test_expired_exact_lease_reacquires_without_stealing(Path(temporary))
     with tempfile.TemporaryDirectory(prefix="l84-unbound-live-supervisor-") as temporary:
         test_live_aggregate_supervisor_leaves_unbound_native_hooks_inert(
             Path(temporary)
@@ -732,13 +771,15 @@ def main() -> None:
             "PYTHONDONTWRITEBYTECODE": "1",
         }
         refused = subprocess.run(
-            [str(ROOT / "bin/agent-watcher"), "codex-user-prompt-hook"],
+            [str(ROOT / "bin/agent-watcher"), "codex-pre-tool-hook"],
             input=json.dumps(
                 {
                     "session_id": f"session:{GAREN_RUNTIME}",
                     "turn_id": "turn:uncertain-owner",
-                    "hook_event_name": "UserPromptSubmit",
-                    "prompt": "Synthetic prompt must not fall back",
+                    "hook_event_name": "PreToolUse",
+                    "tool_use_id": "tool:uncertain-owner",
+                    "tool_name": "Write",
+                    "tool_input": {"file_path": "synthetic.txt", "content": "x"},
                 }
             ),
             capture_output=True,
@@ -762,13 +803,15 @@ def main() -> None:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         try:
             refused = subprocess.run(
-                [str(ROOT / "bin/agent-watcher"), "codex-user-prompt-hook"],
+                [str(ROOT / "bin/agent-watcher"), "codex-pre-tool-hook"],
                 input=json.dumps(
                     {
                         "session_id": f"session:{GAREN_RUNTIME}",
                         "turn_id": "turn:starting-owner",
-                        "hook_event_name": "UserPromptSubmit",
-                        "prompt": "Synthetic prompt fenced during supervisor startup",
+                        "hook_event_name": "PreToolUse",
+                        "tool_use_id": "tool:starting-owner",
+                        "tool_name": "Write",
+                        "tool_input": {"file_path": "synthetic.txt", "content": "x"},
                     }
                 ),
                 capture_output=True,

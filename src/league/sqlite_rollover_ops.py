@@ -859,7 +859,22 @@ def rollover_descendant_target(
         "runtime_generation": None if runtime is None else runtime["runtime_generation"],
         "capabilities": None if runtime is None else runtime["capabilities_json"],
     }
-    if digest(private_binding) != row["binding_digest"]:
+    # A native hook may register an imported runtime after the owner snapshot.
+    # Accept only that exact producer and the unchanged pre-registration binding;
+    # never refresh the snapshot or disregard another identity field here.
+    late_hook_binding = (
+        runtime is not None
+        and _legacy_hook_runtime_exact(
+            dict(runtime), champion_agent_id=champion_agent_id,
+            runtime_instance_id=runtime["runtime_instance_id"],
+            harness_kind=champion["kind"], backend_kind=champion["backend"],
+            session_ref=champion["thread_id"], endpoint=champion["address"],
+        )
+        and digest({**private_binding, **dict.fromkeys((
+            "runtime_instance_id", "session_ref", "endpoint", "runtime_generation", "capabilities",
+        ))}) == row["binding_digest"]
+    )
+    if digest(private_binding) != row["binding_digest"] and not late_hook_binding:
         raise StorageRefusal(
             "descendant_snapshot_mismatch",
             "descendant canonical binding no longer matches the frozen row",
@@ -913,6 +928,11 @@ def rollover_descendant_target(
         callsigns[0],
         assignment,
     )
+    if late_hook_binding and source_shape != "imported_legacy_partial":
+        raise StorageRefusal(
+            "descendant_snapshot_mismatch",
+            "post-snapshot hook registration requires exact imported legacy provenance",
+        )
     route_adoption = None
     if champion["routing_name"] is None:
         _imported_null_route_provenance(

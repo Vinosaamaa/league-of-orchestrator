@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / "src"), str(ROOT / "tests")]
 
 from league.cleanup import CleanupAdapterRegistry, CleanupExecutor, CleanupPlanner  # noqa: E402
+from league.real_cleanup import CallsignAdapter  # noqa: E402
 from league.continuation import (  # noqa: E402
     ContinuationIssueReopener,
     GitHubIssueAdapter,
@@ -91,22 +92,6 @@ class RuntimeCloseAdapter(StateCleanupAdapter):
             self.runtime["runtime_instance_id"],
             self.runtime["endpoint"],
             self.runtime["runtime_generation"],
-            AT_EXECUTE,
-        )
-        return super().apply(action)
-
-
-class CallsignReleaseAdapter(StateCleanupAdapter):
-    def __init__(self, store, states, effects, assignment_id: str) -> None:
-        super().__init__("callsign", states, effects)
-        self.store = store
-        self.assignment_id = assignment_id
-
-    def apply(self, action):
-        self.store.release_callsign(
-            f"callsign-assignment:{self.assignment_id}",
-            2,
-            hashlib.sha256(self.assignment_id.encode("utf-8")).hexdigest(),
             AT_EXECUTE,
         )
         return super().apply(action)
@@ -363,6 +348,18 @@ def _manifest(
             "issue_close",
         )
     ]
+    endpoint = next(a for a in final_actions if a["action_kind"] == "endpoint_close")
+    endpoint["expected_identity"] = {
+        "runtime_instance_id": runtime_id, "runtime_generation": runtime["runtime_generation"],
+        "pane_id": runtime["endpoint"],
+    }
+    callsign = store.connection.execute(
+        "SELECT * FROM callsign_assignments WHERE agent_id=? AND state='active'", (agent_id,)).fetchone()
+    release = next(a for a in final_actions if a["action_kind"] == "callsign_release")
+    release["expected_identity"] = {
+        "assignment_id": callsign["callsign_assignment_id"], "callsign": callsign["callsign"],
+        "expected_version": callsign["version"],
+    }
     return {
         "task_id": task_id,
         "owner": {"id": agent_id, "role": "champion", "persistent": False},
@@ -438,7 +435,8 @@ def _execute_cleanup(
         (manifest["continuation_archive"]["runtime_instance_id"],),
     ).fetchone()
     registry.register(RuntimeCloseAdapter(store, states, effects, dict(runtime)))
-    registry.register(CallsignReleaseAdapter(store, states, effects, assignment_id))
+    release = next(a for a in operation["actions"] if a["action_kind"] == "callsign_release")
+    registry.register(CallsignAdapter(store, release["expected_identity"], at))
     registry.register(issue)
     return CleanupExecutor(store, registry).execute(
         operation_id,

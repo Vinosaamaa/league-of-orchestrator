@@ -172,6 +172,19 @@ def test_launchd_environment_starts_the_canonical_watcher(root: Path) -> None:
     with patch.dict(os.environ, {"HERDR_SESSION": "synthetic-session"}):
         rendered, _ = render_launchd_plist(template, agent_watcher, state.resolve())
     value = plistlib.loads(rendered)
+    # The watcher serves foreground input/control; do not opt it into Darwin's
+    # discretionary Background CPU and I/O scheduling class.
+    assert value["ProcessType"] == "Standard"
+    background_template = root / "background-template.plist"
+    background_template.write_bytes(
+        template.read_bytes().replace(b"<string>Standard</string>", b"<string>Background</string>")
+    )
+    try:
+        render_launchd_plist(background_template, agent_watcher, state.resolve())
+    except StorageRefusal as exc:
+        assert exc.code == "supervisor_service_template_invalid"
+    else:
+        raise AssertionError("background scheduling template accepted")
     environment = value["EnvironmentVariables"]
     assert environment["HERDR_SESSION"] == "synthetic-session"
     assert "HERDR_SOCKET_PATH" not in environment and "HERDR_PANE_ID" not in environment

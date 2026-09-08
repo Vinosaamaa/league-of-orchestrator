@@ -1,5 +1,19 @@
 # Source provenance
 
+## Issue #66 supervisor scheduling
+
+The service template now requires launchd `ProcessType=Standard` instead of
+`Background`. The supervisor handles user-facing control traffic, not solely
+discretionary background work. A bounded installed-command comparison completed
+normal startup in 0.889 seconds while explicit background scheduling exceeded
+six seconds. This reproduces a scheduling-sensitive startup delay; it does not
+establish its kernel-level cause or prove repaired launchd service startup.
+
+The renderer rejects the old Background template, and synthetic service tests
+cover the new template with existing install, restart and exact rollback gates.
+No service timeout, ownership check, security control or installed manifest is
+relaxed. Source acceptance remains separate from installation and live health.
+
 ## Issue #66 expired exact-owner renewal
 
 A delayed persistent watcher reused its previous fence after its lease expired.

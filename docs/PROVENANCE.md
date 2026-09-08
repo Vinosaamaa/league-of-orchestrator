@@ -2532,3 +2532,16 @@ and unchanged task owner; retain every runtime, version, recipient and state
 progression check. No reactivation, process effect or cleanup clearance occurs.
 The focused assignment fixture covers successful recovery and atomic refusals;
 installed acceptance remains a separate gate.
+
+## Ambiguous background-triage follow-ups (issue #66)
+
+The classifier must not use an unrelated existing-request summary to invent the
+subject of an underspecified new prompt. Unknown-reference asks remain new,
+unlinked requests with their uncertainty preserved; bare factual updates remain
+context. Explicitly identified follow-ups still link normally. This changes only
+the classifier instructions, not captured prompt bytes, request IDs, completion
+rules, storage transactions, or the delivery protocol. Protocol tests verify the
+instruction is supplied in both instruction fields for every fresh context;
+semantic acceptance requires real classifier output, not the fake model fixture.
+The structured output schema also enforces the existing disposition/reference
+contract: context, acknowledgement and new requests cannot carry a linked ID.

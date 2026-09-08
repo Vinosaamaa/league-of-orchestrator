@@ -4087,7 +4087,8 @@ class SQLiteStorage(SQLiteTransactionCore):
         observed_endpoint: str,
         observed_generation: str,
         at: str,
-        *, recover_observed_failure: bool = False,
+        *, recover_observed_failure: bool = False, expected_owner_agent_id: str | None = None,
+        expected_agent_version: int | None = None,
     ) -> dict[str, Any]:
         return sqlite_runtime_ops.reconcile_restored_runtime(
             self,
@@ -4102,6 +4103,8 @@ class SQLiteStorage(SQLiteTransactionCore):
             observed_generation,
             at,
             recover_observed_failure=recover_observed_failure,
+            expected_owner_agent_id=expected_owner_agent_id,
+            expected_agent_version=expected_agent_version,
         )
 
     def pending_shotcaller_identity_repair(self, request: dict[str, Any], generation: str,

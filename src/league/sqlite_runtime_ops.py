@@ -69,7 +69,8 @@ def reconcile_restored_runtime(
     observed_endpoint: str,
     observed_generation: str,
     at: str,
-    *, recover_observed_failure: bool = False,
+    *, recover_observed_failure: bool = False, expected_owner_agent_id: str | None = None,
+    expected_agent_version: int | None = None,
 ) -> dict[str, Any]:
     """CAS one restored endpoint onto an existing immutable agent session."""
 
@@ -95,7 +96,7 @@ def reconcile_restored_runtime(
             runtime = store.connection.execute(
                 """
                 SELECT r.*,a.address,a.thread_id,a.role,a.retired_at,a.version AS agent_version,
-                       a.status AS agent_status,a.task_id
+                       a.status AS agent_status,a.task_id,a.shotcaller_agent_id
                   FROM runtime_instances r JOIN agent_instances a
                     ON a.agent_id=r.actor_agent_id
                  WHERE r.runtime_instance_id=?
@@ -117,6 +118,17 @@ def reconcile_restored_runtime(
                     "runtime_reconcile_identity_mismatch",
                     "restored runtime does not match one active canonical session",
                 )
+            if expected_owner_agent_id is not None and (
+                runtime["role"] != "champion"
+                or runtime["shotcaller_agent_id"] != expected_owner_agent_id
+                or store.connection.execute(
+                    "SELECT 1 FROM agent_instances WHERE agent_id=? AND role='shotcaller' AND retired_at IS NULL",
+                    (expected_owner_agent_id,),
+                ).fetchone() is None
+            ):
+                raise StorageRefusal("runtime_reconcile_owner_mismatch", "Champion owner changed before reconciliation")
+            if expected_agent_version is not None and runtime["agent_version"] != expected_agent_version:
+                raise StorageRefusal("runtime_reconcile_version_conflict", "Champion identity changed during native verification")
             current_exact = bool(
                 runtime["endpoint"] == observed_endpoint
                 and runtime["runtime_generation"] == observed_generation

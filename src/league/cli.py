@@ -774,6 +774,11 @@ def _add_runtime_commands(groups: argparse._SubParsersAction) -> None:
     handoff.add_argument('--owner-authorized', action='store_true')
     handoff.add_argument('--check-only', action='store_true')
     handoff.add_argument('--at', required=True)
+    champion_recovery = commands.add_parser('reconcile-champion-identity', help='Recover one exactly observed retained Champion session; no process or task effects.')
+    for name in ('owner-agent-id', 'agent-id', 'runtime-instance-id', 'session-ref', 'endpoint', 'expected-generation', 'at'):
+        champion_recovery.add_argument(f'--{name}', required=True)
+    champion_recovery.add_argument('--owner-authorized', action='store_true')
+    champion_recovery.add_argument('--check-only', action='store_true')
     repair = commands.add_parser("repair-shotcaller-identity", help="Repair one malformed legacy Codex identity in the calling Herdr pane; never rollover.")
     for name in ("agent-id", "runtime-instance-id", "expected-session-ref", "expected-generation", "endpoint", "thread-id", "at"):
         repair.add_argument(f"--{name}", required=True)
@@ -2410,6 +2415,16 @@ def _runtime_reconcile_handoff(store: Storage, args: argparse.Namespace) -> Comm
         raise StorageRefusal('runtime_handoff_invalid', 'cannot read bounded pre-handoff inventory') from exc
     multiplexer = builtin_multiplexer_adapter_registry().adapter('herdr')
     return reconcile_handoff(store, before, multiplexer=multiplexer, at=args.at, check_only=args.check_only), None
+
+
+def _runtime_reconcile_champion_identity(store: Storage, args: argparse.Namespace) -> CommandResult:
+    from .runtime_identity import reconcile_champion_identity
+    request = {key: getattr(args, key) for key in (
+        'owner_agent_id', 'agent_id', 'runtime_instance_id', 'session_ref', 'endpoint', 'expected_generation')}
+    return reconcile_champion_identity(
+        store, request, multiplexer=builtin_multiplexer_adapter_registry().adapter('herdr'),
+        at=args.at, owner_authorized=args.owner_authorized, check_only=args.check_only,
+    ), None
 
 
 def _runtime_retire_stopped_agent(
@@ -4151,6 +4166,7 @@ HANDLERS: dict[str, CommandHandler] = {
     "runtime.replay-restored-display": _runtime_replay_restored_display,
     "runtime.reconcile-restored-agent": _runtime_reconcile_restored_agent,
     "runtime.reconcile-handoff": _runtime_reconcile_handoff,
+    "runtime.reconcile-champion-identity": _runtime_reconcile_champion_identity,
     "runtime.repair-shotcaller-identity": _runtime_repair_shotcaller_identity,
     "runtime.retire-stopped-agent": _runtime_retire_stopped_agent,
     "routing.choose": _routing_choose,

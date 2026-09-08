@@ -1,5 +1,17 @@
 # Source provenance
 
+## Issue #66 exact retained Champion identity recovery
+
+`runtime reconcile-champion-identity` recovers one explicitly identified retained
+Champion whose immutable session still exists but whose old runtime generation
+no longer matches the native terminal. It verifies the calling owner, canonical
+worktree, unique native session, routing name and two matching process observations.
+Owner and agent-version checks occur again in the existing canonical transaction.
+No display replay, process restart, task completion, callsign release or cleanup
+occurs. Bulk restored-agent reconciliation and pre-handoff inventory recovery
+retain their existing behavior. Synthetic exact-target and refusal tests pass;
+the new command is not yet installed or live-accepted.
+
 The native Codex every-Stop-blocks policy is deliberately bounded for unchanged
 continuations; see [the issue #66 Stop-loop correction](stop-loop-recovery.md).
 

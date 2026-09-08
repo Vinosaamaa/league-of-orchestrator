@@ -10,8 +10,75 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from .provider_lifecycle import provider_lifecycle
-from .restored_agent import SupervisorWatcherAdapter, restored_runtime_generation
+from .restored_agent import SupervisorWatcherAdapter, restored_runtime_generation, _timestamp
 from .storage_types import StorageRefusal
+
+
+def reconcile_champion_identity(
+    store: Any, request: Mapping[str, Any], *, multiplexer: Any, at: str,
+    owner_authorized: bool, check_only: bool = False,
+) -> dict[str, Any]:
+    """Recover one retained session, never infer identity from its pane or title."""
+    _timestamp(at)
+    if not owner_authorized:
+        raise StorageRefusal("owner_authorization_required", "Champion recovery requires explicit owner authority")
+    refusal = StorageRefusal("champion_identity_unproven", "exact retained Champion identity did not verify")
+    owner = store.agent_status(request["owner_agent_id"])
+    actor_row = store.connection.execute(
+        "SELECT * FROM agent_instances WHERE agent_id=?", (request["agent_id"],)
+    ).fetchone()
+    actor = dict(actor_row) if actor_row is not None else None
+    row = store.connection.execute(
+        "SELECT * FROM runtime_instances WHERE runtime_instance_id=?", (request["runtime_instance_id"],)
+    ).fetchone()
+    if (owner is None or owner["role"] != "shotcaller" or owner["retired_at"] is not None
+        or actor is None or actor["role"] != "champion" or actor["retired_at"] is not None
+        or actor["shotcaller_agent_id"] != owner["agent_id"] or row is None
+        or row["actor_agent_id"] != actor["agent_id"] or row["backend_kind"] != "herdr"
+        or row["session_ref"] != request["session_ref"] or actor["thread_id"] != request["session_ref"]
+        or row["endpoint"] != request["endpoint"] or actor["address"] != request["endpoint"]
+        or row["status"] not in {"active", "idle", "failed"}
+        or not actor.get("worktree") or not actor.get("routing_name") or multiplexer.kind != "herdr"):
+        raise refusal
+    kind = row["harness_kind"].removesuffix("-thread")
+    if actor["kind"].removesuffix("-thread") != kind or not provider_lifecycle(kind).validate_session(request["session_ref"]):
+        raise refusal
+    inventory = multiplexer.discover()
+    context = multiplexer.calling_context()
+    owners = [item for item in inventory if item.get("pane_id") == context["pane_id"]
+              and item.get("pane_id") == owner["address"]
+              and (item.get("agent_session") or {}).get("value") == owner["thread_id"]]
+    matches = [item for item in inventory if (item.get("agent_session") or {}).get("value") == request["session_ref"]]
+    if len(owners) != 1 or len(matches) != 1:
+        raise refusal
+    item = matches[0]
+    if (item.get("pane_id") != request["endpoint"] or item.get("name") != actor["routing_name"]
+        or item.get("agent") != kind or item.get("foreground_cwd") != actor["worktree"]):
+        raise refusal
+    endpoint = multiplexer.endpoint(request["runtime_instance_id"], item)
+    generation = restored_runtime_generation("herdr", endpoint.terminal_id, request["session_ref"])
+    if row["runtime_generation"] not in {request["expected_generation"], generation}:
+        raise StorageRefusal("runtime_reconcile_version_conflict", "previous Champion generation changed")
+    descriptor = {**dict(row), "cwd": actor["worktree"], "verify_native_process": True,
+                  "tokens": {"sidebar_name": actor["callsign"]}}
+    first = multiplexer.inspect_restored(descriptor, endpoint)
+    second = multiplexer.inspect_restored(descriptor, endpoint)
+    keys = ("pane_id", "name", "agent", "agent_session", "workspace_id", "tab_id", "terminal_id", "foreground_cwd")
+    if (not first.get("process_fingerprint") or first["process_fingerprint"] != second.get("process_fingerprint")
+        or any(obs.get("session_ref") != request["session_ref"]
+               or any(obs.get("agent", {}).get(key) != item.get(key) for key in keys)
+               for obs in (first, second))):
+        raise refusal
+    if check_only:
+        return {"runtime_instance_id": request["runtime_instance_id"], "verified": True,
+                "check_only": True, "process_effects": False, "task_completion_effects": False}
+    result = store.reconcile_restored_runtime(
+        request["runtime_instance_id"], actor["agent_id"], actor["thread_id"], request["session_ref"],
+        "herdr", request["endpoint"], request["expected_generation"], request["endpoint"], generation, at,
+        recover_observed_failure=True, expected_owner_agent_id=request["owner_agent_id"],
+        expected_agent_version=actor["version"],
+    )
+    return {**result, "process_effects": False, "task_completion_effects": False}
 
 
 def validate_registration(store: Any, command: Any) -> None:

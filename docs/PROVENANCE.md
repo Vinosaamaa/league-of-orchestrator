@@ -1,5 +1,18 @@
 # Source provenance
 
+## Issue #66 detached prompt-worker notification
+
+Prompt intake and triage-mode changes saved successfully for a detached owner,
+but their notification returned early because terminal delivery used the direct
+route. Detachment does not stop the persistent supervisor or classifier.
+Notification now resolves the exact live watcher registration for that route,
+checks actor, runtime and lease, and sends the existing fenced service message.
+It never falls back to a terminal prompt. Attached delivery is unchanged.
+The regression reproduces the original skipped notification and verifies
+detached user-priority and classifier signals, foreign/expired/stale refusals,
+and a real isolated socket response without a Shotcaller wake. Native capture
+and full installed acceptance remain separate gates.
+
 ## Issue #66 exact post-snapshot hook registration
 
 Individual inherited-Champion reconciliation refused an otherwise unchanged

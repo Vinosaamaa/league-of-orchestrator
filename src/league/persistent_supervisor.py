@@ -415,8 +415,22 @@ def notify_user_message(store: Any, actor_agent_id: str, prompt_id: str,
                         *, kind: str = 'user-message') -> bool:
     if kind not in {'user-message', 'triage-ready'}:
         raise ValueError('unsupported prompt notification kind')
-    target = store.delivery_target(actor_agent_id, _at())
-    if target is None or target.get("channel") != "watcher":
+    at = _at()
+    target = store.delivery_target(actor_agent_id, at)
+    if target is None:
+        return False
+    if target.get('channel') == 'direct':
+        # Detached receivers still own a persistent classifier and user-priority
+        # signal. Notify its exact service, never the terminal prompt interface.
+        registration = store.watcher_registration(actor_agent_id)
+        if (not isinstance(registration, Mapping)
+            or registration.get('actor_agent_id') != actor_agent_id
+            or registration.get('runtime_instance_id') != target.get('runtime_instance_id')
+            or datetime.fromisoformat(str(registration['leased_until']).replace('Z', '+00:00'))
+               <= datetime.fromisoformat(at.replace('Z', '+00:00'))):
+            return False
+        target = {**target, 'locator': registration['wake_locator'], 'fence': registration['fence']}
+    elif target.get('channel') != 'watcher':
         return False
     locator = str(target.get("locator", ""))
     if not locator.startswith("unix:"):

@@ -37,3 +37,16 @@ new continuation expectation while retaining prompt capture and rearm checks.
 
 Official native contract: <https://learn.chatgpt.com/docs/hooks#stop>.
 Source/test results alone do not prove the final live Stop boundary.
+
+## Installed recovery
+
+The installed-base recovery commit is
+`fe4cf0180f9d42c0ca73905f87551bea1406d5ca`, retained in PR #220's ancestry.
+The staged launcher passed the synthetic regression before the release pointer
+changed. All release file hashes match that commit; only the hook implementation
+and League supplement differ from the prior release. Both the previous release
+and guidance backup are retained. The universal guide is unchanged.
+
+Post-install watcher health is verified with unchanged ownership fences. There
+was no supervisor restart, database migration, worker activation or Champion
+cleanup. The next real end-of-turn boundary is still required for live acceptance.

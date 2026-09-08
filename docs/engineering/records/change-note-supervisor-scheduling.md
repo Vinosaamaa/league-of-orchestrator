@@ -1,7 +1,7 @@
 ---
 schemaVersion: 1
 id: "change-note-supervisor-scheduling"
-revision: 3
+revision: 4
 type: "change-note"
 status: "draft"
 title: "Keep user-facing supervision out of discretionary background scheduling"
@@ -96,3 +96,26 @@ This consolidated source is not installed. The idle check and send are still
 separate operations, so this draft does not satisfy the strict busy/idle race
 acceptance criterion. Short database polling likewise does not prove host-level
 wait interruption. Installed end-to-end acceptance and cleanup remain open.
+
+## Bounded Stop-loop recovery
+
+The every-Stop-blocks policy caused repeated native model continuations without
+new work or user steering. The Codex hook now recognizes an already-continued
+turn and reads the exact bound scope's last reported wait generation before
+contacting the broker. An unchanged continuation returns empty native output;
+fresh captured steering rearms the reminder. This read-only path neither clears
+obligations nor claims a supervisor handoff. Initial reminders, malformed-input
+validation, other providers, Champion Stop and completion evidence remain intact.
+
+The narrow installed-base commit `fe4cf0180f9d42c0ca73905f87551bea1406d5ca`
+contains only this recovery, tests and guidance, and is retained in this PR's
+ancestry. Its baseline and native-generation tests passed. The staged native
+launcher regression verifies repeated continuation suppression, unchanged
+logical database contents, unavailable-broker independence and fresh steering.
+
+That candidate is installed with exact source hashes and retained rollback.
+Only the hook implementation and matching League guidance differ from the prior
+release. No schema migration, worker activation or supervisor restart occurred.
+A post-install native health probe verified all existing watcher bindings with
+unchanged ownership fences. Final real-turn Stop acceptance remains the next
+boundary; this is not acceptance of the unfinished consolidated worker release.

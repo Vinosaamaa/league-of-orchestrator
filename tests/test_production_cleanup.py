@@ -490,6 +490,62 @@ def test_production_cleanup_crash_resume_and_lease_scope(
             assert store.connection.execute(
                 "SELECT COUNT(*) FROM events WHERE event_type='cleanup_assignment_reconciled'",
             ).fetchone()[0] == 1
+            # Historical owner acceptance completed the agent and cleanup,
+            # but left its ready-to-land task counted as unfinished.
+            before_operation = store.cleanup_operation(planned["operation_id"])
+            store.connection.execute(
+                "UPDATE tasks SET state='ready_to_land' WHERE task_id=?", (LIFECYCLE_TASK_ID,),
+            )
+            task_version = store.connection.execute(
+                "SELECT version FROM tasks WHERE task_id=?", (LIFECYCLE_TASK_ID,),
+            ).fetchone()[0]
+            store.connection.execute(
+                "UPDATE agent_instances SET status='working' WHERE agent_id=?", (CHAMPION_ID,),
+            )
+            unaccepted = store.finalize_cleanup(planned["operation_id"], resume_fence + 1, AT_RESUME)
+            assert unaccepted["task_reconciled"] is False
+            assert store.connection.execute(
+                "SELECT state,version FROM tasks WHERE task_id=?", (LIFECYCLE_TASK_ID,),
+            ).fetchone()[:] == ("ready_to_land", task_version)
+            store.connection.execute(
+                "UPDATE agent_instances SET status='completed',update_text='Accepted synthetic source' "
+                "WHERE agent_id=?", (CHAMPION_ID,),
+            )
+            for statement, restore, parameters, code in (
+                ("UPDATE tasks SET current_owner_agent_id=? WHERE task_id=?",
+                 "UPDATE tasks SET current_owner_agent_id=? WHERE task_id=?",
+                 (SHOTCALLER_ID, LIFECYCLE_TASK_ID), "cleanup_identity_mismatch"),
+                ("UPDATE teardown_receipts SET receipt_hash='foreign' WHERE operation_id=?",
+                 "UPDATE teardown_receipts SET receipt_hash=? WHERE operation_id=?",
+                 (planned["operation_id"],), "cleanup_receipt_conflict"),
+            ):
+                store.connection.execute(statement, parameters)
+                before = tuple(store.connection.iterdump())
+                try:
+                    store.finalize_cleanup(planned["operation_id"], resume_fence + 1, AT_RESUME)
+                except StorageRefusal as exc:
+                    assert exc.code == code, exc.code
+                else:
+                    raise AssertionError("unproven task settlement accepted")
+                assert tuple(store.connection.iterdump()) == before
+                store.connection.execute(restore,
+                    (CHAMPION_ID, LIFECYCLE_TASK_ID) if "tasks SET" in restore else
+                    (resumed["execution"]["receipt_hash"], planned["operation_id"]))
+            settled = service.execute(planned["operation_id"], expected_fence=resume_fence + 1,
+                executor_id="executor:task-settlement", leased_until=LEASE_RESUME, at=AT_RESUME)
+            task = store.connection.execute(
+                "SELECT state,version,result_summary FROM tasks WHERE task_id=?", (LIFECYCLE_TASK_ID,),
+            ).fetchone()
+            assert tuple(task) == ("completed", task_version + 1, "Accepted synthetic source"), dict(task)
+            assert settled["execution"]["task_reconciled"] is True
+            assert store.cleanup_operation(planned["operation_id"]) == before_operation
+            again = service.execute(planned["operation_id"], expected_fence=resume_fence + 1,
+                executor_id="executor:task-settlement", leased_until=LEASE_RESUME, at=AT_RESUME)
+            assert again["execution"]["idempotent"] is True
+            assert store.connection.execute(
+                "SELECT COUNT(*) FROM delivery_outbox WHERE event_id=?",
+                (f"cleanup:{planned['operation_id']}:task-reconciled",),
+            ).fetchone()[0] == 1
         assert store.connection.execute(
             "SELECT COUNT(*) FROM teardown_receipts WHERE operation_id=?",
             (planned["operation_id"],),

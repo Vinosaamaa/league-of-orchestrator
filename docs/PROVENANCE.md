@@ -1,5 +1,16 @@
 # Source provenance
 
+## Issue #23 accepted historical task settlement
+
+A completed-cleanup retry may now settle a historical `ready_to_land` task
+whose exact Champion already has accepted `completed` status. It validates
+the immutable cleanup policy and plan, final action receipts, closed runtime,
+released callsign and unchanged task/Champion/Shotcaller ownership first.
+Task transition and one recipient outbox commit atomically. Cleanup effects
+and original receipts are not replayed or rewritten, and ordinary task
+transition guards remain unchanged. Unaccepted work is not completed;
+conflicting receipts or ownership refuse without partial writes.
+
 ## Issue #23 final acceptance contract alignment
 
 Acceptance receipts now describe the existing schema 25 migration; fixture

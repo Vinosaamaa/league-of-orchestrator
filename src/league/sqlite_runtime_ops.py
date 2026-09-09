@@ -1746,6 +1746,7 @@ def finalize_cleanup(store: Any, operation_id: str, fence: int, at: str) -> dict
                 raise StorageRefusal("cleanup_fence_conflict", "cleanup finalization has a stale fence")
             was_completed = operation["state"] == "completed"
             assignment_reconciled = False
+            task_reconciled = False
             pending = store.connection.execute(
                 "SELECT COUNT(*) FROM cleanup_actions WHERE operation_id=? AND state!='completed'", (operation_id,)
             ).fetchone()[0]
@@ -1822,6 +1823,39 @@ def finalize_cleanup(store: Any, operation_id: str, fence: int, at: str) -> dict
                             (digest, at, assignment["task_assignment_id"], assignment["version"]),
                         )
                         assignment_reconciled = True
+                    if was_completed:
+                        task = store.connection.execute(
+                            "SELECT * FROM tasks WHERE task_id=?", (operation["task_id"],),
+                        ).fetchone()
+                        owner = store.connection.execute(
+                            "SELECT * FROM agent_instances WHERE agent_id=?", (archive["owner"]["id"],),
+                        ).fetchone()
+                        # Historical owner acceptance may have completed the
+                        # agent before cleanup, leaving its task ready to land.
+                        # Reconcile only that accepted state from immutable
+                        # completed cleanup proof; never infer it from teardown.
+                        if task is not None and task["state"] == "ready_to_land":
+                            cleanup_execution_context(store, operation_id)
+                            if (owner is None or owner["role"] != "champion"
+                                    or owner["task_id"] != task["task_id"]
+                                    or task["current_owner_agent_id"] != owner["agent_id"]
+                                    or owner["shotcaller_agent_id"] != assignment["coordinator_agent_id"]):
+                                raise StorageRefusal("cleanup_identity_mismatch", "accepted task has a different owner")
+                            if owner["status"] == "completed" and owner["update_text"]:
+                                from .sqlite_assignment_ops import _persist_task_transition
+
+                                event_id = f"cleanup:{operation_id}:task-reconciled"
+                                _persist_task_transition(
+                                    store, task=task, assignment=assignment, runtime=runtime,
+                                    task_id=task["task_id"], runtime_instance_id=runtime["runtime_instance_id"],
+                                    expected_version=task["version"], state="completed",
+                                    update=owner["update_text"], next_action="None", blocker=None,
+                                    transition_id=event_id, transition_key=event_id,
+                                    event_id=event_id, outbox_id=f"outbox:{event_id}",
+                                    recipient_agent_id=assignment["coordinator_agent_id"],
+                                    at=at, attention_required=False,
+                                )
+                                task_reconciled = True
             if was_completed:
                 if assignment_reconciled:
                     store.connection.execute(
@@ -1832,7 +1866,8 @@ def finalize_cleanup(store: Any, operation_id: str, fence: int, at: str) -> dict
                          _json({"operation_id": operation_id, "receipt_hash": digest})),
                     )
                 return {"operation_id": operation_id, "state": "cleanup_completed", "receipt_hash": digest,
-                        "idempotent": not assignment_reconciled, "assignment_reconciled": assignment_reconciled}
+                        "idempotent": not (assignment_reconciled or task_reconciled),
+                        "assignment_reconciled": assignment_reconciled, "task_reconciled": task_reconciled}
             store.connection.execute(
                 "INSERT INTO teardown_receipts(receipt_id,operation_id,task_id,policy_version,receipt_hash,completed_at) VALUES(?,?,?,?,?,?)",
                 (receipt_id, operation_id, operation["task_id"], operation["required_policy"], digest, at),

@@ -2656,3 +2656,14 @@ command injection. Native candidate acceptance passed challenge response, the
 publication guard, interrupted cleanup recovery, all six cleanup actions, and
 the final Stop decision. This is the disposable cleanup flow, not full installed
 prompt-triage and delivery acceptance or retained Champion teardown.
+
+## Compact inbox receipts (issue #23)
+
+An optional `delivery inbox --receipt-file` writes the exact read receipt to a
+new private file and returns only event IDs, kinds, summaries, and its file
+reference. This removes the need to reproduce delivery envelopes in visible
+file edits. Existing output without the flag remains unchanged. Exclusive
+creation rejects existing files and symlinks before claiming deliveries; failed
+writes never acknowledge messages. Exact acknowledgement and lease recovery
+remain unchanged. Focused tests cover private permissions, unsafe destinations,
+compact output, and acknowledgement from the saved receipt.

@@ -510,6 +510,8 @@ def _add_delivery_commands(groups: argparse._SubParsersAction) -> None:
     for field in ("owner-agent-id", "runtime-instance-id", "at"):
         inbox.add_argument(f"--{field}", required=True)
     inbox.add_argument("--limit", type=int, default=10)
+    inbox.add_argument("--receipt-file", type=Path,
+                       help="Save the full read receipt to a new private file and return compact updates.")
     inbox_ack = commands.add_parser("ack-inbox", help="Acknowledge an exact inbox read, not task completion.")
     inbox_ack.add_argument("--receipt", type=Path, required=True)
     inbox_ack.add_argument("--at", required=True)
@@ -2091,7 +2093,35 @@ def _delivery_inspect_outbox(store: Storage, args: argparse.Namespace) -> Comman
 
 def _delivery_inbox(store: Storage, args: argparse.Namespace) -> CommandResult:
     from .sqlite_inbox_ops import read
-    return read(store, args.owner_agent_id, args.runtime_instance_id, args.at, args.limit), None
+    path = getattr(args, 'receipt_file', None)
+    if path is None:
+        return read(store, args.owner_agent_id, args.runtime_instance_id, args.at, args.limit), None
+    if not path.is_absolute():
+        raise StorageRefusal('invalid_receipt_path', 'inbox receipt requires a new absolute file path')
+    try:
+        # Reserve before claiming deliveries; never overwrite a file or follow
+        # an existing symlink. The receipt is evidence, not a second queue.
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except OSError as exc:
+        raise StorageRefusal('invalid_receipt_path', 'inbox receipt destination is unavailable') from exc
+    with os.fdopen(descriptor, 'w', encoding='utf-8') as output:
+        receipt = read(store, args.owner_agent_id, args.runtime_instance_id, args.at, args.limit)
+        try:
+            json.dump(receipt, output, ensure_ascii=False, separators=(',', ':'))
+            output.write('\n')
+            output.flush()
+            os.fsync(output.fileno())
+        except OSError as exc:
+            # No acknowledgement occurred. An interrupted/failed receipt write
+            # leaves the normal expiring claim available for recovery.
+            raise StorageRefusal('receipt_write_failed', 'inbox receipt was not durably saved') from exc
+    return {
+        'receipt_file': str(path),
+        'lease_expires_at': receipt['lease_expires_at'],
+        'items': [{'event_id': item['envelope']['event_id'],
+                   'kind': item['envelope']['event_type'],
+                   'summary': item['envelope']['summary']} for item in receipt['items']],
+    }, None
 
 
 def _delivery_ack_inbox(store: Storage, args: argparse.Namespace) -> CommandResult:

@@ -2626,3 +2626,6 @@ rechecks the exact Codex identity and trust screen, cancels startup with Ctrl-C,
 and proves the agent disappeared before existing exact-resource cleanup. Changed
 identity or failed exit preserves resources. This fixes the blocked-startup
 failure path; it does not count a refused launch as completed lifecycle acceptance.
+An explicit `--codex-yolo` flag opts only that disposable invocation into native
+approval/sandbox bypass. Defaults and global configuration remain unchanged;
+the trust-screen check is not disabled by that flag.

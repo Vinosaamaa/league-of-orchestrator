@@ -897,7 +897,7 @@ def test_cursor_and_pi_use_provider_exit_contract() -> None:
 
 
 def test_canary_readiness_requires_reply_without_trust_override(root: Path) -> None:
-    for reply, stalled, trust in ((False, False, False), (True, False, False), (True, True, False), (False, False, True), (False, False, "refused")):
+    for reply, stalled, trust in ((False, False, False), (True, False, False), (True, True, False), (False, False, True), (False, False, "refused"), (True, False, "yolo")):
         home = root / f"reply-{reply}-stalled-{stalled}-trust-{trust}"
         worktree = home / "git/worktree"
         worktree.mkdir(parents=True)
@@ -919,9 +919,13 @@ def test_canary_readiness_requires_reply_without_trust_override(root: Path) -> N
                 assert token not in prompt
                 code = int(stalled)
                 result = json.dumps({"error": {"code": "agent_prompt_stalled"}} if stalled else {"ok": True})
+            elif args[:3] == ("herdr", "pane", "run"):
+                assert trust == "yolo"
+                assert args == ("herdr", "pane", "run", "w-test:p-test", "unfunction codex 2>/dev/null; whence -w codex")
+                result = "command submitted"
             elif args[:3] == ("herdr", "pane", "read"):
                 result = "gpt-6-astra high\n" + prompt
-                if trust:
+                if trust and trust != "yolo":
                     result = "Do you trust the\n contents of this directory?"
                 elif reply:
                     result += "\n" + token
@@ -941,6 +945,7 @@ def test_canary_readiness_requires_reply_without_trust_override(root: Path) -> N
             assert arguments[:2] == ("agent", "start")
             assert "gpt-6-astra" in arguments
             assert not any("trust_level" in part for part in arguments)
+            assert ("--dangerously-bypass-approvals-and-sandbox" in arguments) == (trust == "yolo")
             if trust == "refused":
                 raise StorageRefusal("real_canary_command_failed", "synthetic startup refusal")
             return {"ok": True}
@@ -952,15 +957,16 @@ def test_canary_readiness_requires_reply_without_trust_override(root: Path) -> N
         with patch.object(real_canary, "_run", side_effect=fake_run), patch.object(
             real_canary, "_herdr", side_effect=fake_herdr
         ), patch.object(real_canary, "_exact_agent", side_effect=[None, identity]):
-            if trust:
+            if trust and trust != "yolo":
                 refused(lambda: real_canary._create_herdr_canary(home, worktree, "test"), "real_canary_trust_required")
                 scope = json.loads((home / "failure-scope.json").read_text())
                 assert scope["herdr"]["startup_blocker"] == "directory_trust"
             elif reply:
-                assert real_canary._create_herdr_canary(home, worktree, "test")["session_id"] == "session-test"
+                assert real_canary._create_herdr_canary(home, worktree, "test", codex_yolo=trust == "yolo")["session_id"] == "session-test"
             else:
                 refused(lambda: real_canary._create_herdr_canary(home, worktree, "test"), "real_canary_readiness_unproven")
-        assert sum(call[:3] == ("herdr", "agent", "prompt") for call in calls) == (0 if trust else 1)
+        assert sum(call[:3] == ("herdr", "agent", "prompt") for call in calls) == (0 if trust and trust != "yolo" else 1)
+        assert any(call[:3] == ("herdr", "pane", "run") for call in calls) == (trust == "yolo")
 
 
 def test_trust_gate_cleanup_cancels_only_exact_canary() -> None:

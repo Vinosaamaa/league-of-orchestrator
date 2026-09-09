@@ -50,3 +50,10 @@ Command diagnostics expose only literal categories and numeric exits; combined
 failures preserve both refusal codes without terminal contents or arguments.
 Focused fixtures cover successful and refused starts at trust, zero prompt
 submission, exact cancellation, changed identity, stuck exit, and data exclusion.
+
+The explicit `--codex-yolo` acceptance option forwards the native bypass flag to
+this disposable Codex invocation only. It defaults off and removes an interactive
+`codex` shell function only inside the newly created disposable pane, verifying
+binary command resolution before launch. No global shell configuration, trust
+record, or retained agent changes; hook trust is not bypassed. The directory-trust
+refusal remains in place if the native gate appears.

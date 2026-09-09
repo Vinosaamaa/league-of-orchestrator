@@ -435,7 +435,7 @@ def _directory_trust_visible(text: str) -> bool:
     return "do you trust the contents of this" in normalized
 
 
-def _create_herdr_canary(home: Path, worktree: Path, namespace: str) -> dict[str, str]:
+def _create_herdr_canary(home: Path, worktree: Path, namespace: str, *, codex_yolo: bool = False) -> dict[str, str]:
     name = f"l23{hashlib.sha256(namespace.encode('utf-8')).hexdigest()[:12]}"
     repository = worktree.parent / "repository"
     if not repository.is_dir() or repository.is_symlink():
@@ -470,6 +470,15 @@ def _create_herdr_canary(home: Path, worktree: Path, namespace: str) -> dict[str
         "pane_id": pane_id,
     }
     _write_json(failure_scope_path, failure_scope)
+    if codex_yolo:
+        # Honor explicit native policy flags without a user's interactive shell
+        # function adding incompatible defaults. This changes only our new pane.
+        _run(("herdr", "pane", "run", pane_id, "unfunction codex 2>/dev/null; whence -w codex"), cwd=home)
+        _run(
+            ("herdr", "pane", "wait-output", pane_id, "--match", "codex: command",
+             "--source", "recent-unwrapped", "--lines", "20", "--timeout", "5000"),
+            cwd=home, timeout=10,
+        )
     start_error = None
     try:
         _herdr(
@@ -477,6 +486,7 @@ def _create_herdr_canary(home: Path, worktree: Path, namespace: str) -> dict[str
                 "agent", "start", name, "--kind", "codex", "--pane", pane_id,
                 "--timeout", "120000", "--", "--model", "gpt-6-astra",
                 "--config", 'model_reasoning_effort="high"',
+                *(("--dangerously-bypass-approvals-and-sandbox",) if codex_yolo else ()),
             ),
             home,
             timeout=150,
@@ -1194,7 +1204,7 @@ def _real_canary_paths(
     return root.resolve(), source, home
 
 
-def _prepare_real_canary(home: Path, source: Path, namespace: str) -> dict[str, Any]:
+def _prepare_real_canary(home: Path, source: Path, namespace: str, *, codex_yolo: bool = False) -> dict[str, Any]:
     git = _create_repository_artifact_canary(home, source, namespace)
     scope = {
         "schema": "league.real-canary-failure-scope.v1",
@@ -1202,7 +1212,7 @@ def _prepare_real_canary(home: Path, source: Path, namespace: str) -> dict[str, 
         "git": git,
     }
     _write_json(home / "failure-scope.json", scope)
-    herdr = _create_herdr_canary(home, Path(git["worktree"]), namespace)
+    herdr = _create_herdr_canary(home, Path(git["worktree"]), namespace, codex_yolo=codex_yolo)
     _write_json(home / "failure-scope.json", {**scope, "herdr": herdr})
     _write_json(home / "setup-receipt.json", {"git": git, "herdr": herdr})
     setup = _setup_sqlite(home, source, git, herdr)
@@ -1686,10 +1696,11 @@ def run_real_cleanup_canary(
     namespace: str,
     *,
     source_root: Path | None = None,
+    codex_yolo: bool = False,
 ) -> dict[str, Any]:
     root, source, home = _real_canary_paths(temporary_root, namespace, source_root)
     try:
-        prepared = _prepare_real_canary(home, source, namespace)
+        prepared = _prepare_real_canary(home, source, namespace, codex_yolo=codex_yolo)
         task = _complete_real_canary_task(home, source, prepared)
         operation_id = "operation:real-cleanup-canary"
         publication = _publish_real_canary_artifact(

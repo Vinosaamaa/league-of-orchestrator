@@ -1834,22 +1834,34 @@ def finalize_cleanup(store: Any, operation_id: str, fence: int, at: str) -> dict
                         # agent before cleanup, leaving its task ready to land.
                         # Reconcile only that accepted state from immutable
                         # completed cleanup proof; never infer it from teardown.
-                        if task is not None and task["state"] == "ready_to_land":
+                        event_id = f"cleanup:{operation_id}:task-reconciled"
+                        summary = f"Accepted work verified by completed cleanup receipt {digest}."
+                        prior = store.connection.execute(
+                            "SELECT entity_version,update_text FROM events WHERE event_id=? "
+                            "AND task_id=? AND event_type='task_transition' AND status='completed'",
+                            (event_id, operation["task_id"]),
+                        ).fetchone()
+                        repair_summary = bool(task is not None and prior is not None
+                            and task["state"] == "completed" and task["version"] == prior["entity_version"]
+                            and task["result_summary"] == prior["update_text"]
+                            and task["result_summary"] != summary)
+                        if task is not None and (task["state"] == "ready_to_land" or repair_summary):
                             cleanup_execution_context(store, operation_id)
                             if (owner is None or owner["role"] != "champion"
                                     or owner["task_id"] != task["task_id"]
                                     or task["current_owner_agent_id"] != owner["agent_id"]
                                     or owner["shotcaller_agent_id"] != assignment["coordinator_agent_id"]):
                                 raise StorageRefusal("cleanup_identity_mismatch", "accepted task has a different owner")
-                            if owner["status"] == "completed" and owner["update_text"]:
+                            if owner["status"] == "completed":
                                 from .sqlite_assignment_ops import _persist_task_transition
 
-                                event_id = f"cleanup:{operation_id}:task-reconciled"
+                                if repair_summary:
+                                    event_id += ":summary-corrected"
                                 _persist_task_transition(
                                     store, task=task, assignment=assignment, runtime=runtime,
                                     task_id=task["task_id"], runtime_instance_id=runtime["runtime_instance_id"],
                                     expected_version=task["version"], state="completed",
-                                    update=owner["update_text"], next_action="None", blocker=None,
+                                    update=summary, next_action="None", blocker=None,
                                     transition_id=event_id, transition_key=event_id,
                                     event_id=event_id, outbox_id=f"outbox:{event_id}",
                                     recipient_agent_id=assignment["coordinator_agent_id"],

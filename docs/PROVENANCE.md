@@ -1,5 +1,13 @@
 # Source provenance
 
+## Issue #23 immutable settlement summary
+
+The first installed historical reconciliation exposed that agent update text
+is mutable cleanup progress, not the accepted task result. Settlement now
+describes its verified final cleanup receipt. An exact untouched result from
+the earlier reconciliation may receive one corrective task event and outbox;
+the original event remains immutable, and later task revisions are preserved.
+
 ## Issue #23 accepted historical task settlement
 
 A completed-cleanup retry may now settle a historical `ready_to_land` task

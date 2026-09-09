@@ -82,6 +82,20 @@ class _FixtureSettlementIds:
         return f"{kind}:fixture-settlement:{self.sequence}"
 
 
+def _command_label(arguments: Sequence[str]) -> str:
+    # Labels are literals: never echo arguments, paths, prompts, or output.
+    for prefix in (
+        ("herdr", "agent", "start"), ("herdr", "agent", "prompt"),
+        ("herdr", "agent", "get"), ("herdr", "agent", "list"),
+        ("herdr", "pane", "split"), ("herdr", "pane", "close"),
+        ("herdr", "pane", "read"), ("herdr", "pane", "wait-output"),
+        ("git",), ("gh", "api"),
+    ):
+        if tuple(arguments[:len(prefix)]) == prefix:
+            return " ".join(prefix)
+    return "canary subprocess"
+
+
 def _run(
     arguments: Sequence[str],
     *,
@@ -101,12 +115,14 @@ def _run(
             timeout=timeout,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
+        reason = "timed out" if isinstance(exc, subprocess.TimeoutExpired) else "could not start"
         raise StorageRefusal(
-            "real_canary_command_failed", "a bounded real-canary command could not complete"
+            "real_canary_command_failed", f"{_command_label(arguments)} {reason}"
         ) from exc
     if result.returncode not in allowed:
         raise StorageRefusal(
-            "real_canary_command_failed", "a bounded real-canary command refused or failed"
+            "real_canary_command_failed",
+            f"{_command_label(arguments)} exited with code {result.returncode}",
         )
     return result
 
@@ -414,7 +430,12 @@ def _create_repository_artifact_canary(
     }
 
 
-def _create_herdr_canary(home: Path, worktree: Path, namespace: str) -> dict[str, str]:
+def _directory_trust_visible(text: str) -> bool:
+    normalized = " ".join(text.lower().split())
+    return "do you trust the contents of this" in normalized
+
+
+def _create_herdr_canary(home: Path, worktree: Path, namespace: str, *, codex_yolo: bool = False) -> dict[str, str]:
     name = f"l23{hashlib.sha256(namespace.encode('utf-8')).hexdigest()[:12]}"
     repository = worktree.parent / "repository"
     if not repository.is_dir() or repository.is_symlink():
@@ -449,26 +470,30 @@ def _create_herdr_canary(home: Path, worktree: Path, namespace: str) -> dict[str
         "pane_id": pane_id,
     }
     _write_json(failure_scope_path, failure_scope)
-    _herdr(
-        (
-            "agent",
-            "start",
-            name,
-            "--kind",
-            "codex",
-            "--pane",
-            pane_id,
-            "--timeout",
-            "120000",
-            "--",
-            "--model",
-            "gpt-6-astra",
-            "--config",
-            'model_reasoning_effort="high"',
-        ),
-        home,
-        timeout=150,
-    )
+    if codex_yolo:
+        # Honor explicit native policy flags without a user's interactive shell
+        # function adding incompatible defaults. This changes only our new pane.
+        _run(("herdr", "pane", "run", pane_id, "unfunction codex 2>/dev/null; whence -w codex"), cwd=home)
+        _run(
+            ("herdr", "pane", "wait-output", pane_id, "--match", "codex: command",
+             "--source", "recent-unwrapped", "--lines", "20", "--timeout", "5000"),
+            cwd=home, timeout=10,
+        )
+    start_error = None
+    try:
+        _herdr(
+            (
+                "agent", "start", name, "--kind", "codex", "--pane", pane_id,
+                "--timeout", "120000", "--", "--model", "gpt-6-astra",
+                "--config", 'model_reasoning_effort="high"',
+                *(("--dangerously-bypass-approvals-and-sandbox",) if codex_yolo else ()),
+            ),
+            home,
+            timeout=150,
+        )
+    except StorageRefusal as exc:
+        # A refused start can still leave the native trust UI running.
+        start_error = exc
     read_arguments = (
         "herdr",
         "pane",
@@ -481,6 +506,17 @@ def _create_herdr_canary(home: Path, worktree: Path, namespace: str) -> dict[str
         "--format",
         "text",
     )
+    startup = _run(read_arguments, cwd=home)
+    if _directory_trust_visible(startup.stdout):
+        # Herdr can report an idle agent before the native trust gate is resolved.
+        # Never send model input or accept that gate on the user's behalf.
+        failure_scope["herdr"]["startup_blocker"] = "directory_trust"
+        _write_json(failure_scope_path, failure_scope)
+        raise StorageRefusal(
+            "real_canary_trust_required", "disposable Codex repository requires human directory trust"
+        )
+    if start_error is not None:
+        raise start_error
     challenge = hashlib.sha256(os.urandom(32)).hexdigest()[:24]
     readiness_token = f"LEAGUE23_CANARY_READY_{challenge}"
     prompt_arguments = (
@@ -1168,7 +1204,7 @@ def _real_canary_paths(
     return root.resolve(), source, home
 
 
-def _prepare_real_canary(home: Path, source: Path, namespace: str) -> dict[str, Any]:
+def _prepare_real_canary(home: Path, source: Path, namespace: str, *, codex_yolo: bool = False) -> dict[str, Any]:
     git = _create_repository_artifact_canary(home, source, namespace)
     scope = {
         "schema": "league.real-canary-failure-scope.v1",
@@ -1176,7 +1212,7 @@ def _prepare_real_canary(home: Path, source: Path, namespace: str) -> dict[str, 
         "git": git,
     }
     _write_json(home / "failure-scope.json", scope)
-    herdr = _create_herdr_canary(home, Path(git["worktree"]), namespace)
+    herdr = _create_herdr_canary(home, Path(git["worktree"]), namespace, codex_yolo=codex_yolo)
     _write_json(home / "failure-scope.json", {**scope, "herdr": herdr})
     _write_json(home / "setup-receipt.json", {"git": git, "herdr": herdr})
     setup = _setup_sqlite(home, source, git, herdr)
@@ -1245,6 +1281,26 @@ def _cleanup_failed_herdr(
             "real_canary_failure_cleanup_refused",
             "failed canary agent endpoint identity changed",
         )
+    if agent is not None and herdr.get("startup_blocker") == "directory_trust":
+        visible = _run(
+            ("herdr", "pane", "read", str(pane_id), "--source", "recent-unwrapped",
+             "--lines", "160", "--format", "text"), cwd=home,
+        )
+        if agent.get("agent") != "codex" or not _directory_trust_visible(visible.stdout):
+            raise StorageRefusal(
+                "real_canary_failure_cleanup_refused", "failed canary trust-screen identity changed"
+            )
+        _herdr(("agent", "send-keys", str(agent_name), "ctrl+c"), home)
+        for attempt in range(6):
+            agent = _exact_agent(home, str(agent_name))
+            if agent is None:
+                break
+            if attempt < 5:
+                time.sleep(0.2)
+        if agent is not None:
+            raise StorageRefusal(
+                "real_canary_failure_cleanup_refused", "failed canary trust process did not exit"
+            )
     if agent is not None and agent.get("agent_status") != "done":
         remaining = agent
         for attempt in range(2):
@@ -1640,10 +1696,11 @@ def run_real_cleanup_canary(
     namespace: str,
     *,
     source_root: Path | None = None,
+    codex_yolo: bool = False,
 ) -> dict[str, Any]:
     root, source, home = _real_canary_paths(temporary_root, namespace, source_root)
     try:
-        prepared = _prepare_real_canary(home, source, namespace)
+        prepared = _prepare_real_canary(home, source, namespace, codex_yolo=codex_yolo)
         task = _complete_real_canary_task(home, source, prepared)
         operation_id = "operation:real-cleanup-canary"
         publication = _publish_real_canary_artifact(
@@ -1655,12 +1712,16 @@ def run_real_cleanup_canary(
         return _build_real_canary_receipt(
             root, home, namespace, prepared, task, publication, cleanup, operation_id
         )
-    except BaseException:
+    except BaseException as primary_exc:
         try:
             _cleanup_failed_canary(home)
         except BaseException as cleanup_exc:
+            # Keep the primary command failure visible when compensation fails.
+            # Both fields are exception classes/codes, not subprocess output.
+            primary = primary_exc.code if isinstance(primary_exc, StorageRefusal) else type(primary_exc).__name__
+            cleanup = cleanup_exc.code if isinstance(cleanup_exc, StorageRefusal) else type(cleanup_exc).__name__
             raise StorageRefusal(
                 "real_canary_failure_cleanup_failed",
-                "failed canary resources could not be proven safe for exact cleanup",
+                f"failed canary cleanup refused (primary={primary}; cleanup={cleanup})",
             ) from cleanup_exc
         raise

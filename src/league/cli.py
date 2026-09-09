@@ -217,6 +217,10 @@ def _add_acceptance_commands(groups: argparse._SubParsersAction) -> None:
     cleanup_canary.add_argument("--temporary-root", type=Path, required=True)
     cleanup_canary.add_argument("--namespace", required=True)
     cleanup_canary.add_argument("--source-root", type=Path, required=True)
+    cleanup_canary.add_argument(
+        "--codex-yolo", action="store_true",
+        help="Explicitly disable approvals and sandboxing for this disposable Codex run only.",
+    )
 
 
 def _add_storage_commands(groups: argparse._SubParsersAction) -> None:
@@ -4465,6 +4469,7 @@ def _run(args: argparse.Namespace) -> CommandResult:
             args.temporary_root,
             args.namespace,
             source_root=args.source_root,
+            codex_yolo=args.codex_yolo,
         ), None
     if command in CONFIG_ONLY_COMMANDS:
         if args.state_root is not None:

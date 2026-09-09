@@ -897,8 +897,8 @@ def test_cursor_and_pi_use_provider_exit_contract() -> None:
 
 
 def test_canary_readiness_requires_reply_without_trust_override(root: Path) -> None:
-    for reply, stalled in ((False, False), (True, False), (True, True)):
-        home = root / f"reply-{reply}-stalled-{stalled}"
+    for reply, stalled, trust in ((False, False, False), (True, False, False), (True, True, False), (False, False, True), (False, False, "refused"), (True, False, "yolo")):
+        home = root / f"reply-{reply}-stalled-{stalled}-trust-{trust}"
         worktree = home / "git/worktree"
         worktree.mkdir(parents=True)
         (worktree.parent / "repository").mkdir()
@@ -919,9 +919,15 @@ def test_canary_readiness_requires_reply_without_trust_override(root: Path) -> N
                 assert token not in prompt
                 code = int(stalled)
                 result = json.dumps({"error": {"code": "agent_prompt_stalled"}} if stalled else {"ok": True})
+            elif args[:3] == ("herdr", "pane", "run"):
+                assert trust == "yolo"
+                assert args == ("herdr", "pane", "run", "w-test:p-test", "unfunction codex 2>/dev/null; whence -w codex")
+                result = "command submitted"
             elif args[:3] == ("herdr", "pane", "read"):
                 result = "gpt-6-astra high\n" + prompt
-                if reply:
+                if trust and trust != "yolo":
+                    result = "Do you trust the\n contents of this directory?"
+                elif reply:
                     result += "\n" + token
             elif args[0] == "git":
                 if "rev-parse" in args:
@@ -939,6 +945,9 @@ def test_canary_readiness_requires_reply_without_trust_override(root: Path) -> N
             assert arguments[:2] == ("agent", "start")
             assert "gpt-6-astra" in arguments
             assert not any("trust_level" in part for part in arguments)
+            assert ("--dangerously-bypass-approvals-and-sandbox" in arguments) == (trust == "yolo")
+            if trust == "refused":
+                raise StorageRefusal("real_canary_command_failed", "synthetic startup refusal")
             return {"ok": True}
 
         identity = {
@@ -948,14 +957,89 @@ def test_canary_readiness_requires_reply_without_trust_override(root: Path) -> N
         with patch.object(real_canary, "_run", side_effect=fake_run), patch.object(
             real_canary, "_herdr", side_effect=fake_herdr
         ), patch.object(real_canary, "_exact_agent", side_effect=[None, identity]):
-            if reply:
-                assert real_canary._create_herdr_canary(home, worktree, "test")["session_id"] == "session-test"
+            if trust and trust != "yolo":
+                refused(lambda: real_canary._create_herdr_canary(home, worktree, "test"), "real_canary_trust_required")
+                scope = json.loads((home / "failure-scope.json").read_text())
+                assert scope["herdr"]["startup_blocker"] == "directory_trust"
+            elif reply:
+                assert real_canary._create_herdr_canary(home, worktree, "test", codex_yolo=trust == "yolo")["session_id"] == "session-test"
             else:
                 refused(lambda: real_canary._create_herdr_canary(home, worktree, "test"), "real_canary_readiness_unproven")
-        assert sum(call[:3] == ("herdr", "agent", "prompt") for call in calls) == 1
+        assert sum(call[:3] == ("herdr", "agent", "prompt") for call in calls) == (0 if trust and trust != "yolo" else 1)
+        assert any(call[:3] == ("herdr", "pane", "run") for call in calls) == (trust == "yolo")
+
+
+def test_trust_gate_cleanup_cancels_only_exact_canary() -> None:
+    namespace = "trust-fixture"
+    name = "l23" + hashlib.sha256(namespace.encode()).hexdigest()[:12]
+    identity = {"agent": "codex", "pane_id": "w-test:p-canary", "agent_status": "idle"}
+    scope = {"agent_name": name, "pane_id": identity["pane_id"], "workspace_id": "w-test",
+             "startup_blocker": "directory_trust"}
+    screen = "Do you trust the\n contents of this directory?"
+    for mode in ("exit", "changed", "stuck", "wrong-pane"):
+        calls = []
+        def fake_herdr(arguments: Sequence[str], *args: Any, **kwargs: Any) -> dict[str, Any]:
+            calls.append(tuple(arguments))
+            if arguments[:2] == ("pane", "list"):
+                return {"result": {"panes": [{"pane_id": identity["pane_id"]}]}}
+            assert arguments in (("agent", "send-keys", name, "ctrl+c"), ("pane", "close", identity["pane_id"]))
+            return {}
+        observations = [identity, None] if mode == "exit" else None
+        observed = {**identity, "pane_id": "w-test:p-other"} if mode == "wrong-pane" else identity
+        with patch.object(real_canary, "_exact_agent", side_effect=observations, return_value=observed), patch.object(
+            real_canary, "_run", return_value=subprocess.CompletedProcess([], 0, "ready" if mode == "changed" else screen, "")
+        ), patch.object(real_canary, "_herdr", side_effect=fake_herdr), patch.object(real_canary.time, "sleep"):
+            if mode == "exit":
+                real_canary._cleanup_failed_herdr(Path("."), namespace, scope)
+            else:
+                refused(lambda: real_canary._cleanup_failed_herdr(Path("."), namespace, scope), "real_canary_failure_cleanup_refused")
+        assert ("pane", "close", identity["pane_id"]) in calls if mode == "exit" else not any(c[:2] == ("pane", "close") for c in calls)
+        assert not any(c[:2] == ("agent", "prompt") for c in calls)
+        if mode in ("changed", "wrong-pane"):
+            assert not calls
+
+
+def test_canary_failure_diagnostics_do_not_echo_private_data() -> None:
+    secret = "private-path-or-prompt"
+    arguments = ("herdr", "agent", "start", secret)
+    cases = (
+        (subprocess.CompletedProcess(arguments, 2, secret, secret), "herdr agent start exited with code 2"),
+        (subprocess.TimeoutExpired(arguments, 1, output=secret), "herdr agent start timed out"),
+        (OSError(secret), "herdr agent start could not start"),
+    )
+    for outcome, expected in cases:
+        mocked = {"side_effect": outcome} if isinstance(outcome, Exception) else {"return_value": outcome}
+        with patch.object(real_canary.subprocess, "run", **mocked):
+            try:
+                real_canary._run(arguments, cwd=Path("."))
+            except StorageRefusal as exc:
+                assert exc.code == "real_canary_command_failed"
+                assert str(exc) == expected, str(exc)
+                assert secret not in str(exc)
+            else:
+                raise AssertionError("expected command refusal")
+    assert real_canary._command_label((secret, secret)) == "canary subprocess"
+    with patch.object(real_canary.subprocess, "run", return_value=cases[0][0]):
+        assert real_canary._run(arguments, cwd=Path("."), allowed=frozenset({2})).returncode == 2
+    with patch.object(real_canary, "_real_canary_paths", return_value=(Path("."),) * 3), patch.object(
+        real_canary, "_prepare_real_canary", side_effect=StorageRefusal("real_canary_command_failed", secret)
+    ), patch.object(
+        real_canary, "_cleanup_failed_canary", side_effect=StorageRefusal("real_canary_failure_cleanup_refused", secret)
+    ):
+        try:
+            real_canary.run_real_cleanup_canary(Path("."), "synthetic")
+        except StorageRefusal as exc:
+            assert exc.code == "real_canary_failure_cleanup_failed"
+            assert "primary=real_canary_command_failed" in str(exc)
+            assert "cleanup=real_canary_failure_cleanup_refused" in str(exc)
+            assert secret not in str(exc)
+        else:
+            raise AssertionError("expected cleanup refusal")
 
 
 def main() -> None:
+    test_canary_failure_diagnostics_do_not_echo_private_data()
+    test_trust_gate_cleanup_cancels_only_exact_canary()
     with tempfile.TemporaryDirectory(prefix="league-real-cleanup-") as directory:
         root = Path(directory)
         test_canary_readiness_requires_reply_without_trust_override(root / "readiness")

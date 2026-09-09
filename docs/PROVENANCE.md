@@ -2616,3 +2616,13 @@ cross-owner/session/runtime exclusion, expiry and unchanged prompt bytes. Real
 model samples separately verify that a short response to a supplied explicit
 invitation links correctly and an unsupported reference does not guess.
 Installed capture and full lifecycle acceptance remain separate release gates.
+
+## Disposable startup trust refusal (issue #23)
+
+A native canary start may report readiness or refuse while a directory-trust
+screen remains active. Inspect that screen before submitting the readiness
+challenge on either path. Never accept trust automatically. Failure compensation
+rechecks the exact Codex identity and trust screen, cancels startup with Ctrl-C,
+and proves the agent disappeared before existing exact-resource cleanup. Changed
+identity or failed exit preserves resources. This fixes the blocked-startup
+failure path; it does not count a refused launch as completed lifecycle acceptance.

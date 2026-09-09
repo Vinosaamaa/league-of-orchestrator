@@ -430,6 +430,11 @@ def _create_repository_artifact_canary(
     }
 
 
+def _directory_trust_visible(text: str) -> bool:
+    normalized = " ".join(text.lower().split())
+    return "do you trust the contents of this" in normalized
+
+
 def _create_herdr_canary(home: Path, worktree: Path, namespace: str) -> dict[str, str]:
     name = f"l23{hashlib.sha256(namespace.encode('utf-8')).hexdigest()[:12]}"
     repository = worktree.parent / "repository"
@@ -465,26 +470,20 @@ def _create_herdr_canary(home: Path, worktree: Path, namespace: str) -> dict[str
         "pane_id": pane_id,
     }
     _write_json(failure_scope_path, failure_scope)
-    _herdr(
-        (
-            "agent",
-            "start",
-            name,
-            "--kind",
-            "codex",
-            "--pane",
-            pane_id,
-            "--timeout",
-            "120000",
-            "--",
-            "--model",
-            "gpt-6-astra",
-            "--config",
-            'model_reasoning_effort="high"',
-        ),
-        home,
-        timeout=150,
-    )
+    start_error = None
+    try:
+        _herdr(
+            (
+                "agent", "start", name, "--kind", "codex", "--pane", pane_id,
+                "--timeout", "120000", "--", "--model", "gpt-6-astra",
+                "--config", 'model_reasoning_effort="high"',
+            ),
+            home,
+            timeout=150,
+        )
+    except StorageRefusal as exc:
+        # A refused start can still leave the native trust UI running.
+        start_error = exc
     read_arguments = (
         "herdr",
         "pane",
@@ -497,6 +496,17 @@ def _create_herdr_canary(home: Path, worktree: Path, namespace: str) -> dict[str
         "--format",
         "text",
     )
+    startup = _run(read_arguments, cwd=home)
+    if _directory_trust_visible(startup.stdout):
+        # Herdr can report an idle agent before the native trust gate is resolved.
+        # Never send model input or accept that gate on the user's behalf.
+        failure_scope["herdr"]["startup_blocker"] = "directory_trust"
+        _write_json(failure_scope_path, failure_scope)
+        raise StorageRefusal(
+            "real_canary_trust_required", "disposable Codex repository requires human directory trust"
+        )
+    if start_error is not None:
+        raise start_error
     challenge = hashlib.sha256(os.urandom(32)).hexdigest()[:24]
     readiness_token = f"LEAGUE23_CANARY_READY_{challenge}"
     prompt_arguments = (
@@ -1261,6 +1271,26 @@ def _cleanup_failed_herdr(
             "real_canary_failure_cleanup_refused",
             "failed canary agent endpoint identity changed",
         )
+    if agent is not None and herdr.get("startup_blocker") == "directory_trust":
+        visible = _run(
+            ("herdr", "pane", "read", str(pane_id), "--source", "recent-unwrapped",
+             "--lines", "160", "--format", "text"), cwd=home,
+        )
+        if agent.get("agent") != "codex" or not _directory_trust_visible(visible.stdout):
+            raise StorageRefusal(
+                "real_canary_failure_cleanup_refused", "failed canary trust-screen identity changed"
+            )
+        _herdr(("agent", "send-keys", str(agent_name), "ctrl+c"), home)
+        for attempt in range(6):
+            agent = _exact_agent(home, str(agent_name))
+            if agent is None:
+                break
+            if attempt < 5:
+                time.sleep(0.2)
+        if agent is not None:
+            raise StorageRefusal(
+                "real_canary_failure_cleanup_refused", "failed canary trust process did not exit"
+            )
     if agent is not None and agent.get("agent_status") != "done":
         remaining = agent
         for attempt in range(2):

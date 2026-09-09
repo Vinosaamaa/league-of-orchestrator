@@ -154,9 +154,10 @@ $HOME/.local/bin/league --state-root "$HOME/.local/state/league" request turn \
 ## Delivery and supervision
 
 - During work, read `league delivery inbox --owner-agent-id <id>
-  --runtime-instance-id <runtime> --at <time>` at a task boundary and before
+  --runtime-instance-id <runtime> --at <time> --receipt-file <new-absolute-file>` at a task boundary and before
   reporting request completion. It returns pending Champion and triage updates
-  without submitting a prompt; an empty inbox requires no immediate repeat.
+  without submitting a prompt and saves the full receipt privately; do not copy
+  raw receipt JSON into a visible file edit. An empty inbox requires no immediate repeat.
 - After receiving an inbox or wait result, acknowledge its exact saved receipt
   with `league delivery ack-inbox --receipt <file> --at <time>`. Receipt removes
   pending delivery only; report request/task completion separately with evidence.

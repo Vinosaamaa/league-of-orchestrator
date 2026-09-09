@@ -1,6 +1,8 @@
 """A busy recipient consumes durable updates without invoking a prompt adapter."""
 
 from pathlib import Path
+from argparse import Namespace
+from unittest.mock import patch
 import json
 import sys
 import tempfile
@@ -14,6 +16,64 @@ from request_lifecycle_fixture import create_context, GAREN_RUNTIME, SyntheticLi
 from storage_fixture import SHOTCALLER_ID, CHAMPION_ID
 from league.sqlite_receiver_activity import finish_work
 from league.canonical_delivery import dispatch_event
+
+
+def test_cli_private_receipt():
+    from league.cli import _delivery_inbox, _delivery_ack_inbox
+
+    with tempfile.TemporaryDirectory(prefix='league-inbox-receipt-') as temporary:
+        root = Path(temporary)
+        _, store, clock = create_context(root)
+        try:
+            SyntheticLifecycleSeeder(store, clock).add_pending_delivery(
+                event_id='event:compact', outbox_id='outbox:compact',
+                recipient_agent_id=SHOTCALLER_ID, source_agent_id=SHOTCALLER_ID,
+                update='Synthetic source accepted.')
+            path = root / 'receipt.json'
+            args = Namespace(owner_agent_id=SHOTCALLER_ID, runtime_instance_id=GAREN_RUNTIME,
+                             at=clock.now(), limit=10, receipt_file=path)
+            sentinel = root / 'preserved.json'
+            sentinel.write_text('preserve')
+            link = root / 'link.json'
+            link.symlink_to(sentinel)
+            for invalid in (Path('relative.json'), sentinel, link, root / 'absent' / 'receipt.json'):
+                args.receipt_file = invalid
+                try:
+                    _delivery_inbox(store, args)
+                except StorageRefusal as exc:
+                    assert exc.code == 'invalid_receipt_path', exc.code
+                else:
+                    raise AssertionError('unsafe receipt path accepted')
+            assert sentinel.read_text() == 'preserve'
+            assert not store.connection.execute('SELECT 1 FROM outbox_dispatch_leases').fetchall()
+            args.receipt_file = path
+            compact, _ = _delivery_inbox(store, args)
+            assert path.stat().st_mode & 0o777 == 0o600
+            saved = json.loads(path.read_text())
+            assert len(saved['items']) == 1
+            assert compact['items'] == [{'event_id': 'event:compact', 'kind': 'agent_transition',
+                                         'summary': 'Synthetic source accepted.'}]
+            assert compact['receipt_file'] == str(path)
+            assert 'envelope_sha256' not in json.dumps(compact)
+            assert store.connection.execute("SELECT state FROM delivery_outbox WHERE outbox_id='outbox:compact'").fetchone()[0] == 'in_flight'
+            result, _ = _delivery_ack_inbox(store, Namespace(receipt=path, at=clock.now()))
+            assert len(result['received']) == 1
+            assert not read(store, SHOTCALLER_ID, GAREN_RUNTIME, clock.now())['items']
+            SyntheticLifecycleSeeder(store, clock).add_pending_delivery(
+                event_id='event:write-failure', outbox_id='outbox:write-failure',
+                recipient_agent_id=SHOTCALLER_ID, source_agent_id=CHAMPION_ID,
+                update='Synthetic pending update.')
+            args.receipt_file = root / 'failed-receipt.json'
+            with patch('league.cli.os.fsync', side_effect=OSError('synthetic disk failure')):
+                try:
+                    _delivery_inbox(store, args)
+                except StorageRefusal as exc:
+                    assert exc.code == 'receipt_write_failed', exc.code
+                else:
+                    raise AssertionError('failed durable write accepted')
+            assert store.connection.execute("SELECT state FROM delivery_outbox WHERE outbox_id='outbox:write-failure'").fetchone()[0] == 'in_flight'
+        finally:
+            store.close()
 
 
 def test_background_busy_boundary():
@@ -114,6 +174,7 @@ def test_background_busy_boundary():
 
 
 def main():
+    test_cli_private_receipt()
     test_background_busy_boundary()
     with tempfile.TemporaryDirectory(prefix='league-inbox-') as temporary:
         _, store, clock = create_context(Path(temporary))

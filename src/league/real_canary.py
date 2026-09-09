@@ -216,7 +216,24 @@ def _json_result(result: subprocess.CompletedProcess[str], label: str) -> dict[s
 
 
 def _herdr(arguments: Sequence[str], cwd: Path, *, timeout: int = 120) -> dict[str, Any]:
-    return _json_result(_run(("herdr", *arguments), cwd=cwd, timeout=timeout), "Herdr")
+    if tuple(arguments[:2]) != ("agent", "start"):
+        return _json_result(_run(("herdr", *arguments), cwd=cwd, timeout=timeout), "Herdr")
+    # Output from shell setup can arrive before the prompt is available. Herdr's
+    # atomic start preflight rejects this without submitting input. Retry only
+    # that explicit refusal, never a timeout or an uncertain partial launch.
+    for attempt in range(21):
+        result = _run(("herdr", *arguments), cwd=cwd, timeout=timeout,
+                      allowed=frozenset({0, 1}))
+        value = _json_result(result, "Herdr")
+        if result.returncode == 0:
+            return value
+        code = value.get("error", {}).get("code")
+        if code == "agent_pane_busy" and attempt < 20:
+            time.sleep(0.1)
+            continue
+        reason = "shell remained unavailable" if code == "agent_pane_busy" else "native startup refused"
+        raise StorageRefusal("real_canary_command_failed", f"herdr agent start: {reason}")
+    raise AssertionError("bounded start attempts exhausted")
 
 
 def _agent_rows(cwd: Path) -> list[dict[str, Any]]:
@@ -435,7 +452,8 @@ def _directory_trust_visible(text: str) -> bool:
     return "do you trust the contents of this" in normalized
 
 
-def _create_herdr_canary(home: Path, worktree: Path, namespace: str, *, codex_yolo: bool = False) -> dict[str, str]:
+def _create_herdr_canary(home: Path, worktree: Path, namespace: str, *, codex_yolo: bool = False,
+                        trust_wait_seconds: int = 0) -> dict[str, str]:
     name = f"l23{hashlib.sha256(namespace.encode('utf-8')).hexdigest()[:12]}"
     repository = worktree.parent / "repository"
     if not repository.is_dir() or repository.is_symlink():
@@ -512,9 +530,29 @@ def _create_herdr_canary(home: Path, worktree: Path, namespace: str, *, codex_yo
         # Never send model input or accept that gate on the user's behalf.
         failure_scope["herdr"]["startup_blocker"] = "directory_trust"
         _write_json(failure_scope_path, failure_scope)
-        raise StorageRefusal(
-            "real_canary_trust_required", "disposable Codex repository requires human directory trust"
-        )
+        deadline = time.monotonic() + trust_wait_seconds
+        ready = False
+        while time.monotonic() < deadline:
+            visible = _run(("herdr", "pane", "read", pane_id, "--source", "visible",
+                            "--lines", "160", "--format", "text"), cwd=home)
+            identity = _exact_agent(home, name)
+            ready = (not _directory_trust_visible(visible.stdout)
+                     and "gpt-6-astra high" in visible.stdout
+                     and identity is not None and identity.get("agent") == "codex"
+                     and identity.get("pane_id") == pane_id
+                     and _codex_session_id(identity) is not None)
+            if ready:
+                break
+            time.sleep(0.2)
+        if not ready:
+            raise StorageRefusal(
+                "real_canary_trust_required", "disposable Codex repository requires human directory trust"
+            )
+        # Only human interaction can clear this gate. Keep the normal challenge
+        # below: a changed screen alone is not successful model acceptance.
+        del failure_scope["herdr"]["startup_blocker"]
+        _write_json(failure_scope_path, failure_scope)
+        start_error = None
     if start_error is not None:
         raise start_error
     challenge = hashlib.sha256(os.urandom(32)).hexdigest()[:24]
@@ -1204,7 +1242,8 @@ def _real_canary_paths(
     return root.resolve(), source, home
 
 
-def _prepare_real_canary(home: Path, source: Path, namespace: str, *, codex_yolo: bool = False) -> dict[str, Any]:
+def _prepare_real_canary(home: Path, source: Path, namespace: str, *, codex_yolo: bool = False,
+                         trust_wait_seconds: int = 0) -> dict[str, Any]:
     git = _create_repository_artifact_canary(home, source, namespace)
     scope = {
         "schema": "league.real-canary-failure-scope.v1",
@@ -1212,7 +1251,8 @@ def _prepare_real_canary(home: Path, source: Path, namespace: str, *, codex_yolo
         "git": git,
     }
     _write_json(home / "failure-scope.json", scope)
-    herdr = _create_herdr_canary(home, Path(git["worktree"]), namespace, codex_yolo=codex_yolo)
+    herdr = _create_herdr_canary(home, Path(git["worktree"]), namespace, codex_yolo=codex_yolo,
+                               trust_wait_seconds=trust_wait_seconds)
     _write_json(home / "failure-scope.json", {**scope, "herdr": herdr})
     _write_json(home / "setup-receipt.json", {"git": git, "herdr": herdr})
     setup = _setup_sqlite(home, source, git, herdr)
@@ -1697,10 +1737,14 @@ def run_real_cleanup_canary(
     *,
     source_root: Path | None = None,
     codex_yolo: bool = False,
+    trust_wait_seconds: int = 0,
 ) -> dict[str, Any]:
+    if type(trust_wait_seconds) is not int or not 0 <= trust_wait_seconds <= 300:
+        raise StorageRefusal("invalid_trust_wait", "human trust wait must be between 0 and 300 seconds")
     root, source, home = _real_canary_paths(temporary_root, namespace, source_root)
     try:
-        prepared = _prepare_real_canary(home, source, namespace, codex_yolo=codex_yolo)
+        prepared = _prepare_real_canary(home, source, namespace, codex_yolo=codex_yolo,
+                                        trust_wait_seconds=trust_wait_seconds)
         task = _complete_real_canary_task(home, source, prepared)
         operation_id = "operation:real-cleanup-canary"
         publication = _publish_real_canary_artifact(

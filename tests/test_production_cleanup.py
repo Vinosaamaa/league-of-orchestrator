@@ -508,7 +508,7 @@ def test_production_cleanup_crash_resume_and_lease_scope(
                 "SELECT state,version FROM tasks WHERE task_id=?", (LIFECYCLE_TASK_ID,),
             ).fetchone()[:] == ("ready_to_land", task_version)
             store.connection.execute(
-                "UPDATE agent_instances SET status='completed',update_text='Accepted synthetic source' "
+                "UPDATE agent_instances SET status='completed',update_text='callsign released' "
                 "WHERE agent_id=?", (CHAMPION_ID,),
             )
             for statement, restore, parameters, code in (
@@ -536,7 +536,8 @@ def test_production_cleanup_crash_resume_and_lease_scope(
             task = store.connection.execute(
                 "SELECT state,version,result_summary FROM tasks WHERE task_id=?", (LIFECYCLE_TASK_ID,),
             ).fetchone()
-            assert tuple(task) == ("completed", task_version + 1, "Accepted synthetic source"), dict(task)
+            expected_summary = f"Accepted work verified by completed cleanup receipt {resumed['execution']['receipt_hash']}."
+            assert tuple(task) == ("completed", task_version + 1, expected_summary), dict(task)
             assert settled["execution"]["task_reconciled"] is True
             assert store.cleanup_operation(planned["operation_id"]) == before_operation
             again = service.execute(planned["operation_id"], expected_fence=resume_fence + 1,
@@ -546,6 +547,27 @@ def test_production_cleanup_crash_resume_and_lease_scope(
                 "SELECT COUNT(*) FROM delivery_outbox WHERE event_id=?",
                 (f"cleanup:{planned['operation_id']}:task-reconciled",),
             ).fetchone()[0] == 1
+            # The first shipped reconciliation copied mutable cleanup chatter.
+            # Correct only its exact untouched result, retaining the old event.
+            event_id = f"cleanup:{planned['operation_id']}:task-reconciled"
+            store.connection.execute("UPDATE tasks SET result_summary='callsign released' WHERE task_id=?",
+                (LIFECYCLE_TASK_ID,))
+            store.connection.execute("UPDATE events SET update_text='callsign released' WHERE event_id=?",
+                (event_id,))
+            store.connection.execute("UPDATE tasks SET version=version+1 WHERE task_id=?", (LIFECYCLE_TASK_ID,))
+            before = tuple(store.connection.iterdump())
+            assert store.finalize_cleanup(planned["operation_id"], resume_fence + 1, AT_RESUME)["idempotent"]
+            assert tuple(store.connection.iterdump()) == before
+            store.connection.execute("UPDATE tasks SET version=version-1 WHERE task_id=?", (LIFECYCLE_TASK_ID,))
+            corrected = store.finalize_cleanup(planned["operation_id"], resume_fence + 1, AT_RESUME)
+            assert corrected["task_reconciled"] is True
+            assert store.connection.execute("SELECT version,result_summary FROM tasks WHERE task_id=?",
+                (LIFECYCLE_TASK_ID,)).fetchone()[:] == (task_version + 2, expected_summary)
+            assert store.finalize_cleanup(planned["operation_id"], resume_fence + 1, AT_RESUME)["idempotent"]
+            assert store.connection.execute("SELECT update_text FROM events WHERE event_id=?",
+                (event_id,)).fetchone()[0] == "callsign released"
+            assert store.connection.execute("SELECT COUNT(*) FROM delivery_outbox WHERE event_id=?",
+                (event_id + ":summary-corrected",)).fetchone()[0] == 1
         assert store.connection.execute(
             "SELECT COUNT(*) FROM teardown_receipts WHERE operation_id=?",
             (planned["operation_id"],),

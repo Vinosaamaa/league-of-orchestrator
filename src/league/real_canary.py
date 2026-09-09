@@ -82,6 +82,20 @@ class _FixtureSettlementIds:
         return f"{kind}:fixture-settlement:{self.sequence}"
 
 
+def _command_label(arguments: Sequence[str]) -> str:
+    # Labels are literals: never echo arguments, paths, prompts, or output.
+    for prefix in (
+        ("herdr", "agent", "start"), ("herdr", "agent", "prompt"),
+        ("herdr", "agent", "get"), ("herdr", "agent", "list"),
+        ("herdr", "pane", "split"), ("herdr", "pane", "close"),
+        ("herdr", "pane", "read"), ("herdr", "pane", "wait-output"),
+        ("git",), ("gh", "api"),
+    ):
+        if tuple(arguments[:len(prefix)]) == prefix:
+            return " ".join(prefix)
+    return "canary subprocess"
+
+
 def _run(
     arguments: Sequence[str],
     *,
@@ -101,12 +115,14 @@ def _run(
             timeout=timeout,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
+        reason = "timed out" if isinstance(exc, subprocess.TimeoutExpired) else "could not start"
         raise StorageRefusal(
-            "real_canary_command_failed", "a bounded real-canary command could not complete"
+            "real_canary_command_failed", f"{_command_label(arguments)} {reason}"
         ) from exc
     if result.returncode not in allowed:
         raise StorageRefusal(
-            "real_canary_command_failed", "a bounded real-canary command refused or failed"
+            "real_canary_command_failed",
+            f"{_command_label(arguments)} exited with code {result.returncode}",
         )
     return result
 
@@ -1655,12 +1671,16 @@ def run_real_cleanup_canary(
         return _build_real_canary_receipt(
             root, home, namespace, prepared, task, publication, cleanup, operation_id
         )
-    except BaseException:
+    except BaseException as primary_exc:
         try:
             _cleanup_failed_canary(home)
         except BaseException as cleanup_exc:
+            # Keep the primary command failure visible when compensation fails.
+            # Both fields are exception classes/codes, not subprocess output.
+            primary = primary_exc.code if isinstance(primary_exc, StorageRefusal) else type(primary_exc).__name__
+            cleanup = cleanup_exc.code if isinstance(cleanup_exc, StorageRefusal) else type(cleanup_exc).__name__
             raise StorageRefusal(
                 "real_canary_failure_cleanup_failed",
-                "failed canary resources could not be proven safe for exact cleanup",
+                f"failed canary cleanup refused (primary={primary}; cleanup={cleanup})",
             ) from cleanup_exc
         raise

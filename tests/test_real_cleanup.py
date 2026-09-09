@@ -955,7 +955,46 @@ def test_canary_readiness_requires_reply_without_trust_override(root: Path) -> N
         assert sum(call[:3] == ("herdr", "agent", "prompt") for call in calls) == 1
 
 
+def test_canary_failure_diagnostics_do_not_echo_private_data() -> None:
+    secret = "private-path-or-prompt"
+    arguments = ("herdr", "agent", "start", secret)
+    cases = (
+        (subprocess.CompletedProcess(arguments, 2, secret, secret), "herdr agent start exited with code 2"),
+        (subprocess.TimeoutExpired(arguments, 1, output=secret), "herdr agent start timed out"),
+        (OSError(secret), "herdr agent start could not start"),
+    )
+    for outcome, expected in cases:
+        mocked = {"side_effect": outcome} if isinstance(outcome, Exception) else {"return_value": outcome}
+        with patch.object(real_canary.subprocess, "run", **mocked):
+            try:
+                real_canary._run(arguments, cwd=Path("."))
+            except StorageRefusal as exc:
+                assert exc.code == "real_canary_command_failed"
+                assert str(exc) == expected, str(exc)
+                assert secret not in str(exc)
+            else:
+                raise AssertionError("expected command refusal")
+    assert real_canary._command_label((secret, secret)) == "canary subprocess"
+    with patch.object(real_canary.subprocess, "run", return_value=cases[0][0]):
+        assert real_canary._run(arguments, cwd=Path("."), allowed=frozenset({2})).returncode == 2
+    with patch.object(real_canary, "_real_canary_paths", return_value=(Path("."),) * 3), patch.object(
+        real_canary, "_prepare_real_canary", side_effect=StorageRefusal("real_canary_command_failed", secret)
+    ), patch.object(
+        real_canary, "_cleanup_failed_canary", side_effect=StorageRefusal("real_canary_failure_cleanup_refused", secret)
+    ):
+        try:
+            real_canary.run_real_cleanup_canary(Path("."), "synthetic")
+        except StorageRefusal as exc:
+            assert exc.code == "real_canary_failure_cleanup_failed"
+            assert "primary=real_canary_command_failed" in str(exc)
+            assert "cleanup=real_canary_failure_cleanup_refused" in str(exc)
+            assert secret not in str(exc)
+        else:
+            raise AssertionError("expected cleanup refusal")
+
+
 def main() -> None:
+    test_canary_failure_diagnostics_do_not_echo_private_data()
     with tempfile.TemporaryDirectory(prefix="league-real-cleanup-") as directory:
         root = Path(directory)
         test_canary_readiness_requires_reply_without_trust_override(root / "readiness")

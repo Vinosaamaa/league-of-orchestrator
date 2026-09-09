@@ -2667,3 +2667,13 @@ creation rejects existing files and symlinks before claiming deliveries; failed
 writes never acknowledge messages. Exact acknowledgement and lease recovery
 remain unchanged. Focused tests cover private permissions, unsafe destinations,
 compact output, and acknowledgement from the saved receipt.
+
+## Compact Stop reminders (issue #23)
+
+Stop feedback now lists counts by obligation category instead of echoing request
+summaries and untriaged prompt bodies. It retains the same blocker decisions,
+wait-generation fencing, exact feedback acknowledgement, and unchanged-generation
+continuation behavior. Detailed requests remain available through the canonical
+request commands; no record is completed, dropped, or hidden from those queries.
+Focused tests verify bounded feedback with twelve long prompts, unchanged
+retained input, provider-native feedback, and exact continuation acknowledgement.

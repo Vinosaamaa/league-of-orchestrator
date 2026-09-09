@@ -17,8 +17,6 @@ DEFAULT_UNREACHABLE_GRACE_SECONDS = 60
 MAX_CHAMPION_STOP_GUARDS = 64
 MAX_OWNER_STOP_TARGETS = 64
 MAX_SUPERVISOR_SCOPE_CANDIDATES = 16
-MAX_STOP_DETAIL_ROWS = 10
-MAX_STOP_DETAIL_TEXT = 160
 ATTENTION_STATUSES = frozenset(
     {
         "blocked",
@@ -66,7 +64,7 @@ def _stop_obligation_summaries(
     actor_agent_id: str,
     counts: Mapping[str, int],
 ) -> tuple[str, ...]:
-    """Describe every Stop-obligation kind instead of only durable requests."""
+    """Count every Stop-obligation kind without echoing user text to terminals."""
 
     summaries: list[str] = []
     unresolved_items = int(counts.get("unresolved_requests", 0))
@@ -83,49 +81,26 @@ def _stop_obligation_summaries(
                 )
               )
         """
-        request_rows = store.connection.execute(
-            f"""
-            SELECT summary,COUNT(*) OVER() AS total FROM requests
-             WHERE owner_agent_id=? AND state NOT IN ('answered','cancelled')
-                   {owner_decision_filter}
-             ORDER BY updated_at DESC,request_id LIMIT ?
-            """,
-            (actor_agent_id, MAX_STOP_DETAIL_ROWS),
-        ).fetchall()
-        summaries.extend(
-            " ".join(str(row["summary"]).split())[:MAX_STOP_DETAIL_TEXT]
-            for row in request_rows
-        )
-        request_total = int(request_rows[0]["total"]) if request_rows else 0
-        if request_total > len(request_rows):
-            additional = request_total - len(request_rows)
-            noun = "request" if additional == 1 else "requests"
-            summaries.append(f"{additional} additional unresolved {noun}")
+        request_total = int(store.connection.execute(
+            f"""SELECT COUNT(*) FROM requests
+                 WHERE owner_agent_id=? AND state NOT IN ('answered','cancelled')
+                       {owner_decision_filter}""", (actor_agent_id,),
+        ).fetchone()[0])
+        if request_total:
+            noun = "request" if request_total == 1 else "requests"
+            summaries.append(f"{request_total} unresolved {noun}")
 
     if unresolved_items or int(counts.get("untriaged_prompts", 0)):
-        prompt_rows = store.connection.execute(
-            """
-            SELECT pp.body,COUNT(*) OVER() AS total FROM prompts p
-            LEFT JOIN prompt_payloads pp ON pp.prompt_id=p.prompt_id
-             WHERE p.current_owner_agent_id=? AND p.triage_state='untriaged'
-               AND NOT EXISTS (SELECT 1 FROM prompt_triage_settings s
-                               WHERE s.owner_agent_id=p.current_owner_agent_id AND s.mode='off')
-             ORDER BY p.created_at,p.prompt_id LIMIT ?
-            """,
-            (actor_agent_id, MAX_STOP_DETAIL_ROWS),
-        ).fetchall()
-        for row in prompt_rows:
-            body = " ".join(str(row["body"] or "").split())
-            summaries.append(
-                f"Untriaged prompt: {body[:MAX_STOP_DETAIL_TEXT]}"
-                if body
-                else "Untriaged prompt awaiting semantic triage"
-            )
-        prompt_total = int(prompt_rows[0]["total"]) if prompt_rows else 0
-        if prompt_total > len(prompt_rows):
-            additional = prompt_total - len(prompt_rows)
-            noun = "prompt" if additional == 1 else "prompts"
-            summaries.append(f"{additional} additional untriaged {noun}")
+        prompt_total = int(store.connection.execute(
+            """SELECT COUNT(*) FROM prompts p
+                 WHERE p.current_owner_agent_id=? AND p.triage_state='untriaged'
+                   AND NOT EXISTS (SELECT 1 FROM prompt_triage_settings s
+                                   WHERE s.owner_agent_id=p.current_owner_agent_id AND s.mode='off')""",
+            (actor_agent_id,),
+        ).fetchone()[0])
+        if prompt_total:
+            noun = "prompt" if prompt_total == 1 else "prompts"
+            summaries.append(f"{prompt_total} untriaged {noun}")
 
     category_labels = {
         "active_champions": ("active Champion", "active Champions"),

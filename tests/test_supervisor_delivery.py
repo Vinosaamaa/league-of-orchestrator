@@ -127,6 +127,10 @@ def active_champion(root: Path):
     active = AssignmentService(store, FakeLaunchAdapter(), clock, FakeIds()).assign(
         issue_bound_spec(store, spec, clock.now())
     )
+    # This fixture tests idle wake, not ongoing prompt handling.
+    scope = store.supervisor_binding('Garen')['scope_id']
+    store.set_allow_stop_once(scope, SHOTCALLER_ID)
+    assert store.stop_decision(scope, SHOTCALLER_ID, 'fixture:input-finished', clock.now())['decision'] == 'allow'
     store.close()
     return state, clock, active
 

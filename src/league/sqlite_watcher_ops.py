@@ -1059,10 +1059,15 @@ def apply_supervision_delivery_policy(
             )
             active_turn = None if scope is None else _shotcaller_turn(_scope_metadata(scope))
             foreground = None if scope is None else _scope_metadata(scope).get('foreground_inbox')
+            activity = {} if scope is None else _scope_metadata(scope).get('receiver_activity', {})
             if (row['state'] == 'pending' and row['event_type'] != 'owner_stop_control'
                 and isinstance(foreground, dict)
                 and _time(foreground['expires_at'], 'foreground receive expiry') > _time(at, 'delivery time')):
                 return {'action': 'defer', 'reason': 'foreground_wait',
+                        'state': 'pending', 'idempotent': False}
+            if (row['state'] == 'pending' and row['event_type'] != 'owner_stop_control'
+                and activity.get('state') == 'busy'):
+                return {'action': 'defer', 'reason': 'receiver_work_active',
                         'state': 'pending', 'idempotent': False}
             if (
                 row["state"] == "pending"
@@ -2083,6 +2088,9 @@ def note_user_message(store: Any, scope_id: str, actor_agent_id: str, at: str) -
     try:
         with store._transaction():
             ensure_watcher_scope(store, scope_id, actor_agent_id, block_on_obligations=None)
+            from .sqlite_receiver_activity import mark_busy
+
+            mark_busy(store, actor_agent_id, at, scope_id=scope_id)
             store.connection.execute(
                 """
                 UPDATE watcher_scopes
@@ -2971,6 +2979,29 @@ def _persist_stop_block(
 
 
 def stop_decision(
+    store: Any,
+    scope_id: str,
+    actor_agent_id: str,
+    terminal_generation: str,
+    at: str,
+    *,
+    block_on_fresh_terminal: bool = False,
+) -> dict[str, Any]:
+    from .sqlite_receiver_activity import finish_work
+
+    # Keep the decision and work-boundary change atomic with genuine input.
+    try:
+        with store._transaction():
+            result = _stop_decision(store, scope_id, actor_agent_id, terminal_generation, at,
+                                    block_on_fresh_terminal=block_on_fresh_terminal)
+            if result['decision'] == 'allow':
+                finish_work(store, scope_id, actor_agent_id, at)
+            return result
+    except sqlite3.DatabaseError as exc:
+        raise store._translate_database_error(exc, 'Stop work-boundary update conflicted') from exc
+
+
+def _stop_decision(
     store: Any,
     scope_id: str,
     actor_agent_id: str,

@@ -49,6 +49,11 @@ def test_bounded_stop(root: Path) -> None:
     assert _watcher(env, "codex-user-prompt-hook", payload=prompt) == {}
     assert _watcher(env, "codex-stop-hook", payload=continuation)["decision"] == "block"
     assert _watcher(env, "codex-stop-hook", payload=continuation) == {}
+    with SQLiteStorage(state, request_wal=False) as store:
+        row = store.connection.execute(
+            'SELECT metadata_json FROM watcher_scopes WHERE actor_agent_id=?', (SHOTCALLER_ID,),
+        ).fetchone()
+        assert json.loads(row['metadata_json'])['receiver_activity']['state'] == 'idle'
     # Unbound and malformed native input do not acquire this bound exemption.
     args = type("Args", (), {"command": "codex-stop-hook", "shotcaller": None,
                              "session_id": None})()

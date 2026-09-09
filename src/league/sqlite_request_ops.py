@@ -519,6 +519,9 @@ def intake_prompt(
                     """,
                     (prompt_id, wake_scope_id),
                 )
+                from .sqlite_receiver_activity import mark_busy
+
+                mark_busy(store, intake_actor_id, at, scope_id=wake_scope_id)
     except StorageRefusal:
         raise
     except sqlite3.DatabaseError as exc:
@@ -613,6 +616,9 @@ def quarantine_prompt(
                     """,
                     (prompt_id, wake_scope_id, wake_actor_id),
                 )
+                from .sqlite_receiver_activity import mark_busy
+
+                mark_busy(store, wake_actor_id, at, scope_id=wake_scope_id)
                 store.connection.execute(
                     """
                     UPDATE prompt_quarantine
@@ -736,6 +742,9 @@ def bind_quarantined_prompt(
                     """,
                     (wake_scope_id,),
                 )
+                from .sqlite_receiver_activity import mark_busy
+
+                mark_busy(store, intake_actor_id, at, scope_id=wake_scope_id)
                 store.connection.execute(
                     """
                     UPDATE prompt_quarantine

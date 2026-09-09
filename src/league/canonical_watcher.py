@@ -174,19 +174,29 @@ def _stop_continuation_already_notified(
             actor = _actor(observer, args, payload, adapter_kind="codex")
             if actor is None or str(actor[2]) != "shotcaller":
                 return False
-            scope = observer.connection.execute(
-                "SELECT wait_generation,last_blocked_wait_generation "
-                "FROM watcher_scopes WHERE scope_id=? AND actor_agent_id=?",
-                (_scope(observer, str(actor[0]), str(actor[1])), str(actor[0])),
-            ).fetchone()
-            return bool(
-                scope is not None
-                and scope["last_blocked_wait_generation"] == scope["wait_generation"]
-            )
+            with observer._transaction():
+                scope_id = _scope(observer, str(actor[0]), str(actor[1]))
+                scope = observer.connection.execute(
+                    "SELECT wait_generation,last_blocked_wait_generation "
+                    "FROM watcher_scopes WHERE scope_id=? AND actor_agent_id=?",
+                    (scope_id, str(actor[0])),
+                ).fetchone()
+                allowed = bool(scope is not None and
+                               scope['last_blocked_wait_generation'] == scope['wait_generation'])
+                if allowed:
+                    from .sqlite_receiver_activity import finish_work
+
+                    finish_work(observer, scope_id, str(actor[0]),
+                                datetime.now().astimezone().isoformat(timespec='microseconds'))
+                return allowed
     except StorageRefusal as exc:
         if exc.code in {"invalid_root", "store_missing", "busy"}:
             return False
         raise
+    except sqlite3.OperationalError:
+        # The ordinary Stop path retains bounded busy handling if this short
+        # continuation transaction cannot acquire its write lock.
+        return False
 
 
 def _stop_output_mode(command: str) -> str:

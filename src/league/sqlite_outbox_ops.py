@@ -310,6 +310,10 @@ def acknowledge_outbox(
                 """,
                 (event_id, recipient_agent_id, at, effect_kind, effect_id),
             )
+            if effect_kind == 'direct_prompt':
+                from .sqlite_receiver_activity import mark_busy
+
+                mark_busy(store, recipient_agent_id, at)
             store.connection.execute(
                 """
                 UPDATE delivery_outbox

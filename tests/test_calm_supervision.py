@@ -201,6 +201,10 @@ def _active_champion(
     store.configure_supervision_policy(
         str(binding["scope_id"]), SHOTCALLER_ID, "calm", 5, _at()
     )
+    # Complete the synthetic input turn before exercising idle delivery.
+    store.set_allow_stop_once(str(binding['scope_id']), SHOTCALLER_ID)
+    assert store.stop_decision(str(binding['scope_id']), SHOTCALLER_ID,
+                               'fixture:input-finished', _at())['decision'] == 'allow'
     return state, store, active
 
 

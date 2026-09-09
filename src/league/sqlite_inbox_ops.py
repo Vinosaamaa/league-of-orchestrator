@@ -68,6 +68,9 @@ def read(store: Any, owner: str, runtime: str, at: str, limit: int = 10) -> dict
     items = []
     with store._transaction():
         _runtime(store, owner, runtime)
+        from .sqlite_receiver_activity import mark_busy
+
+        mark_busy(store, owner, at)
         rows = store.connection.execute(
             "SELECT o.outbox_id,o.event_id FROM delivery_outbox o JOIN events e ON e.event_id=o.event_id "
             "WHERE o.recipient_agent_id=? AND o.state IN ('pending','in_flight') "

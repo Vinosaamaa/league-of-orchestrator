@@ -84,6 +84,10 @@ class InstalledDeliveryAdapter:
             ):
                 raise DeliveryUnavailable("owner_stop_target_changed")
             try:
+                if self.store is not None and not owner_control:
+                    from .sqlite_receiver_activity import require_no_known_work
+
+                    require_no_known_work(self.store, str(envelope['recipient_agent_id']))
                 multiplexer = builtin_multiplexer_adapter_registry(
                     herdr_runner=CallableMultiplexerRunner(self.runner),
                     herdr_binary="herdr",

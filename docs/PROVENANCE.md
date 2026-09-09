@@ -2584,3 +2584,17 @@ just as worker-scoped callsigns do. Previously the incomplete scope lookup raise
 KeyError and prevented owner reports. No stored record or lifecycle state changes.
 The synthetic reporting regression covers reservation, activation and release
 in both local-diagnostic and public-safe output.
+
+## Busy delivery after background triage (issues #23 and #66)
+
+Receiver work is now separate from the inline request transaction. Genuine
+input, inbox checkpoints and successful native wakes record busy activity.
+Pending Champion and triage updates stay in the inbox while that activity is
+known, even if the native terminal reports idle. Foreground wait leases retain
+their existing delivery path. Allowed Stop boundaries, including the bounded
+continuation exit, clear work activity; blocked Stop and receipt acknowledgement
+do not. Old timestamps cannot clear newer activity. No timeout guesses that a
+crashed worker is idle: supported recovery must reach a legitimate Stop boundary.
+This changes delivery eligibility, not request completion or cleanup policy.
+Synthetic inbox and Stop-continuation checks cover the boundaries; installed
+busy delivery and interrupted waiting remain separate acceptance gates.

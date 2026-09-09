@@ -180,7 +180,7 @@ def test_native_directions_and_current_owner_boundary(root):
             rendered = json.dumps([champion, successor, switched])
             for private in ("/synthetic/worktrees", "example.invalid", "synthetic-endpoint", "Private synthetic"):
                 assert private not in rendered
-            assert CURRENT_SCHEMA_VERSION == 24
+            assert store.connection.execute("PRAGMA user_version").fetchone()[0] == CURRENT_SCHEMA_VERSION
 
 
 def test_bootstrap_successor_and_late_acceptance(root):

@@ -438,6 +438,7 @@ def test_multiplexer_registry_and_fail_closed_tmux_restore() -> None:
             "shotcaller_bootstrap", "rollover_reconciliation",
             "production_cleanup", "provider_session_lifecycle",
             "runtime_replacement", "stopped_retirement",
+            "conditional_delivery",
         }
     )
     assert registry.adapter("tmux").capabilities == frozenset()

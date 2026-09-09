@@ -21,6 +21,7 @@ REQUEST_LIFECYCLE_TESTS := \
 	tests/test_prompt_triage_policy.py \
 	tests/test_prompt_triage_worker.py \
 	tests/test_triage_codex_protocol.py \
+	tests/test_triage_context.py \
 	tests/test_in_turn_inbox.py \
 	tests/test_receive_guard.py \
 	tests/test_request_lifecycle.py \

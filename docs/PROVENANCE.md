@@ -2598,3 +2598,21 @@ crashed worker is idle: supported recovery must reach a legitimate Stop boundary
 This changes delivery eligibility, not request completion or cleanup policy.
 Synthetic inbox and Stop-continuation checks cover the boundaries; installed
 busy delivery and interrupted waiting remain separate acceptance gates.
+
+## Bounded native reply context (issue #66)
+
+The background classifier reused a process but started an isolated conversation
+for every prompt. Candidate summaries alone could not explain short replies to
+the Shotcaller's questions. A bound native Codex Stop now retains at most 4096
+UTF-8 bytes of its supplied assistant reply, with exact runtime/session identity
+and a content hash. The next classification may use a preceding reply from that
+same runtime/session within one day. This is context, never an answer receipt,
+execution authority, or a human prompt. No transcript is read or backfilled.
+Missing context stays missing; other provider paths are unchanged. Native replies
+made during an unfinished turn are not available through this Stop-only field.
+
+Focused fixtures cover bound Stop capture, replay, blank input, byte bounds,
+cross-owner/session/runtime exclusion, expiry and unchanged prompt bytes. Real
+model samples separately verify that a short response to a supplied explicit
+invitation links correctly and an unsupported reference does not guess.
+Installed capture and full lifecycle acceptance remain separate release gates.

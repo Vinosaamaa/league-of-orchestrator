@@ -1062,6 +1062,10 @@ def handle_brokered_hook(
                 "actor_agent_id": None,
             }
         assert actor_id is not None and callsign is not None and scope is not None
+        if command == 'codex-stop-hook' and actor_role == 'shotcaller':
+            from .triage_context import record_native_reply
+            record_native_reply(store, actor_id, payload,
+                                datetime.now().astimezone().isoformat())
         terminal, _ = _stop_generation(command, args, payload)
         if actor_role == "champion":
             result = store.champion_stop_decision(

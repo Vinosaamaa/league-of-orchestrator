@@ -30,17 +30,22 @@ def next_input(store: Any) -> dict[str, Any] | None:
                              background_prompt_id=row["prompt_id"])
     if not intake["prompts"]:
         return None
-    return {**intake, "policy_version": int(row["version"])}
+    from .triage_context import preceding_context
+    context = preceding_context(store, owner_id, intake['prompts'][0])
+    return {**intake, "policy_version": int(row["version"]), 'context': context}
 
 
 def compact_input(frame: dict[str, Any]) -> dict[str, Any]:
-    return {
+    value = {
         "prompt": frame["prompts"][0]["body"],
         "existing": [
             {"r": index, "s": row["summary"], "state": row["state"]}
             for index, row in enumerate(frame["candidate_inventory"]["requests"], 1)
         ],
     }
+    if frame.get('context'):
+        value['context'] = frame['context']
+    return value
 
 
 def commit(store: Any, frame: dict[str, Any], output: dict[str, Any], at: str,

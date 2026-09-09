@@ -29,7 +29,7 @@ verification: {"state":"verified","evidenceRefs":["tests/test_shotcaller_stop.py
 visibility: "public-safe"
 publicationEligibility: "eligible"
 issue: 23
-pr: null
+pr: 240
 release: null
 run: null
 ---

@@ -29,7 +29,7 @@ verification: {"state":"verified","evidenceRefs":["tests/test_in_turn_inbox.py"]
 visibility: "public-safe"
 publicationEligibility: "eligible"
 issue: 23
-pr: null
+pr: 239
 release: null
 run: null
 ---

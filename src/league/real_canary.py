@@ -12,7 +12,9 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import subprocess
+import sys
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -460,6 +462,20 @@ def _create_herdr_canary(home: Path, worktree: Path, namespace: str, *, codex_yo
         raise StorageRefusal("real_canary_scope_refused", "disposable repository identity changed")
     if _exact_agent(home, name) is not None:
         raise StorageRefusal("real_canary_name_conflict", "Herdr canary name is already active")
+    shell_environment: tuple[str, ...] = ()
+    if codex_yolo:
+        # A private Zsh configuration avoids conflicting user approval flags.
+        # Login-shell path_helper may put an older system Python first, so keep
+        # native hooks on the same interpreter directory as this test runner.
+        shell_config = home / "shell-config"
+        shell_config.mkdir(mode=0o700)
+        python_directory = str(Path(sys.executable).resolve().parent)
+        _atomic_write(
+            shell_config / ".zshrc",
+            f'export PATH={shlex.quote(python_directory)}:"$PATH"\n'.encode("utf-8"),
+            mode=0o600,
+        )
+        shell_environment = ("--env", f"ZDOTDIR={shell_config}")
     split = _herdr(
         (
             "pane",
@@ -472,6 +488,7 @@ def _create_herdr_canary(home: Path, worktree: Path, namespace: str, *, codex_yo
             "--cwd",
             str(worktree),
             "--no-focus",
+            *shell_environment,
         ),
         home,
     )
@@ -488,15 +505,6 @@ def _create_herdr_canary(home: Path, worktree: Path, namespace: str, *, codex_yo
         "pane_id": pane_id,
     }
     _write_json(failure_scope_path, failure_scope)
-    if codex_yolo:
-        # Honor explicit native policy flags without a user's interactive shell
-        # function adding incompatible defaults. This changes only our new pane.
-        _run(("herdr", "pane", "run", pane_id, "unfunction codex 2>/dev/null; whence -w codex"), cwd=home)
-        _run(
-            ("herdr", "pane", "wait-output", pane_id, "--match", "codex: command",
-             "--source", "recent-unwrapped", "--lines", "20", "--timeout", "5000"),
-            cwd=home, timeout=10,
-        )
     start_error = None
     try:
         _herdr(

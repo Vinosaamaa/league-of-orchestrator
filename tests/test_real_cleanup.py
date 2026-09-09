@@ -937,10 +937,6 @@ def test_canary_readiness_requires_reply_without_trust_override(root: Path) -> N
                 assert token not in prompt
                 code = int(stalled)
                 result = json.dumps({"error": {"code": "agent_prompt_stalled"}} if stalled else {"ok": True})
-            elif args[:3] == ("herdr", "pane", "run"):
-                assert trust == "yolo"
-                assert args == ("herdr", "pane", "run", "w-test:p-test", "unfunction codex 2>/dev/null; whence -w codex")
-                result = "command submitted"
             elif args[:3] == ("herdr", "pane", "read"):
                 if trust == "human" and "visible" in args:
                     human_trusted = True  # Synthetic human interaction, not agent input.
@@ -961,6 +957,13 @@ def test_canary_readiness_requires_reply_without_trust_override(root: Path) -> N
         def fake_herdr(arguments: Sequence[str], *args: Any, **kwargs: Any) -> dict[str, Any]:
             calls.append(("herdr", *arguments))
             if arguments[:2] == ("pane", "split"):
+                assert ("--env" in arguments) == (trust == "yolo")
+                if trust == "yolo":
+                    assert f"ZDOTDIR={home / 'shell-config'}" in arguments
+                    shell_config = home / "shell-config"
+                    assert [path.name for path in shell_config.iterdir()] == [".zshrc"]
+                    expected_python = real_canary.shlex.quote(str(Path(sys.executable).resolve().parent))
+                    assert (shell_config / ".zshrc").read_text() == f'export PATH={expected_python}:"$PATH"\n'
                 return {"result": {"pane": {"pane_id": "w-test:p-test"}}}
             assert arguments[:2] == ("agent", "start")
             assert "gpt-6-astra" in arguments
@@ -987,7 +990,7 @@ def test_canary_readiness_requires_reply_without_trust_override(root: Path) -> N
             else:
                 refused(lambda: real_canary._create_herdr_canary(home, worktree, "test"), "real_canary_readiness_unproven")
         assert sum(call[:3] == ("herdr", "agent", "prompt") for call in calls) == (0 if trust and trust not in ("yolo", "human") else 1)
-        assert any(call[:3] == ("herdr", "pane", "run") for call in calls) == (trust == "yolo")
+        assert not any(call[:3] == ("herdr", "pane", "run") for call in calls)
 
 
 def test_trust_gate_cleanup_cancels_only_exact_canary() -> None:

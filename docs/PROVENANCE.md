@@ -2641,3 +2641,18 @@ that screen, requires the same native identity and model display after trust,
 and still requires the normal challenge response. Default refusal behavior and
 all cleanup guards remain unchanged. Focused fixtures cover bounded refusal,
 non-retryable startup outcomes, and continuation after synthetic human trust.
+
+## Disposable shell configuration (issue #23)
+
+For explicit YOLO canaries, replace the startup-time shell command with a private
+Zsh configuration selected when the disposable pane is created. It excludes user
+functions that add conflicting approval flags and prepends the test runner's
+Python directory after login-shell path initialization. Without that directory,
+native hooks selected an older system SQLite and refused the established WAL
+database. Ordinary launch defaults and global shell settings remain unchanged.
+
+Focused fixtures verify the exact pane-local environment and absence of startup
+command injection. Native candidate acceptance passed challenge response, the
+publication guard, interrupted cleanup recovery, all six cleanup actions, and
+the final Stop decision. This is the disposable cleanup flow, not full installed
+prompt-triage and delivery acceptance or retained Champion teardown.

@@ -2629,3 +2629,15 @@ failure path; it does not count a refused launch as completed lifecycle acceptan
 An explicit `--codex-yolo` flag opts only that disposable invocation into native
 approval/sandbox bypass. Defaults and global configuration remain unchanged;
 the trust-screen check is not disabled by that flag.
+
+## Disposable shell readiness (issue #23)
+
+Shell command output can precede an available interactive prompt. The canary
+retries only Herdr's atomic `agent_pane_busy` start refusal for at most two
+seconds; timeouts and other startup failures are never replayed. An explicit
+`--trust-wait-seconds` option can retain the disposable directory-trust screen
+for up to five minutes for human interaction. It submits no keys or prompts to
+that screen, requires the same native identity and model display after trust,
+and still requires the normal challenge response. Default refusal behavior and
+all cleanup guards remain unchanged. Focused fixtures cover bounded refusal,
+non-retryable startup outcomes, and continuation after synthetic human trust.

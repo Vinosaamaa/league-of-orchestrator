@@ -221,6 +221,10 @@ def _add_acceptance_commands(groups: argparse._SubParsersAction) -> None:
         "--codex-yolo", action="store_true",
         help="Explicitly disable approvals and sandboxing for this disposable Codex run only.",
     )
+    cleanup_canary.add_argument(
+        "--trust-wait-seconds", type=int, default=0,
+        help="Wait up to 300 seconds for human directory trust; never accept it automatically.",
+    )
 
 
 def _add_storage_commands(groups: argparse._SubParsersAction) -> None:
@@ -4470,6 +4474,7 @@ def _run(args: argparse.Namespace) -> CommandResult:
             args.namespace,
             source_root=args.source_root,
             codex_yolo=args.codex_yolo,
+            trust_wait_seconds=args.trust_wait_seconds,
         ), None
     if command in CONFIG_ONLY_COMMANDS:
         if args.state_root is not None:

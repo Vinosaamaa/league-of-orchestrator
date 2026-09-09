@@ -56,6 +56,7 @@ from .cleanup import (
     CleanupAdapterRegistry,
     CleanupExecutor,
     CleanupPlanner,
+    cleanup_action_digest,
 )
 from .guidance import is_universal_guidance_target
 from .importer import build_import_plan
@@ -1232,16 +1233,33 @@ class _DeliveryDouble:
 
 
 class _CleanupDouble:
-    def __init__(self, kind: str, states: dict[str, dict[str, Any]], effects: list[str]) -> None:
+    def __init__(self, kind: str, states: dict[str, dict[str, Any]], effects: list[str],
+                 store: SQLiteStorage, at: str) -> None:
         self.kind = kind
         self.states = states
         self.effects = effects
+        self.store = store
+        self.at = at
 
     def inspect(self, action: Mapping[str, Any]) -> Mapping[str, Any]:
         return dict(self.states[str(action["action_id"])])
 
     def apply(self, action: Mapping[str, Any]) -> Mapping[str, Any]:
         action_id = str(action["action_id"])
+        identity = action["expected_identity"]
+        if action["action_kind"] == "endpoint_close":
+            self.store.close_runtime_for_cleanup(
+                identity["runtime_instance_id"], identity["pane_id"],
+                identity["runtime_generation"], self.at,
+            )
+        elif action["action_kind"] == "callsign_release":
+            assignment = self.store.callsign_assignment_status(identity["assignment_id"])
+            if assignment is None:
+                raise StorageRefusal("assignment_unknown", "synthetic cleanup assignment disappeared")
+            self.store.release_callsign(
+                identity["assignment_id"], assignment["version"],
+                cleanup_action_digest(action), self.at,
+            )
         self.effects.append(action_id)
         self.states[action_id] = dict(action["intended_state"])
         return {"isolated_double": True, "action_id": action_id}
@@ -1318,7 +1336,15 @@ def _cleanup_manifest() -> dict[str, Any]:
                     "branch_delete": "git",
                     "callsign_release": "callsign",
                 }[action],
-                "expected_identity": {"action": action, "generation": "exact"},
+                "expected_identity": (
+                    {"runtime_instance_id": "runtime:synthetic-champion",
+                     "pane_id": "synthetic:champion-endpoint",
+                     "runtime_generation": "generation:synthetic-champion"}
+                    if action == "endpoint_close" else
+                    {"assignment_id": "callsign-assignment:assignment:synthetic-precutover"}
+                    if action == "callsign_release" else
+                    {"action": action, "generation": "exact"}
+                ),
                 "intended_state": {"completed": True, "action": action},
             }
             for action in (
@@ -1476,14 +1502,7 @@ def _integrated_lifecycle(home: Path, source_root: Path) -> dict[str, Any]:
         effects: list[str] = []
         registry = CleanupAdapterRegistry()
         for kind in CLEANUP_ADAPTER_KINDS:
-            registry.register(_CleanupDouble(kind, states, effects))
-        cleanup = CleanupExecutor(store, registry).execute(
-            cleanup_plan["operation_id"],
-            expected_fence=0,
-            executor_id="executor:synthetic-precutover",
-            leased_until=clock.after(600),
-            at=clock.now(),
-        )
+            registry.register(_CleanupDouble(kind, states, effects, store, clock.now()))
         request_result = store.record_request_result(
             RequestResultCommand(
                 request_id="synthetic-precutover-request",
@@ -1515,6 +1534,14 @@ def _integrated_lifecycle(home: Path, source_root: Path) -> dict[str, Any]:
                 event_id="event:synthetic-precutover-answered",
                 at=clock.now(),
             )
+        )
+        # Accept the result before cleanup retires its active assignment.
+        cleanup = CleanupExecutor(store, registry).execute(
+            cleanup_plan["operation_id"],
+            expected_fence=0,
+            executor_id="executor:synthetic-precutover",
+            leased_until=clock.after(600),
+            at=clock.now(),
         )
         store.set_supervision_attachment(
             "synthetic-precutover-scope",

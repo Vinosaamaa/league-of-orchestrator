@@ -2211,6 +2211,7 @@ def test_material_delivery_watcher_direct_dedup_and_unavailable(root: Path) -> N
     direct_env["FAKE_HERDR_AGENTS"] = json.dumps({"result": {"agents": [{
         "pane_id": target["locator"], "name": target["routing_name"],
         "terminal_id": "terminal:direct", "agent": "codex", "agent_status": "idle",
+        "state_change_seq": 1,
         "agent_session": {"value": target["session_ref"]},
     }]}})
     prompt_log = _fake_herdr(root / "direct-delivery", direct_env)

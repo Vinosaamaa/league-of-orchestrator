@@ -1,5 +1,16 @@
 # Source provenance
 
+## Issue #23 final acceptance contract alignment
+
+Acceptance receipts now describe the existing schema 25 migration; fixture
+source bytes and imported rows remain unchanged. The isolated lifecycle double
+closes its exact synthetic runtime and releases its exact callsign through the
+storage APIs before accepting cleanup. It records and answers the request
+before cleanup retires the assignment. Production cleanup and delegation guards
+are unchanged. Test expectations also track conditional idle delivery and the
+already-shipped quiet Stop-continuation contract. Synthetic acceptance remains
+distinct from installed runtime verification.
+
 ## Issue #66 detached prompt-worker notification
 
 Prompt intake and triage-mode changes saved successfully for a detached owner,

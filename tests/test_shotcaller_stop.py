@@ -174,7 +174,7 @@ def test_stop_feedback_names_an_untriaged_prompt(root: Path) -> None:
 
     assert blocked["decision"] == "block"
     assert blocked["unresolved_summaries"] == [
-        "Untriaged prompt: Why is Stop still looping?",
+        "1 untriaged prompt",
         "1 active Champion",
     ]
     feedback = stop_feedback_reason(
@@ -183,7 +183,7 @@ def test_stop_feedback_names_an_untriaged_prompt(root: Path) -> None:
         tuple(blocked["unresolved_summaries"]),
     )
     assert feedback.endswith(
-        "Unresolved obligations: Untriaged prompt: Why is Stop still looping?"
+        "Unresolved obligations: 1 untriaged prompt"
         " | 1 active Champion"
     )
     assert store.consume_stop_feedback(
@@ -217,17 +217,12 @@ def test_stop_feedback_bounds_prompt_details(root: Path) -> None:
         "Garen-lifecycle", SHOTCALLER_ID, "terminal:bounded-detail", clock.now()
     )
 
-    prompt_details = [
-        detail
-        for detail in first["unresolved_summaries"]
-        if detail.startswith("Untriaged prompt:")
-    ]
-    assert len(prompt_details) == 10, first
-    assert "2 additional untriaged prompts" in first["unresolved_summaries"], first
-    assert all(
-        len(detail.removeprefix("Untriaged prompt: ")) <= 160
-        for detail in prompt_details
-    )
+    assert "12 untriaged prompts" in first["unresolved_summaries"], first
+    feedback = stop_feedback_reason("Garen", first["wait_generation"],
+                                    tuple(first["unresolved_summaries"]))
+    assert len(feedback) < 200, feedback
+    assert "Bounded prompt" not in feedback and "x" * 200 not in feedback
+    assert store.connection.execute("SELECT COUNT(*) FROM prompts WHERE triage_state='untriaged'").fetchone()[0] == 12
     assert repeated["unresolved_summaries"] == first["unresolved_summaries"], repeated
     store.close()
 

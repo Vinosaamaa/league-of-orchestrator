@@ -11,6 +11,7 @@ from .storage_types import StorageRefusal
 
 
 TASK_CLASSES = frozenset({"analysis", "local_git", "pr_ci", "deployed_service"})
+RETAINED_REPOSITORY_TYPES = frozenset({"standalone_repository", "registered_worktree"})
 DISPOSITIONS = frozenset({"completed", "rejected", "cancelled", "failed"})
 CLEANUP_DISPOSITIONS_BY_TASK_STATE: dict[str, frozenset[str]] = {
     "completed": frozenset({"completed"}),
@@ -110,12 +111,19 @@ def _proof(proof: Mapping[str, Any], dotted: str) -> Any:
     return value
 
 
-def select_cleanup_policy(task_class: str, disposition: str) -> dict[str, Any]:
+def select_cleanup_policy(task_class: str, disposition: str, *, retain_worktree: bool = False) -> dict[str, Any]:
     if task_class not in TASK_CLASSES:
         raise StorageRefusal("cleanup_class_unsupported", "task class has no cleanup policy")
     if disposition not in DISPOSITIONS:
         raise StorageRefusal("cleanup_disposition_unsupported", "task disposition has no cleanup policy")
+    if retain_worktree and (disposition != "completed" or task_class not in {"pr_ci", "deployed_service"}):
+        raise StorageRefusal("cleanup_retention_refused", "worktree retention requires completed acceptance")
     requirements = list(POLICY_REQUIREMENTS[task_class])
+    if retain_worktree:
+        # Preserving a checkout does not assert its dirty bytes were published.
+        requirements = [r for r in requirements if r not in {"git.clean", "git.no_unpublished"}
+                        and not r.startswith("publication.")]
+        requirements.extend(("acceptance.required_gates_complete", "release.required_gates_complete"))
     if disposition in {"rejected", "cancelled"}:
         requirements = [item for item in requirements if not item.startswith(("publication.", "deployment."))]
         requirements.append("decision.explicit")
@@ -123,10 +131,11 @@ def select_cleanup_policy(task_class: str, disposition: str) -> dict[str, Any]:
         requirements = [item for item in requirements if not item.startswith(("publication.", "deployment."))]
         requirements.append("failure.preserved")
     return {
-        "policy": f"{task_class}:{disposition}:v1",
+        "policy": f"{task_class}:{disposition}:" + ("retained-worktree:v1" if retain_worktree else "v1"),
         "task_class": task_class,
         "disposition": disposition,
         "requirements": requirements,
+        **({"retains_worktree": True} if retain_worktree else {}),
     }
 
 
@@ -145,8 +154,10 @@ def retained_repository_resource(
     owner: Mapping[str, Any], policy: Mapping[str, Any], proof: Mapping[str, Any],
 ) -> Optional[Mapping[str, Any]]:
     """Explicit endpoint-only policy; ordinary persistent resources do not opt in."""
-    repositories = [r for r in resources if r.get("resource_type") == "standalone_repository"]
+    repositories = [r for r in resources if r.get("resource_type") in RETAINED_REPOSITORY_TYPES]
     if retention is None and not repositories:
+        if policy.get("retains_worktree"):
+            raise StorageRefusal("cleanup_retention_refused", "worktree retirement requires explicit retention")
         return None
     if (
         not isinstance(retention, Mapping)
@@ -163,6 +174,9 @@ def retained_repository_resource(
         raise StorageRefusal("cleanup_retention_refused", "repository retention requires explicit completed acceptance and release evidence")
     resource = repositories[0]
     expected = resource.get("expected_identity")
+    worktree_only = policy.get("retains_worktree") is True
+    identity_keys = ({"repository", "worktree", "branch", "head", "snapshot_sha256"}
+                     if worktree_only else {"repository", "worktree", "branch", "head", "base_ref", "merge_commit"})
     if (
         resource.get("resource_id") != retention["resource_id"]
         or resource.get("owner_id") != owner["id"]
@@ -172,10 +186,14 @@ def retained_repository_resource(
         or resource.get("adapter_kind") != "retain"
         or resource.get("applicable") is not True
         or not isinstance(expected, Mapping)
-        or set(expected) != {"repository", "worktree", "branch", "head", "base_ref", "merge_commit"}
+        or set(expected) != identity_keys
         or any(not isinstance(v, str) or not v.strip() for v in expected.values())
-        or expected["repository"] != expected["worktree"]
-        or not expected["base_ref"].startswith("refs/remotes/")
+        or resource["resource_type"] != ("registered_worktree" if worktree_only else "standalone_repository")
+        or (worktree_only and (expected["repository"] == expected["worktree"]
+            or len(expected["snapshot_sha256"]) != 64
+            or any(c not in "0123456789abcdef" for c in expected["snapshot_sha256"])))
+        or (not worktree_only and (expected["repository"] != expected["worktree"]
+            or not expected["base_ref"].startswith("refs/remotes/")))
         or any(r.get("lifetime") == "task_owned" for r in resources)
     ):
         raise StorageRefusal("cleanup_retention_refused", "retained repository identity or endpoint-only resource policy is ambiguous")
@@ -397,7 +415,10 @@ class CleanupPlanner:
                 "repository_publication_unresolved",
                 "required repository artifact publication is not merged",
             )
-        policy = select_cleanup_policy(str(manifest.get("task_class")), str(manifest.get("disposition")))
+        policy = select_cleanup_policy(str(manifest.get("task_class")), str(manifest.get("disposition")),
+            retain_worktree=isinstance(manifest.get("resources"), list) and any(
+                isinstance(r, Mapping) and r.get("resource_type") == "registered_worktree"
+                for r in manifest["resources"]))
         proof = manifest.get("proof")
         if not isinstance(proof, Mapping):
             raise StorageRefusal("cleanup_proof_missing", "cleanup proof object is missing")
@@ -474,7 +495,7 @@ class CleanupPlanner:
             actions[0]["intended_state"]["repository_retention"] = dict(retention)
         ordinal = 1
         for resource in sorted(resources, key=lambda item: item.resource_id):
-            if resource.lifetime == "persistent_retain" and resource.resource_type != "standalone_repository":
+            if resource.lifetime == "persistent_retain" and resource.resource_type not in RETAINED_REPOSITORY_TYPES:
                 continue
             actions.append(
                 {
@@ -484,7 +505,7 @@ class CleanupPlanner:
                     "adapter_kind": resource.adapter_kind,
                     "resource_id": resource.resource_id,
                     "expected_identity": dict(resource.expected_identity),
-                    "intended_state": {"retained": True} if resource.resource_type == "standalone_repository" else {"completed": True},
+                    "intended_state": {"retained": True} if resource.resource_type in RETAINED_REPOSITORY_TYPES else {"completed": True},
                 }
             )
             ordinal += 1

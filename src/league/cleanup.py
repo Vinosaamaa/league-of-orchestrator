@@ -177,6 +177,8 @@ def retained_repository_resource(
     worktree_only = policy.get("retains_worktree") is True
     identity_keys = ({"repository", "worktree", "branch", "head", "snapshot_sha256"}
                      if worktree_only else {"repository", "worktree", "branch", "head", "base_ref", "merge_commit"})
+    if worktree_only and isinstance(expected, Mapping) and "assigned_branch" in expected:
+        identity_keys.add("assigned_branch")
     if (
         resource.get("resource_id") != retention["resource_id"]
         or resource.get("owner_id") != owner["id"]

@@ -968,10 +968,11 @@ def _validate_retained_repository_owner(
         "SELECT * FROM agent_instances WHERE agent_id=?", (owner_id,),
     ).fetchone()
     task = store.connection.execute("SELECT state FROM tasks WHERE task_id=?", (task_id,)).fetchone()
-    if (owner is None or task is None or task["state"] != "completed"
+    if (owner is None or task is None or task["state"] not in {"completed", "ready_to_land"}
             or owner["role"] != "champion" or owner["task_id"] != task_id
             or owner["status"] != "completed" or owner["worktree"] != identity["worktree"]
-            or owner["branch"] != identity["branch"] or resource["task_id"] != task_id):
+            or owner["branch"] != identity.get("assigned_branch", identity["branch"])
+            or resource["task_id"] != task_id):
         raise StorageRefusal("cleanup_owner_refused", "retained repository is not the exact completed owner's checkout")
     kinds = [a["action_kind"] for a in actions]
     expected_kinds = ["archive_identity_evidence"] + [

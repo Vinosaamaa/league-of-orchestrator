@@ -586,6 +586,7 @@ def test_production_cleanup_crash_resume_and_lease_scope(
 def test_standalone_repository_retention(
     root: Path, crash_action: str = "endpoint_close", *, recovered_stale: bool = False,
     retained_worktree: bool = False,
+    historical_branch: bool = False, ready_to_land: bool = False,
 ) -> None:
     """Production execution closes only the exact fake endpoint, never the clone."""
     root = root.resolve()
@@ -606,6 +607,11 @@ def test_standalone_repository_retention(
                "base_ref": "refs/remotes/origin/main"}
     herdr = herdr_identity()
     setup = _setup_sqlite(root, ROOT, git, herdr, issue_spec_resolver=issue_bound_spec)
+    assigned_branch = git["branch"]
+    if historical_branch:
+        assert retained_worktree
+        commands.run(("git", "-C", str(clone), "switch", "-c", "historical-followup"))
+        git = {**git, "branch": "historical-followup"}
     manifest_path, _ = _cleanup_files(
         root, git, herdr, f"callsign-assignment:{setup['assignment']['assignment_id']}", "Lux"
     )
@@ -624,6 +630,8 @@ def test_standalone_repository_retention(
         retained["resource_type"] = "registered_worktree"
         retained["expected_identity"] = {k: git[k] for k in ("repository", "worktree", "branch", "head")}
         retained["expected_identity"]["snapshot_sha256"] = worktree_snapshot(clone, commands)
+        if historical_branch:
+            retained["expected_identity"]["assigned_branch"] = assigned_branch
     manifest["resources"] = [retained]
     manifest["repository_retention"] = {
         "resource_id": retained["resource_id"],
@@ -637,7 +645,7 @@ def test_standalone_repository_retention(
     runner = FakeHerdrRunner()
     with SQLiteStorage(root / "league/state", request_wal=False) as store:
         store.transition_task(
-            LIFECYCLE_TASK_ID, herdr["runtime_instance_id"], 3, "completed",
+            LIFECYCLE_TASK_ID, herdr["runtime_instance_id"], 3, "ready_to_land" if ready_to_land else "completed",
             "Synthetic acceptance complete", "Retain clone; retire endpoint", None,
             "transition:retain", "transition-key:retain", "event:retain", "outbox:retain",
             SHOTCALLER_ID, "2026-01-01T01:01:00Z",
@@ -686,6 +694,8 @@ def test_standalone_repository_retention(
             invalid.append(candidate)
         for key, value in (("worktree", str(root / "foreign")), ("branch", "foreign")):
             candidate = deepcopy(manifest)
+            if key == "branch" and historical_branch:
+                key = "assigned_branch"
             candidate["resources"][0]["expected_identity"][key] = value
             if key == "worktree":
                 candidate["resources"][0]["expected_identity"]["repository"] = value
@@ -751,7 +761,7 @@ def test_standalone_repository_retention(
         assert resumed["execution"]["state"] == "cleanup_completed"
         duplicate = service.execute(planned["operation_id"], expected_fence=2,
                                     executor_id="executor:duplicate", leased_until=LEASE_RESUME, at=AT_RESUME)
-        assert duplicate["execution"]["idempotent"] is True
+        assert duplicate["execution"]["idempotent"] is (not ready_to_land)
         assert {str(path.relative_to(clone)): path.read_bytes()
                 for path in clone.rglob("*") if path.is_file()} == before
         assert store.connection.execute(
@@ -1020,6 +1030,8 @@ def main() -> None:
         test_standalone_repository_retention(root / "recovered-stale-release", "callsign_release", recovered_stale=True)
         test_standalone_repository_retention(root / "dirty-worktree", retained_worktree=True)
         test_standalone_repository_retention(root / "dirty-worktree-release", "callsign_release", retained_worktree=True)
+        test_standalone_repository_retention(root / "historical-worktree", retained_worktree=True,
+                                             historical_branch=True, ready_to_land=True)
         test_ready_to_land_owner_cancellation_recovers_planned_fence_zero_after_reopen(
             root / "ready-to-land-cancelled"
         )

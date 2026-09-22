@@ -2712,6 +2712,13 @@ behavior is unchanged. Focused coverage verifies missing or foreign owners,
 explicit authority, read-only checking, successful recovery, and exact retry.
 # Completed-Champion worktree retention
 
+Retained historical checkouts may record their original `assigned_branch`
+separately from the actual preserved `branch`. Canonical ownership still checks
+the original assignment; the adapter checks the actual registration and bytes.
+An accepted `ready_to_land` task is eligible under the same explicit acceptance
+and release proof; its existing completed-cleanup retry settles the stale task
+record. Neither case rewrites branch ownership or deletes retained files.
+
 Issue #23 extends endpoint-only retirement to an explicitly retained registered
 worktree. This path archives the exact registration and a content fingerprint
 of staged, unstaged, and untracked changes, then retires only the endpoint and

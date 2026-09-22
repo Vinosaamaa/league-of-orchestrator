@@ -54,13 +54,6 @@ POINTER_STAGES = (
     "new_writer_activated",
     "generation_verified",
 )
-PENDING_SLICES = (
-    ("request", 17),
-    ("assignment", 4),
-    ("watcher", 3),
-    ("stop", 5),
-    ("teardown", 11),
-)
 UNVERIFIED_RUNTIMES = ("codex", "cursor", "pi", "herdr", "tmux")
 REGISTERED_AGENT_ADAPTER_KINDS = frozenset(builtin_agent_adapter_kinds())
 FIXTURE_RUNTIME_ROOT = Path("/synthetic/league-acceptance-runtime")
@@ -1975,6 +1968,11 @@ def run_acceptance(
         staged = _staged_install(work, source)
         cutover = _cutover_matrix(work / "cutover", context)
         canary = _canary(work, context, adapters)
+        # The pre-cutover suite shares the foundation helpers above. Import at
+        # execution time so both entry points can use the same lifecycle check.
+        from .precutover import _integrated_lifecycle
+
+        lifecycle = _integrated_lifecycle(work, source)
         sentinel_receipt = sentinels.verify()
         adapter_receipt = {
             name: {
@@ -1999,17 +1997,9 @@ def run_acceptance(
             "staged_install": staged,
             "cutover": cutover,
             "canary": canary,
+            "integrated_lifecycle": lifecycle,
             "adapters": adapter_receipt,
-            "pending_assertions": [
-                {
-                    "slice": name,
-                    "issue": issue,
-                    "status": "pending",
-                    "passed": False,
-                    "reason": "owning lifecycle slice is not merged",
-                }
-                for name, issue in PENDING_SLICES
-            ],
+            "pending_assertions": [],
             "runtime_claims": [
                 {"runtime": name, "status": "unverified", "mock_proof": False}
                 for name in UNVERIFIED_RUNTIMES

@@ -13,6 +13,7 @@ import sys
 import tempfile
 from html.parser import HTMLParser
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -105,6 +106,7 @@ def assert_receipt_shape(result: dict[str, object]) -> None:
         "staged_install",
         "cutover",
         "canary",
+        "integrated_lifecycle",
         "adapters",
         "pending_assertions",
         "runtime_claims",
@@ -246,17 +248,18 @@ def assert_canary_and_pending_receipts(result: dict[str, object]) -> None:
     assert result["canary"]["cleanup_exact"]
     assert result["canary"]["wrong_generation_refused"]
     assert result["canary"]["real_runtime_proven"] is False
-    assert {item["slice"] for item in result["pending_assertions"]} == {
-        "request",
-        "assignment",
-        "watcher",
-        "stop",
-        "teardown",
-    }
-    assert all(
-        item["status"] == "pending" and item["passed"] is False
-        for item in result["pending_assertions"]
-    )
+    assert result["pending_assertions"] == []
+    lifecycle = result["integrated_lifecycle"]
+    assert all(lifecycle[name]["status"] == "passed" for name in (
+        "request", "assignment", "watcher", "stop", "teardown"
+    ))
+    assert lifecycle["request"]["state"] == "answered"
+    assert lifecycle["request"]["safe_to_finish"] is True
+    assert lifecycle["assignment"]["exact_receipt"] is True
+    assert lifecycle["watcher"]["recipient_effect_count"] == 1
+    assert lifecycle["stop"] == {"status": "passed", "before": "block", "after": "allow"}
+    assert lifecycle["teardown"]["state"] == "cleanup_completed"
+    assert lifecycle["teardown"]["fake_effects_only"] is True
     assert {item["runtime"] for item in result["runtime_claims"]} == {
         "codex",
         "cursor",
@@ -405,6 +408,29 @@ def test_foundation_through_command_without_home(root: Path) -> None:
     assert json.loads(ambiguous.stdout)["error"]["code"] == "invalid_acceptance_root"
 
 
+def test_lifecycle_failure_blocks_receipt_and_retries(root: Path) -> None:
+    root.mkdir()
+    byte_path, config, processes = live_sentinels(root, "lifecycle-live")
+    arguments = dict(sentinel_paths=(byte_path,), config_sentinel=config,
+                     process_sentinel=processes, source_root=ROOT)
+    with patch("league.precutover._integrated_lifecycle", side_effect=StorageRefusal(
+        "lifecycle_acceptance_failed", "synthetic lifecycle failure"
+    )) as lifecycle:
+        refused(lambda: run_acceptance(root, "lifecycle-failure", **arguments),
+                "lifecycle_acceptance_failed")
+        lifecycle.assert_called_once_with(
+            root / "league-lifecycle-failure/attempts/attempt-0001", ROOT
+        )
+    home = root / "league-lifecycle-failure"
+    assert not (home / "acceptance-receipt.json").exists()
+    operation = json.loads((home / "acceptance-operation.json").read_text())
+    assert operation["state"] == "blocked"
+    assert operation["history"][-1]["error_code"] == "lifecycle_acceptance_failed"
+    result = run_acceptance(root, "lifecycle-failure", **arguments)
+    assert_receipt(result)
+    assert result["operation"]["attempt"] == 2
+
+
 def test_fail_closed_inputs(root: Path) -> None:
     root.mkdir()
     byte_path, config, processes = live_sentinels(root, "failure-live")
@@ -494,6 +520,17 @@ def test_schema_and_command_inventory() -> None:
         "$ref": "#/$defs/migrationReceipt"
     }
     assert len(schema["$defs"]["operationHistory"]["oneOf"]) == 4
+    assert schema["properties"]["integrated_lifecycle"] == {
+        "$ref": "league-pre-cutover-receipt.schema.json#/$defs/integratedLifecycle"
+    }
+    # Historical receipts retain pending assertions; only a receipt containing
+    # integrated evidence may clear them. Native claims remain unverified.
+    assert "integrated_lifecycle" not in schema["required"]
+    assert schema["allOf"] == [{
+        "if": {"required": ["integrated_lifecycle"]},
+        "then": {"properties": {"pending_assertions": {"maxItems": 0}}},
+        "else": {"properties": {"pending_assertions": {"minItems": 5}}},
+    }]
     assert all(
         schema["properties"][name]["additionalProperties"] is False
         for name in (
@@ -999,6 +1036,7 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="league-acceptance-test-") as temporary:
         root = Path(temporary)
         test_foundation_through_command_without_home(root / "command")
+        test_lifecycle_failure_blocks_receipt_and_retries(root / "lifecycle")
         test_fail_closed_inputs(root / "failure")
         test_forbidden_universal_guide_manifest_precedes_install_mutation(
             root / "forbidden-guide-manifest"
@@ -1028,7 +1066,7 @@ def main() -> None:
     print(
         "PASS: explicit-root sandbox, fake adapters, sentinels, migration parity, staged rollback, "
         "generation-fenced fault matrix, resumable receipts, exact canary cleanup, "
-        "regular-file staging with crash retry, and honest pending claims"
+        "regular-file staging with crash retry, integrated lifecycle, and unverified native claims"
     )
 
 

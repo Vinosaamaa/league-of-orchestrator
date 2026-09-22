@@ -455,11 +455,14 @@ supplied state root. It leaves an owner-only
   writers;
 - exact fake canary registration and identity-bound cleanup.
 
-The original `acceptance run` receipt retains machine-readable `pending`
-entries for request, assignment, watcher, Stop, and teardown so its v1 contract
-does not retroactively claim broader coverage. The separate pre-cutover receipt
-is the integrated contract described above. Neither receipt reports a double or
-synthetic hook payload as real-runtime support.
+`acceptance run` now executes the same integrated lifecycle check as pre-cutover:
+request intake and triage, assignment, receipted delivery, answer, cleanup, and
+Stop from blocked to allowed. A failure blocks the operation before a success
+receipt is written. Successful receipts contain `integrated_lifecycle` and an
+empty `pending_assertions` list. Historical v1 receipts without lifecycle
+evidence still require their five pending entries; they are not upgraded by
+this change. Both commands use synthetic adapters. Neither establishes model
+classification, native prompt delivery, or real-runtime support.
 
 Focused and combined affected verification are:
 

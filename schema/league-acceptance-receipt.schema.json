@@ -228,9 +228,11 @@
       },
       "additionalProperties": false
     },
+    "integrated_lifecycle": {
+      "$ref": "league-pre-cutover-receipt.schema.json#/$defs/integratedLifecycle"
+    },
     "pending_assertions": {
       "type": "array",
-      "minItems": 5,
       "items": {
         "type": "object",
         "required": ["slice", "issue", "status", "passed", "reason"],
@@ -259,6 +261,13 @@
       }
     }
   },
+  "allOf": [
+    {
+      "if": {"required": ["integrated_lifecycle"]},
+      "then": {"properties": {"pending_assertions": {"maxItems": 0}}},
+      "else": {"properties": {"pending_assertions": {"minItems": 5}}}
+    }
+  ],
   "$defs": {
     "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "connectionPolicy": {

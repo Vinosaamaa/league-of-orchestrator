@@ -27,12 +27,16 @@ class Native:
         self.changed = False
         self.duplicate = False
         self.on_observation = None
+        self.outside = False
+        self.owner_absent = False
 
     def calling_context(self):
+        if self.outside:
+            raise AssertionError('outside supervisor has no calling pane')
         return {'pane_id': self.owner['pane_id']}
 
     def discover(self):
-        return [self.owner, self.champion] + ([copy.deepcopy(self.champion)] if self.duplicate else [])
+        return ([] if self.owner_absent else [self.owner]) + [self.champion] + ([copy.deepcopy(self.champion)] if self.duplicate else [])
 
     def endpoint(self, *_):
         return SimpleNamespace(terminal_id=self.champion['terminal_id'])
@@ -80,7 +84,19 @@ def exercise(parent):
         request['expected_generation'] = 'hook:old'
         assert call(owner_authorized=True, check_only=True)['verified']
         assert dump() == original
-        receipt = call(owner_authorized=True)
+        native.outside = True
+        refused(lambda: call(owner_authorized=False, outside_supervisor=True), 'owner_authorization_required')
+        native.owner_absent = True
+        refused(lambda: call(owner_authorized=True, outside_supervisor=True), 'champion_identity_unproven')
+        native.owner_absent = False
+        prior_session = native.owner['agent_session']['value']
+        native.owner['agent_session']['value'] = 'foreign-owner-session'
+        refused(lambda: call(owner_authorized=True, outside_supervisor=True), 'champion_identity_unproven')
+        native.owner['agent_session']['value'] = prior_session
+        assert call(owner_authorized=True, outside_supervisor=True, check_only=True)['verified']
+        assert dump() == original
+        receipt = call(owner_authorized=True, outside_supervisor=True)
+        native.outside = False
         assert receipt['status'] == 'active' and not receipt['process_effects']
         assert call(owner_authorized=True)['idempotent']
         assert preserved(store) == baseline

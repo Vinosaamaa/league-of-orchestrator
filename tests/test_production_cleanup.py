@@ -22,7 +22,7 @@ from league.production_cleanup import (  # noqa: E402
     _validate_runtime_context,
     production_cleanup_registry,
 )
-from league.real_cleanup import SubprocessRunner  # noqa: E402
+from league.real_cleanup import SubprocessRunner, worktree_snapshot  # noqa: E402
 from league.real_canary import (  # noqa: E402
     CHAMPION_ID,
     LIFECYCLE_TASK_ID,
@@ -585,17 +585,25 @@ def test_production_cleanup_crash_resume_and_lease_scope(
 
 def test_standalone_repository_retention(
     root: Path, crash_action: str = "endpoint_close", *, recovered_stale: bool = False,
+    retained_worktree: bool = False,
 ) -> None:
     """Production execution closes only the exact fake endpoint, never the clone."""
     root = root.resolve()
     root.mkdir(parents=True)
     git = _create_git_canary(root)
-    clone = root / "retained-clone"
     commands = SubprocessRunner()
-    commands.run(("git", "clone", git["repository"], str(clone)))
-    commands.run(("git", "-C", str(clone), "checkout", git["branch"]))
-    git = {**git, "repository": str(clone), "worktree": str(clone),
-           "base_ref": "refs/remotes/origin/main"}
+    if retained_worktree:
+        clone = Path(git["worktree"])
+        (clone / "preserved.txt").write_text("unpublished task notes")
+        commands.run(("git", "-C", str(clone), "add", "preserved.txt"))
+        (clone / "preserved.txt").write_text("additional unstaged changes")
+        (clone / "untracked.txt").write_text("untracked content")
+    else:
+        clone = root / "retained-clone"
+        commands.run(("git", "clone", git["repository"], str(clone)))
+        commands.run(("git", "-C", str(clone), "checkout", git["branch"]))
+        git = {**git, "repository": str(clone), "worktree": str(clone),
+               "base_ref": "refs/remotes/origin/main"}
     herdr = herdr_identity()
     setup = _setup_sqlite(root, ROOT, git, herdr, issue_spec_resolver=issue_bound_spec)
     manifest_path, _ = _cleanup_files(
@@ -610,6 +618,12 @@ def test_standalone_repository_retention(
     manifest["proof"]["release"] = {"required_gates_complete": True}
     retained = _resource("repository:retained", "persistent_retain", "retain", "retain", git)
     retained["resource_type"] = "standalone_repository"
+    if retained_worktree:
+        manifest["proof"]["git"]["clean"] = False
+        manifest["proof"]["git"]["no_unpublished"] = False
+        retained["resource_type"] = "registered_worktree"
+        retained["expected_identity"] = {k: git[k] for k in ("repository", "worktree", "branch", "head")}
+        retained["expected_identity"]["snapshot_sha256"] = worktree_snapshot(clone, commands)
     manifest["resources"] = [retained]
     manifest["repository_retention"] = {
         "resource_id": retained["resource_id"],
@@ -661,7 +675,7 @@ def test_standalone_repository_retention(
             candidate = deepcopy(manifest)
             candidate.pop(key)
             invalid.append(candidate)
-        for gate in ("acceptance", "release", "publication"):
+        for gate in (("acceptance", "release") if retained_worktree else ("acceptance", "release", "publication")):
             candidate = deepcopy(manifest)
             candidate["proof"][gate] = {}
             invalid.append(candidate)
@@ -675,6 +689,17 @@ def test_standalone_repository_retention(
             candidate["resources"][0]["expected_identity"][key] = value
             if key == "worktree":
                 candidate["resources"][0]["expected_identity"]["repository"] = value
+            invalid.append(candidate)
+        if retained_worktree:
+            for field, value in (("snapshot_sha256", "bad"), ("repository", str(clone))):
+                candidate = deepcopy(manifest)
+                candidate["resources"][0]["expected_identity"][field] = value
+                invalid.append(candidate)
+            candidate = deepcopy(manifest)
+            candidate["resources"][0]["resource_type"] = "standalone_repository"
+            invalid.append(candidate)
+            candidate = deepcopy(manifest)
+            candidate["final_actions"].insert(2, {"action_kind": "worktree_remove", "adapter_kind": "git"})
             invalid.append(candidate)
         for candidate in invalid:
             try:
@@ -993,6 +1018,8 @@ def main() -> None:
         test_standalone_repository_retention(root / "standalone-release-retry", "callsign_release")
         test_standalone_repository_retention(root / "recovered-stale-retention", recovered_stale=True)
         test_standalone_repository_retention(root / "recovered-stale-release", "callsign_release", recovered_stale=True)
+        test_standalone_repository_retention(root / "dirty-worktree", retained_worktree=True)
+        test_standalone_repository_retention(root / "dirty-worktree-release", "callsign_release", retained_worktree=True)
         test_ready_to_land_owner_cancellation_recovers_planned_fence_zero_after_reopen(
             root / "ready-to-land-cancelled"
         )

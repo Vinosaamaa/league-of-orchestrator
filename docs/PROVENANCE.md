@@ -2710,3 +2710,13 @@ observations, and the transaction's version checks remain mandatory. It neither
 starts nor stops processes and never changes task acceptance. Default in-pane
 behavior is unchanged. Focused coverage verifies missing or foreign owners,
 explicit authority, read-only checking, successful recovery, and exact retry.
+# Completed-Champion worktree retention
+
+Issue #23 extends endpoint-only retirement to an explicitly retained registered
+worktree. This path archives the exact registration and a content fingerprint
+of staged, unstaged, and untracked changes, then retires only the endpoint and
+callsign. It requires completed task acceptance and release evidence. It does
+not claim preserved changes were published and cannot include Git deletion
+actions. Ordinary worktree deletion and standalone-clone retention keep their
+existing clean/publication checks. Production cleanup tests cover dirty-file
+preservation, changed-snapshot refusal, exact ownership, and crash retries.

@@ -10,7 +10,7 @@ from typing import Any, Mapping, Optional
 
 from .cleanup import (
     cleanup_action_digest, require_cleanup_task_disposition,
-    retained_repository_resource, select_cleanup_policy,
+    retained_repository_resource, select_cleanup_policy, RETAINED_REPOSITORY_TYPES,
 )
 from .storage_types import StorageRefusal
 
@@ -976,7 +976,7 @@ def _validate_retained_repository_owner(
     kinds = [a["action_kind"] for a in actions]
     expected_kinds = ["archive_identity_evidence"] + [
         r["cleanup_action"] for r in sorted(archive["resources"], key=lambda r: r["resource_id"])
-        if r["lifetime"] != "persistent_retain" or r["resource_type"] == "standalone_repository"
+        if r["lifetime"] != "persistent_retain" or r["resource_type"] in RETAINED_REPOSITORY_TYPES
     ] + ["session_exit", "endpoint_close", "callsign_release"]
     if kinds not in (expected_kinds, expected_kinds + ["issue_close"]):
         raise StorageRefusal("cleanup_retention_refused", "retention may release only exact endpoints and this task's leases")
@@ -1275,7 +1275,7 @@ def _validate_cleanup_resources(
                 )
             resource_actions[resource_id].append(action)
     for resource_id, resource in canonical_resources.items():
-        expected_count = 0 if resource["lifetime"] == "persistent_retain" and resource["resource_type"] != "standalone_repository" else 1
+        expected_count = 0 if resource["lifetime"] == "persistent_retain" and resource["resource_type"] not in RETAINED_REPOSITORY_TYPES else 1
         matching = resource_actions[resource_id]
         if (
             len(matching) != expected_count
@@ -1332,7 +1332,10 @@ def cleanup_execution_context(store: Any, operation_id: str) -> dict[str, Any]:
     archive = actions[0]["intended_state"]
     if not isinstance(archive, dict):
         raise StorageRefusal("cleanup_operation_invalid", "cleanup archive payload is malformed")
-    expected_policy = select_cleanup_policy(str(row["task_class"]), str(row["disposition"]))
+    expected_policy = select_cleanup_policy(str(row["task_class"]), str(row["disposition"]),
+        retain_worktree=isinstance(archive.get("resources"), list) and any(
+            isinstance(r, dict) and r.get("resource_type") == "registered_worktree"
+            for r in archive["resources"]))
     owner = archive.get("owner")
     proof = archive.get("proof")
     if (

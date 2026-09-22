@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import subprocess
 import tempfile
@@ -579,6 +580,31 @@ class GitAdapter(_BaseAdapter):
         return {"exact_git_target": True, "action": action["action_kind"]}
 
 
+def worktree_snapshot(path: Path, runner: CommandRunner) -> str:
+    """Fingerprint staged, unstaged and untracked bytes without changing Git state."""
+    digest = hashlib.sha256()
+    def add(value: bytes) -> None:
+        digest.update(len(value).to_bytes(8, "big"))
+        digest.update(value)
+    for args in (("status", "--porcelain=v1", "-z", "--untracked-files=all"),
+                 ("diff", "--binary", "--no-ext-diff"),
+                 ("diff", "--cached", "--binary", "--no-ext-diff")):
+        add(runner.run(("git", "--no-optional-locks", "-C", str(path), *args)).stdout.encode())
+    names = runner.run(("git", "--no-optional-locks", "-C", str(path),
+                        "ls-files", "--others", "--exclude-standard", "-z")).stdout
+    for name in sorted(filter(None, names.split("\0"))):
+        item = path / name
+        if Path(name).is_absolute() or ".." in Path(name).parts or not item.parent.resolve().is_relative_to(path):
+            raise StorageRefusal("cleanup_identity_mismatch", "untracked path escapes retained worktree")
+        add(name.encode())
+        if item.is_symlink():
+            add(b"symlink:" + os.fsencode(os.readlink(item)))
+        else:
+            with item.open("rb") as stream:
+                add(hashlib.file_digest(stream, "sha256").digest())
+    return digest.hexdigest()
+
+
 class RetainedRepositoryAdapter(_BaseAdapter):
     """Read-only proof of one standalone clone; no remove or delete capability."""
 
@@ -594,6 +620,28 @@ class RetainedRepositoryAdapter(_BaseAdapter):
                 or action["intended_state"] != {"retained": True}):
             raise StorageRefusal("cleanup_identity_mismatch", "retained repository plan changed")
         path = Path(self.identity["worktree"])
+        if "snapshot_sha256" in self.identity:
+            repository = Path(self.identity["repository"])
+            if (not path.is_absolute() or str(path.resolve()) != str(path)
+                    or not (path / ".git").is_file() or (path / ".git").is_symlink()
+                    or not repository.is_absolute() or repository.resolve() != repository
+                    or path == repository):
+                raise StorageRefusal("cleanup_identity_mismatch", "retention requires an exact registered worktree")
+            def checked_git(*args: str) -> str:
+                return self.runner.run(("git", "--no-optional-locks", "-C", str(path), *args)).stdout.strip()
+            registered = self.runner.run(("git", "--no-optional-locks", "-C", str(repository),
+                                          "worktree", "list", "--porcelain")).stdout.split("\n\n")
+            expected = {"worktree " + str(path), "HEAD " + self.identity["head"],
+                        "branch refs/heads/" + self.identity["branch"]}
+            matches = [set(block.splitlines()) for block in registered if "worktree " + str(path) in block.splitlines()]
+            if (len(matches) != 1 or not expected.issubset(matches[0])
+                    or checked_git("rev-parse", "--show-toplevel") != str(path)
+                    or Path(checked_git("rev-parse", "--path-format=absolute", "--git-common-dir")) != repository / ".git"
+                    or checked_git("rev-parse", "HEAD") != self.identity["head"]
+                    or checked_git("branch", "--show-current") != self.identity["branch"]
+                    or worktree_snapshot(path, self.runner) != self.identity["snapshot_sha256"]):
+                raise StorageRefusal("cleanup_identity_mismatch", "retained worktree registration or bytes changed")
+            return {"retained": True}
         if (not path.is_absolute() or str(path.resolve()) != str(path)
                 or not (path / ".git").is_dir() or (path / ".git").is_symlink()):
             raise StorageRefusal("cleanup_identity_mismatch", "retention requires an exact standalone clone")

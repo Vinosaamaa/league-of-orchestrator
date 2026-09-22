@@ -2685,3 +2685,7 @@ check instead of emitting fixed pending assertions. Its synthetic scope is
 unchanged. Historical receipts retain their pending evidence; native runtime
 support remains a separate gate. Focused command tests cover successful
 settlement, failure without a success receipt, and an exact isolated retry.
+Native acceptance preserves human directory trust and sends its challenge only
+after observing the requested route and current input screen; process detection
+alone is not an input-readiness receipt. Both legacy and current native trust
+screens are recognized before any model prompt is sent.

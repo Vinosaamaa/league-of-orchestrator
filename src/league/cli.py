@@ -789,6 +789,8 @@ def _add_runtime_commands(groups: argparse._SubParsersAction) -> None:
         champion_recovery.add_argument(f'--{name}', required=True)
     champion_recovery.add_argument('--owner-authorized', action='store_true')
     champion_recovery.add_argument('--check-only', action='store_true')
+    champion_recovery.add_argument('--outside-supervisor', action='store_true',
+        help='Explicitly reconcile from outside the multiplexer; exact canonical owner and Champion sessions must both be present.')
     repair = commands.add_parser("repair-shotcaller-identity", help="Repair one malformed legacy Codex identity in the calling Herdr pane; never rollover.")
     for name in ("agent-id", "runtime-instance-id", "expected-session-ref", "expected-generation", "endpoint", "thread-id", "at"):
         repair.add_argument(f"--{name}", required=True)
@@ -2462,6 +2464,7 @@ def _runtime_reconcile_champion_identity(store: Storage, args: argparse.Namespac
     return reconcile_champion_identity(
         store, request, multiplexer=builtin_multiplexer_adapter_registry().adapter('herdr'),
         at=args.at, owner_authorized=args.owner_authorized, check_only=args.check_only,
+        outside_supervisor=args.outside_supervisor,
     ), None
 
 

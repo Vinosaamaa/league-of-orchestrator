@@ -2699,3 +2699,14 @@ title. Endpoint, routing, and bootstrap ownership checks remain mandatory.
 The companion terminal helper change in terminal-environment-toolkit issue 178
 preserves explicitly owned, callsign-only Shotcaller names. Focused coverage
 checks registration, retry, unchanged native titles, and stale-thread refusal.
+
+## Issue 23: outside-supervisor Champion recovery
+
+Exact retained-Champion recovery can explicitly run outside the multiplexer.
+This mode omits only the unavailable calling-pane requirement. The canonical
+owner endpoint and immutable owner session must still appear exactly once;
+Champion ownership, session, route, working directory, two native process
+observations, and the transaction's version checks remain mandatory. It neither
+starts nor stops processes and never changes task acceptance. Default in-pane
+behavior is unchanged. Focused coverage verifies missing or foreign owners,
+explicit authority, read-only checking, successful recovery, and exact retry.

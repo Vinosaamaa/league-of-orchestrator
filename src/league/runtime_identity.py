@@ -17,6 +17,7 @@ from .storage_types import StorageRefusal
 def reconcile_champion_identity(
     store: Any, request: Mapping[str, Any], *, multiplexer: Any, at: str,
     owner_authorized: bool, check_only: bool = False,
+    outside_supervisor: bool = False,
 ) -> dict[str, Any]:
     """Recover one retained session, never infer identity from its pane or title."""
     _timestamp(at)
@@ -44,8 +45,10 @@ def reconcile_champion_identity(
     if actor["kind"].removesuffix("-thread") != kind or not provider_lifecycle(kind).validate_session(request["session_ref"]):
         raise refusal
     inventory = multiplexer.discover()
-    context = multiplexer.calling_context()
-    owners = [item for item in inventory if item.get("pane_id") == context["pane_id"]
+    # An explicitly authorized outside supervisor has no calling pane. It must
+    # still find the exact canonical owner endpoint and immutable owner session.
+    owner_pane = owner["address"] if outside_supervisor else multiplexer.calling_context()["pane_id"]
+    owners = [item for item in inventory if item.get("pane_id") == owner_pane
               and item.get("pane_id") == owner["address"]
               and (item.get("agent_session") or {}).get("value") == owner["thread_id"]]
     matches = [item for item in inventory if (item.get("agent_session") or {}).get("value") == request["session_ref"]]

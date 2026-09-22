@@ -197,6 +197,20 @@ class HerdrShotcallerBootstrapAdapter:
         tokens = agent.get("tokens")
         thread_id = _session(agent)
         if (
+            agent.get("agent") == "codex"
+            and isinstance(tokens, Mapping)
+            and isinstance(thread_id, str)
+            and tokens.get("identity_title_mode") == "tokens-only"
+            and tokens.get("identity_thread_id") == thread_id
+            and tokens.get("harness") == "codex"
+            and isinstance(tokens.get("thread_title"), str)
+            and tokens.get("thread_title")
+            and tokens.get("identity_title") == f"Codex | {tokens['thread_title']}"
+        ):
+            # Native OSC titles remain provider-owned in tokens-only mode.
+            # Publication still checks the exact endpoint, route and owner tokens.
+            return str(tokens["thread_title"])
+        if (
             agent.get("agent") == "pi"
             and isinstance(tokens, Mapping)
             and isinstance(thread_id, str)
@@ -873,6 +887,16 @@ class HerdrShotcallerBootstrapAdapter:
         self._published_source = self._title_source(spec)
         self._expected_published_sequence = sequence
         display = self._display(callsign)
+        tokens = agent.get("tokens")
+        token_only = bool(
+            self.options.runtime_kind == "codex"
+            and isinstance(tokens, Mapping)
+            and tokens.get("identity_title_mode") == "tokens-only"
+            and tokens.get("identity_thread_id") == spec.thread_id
+            and tokens.get("harness") == "codex"
+        )
+        if token_only:
+            display["identity_title"] = f"Codex | {callsign}"
         token_arguments = tuple(
             part
             for key, value in display.items()
@@ -893,8 +917,7 @@ class HerdrShotcallerBootstrapAdapter:
                 self.options.runtime_kind,
                 "--display-agent",
                 self.options.provider_kind,
-                "--title",
-                display["title"],
+                *(("--clear-title",) if token_only else ("--title", display["title"])),
                 *token_arguments,
                 "--token",
                 f"{TITLE_OWNER_TOKEN}={self._title_owner(spec)}",

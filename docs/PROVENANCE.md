@@ -2677,6 +2677,7 @@ continuation behavior. Detailed requests remain available through the canonical
 request commands; no record is completed, dropped, or hidden from those queries.
 Focused tests verify bounded feedback with twelve long prompts, unchanged
 retained input, provider-native feedback, and exact continuation acknowledgement.
+
 # Issue 23: integrated acceptance entry point
 
 The ordinary acceptance command now executes the existing pre-cutover lifecycle

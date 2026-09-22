@@ -258,6 +258,37 @@ def _require_legacy_champion_result(
         "branch": row["branch"], "worktree": row["worktree"],
         "thread_id": row["session_ref"],
     }
+    if isinstance(receipt, dict) and any(
+        receipt.get(key) != expected[key] for key in ("branch", "worktree")
+    ):
+        # A completed, owner-authorized move preserves the original launch
+        # receipt. Reuse its existing verifier rather than rewriting history or
+        # trusting current agent fields alone.
+        from .sqlite_assignment_ops import assignment_launch_context
+
+        try:
+            move = assignment_launch_context(store, row["task_assignment_id"])[
+                "legacy_display_reconciliation"
+            ]
+        except StorageRefusal:
+            raise refusal
+        if not isinstance(move, dict) or not isinstance(move.get("receipt"), dict):
+            raise refusal
+        intent = move["intent"]
+        identity = {
+            "assignment_id": row["task_assignment_id"],
+            "champion_agent_id": row["champion_agent_id"],
+            "runtime_instance_id": row["runtime_instance_id"],
+            "callsign": row["callsign"],
+            "thread_id": row["session_ref"],
+            "previous_branch": receipt.get("branch"),
+            "previous_worktree": receipt.get("worktree"),
+            "branch": row["branch"],
+            "worktree": row["worktree"],
+        }
+        if any(value in (None, "") or intent.get(key) != value for key, value in identity.items()):
+            raise refusal
+        expected.update(branch=receipt["branch"], worktree=receipt["worktree"])
     if (
         not isinstance(receipt, dict) or receipt.get("verified") is not True
         or any(receipt.get(key) != value or value in (None, "") for key, value in expected.items())

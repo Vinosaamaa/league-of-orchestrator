@@ -2727,3 +2727,10 @@ not claim preserved changes were published and cannot include Git deletion
 actions. Ordinary worktree deletion and standalone-clone retention keep their
 existing clean/publication checks. Production cleanup tests cover dirty-file
 preservation, changed-snapshot refusal, exact ownership, and crash retries.
+## Issue 23: accepted worktree move lineage
+
+Legacy result settlement now follows an exact completed, owner-authorized
+worktree move through the existing reconciliation receipt verifier. The original
+launch receipt stays immutable. Missing completion, changed identity, altered
+intent digest, or an unrecorded current location still refuses. Focused tests
+cover refusal without mutation and result-to-answer success after the move.

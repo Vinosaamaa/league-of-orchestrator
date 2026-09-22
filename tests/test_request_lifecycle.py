@@ -580,6 +580,49 @@ def test_explicit_legacy_result_reconciliation(root: Path) -> None:
     store.connection.execute("UPDATE task_assignments SET coordinator_agent_id=? WHERE task_assignment_id='A-legacy'", (JARVAN_ID,))
     refuses(command)
     store.connection.execute("UPDATE task_assignments SET coordinator_agent_id=? WHERE task_assignment_id='A-legacy'", (SHOTCALLER_ID,))
+    # A supported worktree move leaves the original receipt immutable. Current
+    # location alone, an intent alone, or a mismatched final receipt are not proof.
+    original = json.loads(raw)
+    store.connection.execute("UPDATE agent_instances SET branch='agent/moved',worktree='/synthetic/moved' WHERE agent_id=?", (SONA_ID,))
+    refuses(command)
+    intent = {
+        "schema": "league.legacy-display-reconciliation-intent.v2",
+        "assignment_id": "A-legacy", "expected_version": 1,
+        "champion_agent_id": SONA_ID, "runtime_instance_id": assignment["runtime_instance_id"],
+        "callsign": original["callsign"], "pane_id": "synthetic-pane", "terminal_id": "synthetic-terminal",
+        "thread_id": original["thread_id"], "worktree": "/synthetic/moved",
+        "routing_name": "sona", "expected_presentation_source": "synthetic",
+        "expected_title": "Sona", "expected_state_change_seq": 1,
+        "target_task_label": "Accepted Work", "target_title": "Sona · Accepted Work",
+        "owner_authorized": True, "previous_worktree": original["worktree"],
+        "previous_branch": original["branch"], "branch": "agent/moved",
+    }
+    encoded = json.dumps(intent, sort_keys=True, separators=(",", ":"))
+    intent_hash = hashlib.sha256(encoded.encode()).hexdigest()
+    def insert_move(event_id, kind, detail):
+        store.connection.execute(
+            "INSERT INTO events(event_id,task_id,entity_version,event_type,status,update_text,occurred_at,detail_json,aggregate_kind,aggregate_id) VALUES(?,'T-legacy',1,?,'active','synthetic move',?,?,'assignment','A-legacy')",
+            (event_id, kind, clock.now(), json.dumps(detail, sort_keys=True, separators=(",", ":"))),
+        )
+    insert_move("move-intent", "assignment_legacy_display_reconciliation_intent", intent)
+    refuses(command)
+    final = {"schema": "league.legacy-display-reconciliation-result.v1", "intent_digest": intent_hash, "receipt": {
+        "schema": "league.legacy-display-reconciliation.v1", "assignment_id": "A-legacy",
+        "champion_agent_id": SONA_ID, "runtime_instance_id": assignment["runtime_instance_id"],
+        "reconciliation_id": "legacy-display:" + intent_hash[:24],
+        "source": "league-legacy-" + intent_hash[:24], "applies_to_source": "synthetic",
+        "state_change_seq": 1, "sidebar_name": original["callsign"], "task_label": "Accepted Work",
+        "thread_title": "Sona · Accepted Work", "terminal_title": "Sona · Accepted Work",
+        "observation_digest": hashlib.sha256(b"synthetic-observation").hexdigest(),
+    }}
+    insert_move("move-final", "assignment_legacy_display_reconciled", {**final, "intent_digest": "0" * 64})
+    refuses(command)
+    store.connection.execute("UPDATE events SET detail_json=? WHERE event_id='move-final'", (json.dumps(final),))
+    store.connection.execute("UPDATE agent_instances SET branch='agent/unproven' WHERE agent_id=?", (SONA_ID,))
+    refuses(command)
+    store.connection.execute("UPDATE agent_instances SET branch='agent/moved' WHERE agent_id=?", (SONA_ID,))
+    from league.sqlite_assignment_ops import assignment_launch_context
+    assert assignment_launch_context(store, "A-legacy")["legacy_display_reconciliation"]["receipt"]
     payload = invoke_cli(
         state, "request", "result", "--request-id", "R3", "--claim-token", "claim",
         "--expected-version", "2", "--result-id", "legacy-result", "--idempotency-key", "legacy-key",

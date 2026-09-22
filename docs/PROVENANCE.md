@@ -2689,3 +2689,13 @@ Native acceptance preserves human directory trust and sends its challenge only
 after observing the requested route and current input screen; process detection
 alone is not an input-readiness receipt. Both legacy and current native trust
 screens are recognized before any model prompt is sent.
+
+## Issue 23: native Shotcaller title compatibility
+
+Codex token-only identity uses an exact native thread token and provider label;
+its OSC conversation title is not the League display title. Bootstrap now
+publishes and verifies the canonical identity token without changing that native
+title. Endpoint, routing, and bootstrap ownership checks remain mandatory.
+The companion terminal helper change in terminal-environment-toolkit issue 178
+preserves explicitly owned, callsign-only Shotcaller names. Focused coverage
+checks registration, retry, unchanged native titles, and stale-thread refusal.

@@ -4722,9 +4722,45 @@ def test_publish_crash_then_retry_fault_restores_original_unbound_metadata(
         ).fetchone()[0] == 0
 
 
+def test_codex_token_only_bootstrap_preserves_native_title(root: Path) -> None:
+    state, _ = migrated_state(root, "codex-token-only-bootstrap")
+    worktree = root / "codex-token-only-bootstrap" / "worktree"
+    worktree.mkdir()
+    clock = FakeClock()
+    runner = RecordingHerdr(worktree)
+    runner.expose_metadata_source = False
+    runner.title = "Native conversation | codex"
+    runner.tokens = {
+        "identity_title_mode": "tokens-only",
+        "identity_thread_id": THREAD_ID,
+        "identity_title": "Codex | Native conversation",
+        "harness": "codex",
+        "provider_label": "codex",
+        "sidebar_name": "Native conversation",
+        "thread_title": "Native conversation",
+    }
+    with SQLiteStorage(state) as store:
+        _seed_available_ashe(store, clock)
+        service = _service(store, clock, worktree, runner)
+        assert service.bootstrap(_spec())["state"] == "active"
+        assert runner.title == "Native conversation | codex"
+        assert runner.tokens["thread_title"] == "Ashe"
+        assert runner.tokens["identity_title"] == "Codex | Ashe"
+        assert service.bootstrap(_spec())["state"] == "active"
+        # A stale thread token cannot authenticate a different native session.
+        runner.tokens["identity_thread_id"] = "different-thread"
+        try:
+            service.bootstrap(_spec())
+        except StorageRefusal as exc:
+            assert exc.code in {"shotcaller_metadata_unverified", "shotcaller_identity_unverified"}
+        else:
+            raise AssertionError("stale token-only identity was accepted")
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="league-shotcaller-bootstrap-") as temporary:
         root = Path(temporary)
+        test_codex_token_only_bootstrap_preserves_native_title(root)
         test_in_place_bootstrap_creates_shotcaller_without_layout_or_squad_registration(root)
         test_cursor_authority_shotcaller_role_token_is_owned_and_retry_safe(root)
         test_in_place_bootstrap_is_provider_neutral_and_never_creates_layout(root)

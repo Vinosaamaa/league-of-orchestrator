@@ -4,11 +4,13 @@
 from __future__ import annotations
 
 import json
+import os
 import shlex
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -917,16 +919,19 @@ def factory_adapter(store, clock, worktree, root, runner, *, project_code="LEAGU
         "explicit": {"runtime": True, "provider": True, "model": True, "effort": True},
     }
     multiplexer = builtin_multiplexer_adapter_registry(herdr_runner=runner).adapter("herdr")
-    adapter = builtin_agent_adapter_registry().adapter("pi").visible_launch(
-        store=store, options=options, multiplexer=multiplexer, startup_timeout_ms=1000,
-        launch={
-            "assignment_id": "assignment:factory", "project_code": project_code,
-            "worktree": str(worktree), "provider_kind": "codex",
-            "model": options.model, "effort": options.effort, "routing": routing,
-            "resolved_release_root": str(ROOT), "workspace_id": "w1",
-            "state_root": str(root / "state"), "session_mode": "create", "at": clock.now(),
-        },
-    )
+    # The injected runner is synthetic; its calling-context fixture must not
+    # depend on whether the test runner itself happens to be inside Herdr.
+    with patch.dict(os.environ, {"HERDR_ENV": "1"}):
+        adapter = builtin_agent_adapter_registry().adapter("pi").visible_launch(
+            store=store, options=options, multiplexer=multiplexer, startup_timeout_ms=1000,
+            launch={
+                "assignment_id": "assignment:factory", "project_code": project_code,
+                "worktree": str(worktree), "provider_kind": "codex",
+                "model": options.model, "effort": options.effort, "routing": routing,
+                "resolved_release_root": str(ROOT), "workspace_id": "w1",
+                "state_root": str(root / "state"), "session_mode": "create", "at": clock.now(),
+            },
+        )
     return adapter, options, routing
 
 

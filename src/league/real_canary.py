@@ -451,7 +451,32 @@ def _create_repository_artifact_canary(
 
 def _directory_trust_visible(text: str) -> bool:
     normalized = " ".join(text.lower().split())
-    return "do you trust the contents of this" in normalized
+    return ("do you trust the contents of this" in normalized
+            or ("trust this folder?" in normalized
+                and "trust and continue" in normalized))
+
+
+def _await_canary_input(home: Path, pane_id: str) -> subprocess.CompletedProcess[str]:
+    # Process detection can precede the native TUI's first frame. Sending the
+    # challenge then can lose input even though Herdr reported a ready process.
+    # Observe the current screen, not an earlier ready frame in scrollback.
+    deadline = time.monotonic() + 30
+    while True:
+        screen = _run(
+            ("herdr", "pane", "read", pane_id, "--source", "visible",
+             "--lines", "160", "--format", "text"), cwd=home, timeout=5,
+        )
+        if _directory_trust_visible(screen.stdout):
+            return screen
+        if ("gpt-6-astra high" in screen.stdout
+                and re.search(r"(?m)^\s*›", screen.stdout)):
+            return screen
+        if time.monotonic() >= deadline:
+            raise StorageRefusal(
+                "real_canary_input_not_ready",
+                "Codex input screen and requested route were not observed before the challenge",
+            )
+        time.sleep(0.2)
 
 
 def _create_herdr_canary(home: Path, worktree: Path, namespace: str, *, codex_yolo: bool = False,
@@ -532,7 +557,8 @@ def _create_herdr_canary(home: Path, worktree: Path, namespace: str, *, codex_yo
         "--format",
         "text",
     )
-    startup = _run(read_arguments, cwd=home)
+    startup = (_run(read_arguments, cwd=home) if start_error is not None
+               else _await_canary_input(home, pane_id))
     if _directory_trust_visible(startup.stdout):
         # Herdr can report an idle agent before the native trust gate is resolved.
         # Never send model input or accept that gate on the user's behalf.
@@ -546,9 +572,9 @@ def _create_herdr_canary(home: Path, worktree: Path, namespace: str, *, codex_yo
             identity = _exact_agent(home, name)
             ready = (not _directory_trust_visible(visible.stdout)
                      and "gpt-6-astra high" in visible.stdout
+                     and re.search(r"(?m)^\s*›", visible.stdout) is not None
                      and identity is not None and identity.get("agent") == "codex"
-                     and identity.get("pane_id") == pane_id
-                     and _codex_session_id(identity) is not None)
+                     and identity.get("pane_id") == pane_id)
             if ready:
                 break
             time.sleep(0.2)
@@ -556,8 +582,9 @@ def _create_herdr_canary(home: Path, worktree: Path, namespace: str, *, codex_yo
             raise StorageRefusal(
                 "real_canary_trust_required", "disposable Codex repository requires human directory trust"
             )
-        # Only human interaction can clear this gate. Keep the normal challenge
-        # below: a changed screen alone is not successful model acceptance.
+        # Only human interaction can clear this gate. A fresh thread may not be
+        # persisted until its first prompt; require its session identity after
+        # the challenge, not as a prerequisite for sending that first prompt.
         del failure_scope["herdr"]["startup_blocker"]
         _write_json(failure_scope_path, failure_scope)
         start_error = None

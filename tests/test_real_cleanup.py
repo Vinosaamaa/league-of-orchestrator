@@ -940,9 +940,11 @@ def test_canary_readiness_requires_reply_without_trust_override(root: Path) -> N
             elif args[:3] == ("herdr", "pane", "read"):
                 if trust == "human" and "visible" in args:
                     human_trusted = True  # Synthetic human interaction, not agent input.
-                result = "gpt-6-astra high\n" + prompt
+                result = "gpt-6-astra high\n› Ask Codex to do anything\n" + prompt
                 if trust and trust != "yolo" and not human_trusted:
-                    result = "Do you trust the\n contents of this directory?"
+                    result = ("Trust this folder?\n› 1. Trust and continue\n2. Quit"
+                              if trust == "human" else
+                              "Do you trust the\n contents of this directory?")
                 elif reply:
                     result += "\n" + token
             elif args[0] == "git":
@@ -979,7 +981,7 @@ def test_canary_readiness_requires_reply_without_trust_override(root: Path) -> N
         }
         with patch.object(real_canary, "_run", side_effect=fake_run), patch.object(
             real_canary, "_herdr", side_effect=fake_herdr
-        ), patch.object(real_canary, "_exact_agent", side_effect=[None, identity, identity] if trust == "human" else [None, identity]):
+        ), patch.object(real_canary, "_exact_agent", side_effect=[None, {**identity, "agent_session": None}, identity] if trust == "human" else [None, identity]):
             if trust and trust not in ("yolo", "human"):
                 refused(lambda: real_canary._create_herdr_canary(home, worktree, "test"), "real_canary_trust_required")
                 scope = json.loads((home / "failure-scope.json").read_text())
@@ -991,6 +993,33 @@ def test_canary_readiness_requires_reply_without_trust_override(root: Path) -> N
                 refused(lambda: real_canary._create_herdr_canary(home, worktree, "test"), "real_canary_readiness_unproven")
         assert sum(call[:3] == ("herdr", "agent", "prompt") for call in calls) == (0 if trust and trust not in ("yolo", "human") else 1)
         assert not any(call[:3] == ("herdr", "pane", "run") for call in calls)
+
+
+def test_canary_waits_for_input_before_challenge() -> None:
+    ready = "gpt-6-astra high\n› Ask Codex to do anything"
+    trust = "Do you trust the contents of this directory?"
+    for screens, expected in (
+        (["", "gpt-6-astra high", ready], ready),
+        (["", trust], trust),
+        (["Trust this folder?\n› 1. Trust and continue\n2. Quit"],
+         "Trust this folder?\n› 1. Trust and continue\n2. Quit"),
+        (["gpt-6-astra low\n› Ask Codex to do anything"] * 3, None),
+    ):
+        calls = []
+        def read(arguments: Sequence[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            calls.append(tuple(arguments))
+            assert arguments[:3] == ("herdr", "pane", "read")
+            assert "visible" in arguments
+            return subprocess.CompletedProcess(arguments, 0, screens.pop(0), "")
+        with patch.object(real_canary, "_run", side_effect=read), patch.object(
+            real_canary.time, "monotonic", side_effect=[0, 1, 2, 31]
+        ), patch.object(real_canary.time, "sleep"):
+            if expected is None:
+                refused(lambda: real_canary._await_canary_input(Path("."), "w-test:p-test"),
+                        "real_canary_input_not_ready")
+            else:
+                assert real_canary._await_canary_input(Path("."), "w-test:p-test").stdout == expected
+        assert not screens
 
 
 def test_trust_gate_cleanup_cancels_only_exact_canary() -> None:
@@ -1062,6 +1091,7 @@ def test_canary_failure_diagnostics_do_not_echo_private_data() -> None:
 
 
 def main() -> None:
+    test_canary_waits_for_input_before_challenge()
     test_canary_failure_diagnostics_do_not_echo_private_data()
     test_trust_gate_cleanup_cancels_only_exact_canary()
     test_canary_start_retries_only_atomic_shell_preflight()

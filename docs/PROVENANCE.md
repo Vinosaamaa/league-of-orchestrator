@@ -1,5 +1,16 @@
 # Source provenance
 
+## Issue #23: restore in-place Pi Shotcallers
+
+Native acceptance found that Pi restoration required a provider launch
+descriptor even for an in-place Shotcaller, whose identity is recorded in a
+bootstrap publication instead. The Pi adapter now resolves that exact active
+callsign assignment and reuses the existing publication verifier. The full
+session path remains canonical; only its digest is placed in bounded display
+metadata. Champion descriptor verification remains unchanged. Regression checks
+cover both Pi providers, long session paths, side-effect-free display replay,
+and rejection of a replaced session.
+
 ## Issue #23 immutable settlement summary
 
 The first installed historical reconciliation exposed that agent update text

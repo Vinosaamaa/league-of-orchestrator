@@ -809,6 +809,56 @@ def test_shotcaller_publication_cwd_accepts_absent_or_matching_and_refuses_confl
             assert herdr.processes == before_processes
 
 
+def test_in_place_pi_shotcaller_restores_without_launch_descriptor(root: Path) -> None:
+    for provider in ("codex", "cursor"):
+        state = canonical_state(root / provider, include_champions=False)
+        session = str(root / provider / "long-session-directory" / ("a" * 80 + ".jsonl"))
+        with SQLiteStorage(state) as store:
+            raw = store.connection.execute(
+                "SELECT metadata_json FROM agent_instances WHERE agent_id='agent:ashe'"
+            ).fetchone()[0]
+            metadata = json.loads(raw)
+            for key in ("shotcaller_bootstrap_baseline", "shotcaller_bootstrap_publication"):
+                metadata[key]["presentation_source"] = "herdr:pi"
+            publication = metadata["shotcaller_bootstrap_publication"]
+            publication["session_identity"] = session
+            publication["baseline_digest"] = hashlib.sha256(
+                stable(metadata["shotcaller_bootstrap_baseline"]).encode()
+            ).hexdigest()
+            store.connection.execute(
+                "UPDATE agent_instances SET kind='pi-thread',thread_id=?,display_agent=?,metadata_json=? "
+                "WHERE agent_id='agent:ashe'", (session, provider, stable(metadata)),
+            )
+            store.connection.execute(
+                "UPDATE runtime_instances SET harness_kind='pi',session_ref=? "
+                "WHERE runtime_instance_id='runtime:ashe'", (session,),
+            )
+            expected = canonical_presentations(store)
+            assert len(expected) == 1
+            assert expected[0]["session_ref"] == session
+            assert expected[0]["thread_id"] == "sha256:" + hashlib.sha256(session.encode()).hexdigest()
+            assert expected[0]["provider_kind"] == provider
+            assert expected[0]["applies_to_source"] == "herdr:pi"
+            assert store.connection.execute("SELECT COUNT(*) FROM provider_launch_descriptors").fetchone()[0] == 0
+            herdr = RestoredHerdr(expected)
+            processes = json.loads(json.dumps(herdr.processes))
+            receipt = replay_restored_display(store, herdr_runner=herdr, timeout_ms=1000, sleeper=lambda _: None)
+            assert receipt["replayed_count"] == 1
+            assert receipt["created_processes"] == receipt["resumed_sessions"] == 0
+            assert herdr.processes == processes
+            # A bootstrap publication may not hide a changed session binding.
+            store.connection.execute(
+                "UPDATE runtime_instances SET session_ref=? WHERE runtime_instance_id='runtime:ashe'",
+                (session + ".replaced",),
+            )
+            try:
+                canonical_presentations(store)
+            except StorageRefusal as exc:
+                assert exc.code == "display_replay_project_unproven"
+            else:
+                raise AssertionError("Pi bootstrap accepted a different native session")
+
+
 def test_shotcaller_project_binding_refuses_ambiguous_or_malformed_sources(
     root: Path,
 ) -> None:
@@ -1367,6 +1417,7 @@ def main() -> None:
         test_shotcaller_publication_cwd_accepts_absent_or_matching_and_refuses_conflict(
             root / "shotcaller-cwd-evidence"
         )
+        test_in_place_pi_shotcaller_restores_without_launch_descriptor(root / "pi-bootstrap")
         test_shotcaller_project_binding_refuses_ambiguous_or_malformed_sources(
             root / "shotcaller-project-refusals"
         )

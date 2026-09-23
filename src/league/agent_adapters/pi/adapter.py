@@ -7,6 +7,8 @@ from ...storage_types import StorageRefusal
 from ..base import (
     DeclaredAgentAdapter,
     deliver_via_multiplexer,
+    native_assignment,
+    native_presentation,
     steer_via_multiplexer,
 )
 from ..core import declared_lifecycle_operations
@@ -122,6 +124,17 @@ def _visible_launch_factory(
 
 
 def _presentation(**inputs):
+    if inputs["row"]["role"] == "shotcaller" and inputs["store"].shotcaller_bootstrap_publication(
+        inputs["assignment_id"]
+    ) is not None:
+        presentation = native_presentation(**inputs)
+        # An in-place Pi bootstrap binds the absolute session path, not a
+        # launch descriptor's UUID. Keep that path as the canonical identity;
+        # use only its bounded digest in Herdr's display metadata.
+        presentation["thread"] = "sha256:" + hashlib.sha256(
+            str(inputs["row"]["session_ref"]).encode("utf-8")
+        ).hexdigest()
+        return presentation
     return _pi_presentation(**inputs)
 
 
@@ -132,6 +145,10 @@ def _one(rows: list[Any], code: str, message: str) -> Any:
 
 
 def _assignment(store: Any, row: Mapping[str, Any]) -> str:
+    if row["role"] == "shotcaller":
+        assignment_id = native_assignment(store, row)
+        if store.shotcaller_bootstrap_publication(assignment_id) is not None:
+            return assignment_id
     rows = store.connection.execute(
         """
         SELECT assignment_id FROM provider_launch_descriptors

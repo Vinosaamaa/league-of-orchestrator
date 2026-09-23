@@ -1408,6 +1408,7 @@ def test_native_launcher_process_proof() -> None:
 
 def main() -> None:
     test_native_launcher_process_proof()
+    test_native_titled_pi_process_proof()
     with tempfile.TemporaryDirectory(prefix="league-async-restore-") as temporary:
         root = Path(temporary)
         test_async_restart_converges_without_duplicate_processes(root / "success")
@@ -1441,6 +1442,43 @@ def main() -> None:
     test_adapter_capabilities_are_truthful()
     test_plugin_is_supported_async_startup_only()
     print("PASS: async Herdr restart replay converges exact sessions without duplicate processes")
+
+
+def test_native_titled_pi_process_proof() -> None:
+    from copy import deepcopy
+    from league.multiplexer_adapters.herdr.adapter import _foreground_process
+
+    agent = {"agent": "pi", "pane_id": "synthetic:p1", "agent_session": {
+        "agent": "pi", "kind": "path", "source": "herdr:pi", "value": "/synthetic/session.jsonl"}}
+    info = {"pane_id": "synthetic:p1", "shell_pid": 42, "foreground_process_group_id": 8000,
+            "foreground_processes": [{"pid": 8000, "name": "node", "argv0": "pi", "cwd": "/synthetic/project"}]}
+
+    class Reader:
+        output = "8000 42 8000 Fri Sep 4 17:50:46 2026 pi\n"
+
+        def run(self, args, timeout_seconds):
+            assert args[0] == "/bin/ps" and timeout_seconds == 3
+            return subprocess.CompletedProcess(args, 0, self.output, "")
+
+    reader = Reader()
+    verified = _foreground_process(reader, info, agent)
+    assert verified["argv0"] == "pi" and verified["pid"] == 8000
+    baseline = reader.output
+    for bad_info, bad_agent, output in (
+        ({**info, "shell_pid": 99}, agent, baseline),
+        (info, {**agent, "agent": "codex"}, baseline),
+        (info, {**agent, "agent_session": {**agent["agent_session"], "value": "relative"}}, baseline),
+        (info, {**agent, "agent_session": {**agent["agent_session"], "source": "other"}}, baseline),
+        (info, agent, baseline.replace(" pi", " unrelated")),
+        (info, agent, baseline.replace("8000 42 8000", "8000 42 99")),
+    ):
+        reader.output = output
+        try:
+            _foreground_process(reader, deepcopy(bad_info), bad_agent)
+        except StorageRefusal as exc:
+            assert exc.code == "display_replay_process_ambiguous"
+        else:
+            raise AssertionError("ambiguous titled Pi process accepted")
 
 
 if __name__ == "__main__":

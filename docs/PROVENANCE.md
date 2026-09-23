@@ -11,6 +11,11 @@ metadata. Champion descriptor verification remains unchanged. Regression checks
 cover both Pi providers, long session paths, side-effect-free display replay,
 and rejection of a replaced session.
 
+The same native preflight exposed Pi's titled-process inventory: Herdr reports
+one Node process with `argv0=pi` and no original argv. Restoration now verifies
+that narrow shape against the OS process start, pane shell parent, foreground
+group and native Pi session. Other missing-argv or ambiguous processes refuse.
+
 ## Issue #23 immutable settlement summary
 
 The first installed historical reconciliation exposed that agent update text

@@ -14,7 +14,7 @@ unknowns: []
 modules: ["runtime"]
 interfaces: ["restored-agent"]
 seams: []
-adapters: ["pi"]
+adapters: ["pi", "herdr"]
 relatedRecords: []
 decisions: []
 incidents: []
@@ -43,3 +43,8 @@ and use its bounded digest only for display metadata.
 
 Descriptor-backed Champion restoration is unchanged. Both provider variants,
 long paths, no process creation, and changed-session rejection are covered.
+
+Native Pi also replaces its process title, hiding the original argv. Accept
+only the exact single Node/Pi shape with matching OS start, shell parent,
+foreground group and native session source. Foreign or incomplete shapes
+remain rejected and have focused regression coverage.

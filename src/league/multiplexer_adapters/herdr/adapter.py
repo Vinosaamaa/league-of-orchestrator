@@ -94,6 +94,27 @@ def _foreground_process(runner: CommandRunner, info: Any, agent: Mapping[str, An
                         "process_start": " ".join(fields[3:8]), "executable": fields[8]}
     if set(records) != set(pids):
         refuse()
+    # Native Pi sets its process title to "pi", so Herdr cannot return its
+    # original Node argv. Bind the single titled process to the pane's shell,
+    # foreground group, OS start identity and exact native Pi session instead.
+    if len(processes) == 1 and processes[0].get("argv") is None and agent.get("agent") == "pi":
+        process = processes[0]
+        record = records[process["pid"]]
+        session = agent.get("agent_session")
+        if (
+            process.get("argv0") != "pi" or process.get("name") != "node"
+            or process["pid"] != group or record["executable"] != "pi"
+            or type(info.get("shell_pid")) is not int
+            or record["parent"] != info["shell_pid"]
+            or not isinstance(session, Mapping)
+            or session.get("agent") != "pi" or session.get("source") != "herdr:pi"
+            or session.get("kind") != "path"
+            or not isinstance(session.get("value"), str)
+            or not Path(session["value"]).is_absolute()
+        ):
+            refuse()
+        return {**process, "process_start": record["process_start"],
+                "process_group_proof": [record]}
     for process in processes:
         argv = process.get("argv")
         if (not isinstance(argv, list) or not argv or any(not isinstance(arg, str) for arg in argv)

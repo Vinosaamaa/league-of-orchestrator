@@ -29,7 +29,7 @@ verification: {"state":"verified","evidenceRefs":["tests/test_multiplexer_metada
 visibility: "public-safe"
 publicationEligibility: "eligible"
 issue: 23
-pr: null
+pr: 248
 release: null
 run: null
 ---
